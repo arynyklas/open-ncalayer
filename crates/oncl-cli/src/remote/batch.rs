@@ -21,8 +21,8 @@ use crate::{
 use oncl_api::{
     client::{FinalRecord, Route, wire::ResultRecord},
     dto::{
-        BatchItemOutcome, BatchStatus, BatchStopKind, HashAlgorithm, KeyRef, Operation,
-        SignKind, SignWriteMode, VerifyProfile,
+        BatchItemOutcome, BatchStatus, BatchStopKind, HashAlgorithm, KeyRef, Operation, SignKind,
+        SignWriteMode, VerifyProfile,
     },
 };
 use oncl_core::{OperationError, keys::AppliedState};
@@ -61,11 +61,15 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
     let manifest = parse(raw.as_bytes(), command.has_key())
         .map_err(|code| OperationError::Processing(ProcessingError::InvalidInput(code)))?;
     drop(raw);
-    if manifest
-        .items
-        .iter()
-        .any(|item| matches!(item, Item::Sign { profile: SignProfile::Raw, .. }))
-    {
+    if manifest.items.iter().any(|item| {
+        matches!(
+            item,
+            Item::Sign {
+                profile: SignProfile::Raw,
+                ..
+            }
+        )
+    }) {
         // Raw signing is not a profile of the HTTP contract.
         return Err(Failure {
             code: "RemoteUnsupported".into(),
@@ -99,7 +103,10 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
             .iter()
             .map(|path| Input::open_lenient(path))
             .collect();
-        if opened.iter().any(|input| matches!(input, Input::Unreadable(_))) {
+        if opened
+            .iter()
+            .any(|input| matches!(input, Input::Unreadable(_)))
+        {
             // Fails only this item; the rest of the batch still runs.
             continue;
         }
@@ -173,8 +180,9 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
     // local batch) or, for scattered destinations, the temporary directory option.
     let parents: HashSet<&Path> = outputs.iter().map(|path| output::parent(path)).collect();
     let store = match parents.iter().next() {
-        Some(parent) if parents.len() == 1 => TemporaryStore::new(parent)
-            .map_err(OperationError::from)?,
+        Some(parent) if parents.len() == 1 => {
+            TemporaryStore::new(parent).map_err(OperationError::from)?
+        }
         _ => output::store(cli, "-")?,
     };
     let local_failures = manifest.items.len() - submitted.len();
@@ -199,7 +207,9 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
             items,
             error,
         }) => {
-            if *status == BatchStatus::Failed && let Some(error) = error {
+            if *status == BatchStatus::Failed
+                && let Some(error) = error
+            {
                 return Err(Failure::record(error));
             }
             let in_order = *total == submitted.len()
@@ -210,7 +220,13 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
             if !in_order {
                 return Err(Failure::protocol(AppliedState::Unknown));
             }
-            (*operation_id, *completed, *attempted, stop.as_ref(), items.as_slice())
+            (
+                *operation_id,
+                *completed,
+                *attempted,
+                stop.as_ref(),
+                items.as_slice(),
+            )
         }
         None => (0, 0, 0, None, [].as_slice()),
         Some(FinalRecord::Final { .. }) => return Err(Failure::protocol(AppliedState::Unknown)),

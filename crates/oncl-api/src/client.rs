@@ -493,11 +493,12 @@ impl ApiClient {
             .ok_or(ClientError::local(FailureKind::DeadlineExceeded))?;
         let may_apply = request.may_apply_key;
         let route = request.route;
-        let boundary = upload::boundary().map_err(|_| ClientError::local(FailureKind::Transport))?;
+        let boundary =
+            upload::boundary().map_err(|_| ClientError::local(FailureKind::Transport))?;
         let mut body = upload::Upload::new(&boundary, &request.metadata, request.parts, control);
         let agent = self.agent(remaining)?;
 
-        let mut bearer = ureq::http::HeaderValue::from_str(&format!("Bearer {}", &*self.token))
+        let mut bearer = ureq::http::HeaderValue::from_str(&format!("Bearer {}", *self.token))
             .map_err(|_| ClientError::local(FailureKind::InvalidToken))?;
         bearer.set_sensitive(true);
         let mut call = agent
@@ -571,8 +572,8 @@ impl ApiClient {
                 stream::parse(reader, &boundary, sink, control).map_err(lost)?
             }
             ("application/json", Route::Operations) => {
-                let bytes = stream::bounded_body(reader, stream::MAX_FINAL_BYTES, control)
-                    .map_err(lost)?;
+                let bytes =
+                    stream::bounded_body(reader, stream::MAX_FINAL_BYTES, control).map_err(lost)?;
                 let record = serde_json::from_slice::<FinalRecord>(&bytes).map_err(|_| {
                     let mut error = ClientError::new(FailureKind::Protocol, unknown(complete));
                     error.status = Some(status);
@@ -683,9 +684,7 @@ fn classify_transport(
         ureq::Error::Io(io) if !complete && is_connect(io) => FailureKind::Connect,
         // rustls surfaces certificate and handshake failures as `InvalidData` io errors.
         ureq::Error::Io(io) if !complete && is_tls(io) => FailureKind::Tls,
-        ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::TlsRequired => {
-            FailureKind::Tls
-        }
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::TlsRequired => FailureKind::Tls,
         ureq::Error::BadUri(_) | ureq::Error::Http(_) => FailureKind::InvalidRequest,
         _ => FailureKind::Transport,
     };
@@ -702,9 +701,15 @@ fn is_tls(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::InvalidData
         && error.get_ref().is_some_and(|inner| {
             let text = format!("{inner:?}");
-            ["InvalidCertificate", "AlertReceived", "PeerIncompatible", "PeerMisbehaved", "NoCertificatesPresented"]
-                .iter()
-                .any(|needle| text.contains(needle))
+            [
+                "InvalidCertificate",
+                "AlertReceived",
+                "PeerIncompatible",
+                "PeerMisbehaved",
+                "NoCertificatesPresented",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle))
         })
 }
 

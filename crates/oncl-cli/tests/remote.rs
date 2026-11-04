@@ -96,7 +96,14 @@ fn hash_streams_a_client_file_and_stdin_and_matches_openssl_and_local() {
     }
     // The same inputs and the local command give the same digest report.
     let local = oncl(
-        &["hash", "--algorithm", "sha256", "--input", path(&file), "--json"],
+        &[
+            "hash",
+            "--algorithm",
+            "sha256",
+            "--input",
+            path(&file),
+            "--json",
+        ],
         b"",
         &[],
         None,
@@ -261,7 +268,13 @@ mod remote {
         let xml = br#"<root xmlns="urn:t"><a Id="x">v</a></root>"#.as_slice();
         // Each case: one operation whose *every* string field is the server path, plus a
         // well-formed `doc` part where the shape needs one.
-        let cases: Vec<(&str, Operation, Vec<PartMetadata>, Vec<(&str, &[u8])>)> = vec![
+        type Case<'a> = (
+            &'a str,
+            Operation,
+            Vec<PartMetadata>,
+            Vec<(&'a str, &'a [u8])>,
+        );
+        let cases: Vec<Case<'_>> = vec![
             (
                 "hash input",
                 Operation::Hash {
@@ -461,14 +474,14 @@ mod remote {
             "--algorithm",
             "sha256",
             "--input",
-            session.path("does-not-exist-on-the-client").to_str().unwrap(),
+            session
+                .path("does-not-exist-on-the-client")
+                .to_str()
+                .unwrap(),
         ]);
         assert_eq!(exit(&missing), 1);
         assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(matches!(
-            FailureKind::Rejected,
-            FailureKind::Rejected
-        ));
+        assert!(matches!(FailureKind::Rejected, FailureKind::Rejected));
     }
 
     /// Sign through a proxy that cuts the real response; the client must keep nothing.
@@ -502,15 +515,43 @@ mod remote {
         let pki = Pki::start();
         let remote = Remote::start(&pki);
         let cuts = [
-            ("before the artifact", Spot::BeforePart("artifact"), End::Abort),
+            (
+                "before the artifact",
+                Spot::BeforePart("artifact"),
+                End::Abort,
+            ),
             ("inside the artifact", Spot::MidPart("artifact"), End::Abort),
-            ("after the artifact", Spot::AfterPart("artifact"), End::Abort),
-            ("after the artifact, polite end", Spot::AfterPart("artifact"), End::Clean),
-            ("before the final record", Spot::BeforePart("final"), End::Abort),
-            ("inside the final record", Spot::MidPart("final"), End::Abort),
-            ("after the final, no closing delimiter", Spot::AfterPart("final"), End::Clean),
+            (
+                "after the artifact",
+                Spot::AfterPart("artifact"),
+                End::Abort,
+            ),
+            (
+                "after the artifact, polite end",
+                Spot::AfterPart("artifact"),
+                End::Clean,
+            ),
+            (
+                "before the final record",
+                Spot::BeforePart("final"),
+                End::Abort,
+            ),
+            (
+                "inside the final record",
+                Spot::MidPart("final"),
+                End::Abort,
+            ),
+            (
+                "after the final, no closing delimiter",
+                Spot::AfterPart("final"),
+                End::Clean,
+            ),
             ("inside the closing delimiter", Spot::MidClosing, End::Abort),
-            ("complete multipart, HTTP entity never ended", Spot::Nowhere, End::Abort),
+            (
+                "complete multipart, HTTP entity never ended",
+                Spot::Nowhere,
+                End::Abort,
+            ),
         ];
         for (name, spot, end) in cuts {
             let begins = remote.audit_begins();
@@ -525,12 +566,19 @@ mod remote {
                 before,
                 "{name}: temporary client results were left behind"
             );
-            assert!(text(&output.stdout).is_empty(), "{name}: a success report was printed");
+            assert!(
+                text(&output.stdout).is_empty(),
+                "{name}: a success report was printed"
+            );
             // The key was really applied on the server: the client must not claim otherwise.
             assert_eq!(remote.audit_begins(), begins + 1, "{name}");
             assert!(!stderr.contains("applied=NotApplied"), "{name}: {stderr}");
             // And nothing retried it.
-            assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1, "{name}");
+            assert_eq!(
+                proxy.requests.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{name}"
+            );
         }
         // Control: an uncut response commits the file.
         let (output, _session, destination, _proxy, _) = signed_through(
@@ -563,7 +611,10 @@ mod remote {
         // The server did apply the key (BEGIN and FINAL are in its durable journal); the
         // client never retried, and promised neither rollback nor exactly-once.
         assert_eq!((remote.audit_begins(), remote.audit_finals()), (1, 1));
-        assert_eq!(proxy.connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            proxy.connections.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(session);
         // A keyless operation that loses its answer is honestly `NotApplied`.
@@ -585,7 +636,11 @@ mod remote {
         ]);
         // (`abc` is not CMS: the answer is a typed failure, still never a lost-key claim.)
         assert_eq!(exit(&extract), 1);
-        assert!(text(&extract.stderr).contains("applied=NotApplied"), "{}", text(&extract.stderr));
+        assert!(
+            text(&extract.stderr).contains("applied=NotApplied"),
+            "{}",
+            text(&extract.stderr)
+        );
     }
 
     /// Local and remote operations over the same inputs and policy give the same verdict,
@@ -621,7 +676,14 @@ mod remote {
             out
         };
         let compare = |profile: &str, input: &Path, detached: Option<&Path>, expect: i32| {
-            let mut args = vec!["verify", "--profile", profile, "--input", path(input), "--json"];
+            let mut args = vec![
+                "verify",
+                "--profile",
+                profile,
+                "--input",
+                path(input),
+                "--json",
+            ];
             if let Some(detached) = detached {
                 args.extend(["--detached", path(detached)]);
             }
@@ -629,13 +691,26 @@ mod remote {
             let mut local_args = args.clone();
             local_args.extend(trust.iter().copied());
             let local_run = oncl(&local_args, b"", &[], None);
-            assert_eq!(exit(&remote_run), expect, "{profile}: {}", text(&remote_run.stderr));
-            assert_eq!(exit(&local_run), expect, "{profile}: {}", text(&local_run.stderr));
+            assert_eq!(
+                exit(&remote_run),
+                expect,
+                "{profile}: {}",
+                text(&remote_run.stderr)
+            );
+            assert_eq!(
+                exit(&local_run),
+                expect,
+                "{profile}: {}",
+                text(&local_run.stderr)
+            );
             let (r, l) = (json(&remote_run), json(&local_run));
             for key in ["code", "applied", "verdict", "policy"] {
                 assert_eq!(r[key], l[key], "{profile}: {key}");
             }
-            let (rs, ls) = (r["signers"].as_array().unwrap(), l["signers"].as_array().unwrap());
+            let (rs, ls) = (
+                r["signers"].as_array().unwrap(),
+                l["signers"].as_array().unwrap(),
+            );
             assert_eq!(rs.len(), ls.len(), "{profile}: signer count");
             for (a, b) in rs.iter().zip(ls) {
                 for key in [
@@ -652,9 +727,18 @@ mod remote {
                 }
                 // The local report prints the basis with its instant (`Current(<time>)`),
                 // the remote one the variant and the instant in `time_basis_unix`.
-                let (variant, local) = (a["time_basis"].as_str().unwrap(), b["time_basis"].as_str().unwrap());
-                assert!(local.starts_with(variant), "{profile}: time basis {local} vs {variant}");
-                assert_eq!(a["claimed_signing_time"], b["claimed_signing_time"], "{profile}");
+                let (variant, local) = (
+                    a["time_basis"].as_str().unwrap(),
+                    b["time_basis"].as_str().unwrap(),
+                );
+                assert!(
+                    local.starts_with(variant),
+                    "{profile}: time basis {local} vs {variant}"
+                );
+                assert_eq!(
+                    a["claimed_signing_time"], b["claimed_signing_time"],
+                    "{profile}"
+                );
             }
             r
         };
@@ -699,7 +783,12 @@ mod remote {
             &[],
             None,
         );
-        assert_eq!(exit(&remote_run), exit(&local_run), "{}", text(&remote_run.stderr));
+        assert_eq!(
+            exit(&remote_run),
+            exit(&local_run),
+            "{}",
+            text(&remote_run.stderr)
+        );
         assert_ne!(exit(&remote_run), 0);
         assert_eq!(json(&remote_run)["verdict"], json(&local_run)["verdict"]);
     }
@@ -754,8 +843,8 @@ fn token_never_appears_in_any_output_error_or_report() {
     assert_clean(&ok, session.dir.path(), &remote);
     // A different (valid-shaped) token: the typed refusal never echoes either token.
     let other = oncl_server::auth::TokenSecret::generate().unwrap().bearer();
-    let private = oncl_pki::private_fs::PrivateDirectory::create(&session.path("other-token"))
-        .unwrap();
+    let private =
+        oncl_pki::private_fs::PrivateDirectory::create(&session.path("other-token")).unwrap();
     use std::io::Write as _;
     private
         .create_file("t")
@@ -797,18 +886,18 @@ fn token_never_appears_in_any_output_error_or_report() {
         );
     });
     let proxy_session = Session::via(&remote, format!("http://{address}"));
-    let bad = proxy_session.run(&[
-        "hash",
-        "--algorithm",
-        "sha256",
-        "--input",
-        path(&doc),
-    ]);
+    let bad = proxy_session.run(&["hash", "--algorithm", "sha256", "--input", path(&doc)]);
     serve.join().unwrap();
     let stderr = text(&bad.stderr);
     assert_eq!(exit(&bad), 1, "{stderr}");
-    assert!(stderr.contains("UnexpectedStatus") && stderr.contains("HTTP 502"), "{stderr}");
-    assert!(!stderr.contains("RAW-BODY-MARKER"), "a raw response body was printed");
+    assert!(
+        stderr.contains("UnexpectedStatus") && stderr.contains("HTTP 502"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("RAW-BODY-MARKER"),
+        "a raw response body was printed"
+    );
     assert_clean(&bad, proxy_session.dir.path(), &remote);
     // Connection refused (nothing listens): a typed local failure, never the token.
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -817,7 +906,11 @@ fn token_never_appears_in_any_output_error_or_report() {
     let refused = Session::via(&remote, format!("http://{port}"));
     let out = refused.run(&["hash", "--algorithm", "sha256", "--input", path(&doc)]);
     assert_eq!(exit(&out), 1);
-    assert!(text(&out.stderr).contains("ConnectFailed; applied=NotApplied"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("ConnectFailed; applied=NotApplied"),
+        "{}",
+        text(&out.stderr)
+    );
     assert_clean(&out, refused.dir.path(), &remote);
 }
 
@@ -860,89 +953,304 @@ fn token_sources_and_preflight_refusals_need_no_network() {
     let cases: Vec<(&str, Vec<&str>, &str)> = vec![
         (
             "no token source",
-            vec!["--endpoint", &endpoint, "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "TokenRequired",
         ),
         (
             "stdin is both token and document",
-            vec!["--endpoint", &endpoint, "--token-stdin", "hash", "--algorithm", "sha256", "--input", "-"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-stdin",
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                "-",
+            ],
             "StdinConflict",
         ),
         (
             "token argument does not exist",
-            vec!["--endpoint", &endpoint, "--token", "x", "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token",
+                "x",
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "UsageError",
         ),
         (
             "plain http to a remote host",
-            vec!["--endpoint", "http://192.0.2.1:9", "--token-file", token, "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                "http://192.0.2.1:9",
+                "--token-file",
+                token,
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "PlainHttpRefused",
         ),
         (
             "malformed endpoint",
-            vec!["--endpoint", "ftp://example.test", "--token-file", token, "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                "ftp://example.test",
+                "--token-file",
+                token,
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "InvalidEndpoint",
         ),
         (
             "endpoint with userinfo and path",
-            vec!["--endpoint", "http://user:pw@127.0.0.1:1/x", "--token-file", token, "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                "http://user:pw@127.0.0.1:1/x",
+                "--token-file",
+                token,
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "InvalidEndpoint",
         ),
         (
             "trust root on a remote session",
-            vec!["--endpoint", &endpoint, "--token-file", token, "--root", path(&doc), "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "--root",
+                path(&doc),
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "RemoteUnsupported",
         ),
         (
             "offline policy on a remote session",
-            vec!["--endpoint", &endpoint, "--token-file", token, "--offline", "hash", "--algorithm", "sha256", "--input", path(&doc)],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "--offline",
+                "hash",
+                "--algorithm",
+                "sha256",
+                "--input",
+                path(&doc),
+            ],
             "RemoteUnsupported",
         ),
         (
             "container file without the explicit inline mode",
-            vec!["--endpoint", &endpoint, "--token-file", token, "sign", "--profile", "cms", "--key", path(&doc), "--secret-file", token, "--authorize", "--input", path(&doc), "--output", "x.p7s"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "sign",
+                "--profile",
+                "cms",
+                "--key",
+                path(&doc),
+                "--secret-file",
+                token,
+                "--authorize",
+                "--input",
+                path(&doc),
+                "--output",
+                "x.p7s",
+            ],
             "InlineKeyRequired",
         ),
         (
             "token reader on a remote session",
-            vec!["--endpoint", &endpoint, "--token-file", token, "sign", "--profile", "cms", "--token-reader", "r", "--token-kind", "kaztoken", "--token-alias", "a", "--authorize", "--input", path(&doc), "--output", "x.p7s"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "sign",
+                "--profile",
+                "cms",
+                "--token-reader",
+                "r",
+                "--token-kind",
+                "kaztoken",
+                "--token-alias",
+                "a",
+                "--authorize",
+                "--input",
+                path(&doc),
+                "--output",
+                "x.p7s",
+            ],
             "RemoteUnsupported",
         ),
         (
             "plugin on a remote session",
-            vec!["--endpoint", &endpoint, "--token-file", token, "plugin", "call", "--manifest", "m", "--module", "w", "--operation", "o", "--caller", "c", "--args-file", "a", "--output", "-"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "plugin",
+                "call",
+                "--manifest",
+                "m",
+                "--module",
+                "w",
+                "--operation",
+                "o",
+                "--caller",
+                "c",
+                "--args-file",
+                "a",
+                "--output",
+                "-",
+            ],
             "RemoteUnsupported",
         ),
         (
             "raw signing is not a profile of the contract",
-            vec!["--endpoint", &endpoint, "--token-file", token, "sign", "--profile", "raw", "--key-name", "ops-key", "--authorize", "--input", path(&doc), "--output", "x.sig"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "sign",
+                "--profile",
+                "raw",
+                "--key-name",
+                "ops-key",
+                "--authorize",
+                "--input",
+                path(&doc),
+                "--output",
+                "x.sig",
+            ],
             "RemoteUnsupported",
         ),
         (
             "xades-lt is sign xades-t then a keyless extend",
-            vec!["--endpoint", &endpoint, "--token-file", token, "sign", "--profile", "xades-lt", "--key-name", "ops-key", "--authorize", "--input", path(&doc), "--output", "x.sig"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "sign",
+                "--profile",
+                "xades-lt",
+                "--key-name",
+                "ops-key",
+                "--authorize",
+                "--input",
+                path(&doc),
+                "--output",
+                "x.sig",
+            ],
             "RemoteUnsupported",
         ),
         (
             "named key with a client secret",
-            vec!["--endpoint", &endpoint, "--token-file", token, "sign", "--profile", "cms", "--key-name", "ops-key", "--secret-file", token, "--authorize", "--input", path(&doc), "--output", "x.p7s"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "sign",
+                "--profile",
+                "cms",
+                "--key-name",
+                "ops-key",
+                "--secret-file",
+                token,
+                "--authorize",
+                "--input",
+                path(&doc),
+                "--output",
+                "x.p7s",
+            ],
             "InvalidCombination",
         ),
         (
             "timestamp with a client TSA",
-            vec!["--endpoint", &endpoint, "--token-file", token, "timestamp", "acquire", "--input", path(&doc), "--output", "t.tsr", "--tsa", "http://tsa.example"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "timestamp",
+                "acquire",
+                "--input",
+                path(&doc),
+                "--output",
+                "t.tsr",
+                "--tsa",
+                "http://tsa.example",
+            ],
             "RemoteUnsupported",
         ),
         (
             "jwt claims policy is the operator's",
-            vec!["--endpoint", &endpoint, "--token-file", token, "jwt", "verify", "--input", path(&doc), "--issuer", "x"],
+            vec![
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+                token,
+                "jwt",
+                "verify",
+                "--input",
+                path(&doc),
+                "--issuer",
+                "x",
+            ],
             "RemoteUnsupported",
         ),
     ];
     for (name, args, code) in cases {
-        let output = oncl(&args, b"", &[remote.token.as_str()], Some(session.dir.path()));
+        let output = oncl(
+            &args,
+            b"",
+            &[remote.token.as_str()],
+            Some(session.dir.path()),
+        );
         assert_eq!(exit(&output), 1, "{name}: {}", text(&output.stderr));
-        assert!(text(&output.stderr).contains(code), "{name}: {}", text(&output.stderr));
+        assert!(
+            text(&output.stderr).contains(code),
+            "{name}: {}",
+            text(&output.stderr)
+        );
         assert_eq!(requests(), 1, "{name}: a request left the process");
     }
     // An unprotected token directory is refused by the secret rules before any network use.
@@ -1039,10 +1347,17 @@ fn inline_key_mode_sends_the_container_only_when_explicit_and_never_spools_it() 
     watch.store(true, std::sync::atomic::Ordering::SeqCst);
     watcher.join().unwrap();
     assert_eq!(exit(&signed), 0, "{}", text(&signed.stderr));
-    assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "a secret reached the spool");
+    assert!(
+        !hit.load(std::sync::atomic::Ordering::SeqCst),
+        "a secret reached the spool"
+    );
     assert_eq!(
-        openssl_cms_verify(&std::fs::read(&signature).unwrap(), None, session.dir.path())
-            .as_deref(),
+        openssl_cms_verify(
+            &std::fs::read(&signature).unwrap(),
+            None,
+            session.dir.path()
+        )
+        .as_deref(),
         Some(b"inline key payload".as_slice())
     );
     assert_eq!((remote.audit_begins(), remote.audit_finals()), (1, 1));
@@ -1088,7 +1403,11 @@ fn inline_key_mode_sends_the_container_only_when_explicit_and_never_spools_it() 
         &[],
     );
     assert_eq!(exit(&denied), 1);
-    assert!(text(&denied.stderr).contains("PermissionDenied; applied=NotApplied"), "{}", text(&denied.stderr));
+    assert!(
+        text(&denied.stderr).contains("PermissionDenied; applied=NotApplied"),
+        "{}",
+        text(&denied.stderr)
+    );
     assert!(!out.exists());
     assert_eq!(strict.audit_begins(), 0);
 }
@@ -1100,24 +1419,38 @@ fn https_with_a_private_ca_and_no_way_to_skip_verification() {
     let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
     let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    ca_params.distinguished_name.push(rcgen::DnType::CommonName, "oncl test private CA");
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "oncl test private CA");
     let ca = ca_params.self_signed(&ca_key).unwrap();
     let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
     let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
     leaf_params.subject_alt_names = vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())];
-    let leaf = leaf_params.signed_by(&leaf_key, &rcgen::Issuer::new(ca_params, ca_key)).unwrap();
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &rcgen::Issuer::new(ca_params, ca_key))
+        .unwrap();
     let remote = Remote::start_tls(&pki, &leaf.pem(), &leaf_key.serialize_pem(), |_, _| {});
     let session = Session::new(&remote);
     let doc = session.file("doc.bin", b"tls payload");
     let ca_file = session.file("ca.pem", ca.pem().as_bytes());
     let hash = |extra: &[&str]| {
-        let mut args = vec!["hash", "--algorithm", "sha256", "--input", path(&doc), "--json"];
+        let mut args = vec![
+            "hash",
+            "--algorithm",
+            "sha256",
+            "--input",
+            path(&doc),
+            "--json",
+        ];
         args.extend_from_slice(extra);
         session.run(&args)
     };
     let ok = hash(&["--ca-file", path(&ca_file)]);
     assert_eq!(exit(&ok), 0, "{}", text(&ok.stderr));
-    assert_eq!(json(&ok)["digest"], openssl_sha256(b"tls payload", session.dir.path()));
+    assert_eq!(
+        json(&ok)["digest"],
+        openssl_sha256(b"tls payload", session.dir.path())
+    );
     // The same CA as DER also works.
     use der::Decode as _;
     let der_file = session.file("ca.der", ca.der());
@@ -1126,7 +1459,11 @@ fn https_with_a_private_ca_and_no_way_to_skip_verification() {
     // The public roots do not know the private CA: refused, nothing sent past the handshake.
     let untrusted = hash(&[]);
     assert_eq!(exit(&untrusted), 1);
-    assert!(text(&untrusted.stderr).contains("TlsFailed"), "{}", text(&untrusted.stderr));
+    assert!(
+        text(&untrusted.stderr).contains("TlsFailed"),
+        "{}",
+        text(&untrusted.stderr)
+    );
     // A different CA does not vouch for this server either.
     let other_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
     let mut other_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -1144,6 +1481,363 @@ fn https_with_a_private_ca_and_no_way_to_skip_verification() {
     let bad = session.file("bad.pem", leaf_key.serialize_pem().as_bytes());
     let out = hash(&["--ca-file", path(&bad)]);
     assert_eq!(exit(&out), 1);
-    assert!(text(&out.stderr).contains("InvalidCertificate"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("InvalidCertificate"),
+        "{}",
+        text(&out.stderr)
+    );
     assert_clean(&out, session.dir.path(), &remote);
+}
+
+fn manifest(session: &Session<'_>, items: serde_json::Value) -> PathBuf {
+    session.file(
+        "manifest.json",
+        json_text(&serde_json::json!({ "items": items })).as_bytes(),
+    )
+}
+fn json_text(value: &serde_json::Value) -> String {
+    value.to_string()
+}
+fn p(path: &Path) -> String {
+    path.to_str().unwrap().to_owned()
+}
+
+#[test]
+fn batch_runs_on_the_server_and_publishes_each_finished_output_on_the_client() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let session = Session::new(&remote);
+    let doc = session.file("doc.bin", b"batch document");
+    let made = session.path("made.p7s");
+    let signed = session.run(&[
+        "sign",
+        "--profile",
+        "cms",
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&made),
+    ]);
+    assert_eq!(exit(&signed), 0, "{}", text(&signed.stderr));
+    let begins = remote.audit_begins();
+    let (out_sig, out_x) = (session.path("batch.p7s"), session.path("batch.out"));
+    let items = serde_json::json!([
+        {"op":"hash","id":"h","algorithm":"sha256","input":p(&doc)},
+        {"op":"sign","id":"s","profile":"cms","input":p(&doc),"output":p(&out_sig)},
+        {"op":"verify","id":"v","input":p(&made)},
+        {"op":"extract","id":"x","input":p(&made),"output":p(&out_x)},
+        {"op":"hash","id":"missing","algorithm":"sha256","input":p(&session.path("absent.bin"))},
+    ]);
+    let manifest_file = manifest(&session, items);
+    let run = session.run(&[
+        "batch",
+        "run",
+        "--manifest",
+        path(&manifest_file),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--json",
+    ]);
+    // One unreadable client source fails only its own item: the batch is incomplete (4).
+    assert_eq!(exit(&run), 4, "{}", text(&run.stderr));
+    let report = json(&run);
+    assert_eq!(report["code"], "Partial");
+    assert_eq!(
+        (report["completed"].as_u64(), report["total"].as_u64()),
+        (Some(4), Some(5))
+    );
+    let rows = report["items"].as_array().unwrap();
+    let status = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap();
+    assert_eq!(
+        status("h")["digest"]["hex"],
+        openssl_sha256(b"batch document", session.dir.path())
+    );
+    assert_eq!(status("s")["applied"], "Applied");
+    assert_eq!(status("s")["published"], true);
+    assert_eq!(status("v")["verdict"], "Valid");
+    assert_eq!(status("x")["published"], true);
+    assert_eq!(status("missing")["status"], "Failed");
+    assert_eq!(remote.audit_begins(), begins + 1);
+    assert_eq!(std::fs::read(&out_x).unwrap(), b"batch document");
+    assert_eq!(
+        openssl_cms_verify(&std::fs::read(&out_sig).unwrap(), None, session.dir.path()).as_deref(),
+        Some(b"batch document".as_slice())
+    );
+    // A lost terminal record: nothing new is published, an earlier file is untouched and
+    // the key use is `Unknown`, never retried.
+    let proxy = Proxy::start(
+        remote.address,
+        Fault {
+            spot: Spot::BeforePart("final"),
+            end: End::Abort,
+        },
+    );
+    let lossy = Session::via(&remote, proxy.endpoint());
+    let (doc2, kept) = (
+        lossy.file("d2.bin", b"second"),
+        lossy.file("kept.bin", b"earlier output"),
+    );
+    let new_out = lossy.path("new.p7s");
+    let manifest_file = manifest(
+        &lossy,
+        serde_json::json!([
+            {"op":"sign","id":"s","profile":"cms","input":p(&doc2),"output":p(&new_out)},
+        ]),
+    );
+    let lost = lossy.run(&[
+        "batch",
+        "run",
+        "--manifest",
+        path(&manifest_file),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+    ]);
+    assert_eq!(exit(&lost), 1, "{}", text(&lost.stderr));
+    assert!(
+        text(&lost.stderr).contains("ResponseLost")
+            && text(&lost.stderr).contains("applied=Unknown")
+    );
+    assert!(!new_out.exists());
+    assert_eq!(std::fs::read(&kept).unwrap(), b"earlier output");
+    assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn jose_inspect_timestamp_and_extend_families_run_remotely() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let s = Session::new(&remote);
+    let payload = s.file("payload", b"jws payload");
+    let jws = s.path("a.jws");
+    let signed = s.run(&[
+        "jws",
+        "sign",
+        "--serialization",
+        "compact",
+        "--input",
+        path(&payload),
+        "--output",
+        path(&jws),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+    ]);
+    assert_eq!(exit(&signed), 0, "{}", text(&signed.stderr));
+    let verified = s.run(&[
+        "jws",
+        "verify",
+        "--serialization",
+        "compact",
+        "--input",
+        path(&jws),
+        "--json",
+    ]);
+    assert!(
+        [0, 2, 3].contains(&exit(&verified)),
+        "{}",
+        text(&verified.stderr)
+    );
+    assert!(
+        ["Valid", "Invalid", "Indeterminate"]
+            .contains(&json(&verified)["verdict"].as_str().unwrap())
+    );
+    let claims = s.file("claims.json", br#"{"iss":"operator","sub":"x"}"#);
+    let jwt = s.path("a.jwt");
+    let encoded = s.run(&[
+        "jwt",
+        "encode",
+        "--input",
+        path(&claims),
+        "--output",
+        path(&jwt),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+    ]);
+    assert_eq!(exit(&encoded), 0, "{}", text(&encoded.stderr));
+    let decoded = s.path("claims.out");
+    let d = s.run(&[
+        "jwt",
+        "decode",
+        "--input",
+        path(&jwt),
+        "--output",
+        path(&decoded),
+        "--json",
+    ]);
+    assert_eq!(exit(&d), 0, "{}", text(&d.stderr));
+    assert_eq!(
+        std::fs::read(&decoded).unwrap(),
+        br#"{"iss":"operator","sub":"x"}"#
+    );
+    assert_eq!(json(&d)["verified"], false);
+    let v = s.run(&["jwt", "verify", "--input", path(&jwt), "--json"]);
+    assert!([0, 2, 3].contains(&exit(&v)), "{}", text(&v.stderr));
+    // Certificate metadata of a public document, and the named key's public metadata.
+    let leaf = s.file("leaf.der", &{
+        use der::Encode;
+        pki.leaf("user-rsa-sign").cert.to_der().unwrap()
+    });
+    let c = s.run(&[
+        "inspect",
+        "--profile",
+        "certificate",
+        "--input",
+        path(&leaf),
+        "--json",
+    ]);
+    assert_eq!(exit(&c), 0, "{}", text(&c.stderr));
+    assert_eq!(json(&c)["entries"].as_array().unwrap().len(), 1);
+    // Timestamp: acquire through the operator's TSA, verify the token.
+    let doc = s.file("doc.bin", b"stamp me");
+    let token = s.path("doc.tsr");
+    let t = s.run(&[
+        "timestamp",
+        "acquire",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&token),
+        "--json",
+    ]);
+    assert_eq!(exit(&t), 0, "{}", text(&t.stderr));
+    let tv = s.run(&[
+        "timestamp",
+        "verify",
+        "--input",
+        path(&token),
+        "--data",
+        path(&doc),
+        "--json",
+    ]);
+    assert!([0, 2, 3].contains(&exit(&tv)), "{}", text(&tv.stderr));
+    // CAdES-B detached, then a keyless extension to T: the output verifies at level T.
+    let base = s.path("base.p7s");
+    let b = s.run(&[
+        "sign",
+        "--profile",
+        "cades-b",
+        "--detached",
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&base),
+    ]);
+    assert_eq!(exit(&b), 0, "{}", text(&b.stderr));
+    let begins = remote.audit_begins();
+    let ext = s.path("ext.p7s");
+    let e = s.run(&[
+        "extend",
+        "--profile",
+        "cms",
+        "--level",
+        "t",
+        "--input",
+        path(&base),
+        "--detached",
+        path(&doc),
+        "--output",
+        path(&ext),
+        "--json",
+    ]);
+    assert_eq!(exit(&e), 0, "{}", text(&e.stderr));
+    assert_eq!(remote.audit_begins(), begins, "extension never uses a key");
+    assert!(std::fs::metadata(&ext).unwrap().len() > std::fs::metadata(&base).unwrap().len());
+}
+
+#[test]
+fn overload_is_a_typed_not_applied_failure_with_the_local_exit_contract() {
+    let pki = Pki::start();
+    let remote = Remote::start_with(&pki, |config, _| {
+        config.max_in_flight = 1;
+        config.queue_capacity = 0;
+        config.admission_wait_ms = 100;
+    });
+    pki.tsa_gate.hold();
+    let s = Session::new(&remote);
+    let doc = s.file("doc.bin", b"busy");
+    let token_out = s.path("busy.tsr");
+    let first = {
+        let args: Vec<String> = [
+            "--endpoint",
+            &remote.endpoint(),
+            "--token-file",
+            path(&remote.token_file),
+            "timestamp",
+            "acquire",
+            "--input",
+            path(&doc),
+            "--output",
+            path(&token_out),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let (secret, dir) = (remote.token.clone(), s.dir.path().to_owned());
+        std::thread::spawn(move || {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            oncl(&refs, b"", &[secret.as_str()], Some(&dir))
+        })
+    };
+    pki.tsa_gate.wait_entered(1);
+    let second = s.run(&["hash", "--algorithm", "sha256", "--input", path(&doc)]);
+    pki.tsa_gate.release();
+    let finished = first.join().unwrap();
+    assert_eq!(exit(&second), 1, "{}", text(&second.stderr));
+    assert!(
+        text(&second.stderr).contains("CapacityExceeded; applied=NotApplied"),
+        "{}",
+        text(&second.stderr)
+    );
+    assert_eq!(exit(&finished), 0, "{}", text(&finished.stderr));
+    // A token without the right: PermissionDenied, NotApplied.
+    let narrow = Remote::start_with(&pki, |config, _| {
+        config.tokens[0].actions = vec![oncl_server::config::Permission::Hash]
+    });
+    let ns = Session::new(&narrow);
+    let v = ns.run(&["verify", "--profile", "cms", "--input", path(&doc)]);
+    assert_eq!(exit(&v), 1);
+    assert!(text(&v.stderr).contains("PermissionDenied; applied=NotApplied"));
+}
+
+/// Mutation proof for the headline guarantee: the staged result is published only after the
+/// COMPLETE response. (The check lives in `oncl_api::client::stream::parse` and the CLI's
+/// `Session::call`; `truncated_response_not_committed` fails if either is bypassed.)
+#[test]
+fn a_complete_response_is_the_only_one_that_commits() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let proxy = Proxy::start(
+        remote.address,
+        Fault {
+            spot: Spot::Nowhere,
+            end: End::Clean,
+        },
+    );
+    let s = Session::via(&remote, proxy.endpoint());
+    let doc = s.file("doc.bin", b"complete");
+    let out = s.path("ok.p7s");
+    let run = s.run(&[
+        "sign",
+        "--profile",
+        "cms",
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&out),
+    ]);
+    assert_eq!(exit(&run), 0, "{}", text(&run.stderr));
+    assert!(out.exists());
+    assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

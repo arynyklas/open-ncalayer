@@ -24,8 +24,8 @@ use crate::{
 };
 use oncl_api::{
     client::{
-        ApiClient, ArtifactSink, ClientConfig, ClientError, Completed, ExecuteOptions,
-        FailureKind, FinalRecord, Request, Route, Source, Stop,
+        ApiClient, ArtifactSink, ClientConfig, ClientError, Completed, ExecuteOptions, FailureKind,
+        FinalRecord, Request, Route, Source, Stop,
     },
     dto::{
         EvidenceKind, EvidenceRef, ItemMetadata, KeyRef, Operation, OperationMetadata,
@@ -43,7 +43,7 @@ use oncl_pki::{
 };
 use std::{
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::Instant,
 };
@@ -255,7 +255,16 @@ pub fn preflight(cli: &Cli) -> Result<(), &'static str> {
             if wsse_beyond_soap(&args.wsse, true) || legacy_beyond_wire(&args.legacy) {
                 return Err(REFUSED);
             }
-            if args.add && !matches!(args.profile, SignProfile::Cms | SignProfile::CadesB | SignProfile::CadesT | SignProfile::CadesLt | SignProfile::CadesLta) {
+            if args.add
+                && !matches!(
+                    args.profile,
+                    SignProfile::Cms
+                        | SignProfile::CadesB
+                        | SignProfile::CadesT
+                        | SignProfile::CadesLt
+                        | SignProfile::CadesLta
+                )
+            {
                 return Err(REFUSED);
             }
             Ok(())
@@ -278,9 +287,7 @@ pub fn preflight(cli: &Cli) -> Result<(), &'static str> {
             _ => Err(REFUSED),
         },
         Command::Timestamp { command } => match command {
-            T::Acquire {
-                tsa, algorithm, ..
-            } => {
+            T::Acquire { tsa, algorithm, .. } => {
                 // The TSA is the operator's `[pki.tsa]`; the digest is fixed by the service.
                 if tsa.is_some() || !matches!(algorithm, crate::args::Algorithm::Sha256) {
                     return Err(REFUSED);
@@ -648,7 +655,10 @@ pub fn single(
 pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, Failure> {
     control.check()?;
     let mut ctx = scope(cli, &control)?;
-    let endpoint = cli.endpoint.as_deref().ok_or(OperationError::InvalidKeySource)?;
+    let endpoint = cli
+        .endpoint
+        .as_deref()
+        .ok_or(OperationError::InvalidKeySource)?;
     let mut anchors = Vec::new();
     for path in &cli.ca_file {
         control.check()?;
@@ -672,6 +682,6 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, Failure> {
     ops::run(&mut session)
 }
 
-pub fn path_text(path: &PathBuf) -> Result<&str, OperationError> {
+pub fn path_text(path: &Path) -> Result<&str, OperationError> {
     path.to_str().ok_or(OperationError::InvalidKeySource)
 }

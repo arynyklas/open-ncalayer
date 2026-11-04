@@ -1,14 +1,12 @@
 //! Each command is one typed request item; its answer becomes the same report and exit code
 //! the local command produces for the same outcome.
 use super::{
-    Builder, Failure, Session, core_applied, container_bytes, key_reference, reports, single,
+    Builder, Failure, Session, container_bytes, core_applied, key_reference, reports, single,
     source_of,
 };
 use crate::{
     args::{Algorithm, Command, SignArgs, SignProfile, VerifyProfile as CliProfile},
-    families::{
-        ExtendArgs, ExtendProfile, InspectArgs, InspectProfile, Level, TimestampCommand,
-    },
+    families::{ExtendArgs, ExtendProfile, InspectArgs, InspectProfile, Level, TimestampCommand},
     jose_args::{JwsCommand, JwtCommand, Serialization},
     output,
     wsse::Soap,
@@ -237,8 +235,7 @@ fn extract(s: &mut Session<'_>, input: &str, destination: &str) -> Result<i32, F
     builder.item("op", Operation::Extract { input: part });
     let mut reply = s.call(request(builder, Route::Operations)?, 1, Some(&store))?;
     let (id, item) = single(&reply.record, false)?;
-    let ResultRecord::Extraction { artifact, .. } = &item.result
-    else {
+    let ResultRecord::Extraction { artifact, .. } = &item.result else {
         return Err(Failure::protocol(AppliedState::NotApplied));
     };
     let (id, artifact) = (id, artifact.clone());
@@ -310,7 +307,13 @@ fn sign(s: &mut Session<'_>, args: &SignArgs) -> Result<i32, Failure> {
     let store = output::store(cli, &args.output)?;
     let mut builder = Builder::default();
     let stdin_document = args.input == "-" || args.detached_input.as_deref() == Some("-");
-    let key = key_reference(&mut builder, "op", &args.key_options, stdin_document, &mut s.ctx)?;
+    let key = key_reference(
+        &mut builder,
+        "op",
+        &args.key_options,
+        stdin_document,
+        &mut s.ctx,
+    )?;
     let input = builder.document("op", source_of(&args.input)?);
     let detached = match &args.detached_input {
         Some(path) => Some(builder.document("op", source_of(path)?)),
@@ -323,7 +326,11 @@ fn sign(s: &mut Session<'_>, args: &SignArgs) -> Result<i32, Failure> {
     };
     let cms_family = matches!(
         kind,
-        SignKind::Cms | SignKind::CadesB | SignKind::CadesT | SignKind::CadesLt | SignKind::CadesLta
+        SignKind::Cms
+            | SignKind::CadesB
+            | SignKind::CadesT
+            | SignKind::CadesLt
+            | SignKind::CadesLta
     );
     builder.item(
         "op",
@@ -367,8 +374,12 @@ fn sign(s: &mut Session<'_>, args: &SignArgs) -> Result<i32, Failure> {
     else {
         return Err(Failure::protocol(AppliedState::Unknown));
     };
-    let (artifact, profile_text, signer_count, wire_applied) =
-        (artifact.clone(), label(profile), signers.len(), item.applied);
+    let (artifact, profile_text, signer_count, wire_applied) = (
+        artifact.clone(),
+        label(profile),
+        signers.len(),
+        item.applied,
+    );
     finish_written(
         s,
         reply,
@@ -578,8 +589,7 @@ fn timestamp(s: &mut Session<'_>, command: &TimestampCommand) -> Result<i32, Fai
             );
             let reply = s.call(request(builder, Route::Operations)?, 0, None)?;
             let (id, item) = single(&reply.record, false)?;
-            let ResultRecord::StampVerification { timestamp, .. } = &item.result
-            else {
+            let ResultRecord::StampVerification { timestamp, .. } = &item.result else {
                 return Err(Failure::protocol(AppliedState::NotApplied));
             };
             let (text, exit) = reports::verdict(&timestamp.verdict)
@@ -682,7 +692,16 @@ fn jws(s: &mut Session<'_>, command: &JwsCommand) -> Result<i32, Failure> {
                 },
             );
             let reply = s.call(request(builder, Route::Operations)?, 1, Some(&store))?;
-            written_jose(s, reply, if args.add { "JwsGeneralAdd" } else { "JwsCreate" }, &args.output)
+            written_jose(
+                s,
+                reply,
+                if args.add {
+                    "JwsGeneralAdd"
+                } else {
+                    "JwsCreate"
+                },
+                &args.output,
+            )
         }
     }
 }
@@ -700,8 +719,12 @@ fn written_jose(
     else {
         return Err(Failure::protocol(AppliedState::Unknown));
     };
-    let (artifact, profile_text, signer_count, wire_applied) =
-        (artifact.clone(), profile.to_owned(), signers.len(), item.applied);
+    let (artifact, profile_text, signer_count, wire_applied) = (
+        artifact.clone(),
+        profile.to_owned(),
+        signers.len(),
+        item.applied,
+    );
     finish_written(
         s,
         reply,
@@ -793,7 +816,9 @@ fn jwt(s: &mut Session<'_>, command: &JwtCommand) -> Result<i32, Failure> {
                 return Err(Failure::protocol(AppliedState::NotApplied));
             };
             // The payload travels in the record (JSON text); it becomes the output file.
-            let mut stage = store.stage(s.ctx.resources()).map_err(OperationError::from)?;
+            let mut stage = store
+                .stage(s.ctx.resources())
+                .map_err(OperationError::from)?;
             stage
                 .write_chunk(claims.as_bytes())
                 .map_err(OperationError::from)?;

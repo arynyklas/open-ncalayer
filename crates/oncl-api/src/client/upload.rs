@@ -94,12 +94,20 @@ impl<'a> Upload<'a> {
         let mut first = disposition(boundary, "metadata", None);
         first.extend_from_slice(metadata);
         first.extend_from_slice(b"\r\n");
-        add(&mut pieces, &mut total, Piece::Bytes(Zeroizing::new(first), 0));
+        add(
+            &mut pieces,
+            &mut total,
+            Piece::Bytes(Zeroizing::new(first), 0),
+        );
         for (name, document, source) in parts {
             // Header, payload and CRLF are separate pieces so a secret is never copied into
             // a framing buffer.
             let header = disposition(boundary, &name, Some("application/octet-stream"));
-            add(&mut pieces, &mut total, Piece::Bytes(Zeroizing::new(header), 0));
+            add(
+                &mut pieces,
+                &mut total,
+                Piece::Bytes(Zeroizing::new(header), 0),
+            );
             if document {
                 document_pieces.push(pieces.len());
             }
@@ -119,7 +127,11 @@ impl<'a> Upload<'a> {
             );
         }
         let closing = format!("--{boundary}--\r\n").into_bytes();
-        add(&mut pieces, &mut total, Piece::Bytes(Zeroizing::new(closing), 0));
+        add(
+            &mut pieces,
+            &mut total,
+            Piece::Bytes(Zeroizing::new(closing), 0),
+        );
         Self {
             pieces,
             document_pieces,
@@ -222,8 +234,8 @@ impl Read for Upload<'_> {
                                                 io::Error::other("source grew while sending"),
                                             ));
                                         }
-                                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                        }
+                                        Err(error)
+                                            if error.kind() == io::ErrorKind::Interrupted => {}
                                         Err(error) => {
                                             return Err(self.fail(UploadFailure::Source, error));
                                         }

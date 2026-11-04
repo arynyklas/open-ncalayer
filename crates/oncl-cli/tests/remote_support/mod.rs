@@ -222,8 +222,12 @@ impl Pki {
                         continue;
                     }
                 };
-                let (ocsp, root_crl, inter_crl, tsa) =
-                    (ocsp.clone(), root_crl.clone(), inter_crl.clone(), tsa.clone());
+                let (ocsp, root_crl, inter_crl, tsa) = (
+                    ocsp.clone(),
+                    root_crl.clone(),
+                    inter_crl.clone(),
+                    tsa.clone(),
+                );
                 let (url_origin, counted, gate) =
                     (url_origin.clone(), counted.clone(), gate.clone());
                 std::thread::spawn(move || {
@@ -478,7 +482,13 @@ impl Remote {
             metadata_aliases: vec![pki.leaf("user-rsa-sign").alias],
         });
         config.pki = pki.config(server_dir.path());
-        named_key(&mut config, server_dir.path(), pki, "ops-key", "user-rsa-sign");
+        named_key(
+            &mut config,
+            server_dir.path(),
+            pki,
+            "ops-key",
+            "user-rsa-sign",
+        );
         if let Some((certificate, key)) = tls {
             let certificate_path = server_dir.path().join("server.crt");
             std::fs::write(&certificate_path, certificate).unwrap();
@@ -810,8 +820,9 @@ fn respond(client: &mut TcpStream, server: &mut TcpStream, fault: Fault) -> std:
             }
             raw.extend_from_slice(&buffer[..n]);
         };
-        let size = usize::from_str_radix(std::str::from_utf8(&raw[at..line_end]).unwrap().trim(), 16)
-            .unwrap();
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&raw[at..line_end]).unwrap().trim(), 16)
+                .unwrap();
         let data_start = line_end + 2;
         while raw.len() < data_start + size + 2 {
             let n = server.read(&mut buffer)?;
@@ -905,9 +916,7 @@ pub fn oncl(args: &[&str], stdin: &[u8], secrets: &[&str], cwd: Option<&Path>) -
     for secret in secrets {
         for (name, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
             assert!(
-                !bytes
-                    .windows(secret.len())
-                    .any(|w| w == secret.as_bytes()),
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
                 "{name} contains a secret value"
             );
         }
@@ -930,7 +939,15 @@ pub fn openssl_cms_verify(signature: &[u8], content: Option<&[u8]>, dir: &Path) 
     let _ = std::fs::remove_file(&out);
     let mut command = Command::new(openssl_command());
     command
-        .args(["cms", "-verify", "-inform", "DER", "-noverify", "-binary", "-in"])
+        .args([
+            "cms",
+            "-verify",
+            "-inform",
+            "DER",
+            "-noverify",
+            "-binary",
+            "-in",
+        ])
         .arg(&sig)
         .arg("-out")
         .arg(&out);
@@ -955,7 +972,11 @@ pub fn openssl_sha256(bytes: &[u8], dir: &Path) -> String {
         .output()
         .unwrap();
     assert!(out.status.success());
-    text(&out.stdout).split_whitespace().next().unwrap().to_owned()
+    text(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
 }
 pub fn openssl_command() -> String {
     let mut candidates: Vec<String> = Vec::new();

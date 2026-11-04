@@ -71,7 +71,7 @@ pub enum TimestampCommand {
         input: String,
         #[arg(long)]
         output: String,
-        #[arg(long, required_unless_present = "endpoint")]
+        #[arg(long)]
         tsa: Option<String>,
         #[arg(long, value_enum, default_value = "sha256")]
         algorithm: crate::args::Algorithm,

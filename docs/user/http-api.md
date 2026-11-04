@@ -441,3 +441,7 @@ revocation evidence, otherwise they fail before the key is applied.
 
 Encryption additionally requires the real external GOST backend contract. No
 10-GiB/RSS or platform-matrix claim is made by this document.
+
+## Reference client
+
+`oncl_api::client::ApiClient` (feature `client` of `oncl-api`, `ureq` + `rustls` only) is the reference client of this contract and the transport of `oncl --endpoint` ([cli.md](cli.md#remote-mode---endpoint)). It writes the metadata-first multipart request as a bounded stream (secrets first, document bodies streamed with an exact declared length or chunked), sends `Expect: 100-continue`, never follows a redirect, and reads `multipart/mixed` by part `Content-Length` with a bounded reader. A response is a result only when `final`, the closing delimiter and the end of the HTTP entity were received; otherwise the outcome is `ResponseLost` with `Unknown` (private key possible) or `NotApplied`, with no retry. Its owned response mirror (`client::wire`) is checked against every published OpenAPI example (`tests/client.rs`).

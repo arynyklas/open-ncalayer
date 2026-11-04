@@ -357,6 +357,14 @@ impl Cli {
             crate::remote::preflight(self)?;
         } else if self.named_key_without_config() {
             return Err("InvalidCombination");
+        } else if matches!(
+            &self.command,
+            Command::Timestamp {
+                command: crate::families::TimestampCommand::Acquire { tsa: None, .. }
+            }
+        ) {
+            // A local acquisition needs its own TSA; a remote one uses the operator's.
+            return Err("TsaRequired");
         }
         if self.pki_pin.iter().any(|pin| {
             pin.split_once('=')

@@ -7,10 +7,7 @@
 //! bytes go to the caller's sink chunk by chunk and are never accumulated; JSON parts are
 //! capped. A response is a result only when the `final` part, the closing delimiter and the
 //! end of the HTTP entity were all received intact.
-use super::{
-    ArtifactSink, ReceivedArtifact, Stop,
-    wire::FinalRecord,
-};
+use super::{ArtifactSink, ReceivedArtifact, Stop, wire::FinalRecord};
 use std::io::{self, Read};
 
 /// A single header line, all header lines of one part, and one JSON part.
@@ -119,7 +116,9 @@ impl<R: Read> Wire<'_, R> {
     ) -> Result<(), StreamError> {
         while length > 0 {
             let available = self.available()?;
-            let count = usize::try_from(length).unwrap_or(usize::MAX).min(available.len());
+            let count = usize::try_from(length)
+                .unwrap_or(usize::MAX)
+                .min(available.len());
             to(&available[..count])?;
             self.consume(count);
             length -= count as u64;
@@ -273,7 +272,8 @@ pub(super) fn parse<R: Read>(
                 if artifacts.iter().any(|known| known.content_id == id) {
                     return Err(StreamError::Protocol("duplicate artifact Content-ID"));
                 }
-                sink.begin(&id, head.length).map_err(|_| StreamError::Sink)?;
+                sink.begin(&id, head.length)
+                    .map_err(|_| StreamError::Sink)?;
                 wire.body(head.length, &mut |chunk| {
                     sink.write(chunk).map_err(|_| StreamError::Sink)
                 })?;
@@ -394,7 +394,11 @@ mod tests {
             Ok(())
         }
         fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-            self.artifacts.last_mut().unwrap().1.extend_from_slice(bytes);
+            self.artifacts
+                .last_mut()
+                .unwrap()
+                .1
+                .extend_from_slice(bytes);
             Ok(())
         }
     }
@@ -409,7 +413,10 @@ mod tests {
             let parsed = run(good(), size, &mut sink).unwrap_or_else(|e| panic!("{size}: {e:?}"));
             assert_eq!(parsed.progress_frames, 1);
             assert_eq!(parsed.artifacts.len(), 1);
-            assert_eq!(sink.artifacts, vec![("artifact-0".to_owned(), artifact_bytes())]);
+            assert_eq!(
+                sink.artifacts,
+                vec![("artifact-0".to_owned(), artifact_bytes())]
+            );
             assert!(matches!(parsed.record, FinalRecord::Final { .. }));
         }
     }
@@ -420,7 +427,11 @@ mod tests {
         for cut in 0..full.len() {
             let mut sink = Collect::default();
             let result = run(full[..cut].to_vec(), 5, &mut sink);
-            assert!(result.is_err(), "a {cut}-byte prefix of {} parsed", full.len());
+            assert!(
+                result.is_err(),
+                "a {cut}-byte prefix of {} parsed",
+                full.len()
+            );
         }
     }
 
@@ -447,7 +458,8 @@ mod tests {
                 b
             }),
             ("no Content-Length", {
-                let mut b = b"--B\r\nContent-Disposition: form-data; name=\"final\"\r\n\r\n".to_vec();
+                let mut b =
+                    b"--B\r\nContent-Disposition: form-data; name=\"final\"\r\n\r\n".to_vec();
                 b.extend_from_slice(FINAL.as_bytes());
                 b.extend_from_slice(b"\r\n--B--\r\n");
                 b
@@ -470,9 +482,18 @@ mod tests {
                 b.extend(part("artifact", Some("a"), b"y"));
                 b
             }),
-            ("malformed progress", part("progress", None, b"{\"type\":\"final\"}")),
-            ("malformed final", part("final", None, b"{\"type\":\"nope\"}")),
-            ("LF only line ending", b"--B\nContent-Disposition: x\n\n".to_vec()),
+            (
+                "malformed progress",
+                part("progress", None, b"{\"type\":\"final\"}"),
+            ),
+            (
+                "malformed final",
+                part("final", None, b"{\"type\":\"nope\"}"),
+            ),
+            (
+                "LF only line ending",
+                b"--B\nContent-Disposition: x\n\n".to_vec(),
+            ),
             ("oversized JSON part", {
                 let mut b = format!("--B\r\nContent-Disposition: form-data; name=\"final\"\r\nContent-Length: {}\r\n\r\n", MAX_FINAL_BYTES + 1).into_bytes();
                 b.extend_from_slice(b"{}");
@@ -488,7 +509,10 @@ mod tests {
             let mut sink = Collect::default();
             let result = run(bytes, 11, &mut sink);
             assert!(
-                matches!(result, Err(StreamError::Protocol(_)) | Err(StreamError::Lost)),
+                matches!(
+                    result,
+                    Err(StreamError::Protocol(_)) | Err(StreamError::Lost)
+                ),
                 "{name}: accepted or wrongly classified: {:?}",
                 result.map(|p| p.progress_frames)
             );
@@ -544,7 +568,10 @@ mod tests {
         };
         let mut sink = Collect::default();
         let result = parse(Endless { frame, at: 0 }, "B", &mut sink, &control);
-        assert!(matches!(result, Err(StreamError::Stop(Stop::DeadlineExceeded))));
+        assert!(matches!(
+            result,
+            Err(StreamError::Stop(Stop::DeadlineExceeded))
+        ));
         assert!(sink.artifacts.is_empty());
     }
 }
