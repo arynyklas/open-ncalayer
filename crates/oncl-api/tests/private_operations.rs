@@ -3082,11 +3082,21 @@ async fn xades_timestamp_levels_need_a_host_tsa_policy_refused_before_the_key_op
         } else {
             r#""element":"//item","signature_method":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256","digest_method":"http://www.w3.org/2001/04/xmlenc#sha256","#
         };
-        let (_, parts) = sign_inline(&service, &p12, profile, extra, xml).await;
-        let done = final_event(&parts);
-        assert_eq!(done["status"], "failed", "{profile}: {done}");
-        assert_eq!(done["error"]["code"], "MissingConfiguration");
-        assert_eq!(done["error"]["applied"], "NotApplied");
+        // A configuration refusal is decided from metadata + host config alone: a real
+        // HTTP 503 before any secret/document byte is reserved (not a late failed final).
+        let body = multipart(
+            &sign_metadata(profile, extra),
+            &[
+                Part { name: "p12", filename: None, bytes: &p12 },
+                Part { name: "pw", filename: None, bytes: PASSWORD.as_bytes() },
+                Part { name: "doc", filename: None, bytes: xml },
+            ],
+        );
+        let (status, ct, response) = service.post(FORM, body).await;
+        assert_eq!(status, 503, "{profile}: {}", String::from_utf8_lossy(&response));
+        assert!(ct.starts_with("application/json"), "{profile}: {ct}");
+        let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!((error["code"].as_str(), error["applied"].as_str()), (Some("MissingConfiguration"), Some("NotApplied")));
     }
     assert_eq!(begins(&service), 0);
     service.stop().await;
@@ -4120,4 +4130,42 @@ async fn plugin_permission_matrix_is_per_token_and_per_operation_and_payload_ori
         }
     }
     service.stop().await;
+}
+
+/// Revoke the token while the upload is still in flight (worker blocked on the unsent
+/// tail): plain actions are refused 403 before execution, no BEGIN. (A key-less plugin
+/// has no upload to hold open; its liveness check is pinned by the dispatch unit test
+/// `plugin_items_need_a_live_principal_with_and_without_keys`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_during_upload_refuses_plain_actions_with_no_execution() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::config::{PluginConfig, PluginGrant};
+    let pki = Pki::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, wasm) = (dir.path().join("h.toml"), dir.path().join("h.wasm"));
+    std::fs::write(&manifest, private_support::plugin::manifest("test.hash")).unwrap();
+    std::fs::write(&wasm, private_support::plugin::wasm(&[(Import::Hash, abi::encode(&abi::HashArgs { alg: abi::HashAlg::Sha256, data: b"abc".to_vec().into() }))])).unwrap();
+    let plugin = PluginConfig {
+        id: "test.hash".into(), manifest, wasm, max_memory: 1 << 20, max_transfer: 1 << 18,
+        permissions: vec![PluginGrant { token: "test".into(), operation: "run".into(), imports: vec!["hash".into()], keys: vec![], pki_endpoints: vec![] }],
+    };
+    let cases = [
+        ("plain verify", r#"{"items":[{"id":"v","operation":{"kind":"verify","profile":"cms","input":"doc"}}],"parts":[{"name":"doc","item_id":"v","role":"document"}]}"#),
+        ("plain hash", r#"{"items":[{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"h","role":"document"}]}"#),
+    ];
+    for (name, metadata) in cases {
+        let plugin = plugin.clone();
+        let service = Running::start_with(|config, _| {
+            config.tokens[0].actions = vec![Permission::Hash, Permission::Verify];
+            config.plugins = vec![plugin];
+        })
+        .await;
+        let body = multipart(metadata, &[Part { name: "doc", filename: None, bytes: &vec![b'd'; 50_000] }]);
+        let host = service.host.clone();
+        let (status, response) = split_request(&service, &body, || host.policy.revoke("test").unwrap()).await;
+        assert_eq!(status, 403, "{name}: {}", String::from_utf8_lossy(&response));
+        assert!(!String::from_utf8_lossy(&response).contains("\"status\":\"completed\""), "{name}");
+        assert_eq!(begins(&service), 0, "{name}");
+        service.stop().await;
+    }
 }

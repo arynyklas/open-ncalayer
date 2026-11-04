@@ -178,6 +178,9 @@ pub(super) fn precheck(
             ..
         } = &item.operation
         {
+            // Liveness first: a plugin item has no action right, so without this a
+            // revoked token would pass the exact-grant lookup (a host table).
+            policy.ensure_live(principal).map_err(|_| denied())?;
             let grant = plugin_grant(host, principal, plugin, operation).ok_or_else(denied)?;
             if keys.len() > MAX_KEYS_PER_ITEM {
                 return Err(invalid_request());
@@ -191,6 +194,18 @@ pub(super) fn precheck(
                     .map_err(|_| denied())?;
             }
             continue;
+        }
+        // XAdES timestamp levels bind the TSA policy OID (SDK contract): a host TSA
+        // without one is a configuration refusal BEFORE any secret or body is read.
+        if matches!(
+            &item.operation,
+            Operation::Sign {
+                profile: SignKind::XadesT | SignKind::XadesLegacyT,
+                ..
+            }
+        ) && host.tsa.as_ref().is_none_or(|t| t.policy.is_none())
+        {
+            return Err(ApiError::not_applied(ErrorCode::MissingConfiguration));
         }
         if act != Action::Sign {
             policy
@@ -1070,14 +1085,6 @@ pub(super) fn run(
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
             let level = ades_level(profile);
-            // XAdES timestamp levels bind the TSA policy OID (SDK contract). A host
-            // TSA without one is refused BEFORE any key is opened, as a typed
-            // configuration error rather than a malformed-input failure.
-            if matches!(profile, SignKind::XadesT | SignKind::XadesLegacyT)
-                && env.host.tsa.as_ref().is_none_or(|t| t.policy.is_none())
-            {
-                return Err(OperationError::MissingCadesConfiguration);
-            }
             let request = if matches!(profile, SignKind::Wsse) {
                 if requests.len() != 1 {
                     return Err(ProcessingError::InvalidInput("WSSE signing takes one key").into());
@@ -1740,6 +1747,79 @@ pub(super) fn run(
 mod tests {
     use super::*;
     use oncl_pki::key::AppliedState::*;
+    fn plugin_metadata(keys: &str) -> OperationMetadata {
+        serde_json::from_str(&format!(
+            r#"{{"items":[{{"id":"p","operation":{{"kind":"plugin","plugin":"vendor.x","operation":"run","args":"{{}}","keys":[{keys}]}}}}],"parts":[]}}"#
+        ))
+        .unwrap()
+    }
+    fn live_policy(token: &str) -> (AccessPolicy, Principal, crate::auth::TokenSecret) {
+        let secret = crate::auth::TokenSecret::generate().unwrap();
+        let record = crate::auth::TokenRecord::new(token, secret.verifier(), vec![Action::Hash, Action::Sign], vec!["k".into()]).unwrap();
+        let policy = AccessPolicy::new(vec![record]).unwrap();
+        let principal = policy.authenticate(secret.bearer().as_bytes()).unwrap();
+        (policy, principal, secret)
+    }
+    fn host_with_grant(token: &str) -> crate::service::operations::HostPolicy {
+        crate::service::operations::HostPolicy {
+            tsa: None,
+            jwt_issuer: None,
+            jwt_audience: None,
+            plugin_grants: vec![crate::service::operations::PluginGrantRuntime {
+                token: token.into(),
+                plugin: "vendor.x".into(),
+                operation: "run".into(),
+                keys: vec!["k".into()],
+                permission: oncl_core::plugins::PluginPermission::new(
+                    "vendor.x",
+                    "run",
+                    oncl_core::plugins::CallerContext::ServiceClient(token.into()),
+                    vec![],
+                ),
+            }],
+            trust_bytes: 0,
+        }
+    }
+    #[test]
+    fn plugin_items_need_a_live_principal_with_and_without_keys() {
+        for keys in ["", r#"{"handle":1,"name":"k"}"#] {
+            let (policy, principal, _secret) = live_policy("tok");
+            let host = host_with_grant("tok");
+            let metadata = plugin_metadata(keys);
+            assert!(precheck(&metadata, &policy, &principal, false, &host).is_ok(), "{keys}");
+            policy.revoke("tok").unwrap();
+            let error = precheck(&metadata, &policy, &principal, false, &host).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PermissionDenied, "{keys}");
+        }
+    }
+    #[test]
+    fn xades_timestamp_profiles_need_a_tsa_policy_from_metadata_alone() {
+        let (policy, principal, _secret) = live_policy("tok");
+        let metadata: OperationMetadata = serde_json::from_str(r#"{"items":[{"id":"s","operation":{"kind":"sign","profile":"xades_t","input":"d","keys":[{"source":"named","name":"k"}]}}],"parts":[{"name":"d","item_id":"s","role":"document"}]}"#).unwrap();
+        let mut host = host_with_grant("tok");
+        let error = precheck(&metadata, &policy, &principal, false, &host).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MissingConfiguration);
+        assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+        host.tsa = Some(
+            oncl_pki::tsp::TsaSpec {
+                url: "http://tsa.example/".into(),
+                method: oncl_pki::http::PkiMethod::Post { content_type: None },
+                hash: oncl_pki::key::HashAlg::Sha256,
+                policy: None,
+                nonce: oncl_pki::http::NonceSpec::Random(8),
+                cert_req: true,
+                retries: 0,
+                timeout: std::time::Duration::from_secs(1),
+                check_skew: None,
+                require_tsa_eku: true,
+            },
+        );
+        assert_eq!(
+            precheck(&metadata, &policy, &principal, false, &host).unwrap_err().code,
+            ErrorCode::MissingConfiguration,
+            "a TSA without a policy OID is still refused"
+        );
+    }
     #[test]
     fn host_failure_after_key_use_keeps_the_real_applied_state() {
         for state in [Applied, Unknown] {

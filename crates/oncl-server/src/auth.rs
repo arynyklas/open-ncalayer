@@ -265,6 +265,19 @@ impl AccessPolicy {
         }
         Ok(ExecutionGrant::new([action]).with_keys([selector.key_id()]))
     }
+    /// The principal is still the live, current-generation token of this policy.
+    /// Needed by items that carry no action right (plugins authorized only by an
+    /// operator grant), so a revoked token cannot proceed through a key-less plugin.
+    pub fn ensure_live(&self, principal: &Principal) -> io::Result<()> {
+        let state = self.state.read().map_err(|_| denied())?;
+        if !Arc::ptr_eq(&principal.owner, &self.identity)
+            || principal.generation != state.generation
+            || !state.records.contains_key(&principal.id)
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
     /// Source-independent inline right check, made BEFORE any secret byte is
     /// read. The exact immutable InlineID is still authorized after intake.
     pub fn precheck_inline(

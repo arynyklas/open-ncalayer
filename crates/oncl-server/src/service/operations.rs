@@ -205,19 +205,17 @@ impl ServiceHost {
             let mut private = false;
             for item in &prepared.metadata.items {
                 let action = dispatch::action(&item.operation);
-                // Key-bearing actions are authorized per exact key in resolve_keys;
-                // plugin items only by their exact operator grant.
-                // Plugin items are authorized only by their exact operator grant. The
-                // grant's `Action::Hash` (pushed below via `action()`) merely lets the
-                // guest's own `hash` import run through the Engine; it is scoped by the
-                // per-import permission, grants no token action and no key.
-                if matches!(item.operation, Operation::Plugin { .. }) {
-                } else if !matches!(action, Action::Sign) {
+                // Rights were decided by `dispatch::precheck` (per exact key, inline right,
+                // plugin grant + liveness) and are re-run after the body is taken. Here
+                // only the SDK grant is built. A plugin item adds no token action: the
+                // grant's `Action::Hash` (from `action()`) merely lets the guest's own
+                // `hash` import run through the Engine, scoped by its per-import permission.
+                if matches!(action, Action::Sign) {
+                    private = true;
+                } else if !matches!(item.operation, Operation::Plugin { .. }) {
                     policy
                         .authorize(&principal, action, None, None)
                         .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
-                } else {
-                    private = true;
                 }
                 if let Operation::Plugin { keys, .. } = &item.operation
                     && !keys.is_empty()
