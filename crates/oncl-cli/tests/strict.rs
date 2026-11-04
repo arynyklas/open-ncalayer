@@ -420,6 +420,7 @@ fn closed_stdout_during_extraction_is_failure_not_success() {
         .unwrap();
     drop(child.stdout.take());
     let result = child.wait_with_output().unwrap();
+    assert_no_secret(&result);
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     assert!(!String::from_utf8_lossy(&result.stderr).contains("Completed"));
 }

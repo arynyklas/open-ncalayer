@@ -237,15 +237,22 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     } else {
         (None, None, crate::evidence::Material::default())
     };
+    // Key configuration bytes are charged to the same shared budget as roots.
+    let mut key_configuration = budget.reserve_configuration(0, 0)?;
     let plan = if let Some(args) = cli.private_key() {
-        Some(args.plan()?)
+        Some(args.plan(&control, &mut key_configuration)?)
     } else if let Command::Plugin { command } = &cli.command {
-        command.key_plan()?
+        command.key_plan(&control, &mut key_configuration)?
     } else if let Command::Batch { command } = &cli.command {
-        command.key_plan()?
+        command.key_plan(&control, &mut key_configuration)?
     } else if let Command::Inspect(args) = &cli.command {
         match (&args.key_config, &args.key_name) {
-            (Some(config), Some(name)) => Some(crate::keysrc::resolve(config, name)?),
+            (Some(config), Some(name)) => Some(crate::keysrc::resolve(
+                config,
+                name,
+                &control,
+                &mut key_configuration,
+            )?),
             _ => None,
         }
     } else {

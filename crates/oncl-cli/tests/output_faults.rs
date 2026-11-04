@@ -98,6 +98,7 @@ fn fragmented_slow_stdout_reads_deliver_every_byte_exactly() {
     }
     let status = child.wait().unwrap();
     let text = errors.join().unwrap();
+    assert_no_secret_bytes("stderr", text.as_bytes());
     assert_eq!(status.code(), Some(0), "{text}");
     assert_eq!(received.len(), document.len());
     assert!(
@@ -123,6 +124,7 @@ fn stdout_closed_midstream_is_failure_without_a_completed_report() {
     assert!(first == document[..first.len()]);
     drop(stdout);
     let result = child.wait_with_output().unwrap();
+    assert_no_secret(&result);
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     let text = String::from_utf8_lossy(&result.stderr);
     assert!(!text.contains("Completed"), "no success report: {text}");
@@ -144,6 +146,7 @@ fn unwritable_stdout_after_private_use_is_a_truthful_applied_failure_not_success
         .stderr(Stdio::piped())
         .output()
         .unwrap();
+    assert_no_secret(&result);
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     let text = String::from_utf8_lossy(&result.stderr);
     assert!(
@@ -243,6 +246,8 @@ mod acl {
         deny_new_files(&sealed);
         w.server.release();
         let result = child.wait_with_output().unwrap();
+        assert_no_secret(&result);
+        assert_no_secret(&result);
         assert_eq!(result.status.code(), Some(1), "{result:?}");
         let text = String::from_utf8_lossy(&result.stderr);
         assert!(text.contains("applied=Applied succeeded=true"), "{text}");
@@ -319,6 +324,8 @@ mod acl {
         deny_new_files(&sealed);
         w.server.release();
         let result = child.wait_with_output().unwrap();
+        assert_no_secret(&result);
+        assert_no_secret(&result);
         assert_eq!(result.status.code(), Some(4), "{result:?}");
         let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         let row = |id: &str| {

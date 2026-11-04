@@ -196,7 +196,9 @@ impl Pty {
         unsafe { ClosePseudoConsole(self.pseudo) };
         self.pseudo = 0;
         self.reader.take().unwrap().join().unwrap();
-        (code, String::from_utf8_lossy(&self.screen()).into_owned())
+        let screen = String::from_utf8_lossy(&self.screen()).into_owned();
+        assert_no_secret_bytes("terminal screen", screen.as_bytes());
+        (code, screen)
     }
 }
 

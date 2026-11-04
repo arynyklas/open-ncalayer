@@ -324,6 +324,17 @@ impl Cli {
         {
             return Err("ConfigurationLimit");
         }
+        // XAdES evidence requires an explicit TSA policy: a typed refusal before any I/O.
+        if let Command::Sign(args) = &self.command
+            && matches!(
+                args.profile,
+                SignProfile::XadesT | SignProfile::XadesLt | SignProfile::XadesLta
+            )
+            && self.tsa_url.is_some()
+            && self.tsa_policy.is_none()
+        {
+            return Err("TsaPolicyRequired");
+        }
         if crate::evidence::any(self) {
             let uses = match &self.command {
                 Command::Extend(_) => true,

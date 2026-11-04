@@ -15,25 +15,37 @@ fn python() -> Option<&'static str> {
 }
 /// Independent XML-DSig verification of `signed` against the RSA leaf.
 fn oracle(w: &World, signed: &Path) -> Option<String> {
+    oracle_mode(w, signed, None)
+}
+/// The oracle is mandatory: its absence fails the test unless the operator
+/// explicitly opts out with `ONCL_ALLOW_NO_ORACLE=1`, which is then logged.
+fn oracle_mode(w: &World, signed: &Path, mode: Option<&str>) -> Option<String> {
     let python = python().or_else(|| {
-        eprintln!("python with lxml+cryptography unavailable: oracle not exercised");
+        assert!(
+            std::env::var_os("ONCL_ALLOW_NO_ORACLE").is_some(),
+            "python with lxml+cryptography is required (set ONCL_ALLOW_NO_ORACLE=1 to skip explicitly)"
+        );
+        eprintln!("ORACLE SKIPPED (explicit ONCL_ALLOW_NO_ORACLE)");
         None
     })?;
     let script = w.dir.path().join("xmldsig_oracle.py");
     std::fs::write(&script, include_str!("support/xmldsig_oracle.py")).unwrap();
     let leaf = w.dir.path().join("oracle-leaf.der");
     std::fs::write(&leaf, w.pki.rsa.cert.to_der().unwrap()).unwrap();
-    let result = Command::new(python)
-        .args([path(&script), path(signed), path(&leaf)])
-        .output()
-        .unwrap();
+    let mut command = Command::new(python);
+    command.args([path(&script), path(signed), path(&leaf)]);
+    command.args(mode);
+    let result = command.output().unwrap();
     assert!(
         result.status.success(),
         "oracle rejected {}: {}",
         signed.display(),
         String::from_utf8_lossy(&result.stderr)
     );
-    Some(String::from_utf8(result.stdout).unwrap())
+    let proof = String::from_utf8(result.stdout).unwrap();
+    assert!(proof.contains("SIGNATURES=1"), "{proof}");
+    eprintln!("ORACLE RAN {proof}");
+    Some(proof)
 }
 fn common(w: &World) -> Vec<&str> {
     vec!["--root", path(&w.root), "--pki-endpoint", &w.origin]
@@ -291,7 +303,10 @@ fn legacy_xades_b_t_lt_use_the_host_tsa_and_chain_and_verify_at_their_level() {
         &["--legacy", "--tsa-url", &tsa],
     );
     assert_eq!(refused.status.code(), Some(1), "{refused:?}");
-    assert!(!String::from_utf8_lossy(&refused.stderr).contains("private_use"));
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr).trim(),
+        "oncl: TsaPolicyRequired"
+    );
     assert!(!out.exists());
     let (bad, _) = sign(
         &w,
@@ -335,6 +350,8 @@ fn unsupported_legacy_combinations_fail_before_any_io() {
                 "--legacy",
                 "--tsa-url",
                 "http://127.0.0.1:1/tsa",
+                "--tsa-policy",
+                "1.2.398.3.3.2.6.2",
             ],
             "InvalidCombination",
         ),
@@ -560,7 +577,11 @@ fn baseline_xades_levels_need_and_use_the_operator_tsa_policy() {
             &["--tsa-url", &tsa],
         );
         assert_eq!(refused.status.code(), Some(1), "{profile}: {refused:?}");
-        assert!(!String::from_utf8_lossy(&refused.stderr).contains("private_use"));
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stderr).trim(),
+            "oncl: TsaPolicyRequired",
+            "{profile}"
+        );
         assert!(!out.exists());
         let (signed, out) = sign(
             &w,
@@ -585,4 +606,186 @@ fn baseline_xades_levels_need_and_use_the_operator_tsa_policy() {
             assert!(proof.starts_with("OK "), "{profile}: {proof}");
         }
     }
+}
+fn normalized(bytes: &[u8]) -> String {
+    // Certificate and RSA signature bytes depend on the per-run issuing key; every
+    // other byte (digest, SignedInfo, layout, declaration, whitespace) is pinned.
+    let mut text = String::from_utf8(bytes.to_vec()).unwrap();
+    for tag in [
+        "ds:X509Certificate",
+        "ds:SignatureValue",
+        "X509Certificate",
+        "SignatureValue",
+    ] {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        while let Some(start) = text.find(&open) {
+            let end = text[start..].find(&close).unwrap() + start;
+            text.replace_range(start + open.len()..end, "{VOLATILE}");
+            // continue after this element
+            let marker = format!("{open}{{VOLATILE}}");
+            text = text.replacen(&marker, &format!("<{tag}-pinned>{{VOLATILE}}"), 1);
+        }
+        text = text.replace(&format!("<{tag}-pinned>"), &open);
+    }
+    text
+}
+#[test]
+fn legacy_output_bytes_are_pinned_for_a_fixed_input() {
+    let w = world();
+    let document = b"<r><p Id=\"d1\">data</p></r>";
+    let mut results = Vec::new();
+    for (name, extra) in [
+        ("kalkan", vec!["--legacy", "--legacy-element", "/r/p"]),
+        (
+            "santuario",
+            vec![
+                "--legacy",
+                "--legacy-element",
+                "/r/p",
+                "--legacy-line-breaks",
+                "--legacy-base64-line-breaks",
+                "on",
+                "--legacy-output",
+                "as-is",
+            ],
+        ),
+        (
+            "declared",
+            vec![
+                "--legacy",
+                "--legacy-xml-declaration",
+                "--legacy-standalone-no",
+            ],
+        ),
+    ] {
+        let (signed, out) = sign(&w, "xml", document, name, &extra);
+        assert_eq!(signed.status.code(), Some(0), "{name}: {signed:?}");
+        let bytes = std::fs::read(&out).unwrap();
+        results.push((name, normalized(&bytes)));
+    }
+    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    for (name, text) in &results {
+        let file = golden.join(format!("legacy_{name}.xml"));
+        if std::env::var_os("ONCL_WRITE_GOLDEN").is_some() {
+            std::fs::create_dir_all(&golden).unwrap();
+            std::fs::write(&file, text).unwrap();
+        }
+        let expected = std::fs::read_to_string(&file)
+            .unwrap_or_else(|_| panic!("missing golden {}", file.display()))
+            .replace("\r\n", "\n");
+        assert_eq!(
+            &text.replace("\r\n", "\n"),
+            &expected,
+            "{name}: legacy wire drifted"
+        );
+    }
+    // Independent digests: Python hashlib over the canonical bytes of the signed
+    // element / the document without its signature.
+    assert!(
+        results[0].1.contains(
+            "<ds:DigestValue>6e7Z69I++CmaGim1DbiK3WN4VIuPVyTgC7QIetHT+20=</ds:DigestValue>"
+        )
+    );
+    assert!(
+        results[2].1.contains(
+            "<ds:DigestValue>xrH6qCO/dCfbAgRNEKjuB2eFf50jxcVI90CPQwxNz7E=</ds:DigestValue>"
+        )
+    );
+}
+
+#[test]
+fn a_tsa_token_with_another_policy_than_requested_is_rejected() {
+    let w = world();
+    let good = format!("{}/tsa", w.origin);
+    // This responder drops the requested policy, so the token carries its own
+    // (basics) policy, which differs from the operator's `--tsa-policy`.
+    let other = format!("{}/tsa-other-policy", w.origin);
+    let document: &[u8] = b"<r><p>policy</p></r>";
+    let (accepted, _) = sign(
+        &w,
+        "xades-t",
+        document,
+        "policy-ok",
+        &[
+            "--tsa-url",
+            &good,
+            "--tsa-policy",
+            "1.2.398.3.3.2.6.2",
+            "--signature-id",
+            "s1",
+        ],
+    );
+    assert_eq!(accepted.status.code(), Some(0), "control: {accepted:?}");
+    let (rejected, out) = sign(
+        &w,
+        "xades-t",
+        document,
+        "policy-mismatch",
+        &[
+            "--tsa-url",
+            &other,
+            "--tsa-policy",
+            "1.2.398.3.3.2.6.2",
+            "--signature-id",
+            "s1",
+        ],
+    );
+    assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+    assert!(!out.exists());
+    let text = String::from_utf8_lossy(&rejected.stderr);
+    eprintln!("POLICY MISMATCH: {}", text.trim());
+    // Honest bound: acquisition happens after key use, so the refusal is reported
+    // with the truthful private-use state and nothing is published.
+    assert!(text.contains("private_use"), "{text}");
+    assert!(text.contains("applied=Applied"), "{text}");
+}
+#[test]
+fn gost_xml_is_structurally_checked_not_independently_verified_and_legacy_gost_is_refused() {
+    let w = world();
+    let input = w.dir.path().join("gost.in.xml");
+    std::fs::write(&input, b"<r><p Id=\"d1\">gost</p></r>").unwrap();
+    let run_sign = |name: &str, extra: &[&str]| {
+        let out = w.dir.path().join(format!("{name}.xml"));
+        let mut args = vec![
+            "sign",
+            "--input",
+            path(&input),
+            "--output",
+            path(&out),
+            "--key",
+            path(&w.gost_key),
+            "--secret-file",
+            path(&w.secret),
+            "--authorize",
+        ];
+        args.extend(extra);
+        args.extend(common(&w));
+        args.extend(["--as-of", AS_OF]);
+        (run(&args, b""), out)
+    };
+    // Baseline XML with a GOST-2015 key signs and verifies Valid.
+    let (signed, out) = run_sign("baseline", &["--profile", "xml"]);
+    assert_eq!(signed.status.code(), Some(0), "{signed:?}");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains("gostr34102015-gostr34112015-512"), "{text}");
+    assert_eq!(verify(&w, "xml", &out).status.code(), Some(0));
+    // Honest bound: the Python oracle has no GOST R 34.10/34.11, so only structure
+    // (references, digest length, algorithm URIs, SignatureValue) is checked
+    // independently; the GOST math is verified by the SDK alone.
+    if let Some(proof) = oracle_mode(&w, &out, Some("gost")) {
+        assert!(proof.contains("MODE=structural-gost"), "{proof}");
+    }
+    let tampered = w.dir.path().join("gost.tampered.xml");
+    std::fs::write(&tampered, text.replace(">gost<", ">g0st<")).unwrap();
+    assert_eq!(verify(&w, "xml", &tampered).status.code(), Some(2));
+    // Observed limitation: the guarded legacy facade refuses a GOST-2015 signer
+    // before any private use (it is exercised with RSA and baseline GOST instead).
+    let (refused, out) = run_sign("legacy", &["--profile", "xml", "--legacy"]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let text = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !text.contains("private_use") && text.contains("applied=NotApplied"),
+        "{text}"
+    );
+    assert!(!out.exists());
 }

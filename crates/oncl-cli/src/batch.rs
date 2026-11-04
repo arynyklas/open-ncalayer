@@ -135,10 +135,14 @@ impl BatchCommand {
         }
         Ok(())
     }
-    pub fn key_plan(&self) -> Result<Option<crate::keysrc::Plan>, OperationError> {
+    pub fn key_plan(
+        &self,
+        control: &crate::control::Control,
+        reservation: &mut oncl_pki::resource::ConfigurationReservation,
+    ) -> Result<Option<crate::keysrc::Plan>, OperationError> {
         let args = self.args();
         if let (Some(config), Some(name)) = (&args.key_config, &args.key_name) {
-            return crate::keysrc::resolve(config, name).map(Some);
+            return crate::keysrc::resolve(config, name, control, reservation).map(Some);
         }
         args.key
             .as_ref()

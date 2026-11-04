@@ -35,20 +35,31 @@ def canonical(node, uri):
     return etree.tostring(node, method="c14n", exclusive=exclusive, with_comments=comments)
 
 
-def main():
-    signed, leaf = sys.argv[1], sys.argv[2]
-    tree = etree.parse(signed)
-    root = tree.getroot()
-    signatures = list(root.iter(q("Signature")))
-    if not signatures:
-        sys.exit("no signature")
-    signature = signatures[0]
+def verify_signature(tree, signature, leaf, structural):
     info = signature.find(q("SignedInfo"))
     method = info.find(q("SignatureMethod")).get("Algorithm")
+    references = info.findall(q("Reference"))
+    if not references:
+        sys.exit("SignedInfo has no Reference")
+    value = base64.b64decode(signature.find(q("SignatureValue")).text)
+    if not value:
+        sys.exit("empty SignatureValue")
+    if structural:
+        # GOST algorithms: lxml/cryptography cannot compute GOST R 34.11/34.10, so the
+        # math is NOT independently verified. Only the structure is checked.
+        if "gost" not in method.lower():
+            sys.exit("structural mode expects a GOST SignatureMethod: " + method)
+        for reference in references:
+            digest = base64.b64decode(reference.find(q("DigestValue")).text)
+            if len(digest) not in (32, 64):
+                sys.exit("unexpected GOST digest length %d" % len(digest))
+        c14n_uri = info.find(q("CanonicalizationMethod")).get("Algorithm")
+        if c14n_uri not in C14N:
+            sys.exit("unknown SignedInfo canonicalization " + c14n_uri)
+        return len(references), c14n_uri
     if method != RSA_SHA256:
         sys.exit("oracle covers RSA-SHA256 only: " + method)
-    references = info.findall(q("Reference"))
-    ids = {el.get("Id"): el for el in root.iter() if el.get("Id")}
+    root = tree.getroot()
     for reference in references:
         digest_method = reference.find(q("DigestMethod")).get("Algorithm")
         if digest_method != SHA256:
@@ -58,11 +69,9 @@ def main():
             t.get("Algorithm")
             for t in reference.findall("%s/%s" % (q("Transforms"), q("Transform")))
         ]
-        if uri == "":
-            work = copy.deepcopy(tree)
-            target = work
-        else:
-            work = copy.deepcopy(tree)
+        work = copy.deepcopy(tree)
+        target = work
+        if uri != "":
             target = None
             for el in work.getroot().iter():
                 if el.get("Id") == uri[1:]:
@@ -80,19 +89,29 @@ def main():
                 c14n_uri = transform
             else:
                 sys.exit("unsupported transform " + transform)
-        if uri != "" and not transforms:
-            # No explicit canonicalization: same-document default is inclusive.
-            pass
         expected = base64.b64decode(reference.find(q("DigestValue")).text)
         actual = hashlib.sha256(canonical(target, c14n_uri)).digest()
         if expected != actual:
             sys.exit("reference digest mismatch for %r" % uri)
     c14n_uri = info.find(q("CanonicalizationMethod")).get("Algorithm")
-    # SignedInfo is canonicalized inside its signature document context.
-    value = base64.b64decode(signature.find(q("SignatureValue")).text)
     public = x509.load_der_x509_certificate(open(leaf, "rb").read()).public_key()
     public.verify(value, canonical(info, c14n_uri), padding.PKCS1v15(), hashes.SHA256())
-    print("OK %d %s" % (len(references), c14n_uri))
+    return len(references), c14n_uri
+
+
+def main():
+    signed, leaf = sys.argv[1], sys.argv[2]
+    structural = len(sys.argv) > 3 and sys.argv[3] == "gost"
+    tree = etree.parse(signed)
+    signatures = list(tree.getroot().iter(q("Signature")))
+    if not signatures:
+        sys.exit("no signature")
+    total, first = 0, None
+    for signature in signatures:  # every signature, not only the first
+        refs, c14n_uri = verify_signature(tree, signature, leaf, structural)
+        total += refs
+        first = first or c14n_uri
+    print("OK %d %s SIGNATURES=%d MODE=%s" % (total, first, len(signatures), "structural-gost" if structural else "rsa-math"))
 
 
 main()

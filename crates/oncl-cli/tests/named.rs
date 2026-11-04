@@ -8,19 +8,38 @@ use support::*;
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+/// The key configuration lives in an owner-only directory, like a secret file.
 fn config(w: &World, value: serde_json::Value) -> PathBuf {
-    let path = w.dir.path().join("keys.json");
-    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let directory = w.dir.path().join("cfg-private");
+    let namespace = oncl_pki::private_fs::PrivateDirectory::open(&directory)
+        .or_else(|_| oncl_pki::private_fs::PrivateDirectory::create(&directory))
+        .unwrap();
+    let path = directory.join("keys.json");
+    let _ = std::fs::remove_file(&path);
+    std::io::Write::write_all(
+        &mut namespace.create_file("keys.json").unwrap(),
+        &serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
     path
+}
+fn raw_config(w: &World, bytes: &[u8]) -> PathBuf {
+    let directory = w.dir.path().join("cfg-private");
+    let namespace = oncl_pki::private_fs::PrivateDirectory::open(&directory)
+        .or_else(|_| oncl_pki::private_fs::PrivateDirectory::create(&directory))
+        .unwrap();
+    let _ = std::fs::remove_file(directory.join("raw.json"));
+    std::io::Write::write_all(&mut namespace.create_file("raw.json").unwrap(), bytes).unwrap();
+    directory.join("raw.json")
 }
 fn standard(w: &World) -> PathBuf {
     // Relative paths resolve against the config's directory, not the cwd.
     config(
         w,
         json!({"keys":[
-            {"source":"file","name":"rsa-main","path":"rsa.p12"},
-            {"source":"file","name":"gost-main","path":"gost.p12"},
-            {"source":"file","name":"missing","path":"absent.p12"}
+            {"source":"file","name":"rsa-main","path":w.rsa_key},
+            {"source":"file","name":"gost-main","path":w.gost_key},
+            {"source":"file","name":"missing","path":w.dir.path().join("absent.p12")}
         ]}),
     )
 }
@@ -139,16 +158,16 @@ fn unknown_missing_or_malformed_named_keys_fail_closed_before_private_use() {
         (
             "duplicate",
             json!({"keys":[
-            {"source":"file","name":"a","path":"rsa.p12"},
-            {"source":"file","name":"a","path":"gost.p12"}]}),
+            {"source":"file","name":"a","path":w.rsa_key},
+            {"source":"file","name":"a","path":w.gost_key}]}),
         ),
         (
             "unknown field",
-            json!({"keys":[{"source":"file","name":"rsa-main","path":"rsa.p12","password":"x"}]}),
+            json!({"keys":[{"source":"file","name":"rsa-main","path":w.rsa_key,"password":"x"}]}),
         ),
         (
             "unknown source",
-            json!({"keys":[{"source":"pkcs11","name":"rsa-main","path":"rsa.p12"}]}),
+            json!({"keys":[{"source":"pkcs11","name":"rsa-main","path":w.rsa_key}]}),
         ),
         (
             "bad token kind",
@@ -163,8 +182,7 @@ fn unknown_missing_or_malformed_named_keys_fail_closed_before_private_use() {
         );
     }
     // Oversize configuration is bounded before parsing.
-    let big = w.dir.path().join("big.json");
-    std::fs::write(&big, vec![b' '; 70_000]).unwrap();
+    let big = raw_config(&w, &vec![b' '; 70_000]);
     refuse(
         sign(&w, &big, "rsa-main", &document, &out),
         "oversize config",
@@ -195,7 +213,7 @@ fn named_jks_and_pkcs12_metadata_without_private_use_and_wrong_password_refused(
         &w,
         json!({"keys":[
             {"source":"file","name":"jks-key","path":jks,"alias":"openncalayer-rsa"},
-            {"source":"file","name":"p12-key","path":"rsa.p12"}]}),
+            {"source":"file","name":"p12-key","path":w.rsa_key}]}),
     );
     let secret = private.join("jks.secret");
     let inspect = |name: &str, secret: &Path| {
@@ -326,4 +344,107 @@ fn batch_signs_with_a_named_key_and_rejects_a_name_with_a_path() {
     );
     assert_eq!(result.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&result.stderr).contains("InvalidCombination"));
+}
+
+#[test]
+fn key_configuration_is_an_owner_only_regular_file_with_an_exact_size_cap() {
+    let w = world();
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let out = w.dir.path().join("out.der");
+    let valid = serde_json::to_vec(&json!({"keys":[
+        {"source":"file","name":"rsa-main","path":w.rsa_key}]}))
+    .unwrap();
+    // Exactly 65536 bytes (valid JSON padded with spaces) is accepted; 65537 is not.
+    let mut exact = valid.clone();
+    exact.resize(65_536, b' ');
+    let cfg = raw_config(&w, &exact);
+    let signed = run(&sign(&w, &cfg, "rsa-main", &document, &out), b"");
+    assert_eq!(signed.status.code(), Some(0), "{signed:?}");
+    let mut over = valid.clone();
+    over.resize(65_537, b' ');
+    let cfg = raw_config(&w, &over);
+    let out2 = w.dir.path().join("out2.der");
+    let refused = run(&sign(&w, &cfg, "rsa-main", &document, &out2), b"");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("MetadataLimit"));
+    assert!(!out2.exists());
+    // An ordinary (not owner-only) directory is refused: the file selects which
+    // container a granted named key reaches, so it is held to the secret-file policy.
+    let open = w.dir.path().join("open-keys.json");
+    std::fs::write(&open, &valid).unwrap();
+    let out3 = w.dir.path().join("out3.der");
+    let refused = run(&sign(&w, &open, "rsa-main", &document, &out3), b"");
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(!String::from_utf8_lossy(&refused.stderr).contains("private_use"));
+    assert!(!out3.exists());
+    // A directory (or any non-regular file) in its place is refused. FIFOs and
+    // devices are not creatable by this unprivileged Windows test user; the
+    // regular-file check (`is_file`) covers them on every platform.
+    let out4 = w.dir.path().join("out4.der");
+    let dir_cfg = w.dir.path().join("cfg-private");
+    let refused = run(&sign(&w, &dir_cfg, "rsa-main", &document, &out4), b"");
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(!out4.exists());
+}
+#[test]
+fn a_container_whose_certificate_does_not_match_its_key_is_refused_before_private_use() {
+    use der::Encode as _;
+    let w = world();
+    // The RSA key paired with the GOST leaf certificate: a PKCS#12 that is
+    // internally inconsistent.
+    let bytes = oncl_pki::pkcs12::write(
+        &[oncl_pki::pkcs12::WriteEntry {
+            alias: "mismatch".into(),
+            pkcs8_der: w.pki.rsa.key.to_pkcs8_der().unwrap().to_vec(),
+            cert_der: Some(w.pki.gost.cert.to_der().unwrap()),
+        }],
+        &[],
+        PASSWORD,
+        &oncl_pki::pkcs12::WriteOptions::default(),
+        &mut |b| b.fill(0x5a),
+    )
+    .unwrap();
+    let mismatched = w.dir.path().join("mismatch.p12");
+    std::fs::write(&mismatched, bytes).unwrap();
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let cfg = config(
+        &w,
+        json!({"keys":[{"source":"file","name":"bad","path":mismatched}]}),
+    );
+    let direct = w.dir.path().join("direct.der");
+    let named = w.dir.path().join("named.der");
+    let mut by_path = vec![
+        "sign",
+        "--profile",
+        "cms",
+        "--detached",
+        "--input",
+        path(&document),
+        "--output",
+        path(&direct),
+        "--key",
+        path(&mismatched),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+        "--root",
+        path(&w.root),
+        "--pki-endpoint",
+        &w.origin,
+        "--as-of",
+        "1793620800",
+    ];
+    let first = run(&by_path, b"");
+    by_path.clear();
+    let second = run(&sign(&w, &cfg, "bad", &document, &named), b"");
+    for (label, result, out) in [("direct", &first, &direct), ("named", &second, &named)] {
+        assert_eq!(result.status.code(), Some(1), "{label}: {result:?}");
+        let text = String::from_utf8_lossy(&result.stderr);
+        eprintln!("MISMATCH {label}: {}", text.trim());
+        assert!(!text.contains("private_use"), "{label}: {text}");
+        assert!(text.contains("applied=NotApplied"), "{label}: {text}");
+        assert!(!out.exists(), "{label}");
+    }
 }

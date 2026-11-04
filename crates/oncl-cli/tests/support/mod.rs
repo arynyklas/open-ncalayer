@@ -57,16 +57,20 @@ pub fn run_env(args: &[&str], input: &[u8], env: &[(&str, &str)]) -> Output {
     assert_no_secret(&output);
     output
 }
-/// No process output of any test may ever contain the synthetic password.
-pub fn assert_no_secret(output: &Output) {
-    for (name, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+/// Every secret value any test uses: the key password, the token PIN (and a wrong
+/// one), and the JKS fixture password. None may ever reach process output.
+pub const SECRETS: [&str; 4] = [PASSWORD, "123456", "000000", "Qwerty12"];
+pub fn assert_no_secret_bytes(name: &str, bytes: &[u8]) {
+    for secret in SECRETS {
         assert!(
-            !bytes
-                .windows(PASSWORD.len())
-                .any(|w| w == PASSWORD.as_bytes()),
-            "{name} contains the secret"
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{name} contains a secret value"
         );
     }
+}
+pub fn assert_no_secret(output: &Output) {
+    assert_no_secret_bytes("stdout", &output.stdout);
+    assert_no_secret_bytes("stderr", &output.stderr);
 }
 fn fixture(name: &str) -> KeyEntry {
     let f = oncl_testkit::synthetic(name);
@@ -279,6 +283,43 @@ pub fn start(responder: KeyEntry, tsa: KeyEntry, listener: TcpListener, origin: 
         origin,
     }
 }
+/// A `TimeStampReq` without its `reqPolicy`: the mock TSA then answers with its
+/// own (basics) policy, i.e. a TSA that does not honour the requested policy.
+fn without_policy(request: &[u8]) -> Vec<u8> {
+    fn header(bytes: &[u8]) -> (usize, usize) {
+        // (header length, content length) of a DER TLV.
+        if bytes[1] & 0x80 == 0 {
+            (2, bytes[1] as usize)
+        } else {
+            let n = (bytes[1] & 0x7f) as usize;
+            let len = bytes[2..2 + n]
+                .iter()
+                .fold(0usize, |a, b| (a << 8) | *b as usize);
+            (2 + n, len)
+        }
+    }
+    let (h, len) = header(request);
+    let mut rest = &request[h..h + len];
+    let mut kept = Vec::new();
+    while !rest.is_empty() {
+        let (ch, cl) = header(rest);
+        if rest[0] != 0x06 {
+            kept.extend_from_slice(&rest[..ch + cl]);
+        }
+        rest = &rest[ch + cl..];
+    }
+    let mut out = vec![0x30];
+    if kept.len() < 128 {
+        out.push(kept.len() as u8);
+    } else {
+        let bytes = (kept.len() as u32).to_be_bytes();
+        let skip = bytes.iter().take_while(|b| **b == 0).count();
+        out.push(0x80 | (4 - skip) as u8);
+        out.extend_from_slice(&bytes[skip..]);
+    }
+    out.extend_from_slice(&kept);
+    out
+}
 fn serve(
     stream: &mut TcpStream,
     origin: &str,
@@ -353,7 +394,14 @@ fn serve(
     };
     gate.wait(&probe);
     let url = format!("{origin}{path}");
-    let reply = if path == "/tsa" {
+    let reply = if path == "/tsa-other-policy" {
+        tsa.send(&HttpRequest::post(
+            &url,
+            Some("application/timestamp-query"),
+            &without_policy(&body),
+            GetOptions::default(),
+        ))
+    } else if path == "/tsa" {
         tsa.send(&HttpRequest::post(
             &url,
             Some("application/timestamp-query"),

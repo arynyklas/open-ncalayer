@@ -46,6 +46,24 @@ fn card(w: &World, keys: &[&PathBuf]) -> Card {
         pin: private.join("pin.secret"),
     }
 }
+/// Owner-only key configuration (next to the PIN file) naming one token entry.
+fn named_config(w: &World, card: &Card, reader: &str, alias: &str) -> PathBuf {
+    let directory = card.pin.parent().unwrap();
+    let _ = w;
+    let _ = std::fs::remove_file(directory.join("keys.json"));
+    PrivateDirectory::open(directory)
+        .unwrap()
+        .create_file("keys.json")
+        .unwrap()
+        .write_all(
+            &serde_json::to_vec(&json!({"keys":[
+                {"source":"token","name":"card","reader":reader,"kind":"kaztoken","alias":alias}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+    directory.join("keys.json")
+}
 fn env(card: &Card) -> [(&'static str, &str); 1] {
     [("ONCL_TOKEN_EMULATOR", path(&card.config))]
 }
@@ -195,15 +213,7 @@ fn named_token_source_signs_and_publishes_public_metadata_without_private_use() 
     let w = world();
     let card = card(&w, &[&w.rsa_key]);
     let alias = w.pki.rsa.alias.as_str();
-    let keys = w.dir.path().join("keys.json");
-    std::fs::write(
-        &keys,
-        serde_json::to_vec(&json!({"keys":[
-            {"source":"token","name":"card","reader":READER,"kind":"kaztoken","alias":alias}
-        ]}))
-        .unwrap(),
-    )
-    .unwrap();
+    let keys = named_config(&w, &card, READER, alias);
     let document = w.dir.path().join("document.bin");
     std::fs::write(&document, b"named token").unwrap();
     let signature = w.dir.path().join("named.der");
@@ -250,4 +260,75 @@ fn named_token_source_signs_and_publishes_public_metadata_without_private_use() 
     assert_eq!(report["applied"], "NotApplied");
     assert_eq!(report["entries"].as_array().unwrap().len(), 1, "{report}");
     assert!(!String::from_utf8_lossy(&inspected.stderr).contains("private_use"));
+}
+
+#[test]
+fn named_token_wrong_pin_alias_or_reader_fail_closed_with_no_private_use() {
+    let w = world();
+    let card = card(&w, &[&w.rsa_key]);
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let alias = w.pki.rsa.alias.clone();
+    let bad_pin = card.pin.parent().unwrap().join("bad.secret");
+    PrivateDirectory::open(card.pin.parent().unwrap())
+        .unwrap()
+        .create_file("bad.secret")
+        .unwrap()
+        .write_all(b"000000")
+        .unwrap();
+    for (label, reader, alias, pin, code) in [
+        (
+            "wrong pin",
+            READER,
+            alias.as_str(),
+            &bad_pin,
+            "InvalidInput",
+        ),
+        (
+            "wrong alias",
+            READER,
+            "no-such-alias",
+            &card.pin,
+            "KeyNotFound",
+        ),
+        (
+            "wrong reader",
+            "No Such Reader",
+            alias.as_str(),
+            &card.pin,
+            "InvalidInput",
+        ),
+    ] {
+        let keys = named_config(&w, &card, reader, alias);
+        let output = w
+            .dir
+            .path()
+            .join(format!("{}.der", label.replace(' ', "-")));
+        let mut args = vec![
+            "sign",
+            "--profile",
+            "cms",
+            "--detached",
+            "--input",
+            path(&document),
+            "--output",
+            path(&output),
+            "--key-name",
+            "card",
+            "--key-config",
+            path(&keys),
+            "--secret-file",
+            path(pin),
+            "--authorize",
+        ];
+        args.extend(trust(&w));
+        let result = run_env(&args, b"", &env(&card));
+        assert_eq!(result.status.code(), Some(1), "{label}: {result:?}");
+        let text = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            !text.contains("private_use") && text.contains(code),
+            "{label}: {text}"
+        );
+        assert!(!output.exists(), "{label}");
+    }
 }

@@ -70,7 +70,13 @@ fn gost_rooted_chain_signs_valid_zero_for_gost_and_rsa_leaves_altered_two_offlin
         let mut foreign = verify.clone();
         let at = foreign.iter().position(|a| *a == path(&w.root)).unwrap();
         foreign[at] = path(&other.root);
-        assert_ne!(run(&foreign, b"").status.code(), Some(0), "{name}");
+        let wrong_root = run(&foreign, b"");
+        assert_eq!(wrong_root.status.code(), Some(2), "{name}: {wrong_root:?}");
+        let report: serde_json::Value = serde_json::from_slice(&wrong_root.stdout).unwrap();
+        assert_eq!(
+            report["signers"][0]["chain"], "Failed",
+            "{name}: chain failure"
+        );
     }
 }
 #[test]
@@ -115,6 +121,13 @@ fn gost_rooted_cades_t_uses_a_gost_tsa_and_verifies_at_level_t() {
     assert_eq!(valid.status.code(), Some(0), "{valid:?}");
     let report: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
     assert_eq!(report["ades_level"], "T");
+    // Negative contrast: other content under the same CAdES-T signature is Invalid.
+    let altered = w.dir.path().join("altered.bin");
+    std::fs::write(&altered, b"abd").unwrap();
+    let mut bad = verify.clone();
+    let at = bad.iter().position(|a| *a == path(&document)).unwrap();
+    bad[at] = path(&altered);
+    assert_eq!(run(&bad, b"").status.code(), Some(2));
 }
 #[test]
 fn gost_rooted_jws_and_jwt_sign_and_verify_valid_with_a_gost_key() {
@@ -212,4 +225,9 @@ fn gost_rooted_jws_and_jwt_sign_and_verify_valid_with_a_gost_key() {
     check.extend(trust(&w));
     let result = run(&check, b"");
     assert_eq!(result.status.code(), Some(0), "{result:?}");
+    // Negative contrast: a different audience is Invalid (2).
+    let mut wrong = check.clone();
+    let at = wrong.iter().position(|a| *a == "service").unwrap();
+    wrong[at] = "other-service";
+    assert_eq!(run(&wrong, b"").status.code(), Some(2));
 }

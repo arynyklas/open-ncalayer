@@ -79,20 +79,60 @@ fn invalid() -> OperationError {
 }
 /// Parses the whole config (so a duplicate or malformed entry anywhere is
 /// refused) and resolves `name`. Only the selected source is opened later.
-pub fn resolve(config: &Path, name: &str) -> Result<Plan, OperationError> {
+pub fn resolve(
+    config: &Path,
+    name: &str,
+    control: &crate::control::Control,
+    reservation: &mut oncl_pki::resource::ConfigurationReservation,
+) -> Result<Plan, OperationError> {
     if !name_ok(name) {
         return Err(invalid());
     }
-    let mut file = std::fs::File::open(config).map_err(ProcessingError::from)?;
-    let length = file.metadata().map_err(ProcessingError::from)?.len();
+    // Trust model: the file decides which container or reader a granted
+    // `named:NAME` reaches, so it is read exactly like a secret file, from an
+    // owner-only directory through the SDK's ownership/ACL/link checks, which also
+    // refuse anything that is not a regular file (no FIFO/device read can block).
+    // Its bytes are charged to the one configuration budget before being read.
+    control.check()?;
+    let parent = config
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let file_name = config
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(OperationError::InvalidKeySource)?;
+    let mut file = oncl_pki::private_fs::PrivateDirectory::open(parent)
+        .and_then(|directory| directory.open_file(file_name))
+        .map_err(ProcessingError::from)?;
+    let metadata = file.metadata().map_err(ProcessingError::from)?;
+    if !metadata.is_file() {
+        return Err(invalid());
+    }
+    let length = metadata.len();
     if length > CONFIG_BYTES {
         return Err(ProcessingError::MetadataLimit.into());
     }
+    reservation.grow(length, length)?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(ProcessingError::from)?;
+    bytes
+        .try_reserve_exact(length as usize)
+        .map_err(|_| ProcessingError::MemoryLimit)?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        control.check()?;
+        let read = file.read(&mut chunk).map_err(ProcessingError::from)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len() + read > length as usize {
+            return Err(
+                ProcessingError::InvalidInput("key configuration changed during intake").into(),
+            );
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    control.check()?;
     if bytes.len() as u64 != length {
         return Err(
             ProcessingError::InvalidInput("key configuration changed during intake").into(),
@@ -176,9 +216,13 @@ fn token_service() -> Result<std::sync::Arc<oncl_token::Tokens>, OperationError>
     ))
 }
 impl PrivateKeyArgs {
-    pub fn plan(&self) -> Result<Plan, OperationError> {
+    pub fn plan(
+        &self,
+        control: &crate::control::Control,
+        reservation: &mut oncl_pki::resource::ConfigurationReservation,
+    ) -> Result<Plan, OperationError> {
         if let (Some(config), Some(name)) = (&self.key_config, &self.key_name) {
-            return resolve(config, name);
+            return resolve(config, name, control, reservation);
         }
         Ok(Plan::direct(self.selector()?, self.uses_token()))
     }

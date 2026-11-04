@@ -199,7 +199,7 @@ fn assert_terminal_report(s: &Scenario, interrupted_code: &str, top_code: &str) 
         1,
         "{stderr}"
     );
-    assert!(!stderr.contains(PASSWORD));
+    assert_no_secret(&s.output);
 }
 fn ctrl_break(child: &std::process::Child) {
     #[link(name = "kernel32")]
