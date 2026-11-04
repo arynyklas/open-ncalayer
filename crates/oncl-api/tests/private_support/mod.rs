@@ -435,7 +435,110 @@ pub async fn mixed(content_type: &str, body: Vec<u8>) -> Vec<(String, Option<Str
 pub fn final_event(parts: &[(String, Option<String>, Vec<u8>)]) -> serde_json::Value {
     let (name, _, bytes) = parts.last().expect("mandatory terminal part");
     assert_eq!(name, "final", "last part must be the terminal record");
-    serde_json::from_slice(bytes).unwrap()
+    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    assert_matches_schema("FinalEvent", &value);
+    for (name, _, bytes) in parts {
+        if name == "progress" {
+            assert_matches_schema("ProgressEvent", &serde_json::from_slice(bytes).unwrap());
+        }
+    }
+    value
+}
+/// Validate an ACTUAL service response against the published OpenAPI schema.
+pub fn assert_matches_schema(name: &str, value: &serde_json::Value) {
+    let document = oncl_api::openapi::document();
+    let schema = &document["components"]["schemas"][name];
+    if let Err(error) = validate(&document, schema, value, name) {
+        panic!("response does not match published schema {name}: {error}\n{value}");
+    }
+}
+fn validate(
+    doc: &serde_json::Value,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    at: &str,
+) -> Result<(), String> {
+    use serde_json::Value;
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.rsplit('/').next().unwrap();
+        return validate(doc, &doc["components"]["schemas"][name], value, at);
+    }
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        let matching = options
+            .iter()
+            .filter(|o| validate(doc, o, value, at).is_ok())
+            .count();
+        return if matching == 1 {
+            Ok(())
+        } else {
+            Err(format!("{at}: {matching} oneOf matches"))
+        };
+    }
+    if let Some(constant) = schema.get("const") {
+        return if constant == value {
+            Ok(())
+        } else {
+            Err(format!("{at}: expected const {constant}"))
+        };
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        return if values.contains(value) {
+            Ok(())
+        } else {
+            Err(format!("{at}: {value} not in enum"))
+        };
+    }
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
+    };
+    if !types.is_empty() {
+        let ok = types.iter().any(|t| match *t {
+            "string" => value.is_string(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => false,
+        });
+        if !ok {
+            return Err(format!("{at}: {value} is not {types:?}"));
+        }
+    }
+    if let (Some(object), Some(properties)) = (
+        value.as_object(),
+        schema.get("properties").and_then(Value::as_object),
+    ) {
+        for required in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !object.contains_key(required) {
+                return Err(format!("{at}: missing required {required}"));
+            }
+        }
+        for (key, item) in object {
+            match properties.get(key) {
+                Some(property) => validate(doc, property, item, &format!("{at}.{key}"))?,
+                None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                    return Err(format!("{at}: undeclared field {key}"));
+                }
+                None => {}
+            }
+        }
+    }
+    if let (Some(array), Some(items)) = (value.as_array(), schema.get("items")) {
+        for (index, item) in array.iter().enumerate() {
+            validate(doc, items, item, &format!("{at}[{index}]"))?;
+        }
+    }
+    Ok(())
 }
 pub fn artifact<'a>(parts: &'a [(String, Option<String>, Vec<u8>)], id: &str) -> &'a [u8] {
     parts

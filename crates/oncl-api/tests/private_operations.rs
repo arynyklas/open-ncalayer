@@ -401,6 +401,19 @@ async fn cms_add_cosigns_the_detached_container_with_a_second_private_use() {
     service.stop().await;
 }
 
+/// Bytes inside the last signature's `<...>` Contents gap (hex digits plus brackets).
+fn hex_len(pdf: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(pdf);
+    let at = text.rfind("/ByteRange").unwrap();
+    let open = text[at..].find('[').unwrap() + at + 1;
+    let close = text[open..].find(']').unwrap() + open;
+    let n: Vec<usize> = text[open..close]
+        .split_whitespace()
+        .map(|v| v.parse().unwrap())
+        .collect();
+    assert_eq!(n[0], 0);
+    n[2] - (n[0] + n[1])
+}
 fn der_len(bytes: &[u8]) -> usize {
     let first = bytes[1] as usize;
     if first < 0x80 {
@@ -457,6 +470,11 @@ async fn pdf_incremental_signature_verifies_against_the_exact_byterange_in_opens
     );
     let signatures = pdf_signatures(signed);
     let (covered, cms) = signatures.last().unwrap();
+    assert_eq!(
+        covered.len() + hex_len(signed),
+        signed.len(),
+        "the /ByteRange gap is exactly the signature hex and everything else is covered"
+    );
     assert!(openssl_cms_verify(cms, Some(covered), dir.path()).is_some());
     let mut altered = covered.clone();
     altered[10] ^= 1;
@@ -529,6 +547,9 @@ async fn operate(
     if ct.starts_with("multipart/mixed") {
         (status, mixed(&ct, response.clone()).await, response)
     } else {
+        if status == 200 {
+            assert_matches_schema("FinalEvent", &serde_json::from_slice(&response).unwrap());
+        }
         (status, Vec::new(), response)
     }
 }
@@ -1206,33 +1227,96 @@ async fn non_reading_peer_of_a_large_artifact_response_is_cut_at_the_original_de
     );
     stream.write_all(head.as_bytes()).await.unwrap();
     stream.write_all(&body).await.unwrap();
-    // Never read. After the original deadline the server must have released all.
     let started = std::time::Instant::now();
-    loop {
+    // Read only the response head and the first frames, then stop reading.
+    let mut head = vec![0u8; 2048];
+    let mut got = 0;
+    while got < 600 {
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read(&mut head[got..]),
+        )
+        .await
+        .expect("server produced the response head")
+        .unwrap();
+        assert!(n > 0, "closed before producing the head");
+        got += n;
+    }
+    let text = String::from_utf8_lossy(&head[..got]).into_owned();
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "head produced, not a 413/503: {text}"
+    );
+    assert!(text.contains("multipart/mixed"));
+    assert!(
+        text.contains("\"type\":\"progress\""),
+        "first frames were produced"
+    );
+    // The 48 MiB artifact cannot be written to a peer that does not read: the
+    // server blocks on the socket until the ORIGINAL deadline ends the response.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(
+        service
+            .host
+            .engine
+            .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+            .is_err(),
+        "while the write is pending the original root is still held"
+    );
+    // Still not reading: the server must release everything by itself when the
+    // ORIGINAL deadline (3 s from admission) expires.
+    let released_at = loop {
         if service
             .host
             .engine
             .admit(Arc::new(oncl_server::executor::Cancellation::new()))
             .is_ok()
-            && spool_files(&service.scratch()).is_empty()
         {
-            break;
+            break started.elapsed();
         }
         assert!(
             started.elapsed() < std::time::Duration::from_secs(8),
-            "a non-reading peer held the root/scratch past its deadline"
+            "never released"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert!(
+        released_at >= std::time::Duration::from_millis(1800)
+            && released_at <= std::time::Duration::from_secs(5),
+        "ended by the original deadline, not early or never: {released_at:?}"
+    );
+    // Only now drain: the buffered prefix ends without a terminal completed record.
+    let mut received = got;
+    let mut tail = Vec::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(8), stream.read(&mut buffer))
+            .await
+        {
+            Ok(Ok(0)) | Ok(Err(_)) => break,
+            Ok(Ok(n)) => {
+                received += n;
+                if tail.len() < 4096 {
+                    tail.extend_from_slice(&buffer[..n.min(4096)]);
+                }
+            }
+            Err(_) => panic!("stream neither ended nor failed after the deadline"),
+        }
     }
-    assert!(started.elapsed() >= std::time::Duration::from_millis(500));
-    // The peer never receives a terminal success record.
-    let mut received = Vec::new();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        stream.read_to_end(&mut received),
-    )
+    assert!(
+        received < 40 << 20,
+        "the stalled artifact was not fully delivered ({received} bytes)"
+    );
+    assert!(!String::from_utf8_lossy(&tail).contains("\"status\":\"completed\""));
+    wait_for("root and scratch released", || {
+        service
+            .host
+            .engine
+            .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+            .is_ok()
+            && spool_files(&service.scratch()).is_empty()
+    })
     .await;
-    assert!(!String::from_utf8_lossy(&received).contains("\"status\":\"completed\""));
     assert_eq!(service.host.executor.running(), 0);
     service.stop().await;
 }
@@ -1366,15 +1450,22 @@ async fn enveloped_xml_and_xades_signatures_verify_in_lxml_and_cryptography() {
         assert_eq!(done["status"], "completed", "{profile}: {done}");
         let signed = artifact(&parts, "artifact-0");
         let verdict = xml_oracle(signed, dir.path());
-        assert_eq!(verdict["signature_valid"], true, "{profile}: {verdict}");
-        assert!(
-            verdict["references"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r["match"] == true),
-            "{verdict}"
+        assert_eq!(
+            verdict["checked"], true,
+            "oracle must check at least one reference per signature: {verdict}"
         );
+        for signature in verdict["signatures"].as_array().unwrap() {
+            assert_eq!(signature["supported"], true, "{verdict}");
+            assert_eq!(signature["signature_valid"], true, "{profile}: {verdict}");
+            assert!(
+                signature["references"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["match"] == true),
+                "{verdict}"
+            );
+        }
         assert_eq!(
             xades,
             String::from_utf8_lossy(signed).contains("QualifyingProperties")
@@ -1383,11 +1474,15 @@ async fn enveloped_xml_and_xades_signatures_verify_in_lxml_and_cryptography() {
         let altered = String::from_utf8_lossy(signed).replace("payload text", "payload texT");
         let broken = xml_oracle(altered.as_bytes(), dir.path());
         assert!(
-            broken["references"]
+            broken["signatures"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|r| r["match"] == false),
+                .any(|s| s["references"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["match"] == false)),
             "{broken}"
         );
         // The service's own verifier agrees; tampering is a completed Invalid report.
@@ -1674,47 +1769,53 @@ async fn pades_levels_over_http_validate_in_pyhanko() {
         ("pades_lt", true),
         ("pades_lta", true),
     ] {
-        let evidence = r#""evidence":[{"kind":"certificate","input":"ev0"},{"kind":"crl","input":"ev1"},{"kind":"crl","input":"ev2"}],"#;
+        let with_evidence = expect_dss;
+        let (evidence, evidence_parts) = if with_evidence {
+            (
+                r#""evidence":[{"kind":"certificate","input":"ev0"},{"kind":"crl","input":"ev1"},{"kind":"crl","input":"ev2"}],"#,
+                r#",{"name":"ev0","item_id":"s1","role":"document"},{"name":"ev1","item_id":"s1","role":"document"},{"name":"ev2","item_id":"s1","role":"document"}"#,
+            )
+        } else {
+            ("", "")
+        };
         let metadata = format!(
-            r#"{{"items":[{{"id":"s1","operation":{{"kind":"sign","profile":"{level}","input":"doc",{evidence}"keys":[{{"source":"inline","container":"p12","password":"pw"}}]}}}}],"parts":[{{"name":"p12","item_id":"s1","role":"secret"}},{{"name":"pw","item_id":"s1","role":"secret"}},{{"name":"doc","item_id":"s1","role":"document"}},{{"name":"ev0","item_id":"s1","role":"document"}},{{"name":"ev1","item_id":"s1","role":"document"}},{{"name":"ev2","item_id":"s1","role":"document"}}]}}"#
+            r#"{{"items":[{{"id":"s1","operation":{{"kind":"sign","profile":"{level}","input":"doc",{evidence}"keys":[{{"source":"inline","container":"p12","password":"pw"}}]}}}}],"parts":[{{"name":"p12","item_id":"s1","role":"secret"}},{{"name":"pw","item_id":"s1","role":"secret"}},{{"name":"doc","item_id":"s1","role":"document"}}{evidence_parts}]}}"#
         );
-        let (status, parts, response) = operate(
-            &service,
-            &metadata,
-            &[
-                Part {
-                    name: "p12",
-                    filename: None,
-                    bytes: &p12,
-                },
-                Part {
-                    name: "pw",
-                    filename: None,
-                    bytes: PASSWORD.as_bytes(),
-                },
-                Part {
-                    name: "doc",
-                    filename: None,
-                    bytes: pdf,
-                },
-                Part {
-                    name: "ev0",
-                    filename: None,
-                    bytes: &inter,
-                },
-                Part {
-                    name: "ev1",
-                    filename: None,
-                    bytes: &pki.crls[0],
-                },
-                Part {
-                    name: "ev2",
-                    filename: None,
-                    bytes: &pki.crls[1],
-                },
-            ],
-        )
-        .await;
+        let mut request_parts = vec![
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: pdf,
+            },
+        ];
+        if with_evidence {
+            request_parts.push(Part {
+                name: "ev0",
+                filename: None,
+                bytes: &inter,
+            });
+            request_parts.push(Part {
+                name: "ev1",
+                filename: None,
+                bytes: &pki.crls[0],
+            });
+            request_parts.push(Part {
+                name: "ev2",
+                filename: None,
+                bytes: &pki.crls[1],
+            });
+        }
+        let (status, parts, response) = operate(&service, &metadata, &request_parts).await;
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
         let done = final_event(&parts);
         assert_eq!(done["status"], "completed", "{level}: {done}");
@@ -2174,5 +2275,221 @@ async fn cheap_failing_requests_do_not_starve_other_signers_of_audit_binding_slo
         1,
         "rejected-before-use requests took no key use"
     );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extract_and_hash_responses_match_the_schema_and_unimplemented_routes_stay_absent() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.tokens[0].actions.push(Permission::Extract);
+        config.tokens[0].actions.push(Permission::Hash);
+    })
+    .await;
+    let (_, parts) = sign_inline(&service, &p12, "cms", r#""attached":true,"#, b"extract me").await;
+    let sig = artifact(&parts, "artifact-0").to_vec();
+    let metadata = r#"{"items":[{"id":"x","operation":{"kind":"extract","input":"c"}}],"parts":[{"name":"c","item_id":"x","role":"document"}]}"#;
+    let (status, parts, _) = operate(
+        &service,
+        metadata,
+        &[Part {
+            name: "c",
+            filename: None,
+            bytes: &sig,
+        }],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        final_event(&parts)["results"][0]["result"]["kind"],
+        "extraction"
+    );
+    let metadata = r#"{"items":[{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"d"}}],"parts":[{"name":"d","item_id":"h","role":"document"}]}"#;
+    let (status, _, _) = operate(
+        &service,
+        metadata,
+        &[Part {
+            name: "d",
+            filename: None,
+            bytes: b"abc",
+        }],
+    )
+    .await;
+    assert_eq!(status, 200); // schema-validated inside `operate`
+    // Routes that are not implemented must not be advertised nor served.
+    let document = oncl_api::openapi::document();
+    let paths: Vec<&String> = document["paths"].as_object().unwrap().keys().collect();
+    for path in paths {
+        for forbidden in ["batch", "plugin", "encrypt", "decrypt"] {
+            assert!(!path.contains(forbidden), "{path}");
+        }
+    }
+    let text = document.to_string().to_lowercase();
+    assert!(
+        !text.contains("\"kind\":{\"const\":\"encrypt\"")
+            && !text.contains("\"const\":\"decrypt\"")
+    );
+    for route in [
+        "/v1/batch",
+        "/v1/plugin",
+        "/v1/plugins",
+        "/v1/encrypt",
+        "/v1/decrypt",
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(service.address)
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("POST {route} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", service.address, service.token.as_str()).as_bytes())
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 404"), "{route}: {response}");
+    }
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_xml_and_wsse_sign_verify_with_independent_lxml_oracle_and_shape_refusals() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let dir = tempfile::tempdir().unwrap();
+    // Kalkan-compatible legacy XMLDSig with XPath element selection.
+    let xml = br#"<root><data Id="d">legacy payload</data><other>x</other></root>"#;
+    let (_, parts) = sign_inline(&service, &p12, "xml_legacy", r#""element":"//data","signature_method":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256","digest_method":"http://www.w3.org/2001/04/xmlenc#sha256","#, xml).await;
+    let done = final_event(&parts);
+    assert_eq!(done["status"], "completed", "{done}");
+    let signed = artifact(&parts, "artifact-0");
+    let verdict = xml_oracle(signed, dir.path());
+    assert_eq!(verdict["checked"], true, "{verdict}");
+    assert_eq!(
+        verdict["signatures"][0]["signature_valid"], true,
+        "{verdict}"
+    );
+    assert!(
+        verdict["signatures"][0]["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["match"] == true)
+    );
+    assert_eq!(verdict["signatures"][0]["references"][0]["uri"], "#d");
+    let altered = String::from_utf8_lossy(signed).replace("legacy payload", "legacy payloaD");
+    let broken = xml_oracle(altered.as_bytes(), dir.path());
+    assert!(
+        broken["signatures"][0]["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["match"] == false)
+    );
+    // WS-Security Body signature.
+    let soap = br#"<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Header/><soapenv:Body><x:op xmlns:x="urn:x">hello</x:op></soapenv:Body></soapenv:Envelope>"#;
+    let (_, parts) = sign_inline(&service, &p12, "wsse", r#""soap":"soap11","#, soap).await;
+    let done = final_event(&parts);
+    assert_eq!(done["status"], "completed", "{done}");
+    let signed = artifact(&parts, "artifact-0");
+    let verdict = xml_oracle(signed, dir.path());
+    assert_eq!(verdict["checked"], true, "{verdict}");
+    assert_eq!(
+        verdict["signatures"][0]["signature_valid"], true,
+        "{verdict}"
+    );
+    assert!(
+        verdict["signatures"][0]["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["match"] == true),
+        "{verdict}"
+    );
+    let verify = r#"{"items":[{"id":"v","operation":{"kind":"verify","profile":"wsse","soap":"soap11","input":"doc"}}],"parts":[{"name":"doc","item_id":"v","role":"document"}]}"#;
+    let (status, _, response) = operate(
+        &service,
+        verify,
+        &[Part {
+            name: "doc",
+            filename: None,
+            bytes: signed,
+        }],
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let report: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(
+        report["results"][0]["result"]["signers"][0]["signature"], "Passed",
+        "{report}"
+    );
+    // Unsupported combinations are refused from metadata alone: no key, no audit.
+    let before = begins(&service);
+    for (profile, extra) in [
+        ("wsse", r#""target":"x","#),
+        ("cms", r#""element":"//a","#),
+        ("xml_legacy", r#""soap":"soap11","#),
+        ("pdf", r#""mode":"add","#),
+        ("xml", r#""attached":true,"#),
+        ("cms", r#""evidence":[{"kind":"crl","input":"doc"}],"#),
+    ] {
+        let body = multipart(
+            &sign_metadata(profile, extra),
+            &[
+                Part {
+                    name: "p12",
+                    filename: None,
+                    bytes: &p12,
+                },
+                Part {
+                    name: "pw",
+                    filename: None,
+                    bytes: PASSWORD.as_bytes(),
+                },
+                Part {
+                    name: "doc",
+                    filename: None,
+                    bytes: b"x",
+                },
+            ],
+        );
+        let (status, _, _) = service.post(FORM, body).await;
+        assert_eq!(status, 400, "{profile} {extra}");
+    }
+    assert_eq!(begins(&service), before);
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xades_legacy_b_is_signed_over_http_and_checked_by_lxml() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let xml = br#"<root><data Id="d">xades legacy</data></root>"#;
+    for profile in ["xades_legacy_b"] {
+        let extra = r#""element":"//data","signature_method":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256","digest_method":"http://www.w3.org/2001/04/xmlenc#sha256","#;
+        let (_, parts) = sign_inline(&service, &p12, profile, extra, xml).await;
+        let done = final_event(&parts);
+        assert_eq!(done["status"], "completed", "{profile}: {done}");
+        let signed = artifact(&parts, "artifact-0");
+        let verdict = xml_oracle(signed, dir.path());
+        assert_eq!(verdict["checked"], true, "{profile}: {verdict}");
+        for signature in verdict["signatures"].as_array().unwrap() {
+            assert_eq!(signature["signature_valid"], true, "{profile}: {verdict}");
+            assert!(
+                signature["references"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["match"] == true),
+                "{verdict}"
+            );
+        }
+        let text = String::from_utf8_lossy(signed);
+        assert!(text.contains("SignedProperties"), "{profile}");
+    }
     service.stop().await;
 }

@@ -74,6 +74,7 @@ fn validate_metadata(metadata: &OperationMetadata) -> Result<(), ApiError> {
         if !identifier(&item.id) || !ids.insert(item.id.as_str()) {
             return Err(invalid_request());
         }
+        dispatch::validate_shape(&item.operation)?;
         let documents = dispatch::inputs(&item.operation).map(|n| (n, PartRole::Document));
         let secrets = dispatch::secret_refs(&item.operation)
             .into_iter()

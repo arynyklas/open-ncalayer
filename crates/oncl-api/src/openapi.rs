@@ -4,9 +4,9 @@
 //! wire types. No example carries key material or a usable token.
 use crate::{
     dto::{
-        FinalStatus, HashAlgorithm, InspectedCms, InspectedEntry, ItemResult, JwsFormat,
-        JwsSignerFacts, OperationMetadata, OperationResult, ResponseEvent, SignKind, SignerChecks,
-        TimestampFacts, VerifyProfile,
+        FinalStatus, HashAlgorithm, InspectedCms, InspectedEntry, ItemResult, JwsSignerFacts,
+        OperationMetadata, OperationResult, ResponseEvent, SignKind, SignerChecks, TimestampFacts,
+        VerifyProfile,
     },
     error::{ApiError, AppliedState, ErrorCode},
 };
@@ -92,6 +92,18 @@ fn ref_(name: &str) -> Value {
 fn object(required: &[&str], properties: Value) -> Value {
     json!({"type":"object","required":required,"properties":properties,"additionalProperties":false})
 }
+fn res(kind: &str, required: &[&str], mut properties: Value) -> Value {
+    properties["kind"] = json!({"const": kind});
+    let mut all = vec!["kind"];
+    all.extend_from_slice(required);
+    object(&all, properties)
+}
+fn verdict() -> Value {
+    enumeration(&["Valid", "Invalid", "Indeterminate"])
+}
+fn check() -> Value {
+    enumeration(&["Passed", "Failed", "Unavailable", "NotApplicable"])
+}
 fn enumeration(values: &[&str]) -> Value {
     json!({"type":"string","enum":values})
 }
@@ -105,8 +117,6 @@ fn key_ref() -> Value {
     ]})
 }
 fn schemas() -> Value {
-    let part = |names: &[&str]| json!({"type":"string","description":"Name of a part declared in `parts` (roles: ".to_owned() + &names.join(", ") + ")"});
-    let _ = part;
     let doc =
         json!({"type":"string","description":"Name of a `document` part declared for this item."});
     let optional_doc = doc.clone();
@@ -137,9 +147,9 @@ fn schemas() -> Value {
             ref_("JwtEncodeOperation"), ref_("JwtDecodeOperation"), ref_("JwtVerifyOperation")],
             "discriminator":{"propertyName":"kind"}},
         "HashOperation": op("hash", &["algorithm","input"], json!({"algorithm":enumeration(&["sha1","sha256","sha512","gost34311","streebog256","streebog512"]),"input":doc})),
-        "VerifyOperation": op("verify", &["profile","input"], json!({"profile":enumeration(&["cms","cades_b","cades_t","cades_lt","cades_lta","pdf","pades_b","pades_t","pades_lt","pades_lta","xml","xml_kalkan","xades_b","xades_t","xades_lt","xades_lta"]),"input":doc,"detached":optional_doc})),
+        "VerifyOperation": op("verify", &["profile","input"], json!({"profile":enumeration(&["cms","cades_b","cades_t","cades_lt","cades_lta","pdf","pades_b","pades_t","pades_lt","pades_lta","xml","xml_kalkan","xades_b","xades_t","xades_lt","xades_lta","wsse"]),"input":doc,"detached":optional_doc,"soap":enumeration(&["soap11","soap12"])})),
         "ExtractOperation": op("extract", &["input"], json!({"input":doc})),
-        "SignOperation": op("sign", &["profile","input","keys"], json!({"profile":enumeration(&["cms","cades_b","cades_t","cades_lt","cades_lta","pdf","pades_b","pades_t","pades_lt","pades_lta","xml","xades_b","xades_t","xades_lt","xades_lta"]),"input":doc,"detached":doc,"target":{"type":"string","description":"XML/XAdES unique element ID to sign"},"parent":{"type":"string","description":"XML/XAdES unique element ID receiving the signature"},"signature_id":{"type":"string"},"mode":enumeration(&["create","add"]),"attached":{"type":"boolean"},"keys":{"type":"array","minItems":1,"maxItems":8,"items":ref_("KeyRef")}})),
+        "SignOperation": op("sign", &["profile","input","keys"], json!({"profile":enumeration(&["cms","cades_b","cades_t","cades_lt","cades_lta","pdf","pades_b","pades_t","pades_lt","pades_lta","xml","xades_b","xades_t","xades_lt","xades_lta","wsse","xml_legacy","xades_legacy_b"]),"input":doc,"detached":doc,"soap":enumeration(&["soap11","soap12"]),"body_id":{"type":"string"},"element":{"type":"string","description":"xml_legacy/xades_legacy_b: XPath of the element to sign"},"xpath_parent":{"type":"string"},"signature_method":{"type":"string"},"digest_method":{"type":"string"},"evidence":{"type":"array","items":object(&["kind","input"],json!({"kind":enumeration(&["certificate","ocsp","crl"]),"input":{"type":"string"}}))},"target":{"type":"string","description":"XML/XAdES unique element ID to sign"},"parent":{"type":"string","description":"XML/XAdES unique element ID receiving the signature"},"signature_id":{"type":"string"},"mode":enumeration(&["create","add"]),"attached":{"type":"boolean"},"keys":{"type":"array","minItems":1,"maxItems":8,"items":ref_("KeyRef")}})),
         "ExtendOperation": op("extend", &["profile","input"], json!({"profile":enumeration(&["cades_t","cades_lt","cades_lta","pades_t","pades_lt","pades_lta"]),"input":doc,"detached":doc})),
         "InspectOperation": op("inspect", &["target"], json!({"target":{"oneOf":[
             object(&["type","input"], json!({"type":{"const":"certificate"},"input":doc})),
@@ -159,7 +169,25 @@ fn schemas() -> Value {
             "status":{"enum":["completed","failed"],"description":"Mandatory terminal record. `completed` means every item finished (an Invalid verification is completed). `failed` carries `error` with the honest Applied state; its artifacts are withheld."},
             "results":{"type":"array","items":ref_("ItemResult")},
             "error":ref_("ApiError")})),
-        "ItemResult": object(&["item_id","applied","result"], json!({"item_id":{"type":"string"},"applied":ref_("AppliedState"),"result":{"type":"object","description":"Typed by `kind`: hash, verification, extraction, signing, extension, inspection, stamping, stamp_verification, jws, jws_verification, jwt_decoded, jwt_verification. Artifact-producing results carry `artifact`, the Content-ID of a binary part."}})),
+        "ItemResult": object(&["item_id","applied","result"], json!({"item_id":{"type":"string"},"applied":ref_("AppliedState"),"result":ref_("OperationResult")})),
+        "OperationResult": {"oneOf":[ref_("HashResult"),ref_("VerificationResult"),ref_("ExtractionResult"),ref_("SigningResult"),ref_("ExtensionResult"),ref_("InspectionResult"),ref_("StampingResult"),ref_("StampVerificationResult"),ref_("JwsResult"),ref_("JwsVerificationResult"),ref_("JwtDecodedResult"),ref_("JwtVerificationResult")],"discriminator":{"propertyName":"kind"},"description":"Typed by `kind`. Artifact-producing results carry `artifact`, the Content-ID of a binary part; a failed final omits it (artifacts are withheld)."},
+        "HashResult": res("hash", &["algorithm","digest","bytes_in"], json!({"algorithm":{"type":"string"},"digest":{"type":"string"},"bytes_in":{"type":"integer"}})),
+        "VerificationResult": res("verification", &["profile","verdict","policy","checked_at_unix","signers"], json!({"profile":{"type":"string"},"verdict":verdict(),"policy":{"type":"string"},"checked_at_unix":{"type":"integer"},"signers":{"type":"array","items":ref_("SignerChecks")}})),
+        "ExtractionResult": res("extraction", &["bytes_written"], json!({"artifact":{"type":"string"},"bytes_written":{"type":"integer"}})),
+        "SigningResult": res("signing", &["profile","bytes_in","bytes_out","signers"], json!({"profile":{"type":"string"},"artifact":{"type":"string"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"},"signers":{"type":"array","items":ref_("AppliedState")}})),
+        "ExtensionResult": res("extension", &["profile","bytes_in","bytes_out","verdicts"], json!({"profile":{"type":"string"},"artifact":{"type":"string"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"},"verdicts":{"type":"array","items":verdict()}})),
+        "InspectionResult": res("inspection", &["target","bytes_in","entries"], json!({"target":{"type":"string"},"bytes_in":{"type":"integer"},"integrity":{"type":"string"},"entries":{"type":"array","items":ref_("InspectedEntry")},"cms":ref_("InspectedCms")})),
+        "StampingResult": res("stamping", &["bytes_in","bytes_out","timestamp"], json!({"artifact":{"type":"string"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"},"timestamp":ref_("TimestampFacts")})),
+        "StampVerificationResult": res("stamp_verification", &["bytes_in","timestamp"], json!({"bytes_in":{"type":"integer"},"timestamp":ref_("TimestampFacts")})),
+        "JwsResult": res("jws", &["serialization","bytes_in","bytes_out","signers"], json!({"serialization":{"type":"string"},"artifact":{"type":"string"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"},"signers":{"type":"array","items":ref_("AppliedState")}})),
+        "JwsVerificationResult": res("jws_verification", &["verdict","policy","checked_at_unix","signers"], json!({"verdict":verdict(),"policy":{"type":"string"},"checked_at_unix":{"type":"integer"},"signers":{"type":"array","items":ref_("JwsSignerFacts")}})),
+        "JwtDecodedResult": res("jwt_decoded", &["verified","audience","claims"], json!({"verified":{"const":false},"issuer":{"type":["string","null"]},"audience":{"type":"array","items":{"type":"string"}},"expiration_unix":{"type":["integer","null"]},"claims":{"type":"string"}})),
+        "JwtVerificationResult": res("jwt_verification", &["verdict","signature_verdict","claims_verdict","claim_failures","checked_at_unix","signers","claims"], json!({"verdict":verdict(),"signature_verdict":verdict(),"claims_verdict":verdict(),"claim_failures":{"type":"array","items":{"type":"string"}},"checked_at_unix":{"type":"integer"},"signers":{"type":"array","items":ref_("JwsSignerFacts")},"claims":{"type":"string"}})),
+        "SignerChecks": object(&["signature","chain","validity","revocation","timestamp","key_usage","time_basis","time_basis_unix","reasons"], json!({"signature":check(),"chain":check(),"validity":check(),"revocation":check(),"timestamp":check(),"key_usage":check(),"time_basis":{"type":"string"},"time_basis_unix":{"type":"integer"},"claimed_signing_time_unix":{"type":["integer","null"]},"ades_level":{"type":["string","null"]},"reasons":{"type":"array","items":{"type":"string"}}})),
+        "TimestampFacts": object(&["verdict","gen_time_unix","checked_at_unix","policy","imprint","signature","eku","chain","validity","revocation","expectations"], json!({"verdict":verdict(),"gen_time_unix":{"type":"integer"},"checked_at_unix":{"type":"integer"},"policy":{"type":"string"},"algorithm":{"type":["string","null"]},"imprint":{"enum":["NotProvided","Matched","Mismatched"]},"signature":check(),"eku":check(),"chain":check(),"validity":check(),"revocation":check(),"expectations":check()})),
+        "JwsSignerFacts": object(&["algorithm","crypto","verdict","trust"], json!({"algorithm":{"type":"string"},"crypto":check(),"verdict":verdict(),"trust":ref_("SignerChecks")})),
+        "InspectedEntry": object(&["alias","subject_cn","serial_hex","sha256","signature_algorithm_oid","public_key_algorithm_oid","not_before_unix","not_after_unix"], json!({"alias":{"type":["string","null"]},"subject_cn":{"type":["string","null"]},"serial_hex":{"type":["string","null"]},"sha256":{"type":["string","null"]},"signature_algorithm_oid":{"type":["string","null"]},"public_key_algorithm_oid":{"type":["string","null"]},"not_before_unix":{"type":["integer","null"]},"not_after_unix":{"type":["integer","null"]}})),
+        "InspectedCms": object(&["detached","content_len","signer_count"], json!({"detached":{"type":"boolean"},"content_len":{"type":"integer"},"signer_count":{"type":"integer"}})),
         "ProgressEvent": object(&["type","operation_id","bytes_in","bytes_out"], json!({"type":{"const":"progress"},"operation_id":{"type":"integer"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"}}))
     })
 }
@@ -271,16 +299,19 @@ fn responses() -> Value {
         code: ErrorCode::OperationFailed,
         applied: AppliedState::Unknown,
     });
-    let _ = JwsFormat::Compact;
     let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError{code:example,applied:AppliedState::NotApplied}}}});
     json!({
         "200":{"description":"Operations without a binary artifact return one JSON `final` record. Operations that produce a binary artifact (extract, sign, extend, stamp, jws/jwt creation) return `multipart/mixed`: coalesced `progress` JSON parts, one `artifact` part per output (opaque `Content-ID` named by the result's `artifact`, exact `Content-Length`), and a mandatory `final` part last. A stream without a terminal `final` of status `completed` is not a success. Before headers, failures are typed JSON errors with a status code; after headers the status cannot change, so failures are reported in `final` (status `failed`, honest Applied state, artifacts withheld) or by transport abort.",
             "content":{
                 "application/json":{"schema":ref_("FinalEvent"),"examples":{"hash":{"value":hash},"verification_invalid_is_200":{"summary":"A bad signature is a completed Invalid report, never HTTP 500","value":verification},"jws_verification":{"value":jws_verify},"inspection":{"value":inspect}}},
-                "multipart/mixed":{"schema":{"type":"string","format":"binary","description":"progress*, artifact*, final (last)"},"examples":{"signed":{"summary":"Terminal record of a signing stream","value":signing},"stamp":{"value":stamp},"failed_before_use":{"value":failure},"failed_after_use":{"summary":"Key use is unknown after a post-use failure","value":after_use}}}}},
+                "multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last). `progress` and `final` parts are application/json; `artifact` parts are application/octet-stream with a Content-ID.","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("FinalEvent")}},"examples":{"signed":{"summary":"Terminal record of a signing stream","value":signing},"stamp":{"value":stamp},"failed_before_use":{"value":failure},"failed_after_use":{"summary":"Key use is unknown after a post-use failure","value":after_use}}}}},
         "400":error("Malformed or confused metadata, unknown/duplicate/late/unused part, secret in JSON",ErrorCode::InvalidRequest),
         "403":error("Token, operation, key or inline right not granted",ErrorCode::PermissionDenied),
+        "404":error("Unknown path or operation route (no NCANode aliases, no batch/plugin/encryption routes)",ErrorCode::InvalidRequest),
+        "408":error("The request was cancelled before completion",ErrorCode::Cancelled),
         "413":error("Document, framing, memory, temp, metadata or output limit",ErrorCode::InputLimit),
+        "422":error("Validation or operation failure before any response header",ErrorCode::ValidationFailed),
+        "500":error("Internal failure",ErrorCode::Internal),
         "503":error("Capacity, audit or required host configuration unavailable; nothing was applied",ErrorCode::CapacityExceeded),
         "504":error("The original operation deadline expired",ErrorCode::DeadlineExceeded)})
 }

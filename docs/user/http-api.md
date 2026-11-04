@@ -229,6 +229,33 @@ deadline or until every owner of that operation (context, worker, response,
 artifact) has been dropped, whichever is first, so completed requests do not
 consume the bounded binding table.
 
+## Evidence parts, rights order and statuses
+
+`sign` and `extend` accept `evidence`: `[{"kind":"certificate|ocsp|crl","input":"<document part>"}]`
+(at most 64 public DER parts of up to 1 MiB each). LT/LTA levels need caller-acquired
+OCSP/CRL material (`PAdES extension requires acquired status material` is a typed
+`InvalidRequest` failure otherwise); evidence is never a trust anchor. PAdES-LT/LTA
+and large evidence need more than the default 256 MiB per-operation memory budget on
+this build (a `MemoryLimit` after key use is reported as `Applied`).
+
+Rights are checked in this order: token action, then (before any secret byte is
+reserved or read) the per-key right, the global/token inline right and the
+`metadata_aliases` grant; an inline key without a `password` part is refused
+(400) before any binding or document capture. The exact InlineID is authorized after
+the bounded container has been read. `hash` accepts only `document` roles.
+
+Statuses before response headers: 400 InvalidRequest, 403 PermissionDenied, 404
+unknown route (there are no batch, plugin, encryption or NCANode routes), 405 with
+`Allow`, 408 Cancelled, 413 resource limits, 422 ValidationFailed/OperationFailed,
+500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration, 504
+DeadlineExceeded. After headers only the terminal `final` record or a transport
+abort can report failure.
+
+Progress parts are coalesced from a single latest-value channel (at most one frame
+per observed change, never queued per checkpoint); each frame is charged as output
+and metadata under the original scope, so a long operation cannot create unbounded
+progress traffic.
+
 ## Terminal records for streamed responses
 
 `final` has `status` `completed` or `failed`. A `failed` record carries

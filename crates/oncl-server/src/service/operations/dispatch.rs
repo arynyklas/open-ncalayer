@@ -2,7 +2,7 @@ use super::*;
 use crate::auth::{AccessPolicy, Principal};
 use oncl_api::dto::{
     ExtendKind, InspectTarget, InspectedCms, InspectedEntry, JwsSignerFacts, KeyRef, SignKind,
-    SignWriteMode, SignerChecks, TimestampFacts, VerifyProfile,
+    SignWriteMode, SignerChecks, SoapKind, TimestampFacts, VerifyProfile,
 };
 use oncl_core::keys::{KeyId, KeyRequest, KeySelector};
 use oncl_pki::{cms::ades::ValidationMaterial, resource::ResourceScope};
@@ -287,7 +287,11 @@ pub(super) fn evidence_limits(limits: &oncl_pki::resource::ResourceLimits) -> Ev
         max_coverage_bytes: limits.input_bytes,
     }
 }
-fn verify_request(profile: VerifyProfile, limits: EvidenceLimits) -> oncl_core::VerifyRequest {
+fn verify_request(
+    profile: VerifyProfile,
+    soap: Option<SoapKind>,
+    limits: EvidenceLimits,
+) -> oncl_core::VerifyRequest {
     use VerifyProfile::*;
     match profile {
         Cms => oncl_core::VerifyRequest::cms(),
@@ -298,6 +302,10 @@ fn verify_request(profile: VerifyProfile, limits: EvidenceLimits) -> oncl_core::
         XadesT => oncl_core::VerifyRequest::xades(AdesLevel::T),
         XadesLt => oncl_core::VerifyRequest::xades(AdesLevel::Lt),
         XadesLta => oncl_core::VerifyRequest::xades(AdesLevel::Lta),
+        Wsse => oncl_core::VerifyRequest::wsse(oncl_xml::wsse::WsseVerifyProfile {
+            soap: soap_version(soap),
+            ..Default::default()
+        }),
         CadesB => oncl_core::VerifyRequest::cades(AdesLevel::B, limits),
         CadesT => oncl_core::VerifyRequest::cades(AdesLevel::T, limits),
         CadesLt => oncl_core::VerifyRequest::cades(AdesLevel::Lt, limits),
@@ -419,7 +427,7 @@ fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState 
 fn ades_level(kind: SignKind) -> Option<AdesLevel> {
     use SignKind::*;
     match kind {
-        Cms | Pdf | Xml => None,
+        Cms | Pdf | Xml | Wsse | XmlLegacy | XadesLegacyB => None,
         CadesB | PadesB | XadesB => Some(AdesLevel::B),
         CadesT | PadesT | XadesT => Some(AdesLevel::T),
         CadesLt | PadesLt | XadesLt => Some(AdesLevel::Lt),
@@ -470,6 +478,67 @@ fn load_evidence(
         }
     }
     Ok(evidence)
+}
+fn soap_version(kind: Option<SoapKind>) -> oncl_xml::wsse::SoapVersion {
+    match kind {
+        Some(SoapKind::Soap12) => oncl_xml::wsse::SoapVersion::Soap12,
+        _ => oncl_xml::wsse::SoapVersion::Soap11,
+    }
+}
+/// Reject unsupported field/profile combinations from metadata alone, before any
+/// key, secret or document is touched.
+pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
+    match operation {
+        Operation::Sign {
+            profile,
+            detached,
+            mode,
+            attached,
+            target,
+            parent,
+            signature_id,
+            soap,
+            body_id,
+            element,
+            xpath_parent,
+            signature_method,
+            digest_method,
+            evidence,
+            ..
+        } => {
+            use SignKind::*;
+            let cms_like = matches!(profile, Cms | CadesB | CadesT | CadesLt | CadesLta);
+            let xml_ids = matches!(profile, Xml | XadesB | XadesT | XadesLt | XadesLta);
+            let legacy = matches!(profile, XmlLegacy | XadesLegacyB);
+            let high = matches!(
+                profile,
+                CadesLt | CadesLta | PadesLt | PadesLta | XadesLt | XadesLta
+            );
+            let bad = (!cms_like
+                && (*mode == SignWriteMode::Add || *attached || detached.is_some()))
+                || (*mode == SignWriteMode::Create && detached.is_some())
+                || (!xml_ids && (target.is_some() || parent.is_some() || signature_id.is_some()))
+                || (!matches!(profile, Wsse) && (soap.is_some() || body_id.is_some()))
+                || (!legacy
+                    && (element.is_some()
+                        || xpath_parent.is_some()
+                        || signature_method.is_some()
+                        || digest_method.is_some()))
+                || (!high
+                    && !evidence.is_empty()
+                    && !matches!(profile, CadesT | PadesT | XadesT | XadesLegacyB));
+            if bad {
+                return Err(invalid_request());
+            }
+            Ok(())
+        }
+        Operation::Verify { profile, soap, .. }
+            if soap.is_some() && !matches!(profile, VerifyProfile::Wsse) =>
+        {
+            Err(invalid_request())
+        }
+        _ => Ok(()),
+    }
 }
 fn is_xml(kind: SignKind) -> bool {
     matches!(
@@ -666,6 +735,7 @@ pub(super) fn run(
             profile,
             input,
             detached,
+            soap,
         } => {
             let mut document = env.documents.take(&input)?;
             let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
@@ -674,7 +744,7 @@ pub(super) fn run(
                 .as_mut()
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
-            let request = verify_request(profile, evidence_limits(ctx.resources().limits()));
+            let request = verify_request(profile, soap, evidence_limits(ctx.resources().limits()));
             let report = env.engine.verify(
                 &request,
                 reader.source(),
@@ -740,6 +810,12 @@ pub(super) fn run(
             target,
             parent,
             signature_id,
+            soap,
+            body_id,
+            element,
+            xpath_parent,
+            signature_method,
+            digest_method,
             evidence,
             keys,
         } => {
@@ -780,7 +856,41 @@ pub(super) fn run(
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
             let level = ades_level(profile);
-            let request = if is_xml(profile) {
+            let request = if matches!(profile, SignKind::Wsse) {
+                if requests.len() != 1 {
+                    return Err(ProcessingError::InvalidInput("WSSE signing takes one key").into());
+                }
+                let key = requests.remove(0);
+                let mut wsse = oncl_xml::wsse::SourceWsseSignProfile::default();
+                wsse.verification.soap = soap_version(soap);
+                if let Some(id) = body_id {
+                    wsse.body_id = id;
+                }
+                oncl_core::SignRequest::wsse(key, wsse)
+            } else if matches!(profile, SignKind::XmlLegacy) {
+                if requests.len() != 1 {
+                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
+                }
+                let key = requests.remove(0);
+                let mut spec =
+                    oncl_xml::XmlSignSpec::kalkan(element.as_deref(), xpath_parent.as_deref());
+                spec.signature_method = signature_method.as_deref();
+                spec.digest_method = digest_method.as_deref();
+                oncl_core::SignRequest::xml_legacy(key, spec)
+            } else if matches!(profile, SignKind::XadesLegacyB) {
+                if requests.len() != 1 {
+                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
+                }
+                let key = requests.remove(0);
+                let spec = oncl_xml::xades::XadesSpec {
+                    level: oncl_xml::xades::XadesLevel::B,
+                    tsa: None,
+                    chain: evidence.certificates.clone(),
+                    signature_method: signature_method.as_deref(),
+                    digest_method: digest_method.as_deref(),
+                };
+                oncl_core::SignRequest::xades_legacy(key, spec)
+            } else if is_xml(profile) {
                 if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
                     return Err(
                         ProcessingError::InvalidInput("XML signing is enveloped create").into(),

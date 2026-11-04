@@ -637,6 +637,23 @@ mod tests {
         assert!(store.directory().names().unwrap().is_empty());
     }
     #[test]
+    fn length_overflow_after_a_successful_write_poisons_the_body() {
+        let (_directory, _engine, root, mut guard, store) = fixture(1_000_000, 10_000);
+        let mut writer = ArtifactWriter::new(store.clone(), root.clone(), guard.context()).unwrap();
+        // Bytes reach the file but the length accounting cannot be recorded.
+        match &mut *writer.state.phase.lock().unwrap() {
+            ArtifactPhase::Writing(body) => body.length = u64::MAX - 1,
+            _ => unreachable!("writing body"),
+        }
+        guard.context().resources().account_output(4).unwrap();
+        assert!(writer.write(b"data").is_err());
+        // Poisoned for good: no further write, flush or finish, and cleanup runs.
+        assert!(writer.write(b"x").is_err());
+        assert!(writer.flush().is_err());
+        assert!(writer.finish(0).is_err());
+        assert!(store.directory().names().unwrap().is_empty());
+    }
+    #[test]
     fn unfinished_or_foreign_artifact_cannot_create_a_read_task() {
         let (_directory, _engine, root, mut guard, store) = fixture(16, 10_000);
         let mut writer = ArtifactWriter::new(store, root.clone(), guard.context()).unwrap();

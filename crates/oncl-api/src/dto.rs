@@ -37,6 +37,9 @@ pub enum Operation {
         input: String,
         #[serde(default)]
         detached: Option<String>,
+        /// `wsse` only.
+        #[serde(default)]
+        soap: Option<SoapKind>,
     },
     Extract {
         input: String,
@@ -61,6 +64,24 @@ pub enum Operation {
         parent: Option<String>,
         #[serde(default)]
         signature_id: Option<String>,
+        /// `wsse` only.
+        #[serde(default)]
+        soap: Option<SoapKind>,
+        /// `wsse` only: Body ID used when the Body has none.
+        #[serde(default)]
+        body_id: Option<String>,
+        /// `xml_legacy`/`xades_legacy_*` only: XPath of the element to sign.
+        #[serde(default)]
+        element: Option<String>,
+        /// `xml_legacy`/`xades_legacy_*` only: XPath of the element receiving the signature.
+        #[serde(default)]
+        xpath_parent: Option<String>,
+        /// Legacy profiles only: SignatureMethod URI (known and key-compatible).
+        #[serde(default)]
+        signature_method: Option<String>,
+        /// Legacy profiles only: DigestMethod URI.
+        #[serde(default)]
+        digest_method: Option<String>,
         /// Public evidence for LT/LTA levels: acquired by the caller, never trust anchors.
         #[serde(default)]
         evidence: Vec<EvidenceRef>,
@@ -170,6 +191,17 @@ pub enum SignKind {
     XadesT,
     XadesLt,
     XadesLta,
+    /// SOAP WS-Security Body signature with the host verification profile.
+    Wsse,
+    /// Kalkan-compatible XMLDSig (XPath element/parent; NCALayer wire layout).
+    XmlLegacy,
+    XadesLegacyB,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoapKind {
+    Soap11,
+    Soap12,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -254,6 +286,7 @@ pub enum VerifyProfile {
     XadesT,
     XadesLt,
     XadesLta,
+    Wsse,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
