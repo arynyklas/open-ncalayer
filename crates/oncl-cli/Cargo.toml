@@ -29,6 +29,7 @@ oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 base64.workspace = true
 der.workspace = true
+x509-cert.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
