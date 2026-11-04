@@ -29,6 +29,10 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
+/// How many characters the labels of a plugin's buttons may have together before they are
+/// stacked.
+const STACK_BUTTONS_OVER: usize = 36;
+
 /// Shows one dialog at a time process-wide.
 static DIALOGS: Mutex<()> = Mutex::new(());
 
@@ -1250,6 +1254,10 @@ fn wire_choice(
     ui.set_title_text(p.title.as_deref().unwrap_or_default().into());
     ui.set_text(p.text.as_str().into());
     let buttons: Vec<SharedString> = p.buttons.iter().map(|b| b.as_str().into()).collect();
+    // Labels that do not fit one row of a dialog of this width stand one under another.
+    ui.set_stack_buttons(
+        buttons.iter().map(|b| b.chars().count()).sum::<usize>() > STACK_BUTTONS_OVER,
+    );
     ui.set_buttons(ModelRc::new(VecModel::from(buttons)));
     ui.set_default_button(index(Some(p.default)));
     let options: Vec<StandardListViewItem> = p.options.iter().map(|o| o.as_str().into()).collect();

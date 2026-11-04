@@ -21,6 +21,8 @@ export component ConfirmDialog inherits Window {
     out property <string> requester: @tr("Request from: {}", root.origin);
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
+    // How far the text is scrolled (zero or negative).
+    out property <length> body-y: body.content-y;
 
     callback answer(bool);
     callback cancel();
@@ -32,7 +34,7 @@ export component ConfirmDialog inherits Window {
         VerticalLayout {
             padding: Metrics.pad;
             spacing: Metrics.gap;
-            DialogScroll {
+            body := DialogScroll {
                 NameText {
                     text: root.requester;
                 }

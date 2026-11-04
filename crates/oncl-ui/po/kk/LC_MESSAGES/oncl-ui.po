@@ -577,3 +577,6 @@ msgstr "Прокси мекенжайы"
 
 msgid "Size of the windows and the text"
 msgstr "Терезелер мен мәтін өлшемі"
+
+msgid "Text of the window"
+msgstr "Терезе мәтіні"

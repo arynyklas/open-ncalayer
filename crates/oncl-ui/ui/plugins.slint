@@ -84,7 +84,7 @@ export component PluginsWindow inherits Window {
             DialogScroll {
                 Text {
                     text: root.catalog;
-                    wrap: char-wrap;
+                    wrap: word-wrap;
                     color: root.catalog-error ? Tone.error() : Tone.quiet();
                     font-weight: root.catalog-error ? 700 : 400;
                 }
@@ -125,19 +125,19 @@ export component PluginsWindow inherits Window {
 
                     Text {
                         text: row.details;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                     }
 
                     Text {
                         text: row.state;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                         color: row.error ? Tone.error() : Tone.quiet();
                         font-weight: row.error ? 700 : 400;
                     }
 
                     if row.update != "": Text {
                         text: row.update;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                         color: Tone.link();
                     }
                     HorizontalLayout {
@@ -185,12 +185,12 @@ export component PluginsWindow inherits Window {
 
                     Text {
                         text: row.details;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                     }
 
                     if row.needed != "": Text {
                         text: row.needed;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                         color: Tone.link();
                     }
                     HorizontalLayout {

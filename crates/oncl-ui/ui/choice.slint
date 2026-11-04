@@ -25,6 +25,9 @@ export component ChoiceDialog inherits Window {
     in property <[string]> buttons;
     // The button Enter presses.
     in property <int> default-button;
+    // The labels are too long for one row (set by the host): the buttons stand one under
+    // another at the end of the body, which scrolls, instead of widening the window.
+    in property <bool> stack-buttons;
     // The list to pick from; empty: none.
     in property <[StandardListViewItem]> options;
     // The option selected; -1: none.
@@ -64,7 +67,7 @@ export component ChoiceDialog inherits Window {
 
                 Text {
                     text: root.text;
-                    wrap: char-wrap;
+                    wrap: word-wrap;
                 }
 
                 if root.options.length > 0: StandardListView {
@@ -72,14 +75,28 @@ export component ChoiceDialog inherits Window {
                     model: root.options;
                     current-item <=> root.selected;
                 }
+
+                if root.stack-buttons: VerticalLayout {
+                    spacing: Metrics.gap;
+                    for label[i] in root.buttons: Button {
+                        text: label;
+                        primary: i == root.default-button;
+                        clicked => {
+                            root.pressed(i, root.selected);
+                        }
+                    }
+                }
             }
 
             actions := ActionBar {
-                for label[i] in root.buttons: Button {
-                    text: label;
-                    primary: i == root.default-button;
-                    clicked => {
-                        root.pressed(i, root.selected);
+                if !root.stack-buttons: HorizontalLayout {
+                    spacing: Metrics.gap;
+                    for label[i] in root.buttons: Button {
+                        text: label;
+                        primary: i == root.default-button;
+                        clicked => {
+                            root.pressed(i, root.selected);
+                        }
                     }
                 }
             }

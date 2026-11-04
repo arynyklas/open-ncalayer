@@ -577,3 +577,6 @@ msgstr "Адрес прокси"
 
 msgid "Size of the windows and the text"
 msgstr "Размер окон и текста"
+
+msgid "Text of the window"
+msgstr "Текст окна"

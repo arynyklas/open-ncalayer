@@ -109,7 +109,7 @@ export component TlsWizardWindow inherits Window {
                         DialogScroll {
                             Text {
                                 text: root.status-text;
-                                wrap: char-wrap;
+                                wrap: word-wrap;
                             }
 
                             Subheading {
@@ -118,7 +118,7 @@ export component TlsWizardWindow inherits Window {
 
                             Text {
                                 text: root.trust-text;
-                                wrap: char-wrap;
+                                wrap: word-wrap;
                             }
                         }
 
@@ -158,7 +158,7 @@ export component TlsWizardWindow inherits Window {
                                 spacing: Metrics.gap;
                                 Text {
                                     text: root.mkcert-text;
-                                    wrap: char-wrap;
+                                    wrap: word-wrap;
                                 }
 
                                 // The consent's long text wraps beside its box; the text is
@@ -237,7 +237,7 @@ export component TlsWizardWindow inherits Window {
                         DialogScroll {
                             Text {
                                 text: root.install-text;
-                                wrap: char-wrap;
+                                wrap: word-wrap;
                             }
 
                             for row[i] in root.stores: HorizontalLayout {
@@ -261,7 +261,7 @@ export component TlsWizardWindow inherits Window {
 
                                     Text {
                                         text: row.state;
-                                        wrap: char-wrap;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
@@ -310,7 +310,7 @@ export component TlsWizardWindow inherits Window {
                                 spacing: Metrics.gap;
                                 Text {
                                     text: root.replaced-text;
-                                    wrap: char-wrap;
+                                    wrap: word-wrap;
                                 }
 
                                 HorizontalLayout {

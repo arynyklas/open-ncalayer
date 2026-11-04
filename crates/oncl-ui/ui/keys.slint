@@ -1,8 +1,8 @@
 // The key dialog: one row per key of the opened store. Rows of keys whose OCSP check is
 // still running show a spinner and change in place when it ends.
 
-import { Button, ListView, Palette, Spinner, VerticalBox } from "std-widgets.slint";
-import { EscapeScope, Tone } from "common.slint";
+import { Button, Palette, ScrollView, Spinner, VerticalBox } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, StatusArea, Tone } from "common.slint";
 
 // A key in the list.
 export struct KeyItem {
@@ -40,6 +40,9 @@ export component KeyDialog inherits Window {
     // Index of the chosen key, -1 for none.
     in-out property <int> selected: -1;
 
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+
     callback sign();
     callback cancel();
 
@@ -49,24 +52,30 @@ export component KeyDialog inherits Window {
     // Whether the button may be pressed: the selected key is enabled and the dialog is armed.
     out property <bool> can-sign: root.armed && root.selected >= 0 && root.keys[root.selected].enabled;
 
-    EscapeScope {
+    // Escape works from the first moment; the focus starts here, never on «Sign».
+    forward-focus: keys;
+    keys := EscapeScope {
         escape => {
             root.cancel();
         }
     VerticalBox {
-        Text {
-            text: @tr("Request from: {}", root.origin);
-            wrap: word-wrap;
-        }
+        DialogScroll {
+            vertical-stretch: 0;
+            max-height: 110px;
+            Text {
+                text: @tr("Request from: {}", root.origin);
+                wrap: word-wrap;
+            }
 
-        Text {
-            text: root.key-info ? @tr("Action: key information") : root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
-            font-weight: 700;
-        }
+            Text {
+                text: root.key-info ? @tr("Action: key information") : root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
+                font-weight: 700;
+            }
 
-        if !root.detail.is-empty: Text {
-            text: root.detail;
-            wrap: char-wrap;
+            if !root.detail.is-empty: Text {
+                text: root.detail;
+                wrap: word-wrap;
+            }
         }
 
         Text {
@@ -74,9 +83,12 @@ export component KeyDialog inherits Window {
             color: root.has-usable ? Palette.foreground : Tone.error();
         }
 
-        ListView {
-            vertical-stretch: 1;
-            min-height: 160px;
+        // Every row exists, so that Tab reaches each of them and scrolls it into view.
+        ScrollView {
+          vertical-stretch: 1;
+          min-height: 100px;
+          VerticalLayout {
+            alignment: start;
             for row[i] in root.keys: Rectangle {
                 border-radius: 4px;
                 border-width: row-focus.has-focus ? 2px : 0px;
@@ -125,7 +137,7 @@ export component KeyDialog inherits Window {
 
                     Text {
                         text: row.details;
-                        wrap: char-wrap;
+                        wrap: word-wrap;
                         color: !row.enabled && !row.pending ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
@@ -161,23 +173,20 @@ export component KeyDialog inherits Window {
                     }
                 }
             }
+          }
         }
 
-        if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: Text {
-            text: root.keys[root.selected].note;
-            wrap: char-wrap;
-            color: Tone.error();
+        if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: StatusArea {
+            message: root.keys[root.selected].note;
+            error: true;
         }
 
-        if !root.error.is-empty: Text {
-            text: root.error;
-            wrap: char-wrap;
-            color: Tone.error();
+        if !root.error.is-empty: StatusArea {
+            message: root.error;
+            error: true;
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
+        actions := ActionBar {
             Button {
                 text: root.key-info ? @tr("Send") : @tr("Sign");
                 primary: true;

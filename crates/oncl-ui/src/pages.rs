@@ -548,6 +548,195 @@ fn a_storage_is_chosen_from_the_keyboard_and_an_unsupported_one_is_skipped() {
     assert_eq!(cancelled.get(), 1);
 }
 
+/// Presses `key` on the focused element, as the keyboard does.
+fn tap(ui: &impl ComponentHandle, key: Key) {
+    press(ui, key);
+}
+
+#[test]
+fn a_body_longer_than_its_window_is_read_by_keyboard_alone() {
+    offscreen::install();
+    let ui = MessageDialog::new().unwrap();
+    ui.set_text(long_error().into());
+    let logical = narrowest(Class::Dialog);
+    open(&ui, logical);
+    assert_eq!(ui.get_body_y(), 0.0);
+    // Tab to the body, then page down: the text moves; Home brings it back; Enter and Space
+    // never move it and never answer.
+    let (okd, on_ok) = counter();
+    ui.on_ok(on_ok);
+    let mut scrolled = false;
+    for _ in 0..4 {
+        tap(&ui, Key::Tab);
+        tap(&ui, Key::PageDown);
+        if ui.get_body_y() < 0.0 {
+            scrolled = true;
+            break;
+        }
+    }
+    assert!(scrolled, "the long text cannot be scrolled by keyboard");
+    tap(&ui, Key::Home);
+    let down = ui.get_body_y();
+    tap(&ui, Key::DownArrow);
+    assert!(ui.get_body_y() < down);
+    tap(&ui, Key::End);
+    let end = ui.get_body_y();
+    tap(&ui, Key::PageDown);
+    assert_eq!(ui.get_body_y(), end, "it stays inside its range");
+    tap(&ui, Key::Home);
+    assert_eq!(ui.get_body_y(), 0.0);
+    tap(&ui, Key::PageDown);
+    let moved = ui.get_body_y();
+    tap(&ui, Key::Return);
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+    assert_eq!((ui.get_body_y(), okd.get()), (moved, 0));
+}
+
+#[test]
+fn the_consent_of_a_plugin_is_in_the_first_screenful() {
+    offscreen::install();
+    let ui = InstallPluginWindow::new().unwrap();
+    ui.set_asker("https://site.test".into());
+    ui.set_plugin("Plugin 1.0".into());
+    ui.set_warning("Not from the catalog: it is installed from a file you chose.".into());
+    ui.set_may("It may:".into());
+    ui.set_capabilities(ModelRc::new(VecModel::from(vec![SharedString::from(
+        "sign",
+    )])));
+    ui.set_replacing(long_error().into());
+    ui.set_replaces(long_error().into());
+    open(&ui, narrowest(Class::Dialog));
+    for step in UiScale::ALL {
+        scale::apply_to(ui.window(), 1.0, step);
+        assert!(ui.get_consent_in_view(), "at {}%", step.percent());
+    }
+}
+
+#[test]
+fn every_window_answers_escape_before_any_tab() {
+    offscreen::install();
+    macro_rules! first_key {
+        ($window:ident, $logical:expr, $set:ident) => {{
+            let ui = $window::new().unwrap();
+            open(&ui, $logical);
+            let (n, f) = counter();
+            ui.$set(f);
+            press(&ui, Key::Escape);
+            assert_eq!(
+                n.get(),
+                1,
+                "{}: Escape did nothing before the first Tab",
+                stringify!($window)
+            );
+        }};
+    }
+    let key = (520.0, 360.0);
+    first_key!(KeyDialog, key, on_cancel);
+    first_key!(StorageDialog, (480.0, 480.0), on_cancel);
+    first_key!(ChoiceDialog, narrowest(Class::Dialog), on_cancel);
+    first_key!(CsrDialog, narrowest(Class::Form), on_cancel);
+    first_key!(ReaderDialog, narrowest(Class::Dialog), on_cancel);
+    first_key!(PluginsWindow, narrowest(Class::Wide), on_dismiss);
+    first_key!(TlsWizardWindow, narrowest(Class::Wide), on_dismiss);
+    first_key!(AboutWindow, narrowest(Class::Wide), on_dismiss);
+    first_key!(SettingsWindow, narrowest(Class::Form), on_dismiss);
+    first_key!(ImportDialog, narrowest(Class::Form), on_cancel);
+    first_key!(PasswordDialog, narrowest(Class::Dialog), on_cancel);
+    first_key!(MessageDialog, narrowest(Class::Dialog), on_cancel);
+}
+
+#[test]
+fn key_and_storage_dialogs_keep_their_buttons_with_long_errors() {
+    offscreen::install();
+    let ui = KeyDialog::new().unwrap();
+    ui.set_error(long_error().into());
+    ui.set_origin(long_name().into());
+    ui.set_detail(long_error().into());
+    actions_stay_reachable_at(&ui, (520.0, 320.0), |ui| ui.get_actions_reachable(), "keys");
+    let ui = StorageDialog::new().unwrap();
+    ui.set_error(long_error().into());
+    ui.set_origin(long_name().into());
+    actions_stay_reachable_at(
+        &ui,
+        (480.0, 480.0),
+        |ui| ui.get_actions_reachable(),
+        "storage",
+    );
+}
+
+#[test]
+fn a_choice_with_three_long_labels_stacks_them_and_keeps_its_window() {
+    offscreen::install();
+    let ui = ChoiceDialog::new().unwrap();
+    ui.set_text(long_error().into());
+    ui.set_buttons(ModelRc::new(VecModel::from(vec![
+        SharedString::from("Continue with the first of the possible ways"),
+        SharedString::from("Continue with the second of the possible ways"),
+        SharedString::from("Stop here and do nothing at all, please"),
+    ])));
+    ui.set_stack_buttons(true);
+    actions_stay_reachable(
+        &ui,
+        Class::Dialog,
+        |ui| ui.get_actions_reachable(),
+        "choice",
+    );
+}
+
+#[test]
+fn many_keys_can_all_be_chosen_by_keyboard_and_return_never_signs() {
+    offscreen::install();
+    let ui = KeyDialog::new().unwrap();
+    let key = |i: usize| KeyItem {
+        title: format!("Key {i}").into(),
+        details: "details".into(),
+        enabled: true,
+        pending: false,
+        note: "".into(),
+        revoked: "".into(),
+    };
+    ui.set_keys(ModelRc::new(VecModel::from(
+        (0..40).map(key).collect::<Vec<_>>(),
+    )));
+    ui.set_has_usable(true);
+    open(&ui, (520.0, 320.0));
+    let (signed, on_sign) = counter();
+    ui.on_sign(on_sign);
+    // Armed late: Return on a row, the Sign button disabled, can sign nothing.
+    for _ in 0..60 {
+        tap(&ui, Key::Tab);
+        tap(&ui, Key::Return);
+        if ui.get_selected() == 39 {
+            break;
+        }
+    }
+    assert_eq!(
+        ui.get_selected(),
+        39,
+        "the last of 40 keys cannot be reached"
+    );
+    assert_eq!(signed.get(), 0);
+}
+
+/// [`actions_stay_reachable`] for a window of its own minimum size.
+fn actions_stay_reachable_at<C: ComponentHandle>(
+    ui: &C,
+    logical: (f32, f32),
+    reachable: impl Fn(&C) -> bool,
+    what: &str,
+) {
+    open(ui, logical);
+    for locale in [Locale::Ru, Locale::Kk, Locale::En] {
+        select_language(locale);
+        for step in UiScale::ALL {
+            scale::apply_to(ui.window(), 1.0, step);
+            assert!(reachable(ui), "{what} at {}% in {locale:?}", step.percent());
+        }
+    }
+    select_language(Locale::En);
+}
+
 // ---- the windows drawn by Slint's software renderer (not a native smoke) ----
 
 thread_local! {

@@ -47,6 +47,24 @@ export global Tone {
     }
 }
 
+// Where a keyboard scroll of a body goes: Up/Down a line, PageUp/PageDown a page less a line,
+// Home/End the ends. `y` is the viewport's (zero or negative); the result stays in range.
+export global KeyScroll {
+    public pure function target(key: string, y: length, visible: length, viewport: length) -> length {
+        let lowest = min(0px, visible - viewport);
+        if key == Key.UpArrow { return min(0px, max(lowest, y + 24px)); }
+        if key == Key.DownArrow { return min(0px, max(lowest, y - 24px)); }
+        if key == Key.PageUp { return min(0px, max(lowest, y + visible - 24px)); }
+        if key == Key.PageDown { return min(0px, max(lowest, y - visible + 24px)); }
+        if key == Key.Home { return 0px; }
+        if key == Key.End { return lowest; }
+        return y;
+    }
+    public pure function scrolls(key: string) -> bool {
+        return key == Key.UpArrow || key == Key.DownArrow || key == Key.PageUp || key == Key.PageDown || key == Key.Home || key == Key.End;
+    }
+}
+
 // A window's title line.
 export component Heading inherits Text {
     font-size: 20px;
@@ -57,7 +75,7 @@ export component Heading inherits Text {
 // A section's or a block's title.
 export component Subheading inherits Text {
     font-weight: 700;
-    wrap: char-wrap;
+    wrap: word-wrap;
 }
 
 // Text that is not ours and may have no place to break a line: an origin, a path, a file name,
@@ -82,7 +100,7 @@ export component Hint inherits Text {
 // The error of a page's last action, next to the fields it concerns.
 export component ErrorText inherits Text {
     color: Tone.error();
-    wrap: char-wrap;
+    wrap: word-wrap;
 }
 
 // The outcome of the last action. `error` tells the state apart without colour: an error is
@@ -91,15 +109,35 @@ export component StatusText inherits Text {
     in property <bool> error;
     // A question or a note, not an outcome: the text's own colour.
     in property <bool> neutral;
-    wrap: char-wrap;
+    wrap: word-wrap;
     font-weight: root.error ? 700 : 400;
     color: root.neutral ? Palette.foreground : root.error ? Tone.error() : Tone.success();
+}
+
+// The thin strip at the edge of a scrolling text that the keyboard can reach (Tab): while it
+// has the focus the arrows, PageUp/PageDown, Home and End scroll the text beside it. Enter and Space do
+// nothing. It is beside the text, not around it, so that other keys go on to the window.
+component ScrollKeys inherits FocusScope {
+    in property <string> label;
+    callback scroll(string);
+    accessible-role: text;
+    accessible-label: root.label;
+    key-pressed(event) => {
+        if KeyScroll.scrolls(event.text) {
+            root.scroll(event.text);
+            return accept;
+        }
+        reject
+    }
+    Rectangle {
+        background: root.has-focus ? Palette.accent-background : transparent;
+    }
 }
 
 // The outcome line of a window, under its body: as tall as the text needs up to a few lines,
 // then it scrolls, so that a long error can neither push the actions out of the window nor
 // run over the controls above it. The text is named for a screen reader whole.
-export component StatusArea inherits ScrollView {
+export component StatusArea inherits Rectangle {
     in property <string> message;
     in property <bool> error;
     in property <bool> neutral;
@@ -108,13 +146,30 @@ export component StatusArea inherits ScrollView {
     vertical-stretch: 0;
     min-height: min(body.preferred-height, 60px);
     preferred-height: min(body.preferred-height, root.limit);
-    accessible-role: text;
-    accessible-label: root.message;
-    body := VerticalLayout {
-        StatusText {
-            text: root.message;
-            error: root.error;
-            neutral: root.neutral;
+    // The keyboard reads it all: the strip at its edge is on the Tab ring, and the arrows,
+    // PageUp/PageDown, Home and End scroll the text. Enter and Space do nothing here.
+    sv := ScrollView {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.visible-width;
+        content-height: max(body.preferred-height, self.visible-height);
+        body := VerticalLayout {
+            StatusText {
+                text: root.message;
+                error: root.error;
+                neutral: root.neutral;
+            }
+        }
+    }
+
+    ScrollKeys {
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: parent.height;
+        label: root.message;
+        scroll(key) => {
+            sv.content-y = KeyScroll.target(key, sv.content-y, sv.visible-height, sv.content-height);
         }
     }
 }
@@ -249,14 +304,37 @@ export component LinkButton inherits Rectangle {
 
 // The body of a window: it scrolls when it does not fit, so that the actions under it never
 // leave the window, and it asks for no more height than a screen can give.
-export component DialogScroll inherits ScrollView {
+export component DialogScroll inherits Rectangle {
     vertical-stretch: 1;
     min-height: 0px;
     preferred-height: min(content.preferred-height, Metrics.max-preferred-height);
-    content := VerticalLayout {
-        spacing: Metrics.gap;
-        alignment: start;
-        @children
+    // How far the body is scrolled (zero or negative), and how much of it shows.
+    in-out property <length> content-y <=> sv.content-y;
+    out property <length> visible-height: sv.visible-height;
+    out property <length> content-height: sv.content-height;
+    sv := ScrollView {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.visible-width;
+        content-height: max(content.preferred-height, self.visible-height);
+        content := VerticalLayout {
+            spacing: Metrics.gap;
+            alignment: start;
+            @children
+        }
+    }
+
+    // The keyboard reads it all, not the mouse wheel only: the strip at the body's edge is on
+    // the Tab ring, and the arrows, PageUp/PageDown, Home and End scroll it.
+    ScrollKeys {
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: parent.height;
+        label: @tr("Text of the window");
+        scroll(key) => {
+            sv.content-y = KeyScroll.target(key, sv.content-y, sv.visible-height, sv.content-height);
+        }
     }
 }
 

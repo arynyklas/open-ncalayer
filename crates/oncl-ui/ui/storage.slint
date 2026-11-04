@@ -2,7 +2,7 @@
 // a hardware token and its PIN.
 
 import { AboutSlint, Button, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
-import { EscapeScope, Tone } from "common.slint";
+import { ActionBar, DialogScroll, EscapeScope, StatusArea, Tone } from "common.slint";
 
 // A storage in the list.
 export struct StorageRow {
@@ -43,6 +43,9 @@ export component StorageDialog inherits Window {
     // The readers are being searched for: «Refresh» waits.
     in property <bool> scanning;
 
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+
     callback browse();
     callback open();
     callback cancel();
@@ -80,9 +83,13 @@ export component StorageDialog inherits Window {
             font-weight: 700;
         }
 
-        if !root.detail.is-empty: Text {
-            text: root.detail;
-            wrap: char-wrap;
+        if !root.detail.is-empty: DialogScroll {
+            vertical-stretch: 0;
+            max-height: 80px;
+            Text {
+                text: root.detail;
+                wrap: word-wrap;
+            }
         }
 
         Text {
@@ -198,7 +205,7 @@ export component StorageDialog inherits Window {
 
         if root.is-token && !root.reader-note.is-empty: Text {
             text: root.reader-note;
-            wrap: char-wrap;
+            wrap: word-wrap;
         }
 
         if root.is-token: Text {
@@ -226,15 +233,12 @@ export component StorageDialog inherits Window {
             text: @tr("Show password");
         }
 
-        if !root.error.is-empty: Text {
-            text: root.error;
-            wrap: char-wrap;
-            color: Tone.error();
+        if !root.error.is-empty: StatusArea {
+            message: root.error;
+            error: true;
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
+        actions := ActionBar {
             Button {
                 text: @tr("Open");
                 primary: true;

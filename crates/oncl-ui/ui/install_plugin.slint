@@ -31,6 +31,8 @@ export component InstallPluginWindow inherits Window {
     in-out property <bool> can-install: false;
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
+    // What the plugin may do (the host's consent text) is in the first screenful.
+    out property <bool> consent-in-view: may-text.absolute-position.y + may-text.height <= body.absolute-position.y + body.visible-height;
 
     callback answer(bool);
 
@@ -41,7 +43,7 @@ export component InstallPluginWindow inherits Window {
         VerticalLayout {
             padding: Metrics.pad;
             spacing: Metrics.gap;
-            DialogScroll {
+            body := DialogScroll {
                 if root.asker != "": NameText {
                     text: root.asker;
                 }
@@ -51,31 +53,33 @@ export component InstallPluginWindow inherits Window {
                     wrap: char-wrap;
                 }
 
-                if root.replacing != "": Text {
-                    text: root.replacing;
-                    wrap: char-wrap;
+                // What the plugin may do comes first, with the warning above it: the host's
+                // consent text is in view before anything else the plugin says.
+                if root.warning != "": Text {
+                    text: root.warning;
+                    wrap: word-wrap;
+                    font-weight: 700;
+                    color: Tone.error();
                 }
 
-                if root.replaces != "": Text {
-                    text: root.replaces;
-                    wrap: char-wrap;
-                }
-
-                Text {
+                may-text := Text {
                     text: root.may;
-                    wrap: char-wrap;
+                    wrap: word-wrap;
                 }
 
                 for line in root.capabilities: Text {
                     text: "• " + line;
-                    wrap: char-wrap;
+                    wrap: word-wrap;
                 }
 
-                if root.warning != "": Text {
-                    text: root.warning;
-                    wrap: char-wrap;
-                    font-weight: 700;
-                    color: Tone.error();
+                if root.replacing != "": Text {
+                    text: root.replacing;
+                    wrap: word-wrap;
+                }
+
+                if root.replaces != "": Text {
+                    text: root.replaces;
+                    wrap: word-wrap;
                 }
             }
 
