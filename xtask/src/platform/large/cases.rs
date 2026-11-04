@@ -465,9 +465,9 @@ fn xml_signed_case(
             let element = facts.elements.iter().find(|e| e.id == id);
             if let Some(e) = element {
                 c.check(
-                    "the reference covered exactly the element's canonical bytes",
-                    v.reference_lens.first() == Some(&e.canonical_len),
-                    format!("{:?} vs {}", v.reference_lens, e.canonical_len),
+                    "the reference targeted exactly the element's source span (XmlReferenceResult.target is a source Region, not a canonical length; the canonical digest is checked by the independent oracle)",
+                    v.reference_lens.first() == Some(&(e.end - e.start)),
+                    format!("{:?} vs source span {} (canonical {})", v.reference_lens, e.end - e.start, e.canonical_len),
                 );
                 c.check("the referenced element starts after 4 GiB (or the scaled equivalent)", e.start >= d(env) / 2, format!("start {}", e.start));
             }
@@ -536,9 +536,12 @@ pub fn xml_cancel(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let (set, _) = xml_set(env, "xml-archive")?;
         let signed = c.work.join("cancelled.xml");
         let mut spec = Spec::new(Op::Sign(Profile::Xml), Input::File(set.path.clone())).target("section-2").output(&signed);
+        if target == Target::Http {
+            c.expect_begins = Some(0);
+        }
         spec.cancel = match target {
             Target::Sdk => Cancel::SdkAfterBytes(d(env) / 4),
-            _ => Cancel::WhenScratchBytes(64 << 20),
+            _ => Cancel::WhenScratchBytes((d(env) / 16).max(1 << 20)),
         };
         let o = c.op(&spec)?;
         let cancelled = match target {
@@ -570,15 +573,25 @@ pub fn xml_temp_limit(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let (set, _) = xml_set(env, "xml-archive")?;
         let signed = c.work.join("quota.xml");
         let mut spec = Spec::new(Op::Sign(Profile::Xml), Input::File(set.path.clone())).target("section-2").output(&signed);
-        spec.temp_limit = Some(256 << 20);
+        // meaningful only when the document is larger than the quota: an eighth of it, which the
+        // far element's canonical staging (about half the document) exceeds before any key use
+        let quota = (d(env) / 8).max(1 << 20);
+        spec.temp_limit = Some(quota);
+        c.note("quota_bytes", json!(quota));
+        c.check("the document is larger than the quota", d(env) > quota, format!("{} > {quota}", d(env)));
         if target == Target::Http {
-            c.server_settings.temp_per_operation = 256 << 20;
-            c.server_settings.total_temp = 256 << 20;
+            c.server_settings.temp_per_operation = quota;
+            c.server_settings.total_temp = quota;
+            c.expect_begins = Some(0);
         }
         let o = c.op(&spec)?;
+        // Over HTTP the server may close the connection while the client still uploads: the
+        // documented outcome is then a transport failure, NotApplied; the audit journal then
+        // proves that no key was used (`expect_begins`).
+        let transport = target == Target::Http && !o.completed && o.code.as_deref() == Some("TransportFailed");
         c.check(
             "refused with a temporary-disk limit",
-            !o.completed && o.code.as_deref().is_some_and(|code| code.contains("TempLimit") || code.contains("Limit")),
+            !o.completed && (transport || o.code.as_deref().is_some_and(|code| code.contains("TempLimit") || code.contains("Limit"))),
             format!("code {:?}, applied {:?} {}", o.code, o.applied, o.stderr_line),
         );
         expect_not_applied(c, &o);
@@ -590,7 +603,7 @@ pub fn xml_temp_limit(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
 
 // ---------------------------------------------------------------------------- PDF
 
-fn pdf_independent(c: &mut Case<'_>, signed: &Path, set: &DataSet) -> anyhow::Result<()> {
+fn pdf_independent(c: &mut Case<'_>, signed: &Path, set: &DataSet, pyhanko: bool) -> anyhow::Result<()> {
     let manifest = c.env.data_dir.join("manifest.json");
     match c.env.oracle(&[
         "pdf-signature".as_ref(),
@@ -609,12 +622,14 @@ fn pdf_independent(c: &mut Case<'_>, signed: &Path, set: &DataSet) -> anyhow::Re
         }
         Err(e) => c.check("independent PDF signature check", false, format!("{e:#}")),
     }
-    match c.env.oracle(&["pdf-pyhanko".as_ref(), signed.as_os_str()]) {
-        Ok(v) => {
-            c.check("pyHanko validates the signature's integrity", v["ok"].as_bool() == Some(true), v.to_string());
-            c.note("pyhanko", v);
+    if pyhanko {
+        match c.env.oracle(&["pdf-pyhanko".as_ref(), signed.as_os_str()]) {
+            Ok(v) => {
+                c.check("pyHanko validates the signature's integrity", v["ok"].as_bool() == Some(true), v.to_string());
+                c.note("pyhanko", v);
+            }
+            Err(e) => c.check("pyHanko integrity validation", false, format!("{e:#}")),
         }
-        Err(e) => c.check("pyHanko integrity validation", false, format!("{e:#}")),
     }
     Ok(())
 }
@@ -633,7 +648,7 @@ pub fn pdf_case(env: &Env, target: Target, set_name: &str, profile: Profile, id:
         expect_applied_once(c, &o);
         let out_len = size_of(&signed)?;
         c.check("the incremental update is bounded", out_len > d(env) && out_len - d(env) < (1 << 20), format!("{} extra bytes", out_len as i64 - d(env) as i64));
-        pdf_independent(c, &signed, set)?;
+        pdf_independent(c, &signed, set, true)?;
         let v = c.op(&Spec::new(Op::Verify(profile), Input::File(signed.clone())))?;
         expect_valid(c, "verify is Valid", &v);
         // a covered byte inside the embedded file, far into the document
@@ -736,7 +751,9 @@ pub fn pades_levels(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let set = env.doc("pdf-compact")?;
         let first = c.work.join("level-t.pdf");
         let outputs = level_chain(c, Profile::Pades, "pdf", &set.path, None, &first, None, "pdf")?;
-        pdf_independent(c, outputs.first().context("outputs")?, set)?;
+        // pyHanko cannot read the GOST digest of the loopback TSA's timestamp token, so the
+        // timestamped levels get only the hashlib/asn1crypto/cryptography check
+        pdf_independent(c, outputs.first().context("outputs")?, set, false)?;
         c.check_scratch_clean("scratch is empty afterwards");
         Ok(())
     }))

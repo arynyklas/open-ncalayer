@@ -260,6 +260,8 @@ pub struct Case<'e> {
     pub server: Option<HttpServer>,
     pub server_settings: ServerSettings,
     pub blocked: Option<String>,
+    /// For HTTP cases: how many BEGIN records the audit journal must hold.
+    pub expect_begins: Option<u64>,
 }
 
 impl<'e> Case<'e> {
@@ -287,6 +289,7 @@ impl<'e> Case<'e> {
             server: None,
             server_settings: ServerSettings::control(&env.args, env.timeout_seconds),
             blocked: None,
+            expect_begins: None,
         })
     }
 
@@ -362,7 +365,21 @@ impl<'e> Case<'e> {
                 Err(e) => self.check("server stopped gracefully", false, e.to_string()),
             }
             match server.audit_counts() {
-                Ok(c) => self.note("audit", json!(c)),
+                Ok(c) => {
+                    self.note("audit", json!(c));
+                    self.check(
+                        "the durable audit journal has a FINAL for every BEGIN",
+                        c.begin == c.finals,
+                        format!("{c:?}"),
+                    );
+                    if let Some(expected) = self.expect_begins {
+                        self.check(
+                            "the durable audit journal shows the expected number of key uses",
+                            c.begin == expected,
+                            format!("{c:?}, expected {expected} BEGIN"),
+                        );
+                    }
+                }
                 Err(e) => self.check("audit journal readable", false, e.to_string()),
             }
             let (bytes, files) = crate::platform::measure::tree_usage(&server.scratch);
@@ -629,6 +646,10 @@ fn cli_command(
             }
             if let Some(t) = &spec.target_id {
                 c.args(["--target-id", t]);
+            }
+            if matches!(p, Profile::Xades(_)) {
+                // XAdES needs an explicit signature Id
+                c.args(["--signature-id", "oncl-proof-signature"]);
             }
             let name = if spec.gost_key { "gost" } else { "rsa" };
             if remote.is_some() {

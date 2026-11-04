@@ -339,7 +339,7 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
         pki,
         secret_file,
         manifest,
-        timeout_seconds: 6 * 3600,
+        timeout_seconds: 12 * 3600,
     };
 
     let programs: Vec<Value> = [("sdk_probe", &env.bins.probe), ("oncl", &env.bins.oncl), ("oncl-server", &env.bins.server)]

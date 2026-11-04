@@ -159,14 +159,27 @@ def xml_signature(path, manifest, name, mode, key_kind):
     s = load(manifest, name)
     facts = s["facts"]
     size = os.path.getsize(path)
-    base, data = tail_fragment(path, size)
-    found = list(re.finditer(rb"<ds:Signature[\s>]", data))
+    # An enveloped signature is the last child of the root; a WS-Security signature lives in the
+    # SOAP Header, which precedes the Body: look at the start of the document and just after the
+    # Header's big ledger (its offset in the generator's facts, shifted by what was inserted).
+    windows = [(max(0, size - (4 << 20)), size)]
+    if mode == "wsse":
+        ledger_end = next(e["end"] for e in facts["elements"] if e["id"] == "ledger-1")
+        windows = [(0, min(size, 2 << 20)), (max(0, ledger_end - (1 << 20)), min(size, ledger_end + (8 << 20)))]
+    base = data = found = None
     prefix = "ds:"
+    for lo, hi in windows:
+        chunk = read_at(path, lo, hi - lo)
+        hit = list(re.finditer(rb"<ds:Signature[\s>]", chunk))
+        pre = "ds:"
+        if not hit:
+            hit = list(re.finditer(rb"<Signature[\s>]", chunk))
+            pre = ""
+        if hit:
+            base, data, found, prefix = lo, chunk, hit, pre
+            break
     if not found:
-        found = list(re.finditer(rb"<Signature[\s>]", data))
-        prefix = ""
-    if not found:
-        fail("no Signature element in the last 4 MiB of the output")
+        fail("no Signature element in the searched windows of the output", windows=windows)
     start = found[-1].start()
     end_tag = f"</{prefix}Signature>".encode()
     end = data.find(end_tag, start)

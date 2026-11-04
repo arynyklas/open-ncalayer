@@ -197,7 +197,9 @@ fn evidence_limits() -> EvidenceLimits {
         max_chain_len: 16,
         max_proofs: 16,
         max_coverage_parts: 65536,
-        max_coverage_bytes: 64 * 1024 * 1024,
+        // a host's evidence budget covering a whole 10 GiB document (the archive time-stamp
+        // of an LTA level covers every document byte)
+        max_coverage_bytes: 12 * 1024 * 1024 * 1024,
     }
 }
 
@@ -314,7 +316,7 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             authority = Some(guard);
             selector = Some(key);
         }
-        if matches!(opts.level.as_deref(), Some("t" | "lt" | "lta")) || op == "extend" {
+        if matches!(opts.level.as_deref(), Some("t" | "lt" | "lta")) || op == "extend" || op == "xades-sign" {
             let mut tsa = oncl_pki::tsp::TsaSpec {
                 url: pki.tsa_url.clone(),
                 method: oncl_pki::http::PkiMethod::Post { content_type: None },
@@ -490,6 +492,7 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
                     key(),
                     oncl_xml::XmlSignProfile {
                         target: opts.target.as_deref(),
+                        signature_id: Some("oncl-proof-signature"),
                         evidence_limits: Some(evidence_limits()),
                         ..oncl_xml::XmlSignProfile::default()
                     },

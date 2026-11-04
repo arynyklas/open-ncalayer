@@ -115,7 +115,9 @@ pub fn tree_usage(root: &Path) -> (u64, u64) {
             if meta.is_dir() {
                 stack.push(entry.path());
             } else {
-                bytes += meta.len();
+                // `DirEntry::metadata` is the directory's cached size, 0 for a file that is still
+                // being written on Windows: stat the file itself.
+                bytes += std::fs::metadata(entry.path()).map_or(meta.len(), |m| m.len());
                 files += 1;
             }
         }

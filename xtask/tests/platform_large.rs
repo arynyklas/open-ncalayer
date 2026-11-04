@@ -267,7 +267,14 @@ fn otlp_gauges_decode_from_the_wire_format() {
 
 #[test]
 fn a_multipart_mixed_answer_yields_its_final_record_and_artifact() {
-    let body = b"--B\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"type\":\"p\"}\r\n--B\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\nABCDE\r\n--B\r\nContent-Type: application/json\r\nContent-Length: 41\r\n\r\n{\"type\":\"final\",\"status\":\"completed\",\"n\":1  }\r\n--B--\r\n".to_vec();
+    let part = |content_type: &str, data: &str| format!("--B\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{data}\r\n", data.len());
+    let body = format!(
+        "{}{}{}--B--\r\n",
+        part("application/json", "{\"type\":\"progress\"}"),
+        part("application/octet-stream", "ABCDE"),
+        part("application/json", "{\"type\":\"final\",\"status\":\"completed\"}")
+    )
+    .into_bytes();
     let reply = http_raw::Reply {
         status: 200,
         content_type: "multipart/mixed; boundary=B".into(),

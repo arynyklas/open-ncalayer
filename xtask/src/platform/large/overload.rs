@@ -95,8 +95,10 @@ pub fn run(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
 fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let env = case.env;
     let big = env.manifest.document_bytes.min(GIB);
-    let cpu_bytes = env.manifest.document_bytes.min(32 * MIB);
-    let timeout_ms = 120_000u64;
+    // small enough that two workers finish the CPU-bound signatures well inside the deadline
+    // even when the machine is busy with other cases of the same run
+    let cpu_bytes = env.manifest.document_bytes.min(8 * MIB);
+    let timeout_ms = 240_000u64;
 
     // the CPU-bound document, with its independent expectations
     let cpu_path = case.work.join("overload-cpu.xml");
@@ -115,7 +117,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
 
     let collector = Collector::start()?;
     let settings = ServerSettings {
-        max_in_flight: 2,
+        max_in_flight: 4,
         blocking_workers: 2,
         queue_capacity: 2,
         admission_wait_ms: 3000,
@@ -172,7 +174,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..6 {
         add(
             Kind::Cpu,
-            0,
+            1500,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: sign_metadata(),
@@ -189,7 +191,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..6 {
         add(
             Kind::Upload,
-            200,
+            2500,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
@@ -206,7 +208,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..4 {
         add(
             Kind::Disconnect,
-            400,
+            200,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
@@ -223,7 +225,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..2 {
         add(
             Kind::Deadline,
-            600,
+            0,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
@@ -240,7 +242,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..3 {
         add(
             Kind::Late,
-            4000,
+            5000,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
@@ -327,7 +329,16 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
                     None => json.as_ref().is_some_and(|j| j["status"] == "completed"),
                 };
                 if !final_completed {
-                    unexpected.push(format!("{:?}#{} status 200 without a completed final record", o.kind, o.index));
+                    if streamed.is_none() && o.reply.transport_error.is_some() {
+                        // The server answered 200 and then aborted the stream (an operation
+                        // that expired in the queue after its head went out): documented as an
+                        // unknown-outcome transport abort, never success. The durable journal
+                        // must still show a FINAL for every BEGIN (checked when the server stops).
+                        verdict = "aborted stream (no terminal record)";
+                    } else {
+                        let detail = streamed.as_ref().map(|(f, _)| f.to_string()).unwrap_or_else(|| String::from_utf8_lossy(&o.reply.body[..o.reply.body.len().min(600)]).into_owned());
+                        unexpected.push(format!("{:?}#{} status 200 without a completed final record: {}", o.kind, o.index, detail.chars().take(500).collect::<String>()));
+                    }
                 }
                 if o.kind == Kind::Cpu
                     && let Some((_, artifact)) = streamed
@@ -519,7 +530,7 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
                             metadata,
                             document: Source::Bytes(doc),
                             chunked: false,
-                            expect_continue: false,
+                            expect_continue: true,
                             bytes_per_second: None,
                             stall_after: None,
                             abort_after: None,

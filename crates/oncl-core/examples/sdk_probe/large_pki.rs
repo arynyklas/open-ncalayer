@@ -135,6 +135,24 @@ pub fn serve(out: &Path) -> Result<(), Box<dyn Error>> {
         serde_json::to_string(&pki.gost.alias)?
     );
     std::fs::write(out.join("pki.json"), meta)?;
+    // Evidence OCSP responses must be produced AFTER the timestamps they cover: the files are
+    // re-minted every few seconds (atomic rename), so a process that loads them at its start,
+    // after an earlier operation's timestamp, always gets later ones.
+    let refresh_stop = Arc::new(AtomicBool::new(false));
+    let refresher = {
+        let (pki, origin, out, stop) = (pki.clone(), origin.clone(), out.to_owned(), refresh_stop.clone());
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_secs(3));
+                for (name, cert) in [("leaf-rsa.ocsp", &pki.rsa.cert), ("leaf-gost.ocsp", &pki.gost.cert), ("tsa.ocsp", &pki.tsa.cert)] {
+                    let partial = out.join(format!("{name}.partial"));
+                    if std::fs::write(&partial, ocsp_for(&pki, &origin, cert)).is_ok() {
+                        let _ = std::fs::rename(&partial, out.join(name));
+                    }
+                }
+            }
+        })
+    };
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(AtomicU64::new(0));
@@ -166,6 +184,8 @@ pub fn serve(out: &Path) -> Result<(), Box<dyn Error>> {
     let _ = std::io::stdin().read_to_end(&mut sink);
     stop.store(true, Ordering::SeqCst);
     let _ = accept.join();
+    refresh_stop.store(true, Ordering::SeqCst);
+    let _ = refresher.join();
     println!("requests={}", requests.load(Ordering::SeqCst));
     Ok(())
 }
@@ -223,7 +243,7 @@ fn handle(
     // meets an expired responder answer.
     let now = time::OffsetDateTime::now_utc();
     let reply = if path == "/tsa" {
-        tsa.send(&HttpRequest::post(
+        MockTsa::new(pki.tsa.clone()).with_gen_time(now).send(&HttpRequest::post(
             &url,
             Some("application/timestamp-query"),
             &body,

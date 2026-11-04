@@ -284,7 +284,7 @@ impl HttpServer {
             dir.create_file("pin")?.write_all(crate::platform::token_host::PIN.as_bytes())?;
             for (name, reader) in [("card-a", "reader-a"), ("card-b", "reader-b")] {
                 config.push_str(&format!(
-                    "\n[[keys]]\nsource = 'token'\nname = '{name}'\nreader = '{reader}'\nkind = 'kaztoken'\nalias = {}\nsecret = {{ directory = {}, name = 'pin' }}\n",
+                    "\n[[keys]]\nsource = 'token'\nname = '{name}'\nreader = '{reader}'\nkind = 'AKKaztokenStore'\nalias = {}\nsecret = {{ directory = {}, name = 'pin' }}\n",
                     serde_json::to_string(alias)?,
                     toml_path(&operator),
                 ));
