@@ -4,20 +4,28 @@ use std::path::PathBuf;
 pub struct InspectArgs {
     #[arg(long, value_enum)]
     pub profile: InspectProfile,
+    /// Required except for `named-key`.
     #[arg(long)]
-    pub input: String,
+    pub input: Option<String>,
     #[arg(long)]
     pub alias: Vec<String>,
+    /// `named-key`: operator-configured key to read public metadata of.
+    #[arg(long, requires = "key_config")]
+    pub key_name: Option<String>,
+    #[arg(long, requires = "key_name")]
+    pub key_config: Option<PathBuf>,
     #[arg(long)]
     pub secret_file: Option<PathBuf>,
     #[arg(long, conflicts_with = "secret_file")]
     pub secret_interactive: bool,
 }
+
 #[derive(Clone, Copy, ValueEnum)]
 pub enum InspectProfile {
     Certificate,
     Container,
     Cms,
+    NamedKey,
 }
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ExtendProfile {

@@ -30,9 +30,14 @@ pub struct BatchArgs {
     pub key: Option<PathBuf>,
     #[arg(long, requires = "key")]
     pub alias: Option<String>,
-    #[arg(long, requires = "key")]
+    /// Operator-configured key by name (see `--key-config`); no container path on the command line.
+    #[arg(long, requires = "key_config", conflicts_with_all = ["key", "alias"])]
+    pub key_name: Option<String>,
+    #[arg(long, requires = "key_name")]
+    pub key_config: Option<PathBuf>,
+    #[arg(long)]
     pub secret_file: Option<PathBuf>,
-    #[arg(long, requires = "key", conflicts_with = "secret_file")]
+    #[arg(long, conflicts_with = "secret_file")]
     pub secret_interactive: bool,
     /// Confirms this exact ordered composition, sources, key and destinations.
     #[arg(long)]
@@ -121,14 +126,27 @@ impl BatchCommand {
         if !args.authorize {
             return Err("AuthorityRequired");
         }
+        if !self.has_key() && (args.secret_file.is_some() || args.secret_interactive) {
+            return Err("InvalidCombination");
+        }
         Ok(())
     }
-    pub fn key_selector(&self) -> Result<Option<KeySelector>, OperationError> {
+    pub fn key_plan(&self) -> Result<Option<crate::keysrc::Plan>, OperationError> {
         let args = self.args();
+        if let (Some(config), Some(name)) = (&args.key_config, &args.key_name) {
+            return crate::keysrc::resolve(config, name).map(Some);
+        }
         args.key
             .as_ref()
-            .map(|key| KeySelector::file(key, args.alias.clone()))
+            .map(|key| {
+                KeySelector::file(key, args.alias.clone())
+                    .map(|selector| crate::keysrc::Plan::direct(selector, false))
+            })
             .transpose()
+    }
+    pub fn has_key(&self) -> bool {
+        let args = self.args();
+        args.key.is_some() || args.key_name.is_some()
     }
 }
 /// Complete admission of the host manifest before any source or key I/O.

@@ -156,12 +156,19 @@ pub struct PrivateKeyArgs {
     /// PKCS#12/JKS container file. Exactly one of --key or --token-reader.
     #[arg(
         long,
-        conflicts_with = "token_reader",
-        required_unless_present = "token_reader"
+        conflicts_with_all = ["token_reader", "key_name"],
+        required_unless_present_any = ["token_reader", "key_name"]
     )]
     pub key: Option<PathBuf>,
-    #[arg(long, conflicts_with = "token_reader")]
+    #[arg(long, conflicts_with_all = ["token_reader", "key_name"])]
     pub alias: Option<String>,
+    /// Select an operator-configured key by name (see `--key-config`); the
+    /// container path or token reader never appears on the command line.
+    #[arg(long, requires = "key_config", conflicts_with = "token_reader")]
+    pub key_name: Option<String>,
+    /// Operator JSON file of named key sources (no secrets).
+    #[arg(long, requires = "key_name")]
+    pub key_config: Option<PathBuf>,
     /// Exact PC/SC reader name of a real token (experimental; no emulator in this binary).
     #[arg(long, requires_all = ["token_kind", "token_alias"])]
     pub token_reader: Option<String>,
@@ -186,30 +193,37 @@ pub enum TokenFamily {
     Jacarta,
     Akey,
 }
+pub fn token_selector(
+    reader: &str,
+    family: TokenFamily,
+    alias: &str,
+) -> Result<oncl_core::keys::KeySelector, oncl_core::OperationError> {
+    use oncl_token::{TokenKind, execution::TokenDeviceId};
+    let kind = match family {
+        TokenFamily::Kaztoken => TokenKind::Kaztoken,
+        TokenFamily::KzIdCard => TokenKind::KzIdCard,
+        TokenFamily::EToken72k => TokenKind::EToken72K,
+        TokenFamily::EToken5110 => TokenKind::EToken5110,
+        TokenFamily::Jacarta => TokenKind::JaCarta,
+        TokenFamily::Akey => TokenKind::AKey,
+    };
+    let device = TokenDeviceId::new(reader.to_owned())
+        .map_err(|_| oncl_core::OperationError::InvalidKeySource)?;
+    Ok(oncl_core::keys::KeySelector::token(
+        device,
+        kind,
+        alias.to_owned(),
+    ))
+}
 impl PrivateKeyArgs {
     pub fn uses_token(&self) -> bool {
         self.token_reader.is_some()
     }
     pub fn selector(&self) -> Result<oncl_core::keys::KeySelector, oncl_core::OperationError> {
-        use oncl_token::{TokenKind, execution::TokenDeviceId};
         if let (Some(reader), Some(kind), Some(alias)) =
             (&self.token_reader, self.token_kind, &self.token_alias)
         {
-            let kind = match kind {
-                TokenFamily::Kaztoken => TokenKind::Kaztoken,
-                TokenFamily::KzIdCard => TokenKind::KzIdCard,
-                TokenFamily::EToken72k => TokenKind::EToken72K,
-                TokenFamily::EToken5110 => TokenKind::EToken5110,
-                TokenFamily::Jacarta => TokenKind::JaCarta,
-                TokenFamily::Akey => TokenKind::AKey,
-            };
-            let device = TokenDeviceId::new(reader.clone())
-                .map_err(|_| oncl_core::OperationError::InvalidKeySource)?;
-            return Ok(oncl_core::keys::KeySelector::token(
-                device,
-                kind,
-                alias.clone(),
-            ));
+            return token_selector(reader, kind, alias);
         }
         let key = self
             .key
@@ -409,11 +423,16 @@ impl Cli {
             Command::Timestamp {
                 command: crate::families::TimestampCommand::Verify { input, data, .. },
             } if input == "-" && data.as_deref() == Some("-") => Err("StdinConflict"),
-            Command::Inspect(args)
-                if matches!(args.profile, crate::families::InspectProfile::Container)
-                    && args.alias.is_empty() =>
-            {
-                Err("AliasRequired")
+            Command::Inspect(args) => {
+                use crate::families::InspectProfile as P;
+                let keyed = args.key_name.is_some();
+                match args.profile {
+                    P::NamedKey if !keyed || args.input.is_some() => Err("InvalidCombination"),
+                    P::NamedKey => Ok(()),
+                    _ if keyed || args.input.is_none() => Err("InvalidCombination"),
+                    P::Container if args.alias.is_empty() => Err("AliasRequired"),
+                    _ => Ok(()),
+                }
             }
             Command::Plugin { command } => command.preflight(),
             Command::Batch { command } => command.preflight(),

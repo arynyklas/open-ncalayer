@@ -194,14 +194,14 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             command: crate::families::TimestampCommand::Verify { .. },
         } => Action::VerifyStamp,
         Command::Batch { command } => {
-            if command.args().key.is_some() {
+            if command.has_key() {
                 Action::Sign
             } else {
                 Action::Verify
             }
         }
         Command::Plugin { command } => {
-            if command.args().key.is_some() {
+            if command.has_key() {
                 Action::Sign
             } else {
                 Action::Hash
@@ -234,15 +234,21 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     } else {
         (None, None)
     };
-    let selector = if let Some(args) = cli.private_key() {
-        Some(args.selector()?)
+    let plan = if let Some(args) = cli.private_key() {
+        Some(args.plan()?)
     } else if let Command::Plugin { command } = &cli.command {
-        command.key_selector()?
+        command.key_plan()?
     } else if let Command::Batch { command } = &cli.command {
-        command.key_selector()?
+        command.key_plan()?
+    } else if let Command::Inspect(args) = &cli.command {
+        match (&args.key_config, &args.key_name) {
+            (Some(config), Some(name)) => Some(crate::keysrc::resolve(config, name)?),
+            _ => None,
+        }
     } else {
         None
     };
+    let selector = plan.as_ref().map(|plan| plan.selector.clone());
     let (plugin_registry, _plugin_configuration, plugin_id) =
         if let Command::Plugin { command } = &cli.command {
             let (registry, reservation, id) =
@@ -251,7 +257,8 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         } else {
             (None, None, String::new())
         };
-    let authority = selector.as_ref().map(|key| {
+    let private = !matches!(cli.command, Command::Inspect(..));
+    let authority = selector.as_ref().filter(|_| private).map(|key| {
         Arc::new(crate::sign::Authority {
             key: key.key_id(),
             action,
@@ -274,7 +281,11 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     }
     if let Some(authority) = &authority {
         let mut sources = oncl_core::keys::KeySources::new();
-        if cli.private_key().is_some_and(|args| args.uses_token()) {
+        let plan = plan.as_ref().ok_or(OperationError::InvalidKeySource)?;
+        if let Some((id, selector)) = &plan.binding {
+            sources = sources.with_named(id.clone(), selector.clone())?;
+        }
+        if plan.token {
             let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
                 .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
             sources = sources.with_tokens(
@@ -283,6 +294,22 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             );
         }
         services = services.with_keys(Arc::new(sources), authority.clone());
+    } else if let (Some(plan), false) = (&plan, private) {
+        // Public metadata of a named source: a read-only provider, no guard and
+        // no private-use capability.
+        let mut sources = oncl_core::keys::KeySources::new();
+        if let Some((id, selector)) = &plan.binding {
+            sources = sources.with_named(id.clone(), selector.clone())?;
+        }
+        if plan.token {
+            let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
+                .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
+            sources = sources.with_tokens(
+                oncl_token::Tokens::new(Arc::new(oncl_token::PcscBackend::new()), true),
+                Arc::new(gates),
+            );
+        }
+        services = services.with_metadata_provider(Arc::new(sources));
     }
     if let Some(store) = &store {
         services = services.with_temporary_store(store.clone());
@@ -448,7 +475,9 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             prepared.send()?;
             Ok(0)
         }
-        Command::Inspect(args) => crate::public::inspect(&engine, args, cli, &mut ctx),
+        Command::Inspect(args) => {
+            crate::public::inspect(&engine, args, selector.as_ref(), cli, &mut ctx)
+        }
         Command::Extend(args) => crate::public::extend(&engine, args, cli, &mut ctx),
         Command::Timestamp { command } => crate::public::timestamp(&engine, command, cli, &mut ctx),
         Command::Batch { command } => {

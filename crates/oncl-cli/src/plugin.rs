@@ -42,11 +42,16 @@ pub struct PluginCallArgs {
     pub key: Option<PathBuf>,
     #[arg(long, requires = "key")]
     pub alias: Option<String>,
+    /// Operator-configured key by name (see `--key-config`); no container path on the command line.
+    #[arg(long, requires = "key_config", conflicts_with_all = ["key", "alias"])]
+    pub key_name: Option<String>,
+    #[arg(long, requires = "key_name")]
+    pub key_config: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     pub key_handle: u32,
-    #[arg(long, requires = "key")]
+    #[arg(long)]
     pub secret_file: Option<PathBuf>,
-    #[arg(long, requires = "key", conflicts_with = "secret_file")]
+    #[arg(long, conflicts_with = "secret_file")]
     pub secret_interactive: bool,
     #[arg(long)]
     pub authorize: bool,
@@ -81,10 +86,12 @@ impl PluginCommand {
         {
             return Err("InvalidCombination");
         }
-        if args.key.is_some() && !args.authorize {
+        if self.has_key() && !args.authorize {
             return Err("AuthorityRequired");
         }
-        if args.key.is_none() && args.authorize {
+        if !self.has_key()
+            && (args.authorize || args.secret_file.is_some() || args.secret_interactive)
+        {
             return Err("InvalidCombination");
         }
         if args.args_file == "-" && args.secret_interactive {
@@ -92,12 +99,22 @@ impl PluginCommand {
         }
         Ok(())
     }
-    pub fn key_selector(&self) -> Result<Option<KeySelector>, OperationError> {
+    pub fn key_plan(&self) -> Result<Option<crate::keysrc::Plan>, OperationError> {
         let args = self.args();
+        if let (Some(config), Some(name)) = (&args.key_config, &args.key_name) {
+            return crate::keysrc::resolve(config, name).map(Some);
+        }
         args.key
             .as_ref()
-            .map(|key| KeySelector::file(key, args.alias.clone()))
+            .map(|key| {
+                KeySelector::file(key, args.alias.clone())
+                    .map(|selector| crate::keysrc::Plan::direct(selector, false))
+            })
             .transpose()
+    }
+    pub fn has_key(&self) -> bool {
+        let args = self.args();
+        args.key.is_some() || args.key_name.is_some()
     }
 }
 fn pki_endpoint(text: &str) -> Option<(oncl_pki::http::HttpMethod, &str)> {

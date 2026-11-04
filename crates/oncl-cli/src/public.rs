@@ -13,29 +13,39 @@ use std::time::Duration;
 pub fn inspect(
     engine: &Engine,
     args: &InspectArgs,
+    selector: Option<&oncl_core::keys::KeySelector>,
     cli: &Cli,
     ctx: &mut OperationContext,
 ) -> Result<i32, OperationError> {
     let _secret_memory = ctx.resources().reserve_memory(16384)?;
-    let secret = if matches!(args.profile, InspectProfile::Container) {
+    let secret = if matches!(
+        args.profile,
+        InspectProfile::Container | InspectProfile::NamedKey
+    ) {
         Some(secrets::read(
             args.secret_file.as_deref(),
             args.secret_interactive,
-            args.input == "-",
+            args.input.as_deref() == Some("-"),
             ctx,
         )?)
     } else {
         None
     };
+    let named = selector.map(|selector| {
+        oncl_core::keys::KeyRequest::new(selector, secret.as_deref().map(String::as_str))
+    });
     let request = match args.profile {
+        InspectProfile::NamedKey => oncl_core::InspectRequest::named_key(
+            named.as_ref().ok_or(OperationError::InvalidKeySource)?,
+        ),
         InspectProfile::Certificate => oncl_core::InspectRequest::certificate(),
         InspectProfile::Container => {
             oncl_core::InspectRequest::container(secret.as_deref().map(String::as_str))
         }
         InspectProfile::Cms => oncl_core::InspectRequest::cms_metadata(),
     };
-    let mut input = Input::open(&args.input)?;
-    let report = engine.inspect(&request, Some(input.source()), ctx)?;
+    let mut input = args.input.as_deref().map(Input::open).transpose()?;
+    let report = engine.inspect(&request, input.as_mut().map(Input::source), ctx)?;
     output::report(
         cli,
         &reports::Inspection(&report),

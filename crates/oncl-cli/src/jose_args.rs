@@ -52,7 +52,7 @@ pub struct JwsVerify {
 }
 #[derive(Subcommand)]
 pub enum JwsCommand {
-    Sign(JwsSign),
+    Sign(Box<JwsSign>),
     Verify(JwsVerify),
 }
 #[derive(Args)]
