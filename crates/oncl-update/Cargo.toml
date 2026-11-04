@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["update", "minisign", "signature", "release", "ncalayer"]
+categories = ["cryptography"]
+include = ["/src/**", "/build.rs", "/keys/**", "/LICENSE", "/NOTICE"]
 
 [dependencies]
 getrandom.workspace = true

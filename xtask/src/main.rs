@@ -55,6 +55,12 @@ enum Command {
     },
     /// Sign with the synthetic RSA key and check the CMS with `openssl cms -verify`.
     InteropOpenssl,
+    /// SDK delivery evidence: dependency closure, packaged-sources consumer smoke, licence
+    /// inventory (docs/dev/sdk.md).
+    Sdk {
+        #[command(subcommand)]
+        command: xtask::sdk_delivery::SdkCommand,
+    },
     /// Generate the third-party licence texts of the programs for the About window
     /// (`crates/oncl-ui/assets/THIRD-PARTY.txt`) from the local cargo registry.
     Licenses {
@@ -649,6 +655,9 @@ fn main() -> anyhow::Result<()> {
             }
             println!("fixtures/synthetic is up to date");
             Ok(())
+        }
+        Command::Sdk { command } => {
+            xtask::sdk_delivery::run(&oncl_testkit::workspace_root(), command)
         }
         Command::Licenses {
             check: false,

@@ -1,19 +1,43 @@
 [package]
 name = "oncl-core"
-description = "Typed streaming operations and resource policies for OpenNCALayer"
+description = "Typed streaming signing, verification and validation operations with resource policies: the embeddable OpenNCALayer SDK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+# The SDK chain (docs/dev/sdk.md, "Publication readiness") is eligible for the registry so that
+# `cargo package` can verify it as a chain, but nothing in the workspace uploads it. Today
+# `cargo publish` fails closed on the first crate: the patched `hmac`/`streebog` of `vendor/`
+# are not on crates.io under these names, so resolution against the registry is refused.
+publish = true
+readme = "README.md"
+keywords = ["cades", "pades", "xmldsig", "gost", "kazakhstan"]
+categories = ["cryptography", "authentication"]
+include = [
+    "/src/**",
+    "/examples/sign_file.rs",
+    "/examples/verify_file.rs",
+    "/examples/custom_transport.rs",
+    "/examples/support/**",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/THIRD-PARTY.txt",
+]
 
 [features]
+# The minimal SDK (`--no-default-features` is the same): CMS/CAdES, hashing, PKI validation,
+# key sources (files, inline PKCS#12/JKS, host-named keys), batches and inspection.
+default = []
 tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
 jose = ["dep:base64", "dep:serde", "dep:serde_json"]
 plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing"]
+# Every SDK feature above. It brings no desktop, updater, UI, server or async runtime;
+# `oncl-plugin`'s `distribution` (package store) stays a separate opt-in of that crate.
+full = ["tokens", "xml", "pdf", "jose", "plugins"]
 
 [dependencies]
 oncl-pki.workspace = true
@@ -43,6 +67,9 @@ wat.workspace = true
 tracing-subscriber.workspace = true
 roxmltree.workspace = true
 x509-cert.workspace = true
+# The examples issue a throwaway RSA PKI at run time.
+rcgen.workspace = true
+getrandom.workspace = true
 
 [[test]]
 name = "plugin_access"

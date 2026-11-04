@@ -1,0 +1,106 @@
+//! An independent embedding application, built by `cargo xtask sdk smoke` against the
+//! *unpacked source packages* of the SDK crates (never against the workspace or an app crate).
+//! It signs and verifies for real, with no display, daemon, collector or listener.
+#[path = "@SUPPORT@"]
+mod support;
+
+use oncl_core::keys::{AppliedState, KeyRequest};
+use oncl_core::{Action, ExecutionGrant, OperationPolicy, SignRequest, VerifyRequest};
+use oncl_pki::{http::HttpTransport, io::Source, validation::Verdict};
+use std::sync::Arc;
+use support::{AuditGuard, NeverCancelled, PASSWORD};
+
+const DOCUMENT: &[u8] = b"A document signed by an application that embeds the SDK from source packages.";
+
+fn main() {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("oncl-sdk-consumer-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
+    let pki = support::open_or_create(&dir);
+    let crl: Arc<dyn HttpTransport> = Arc::new(oncl_pki::http::RouteTransport::new(vec![(
+        support::CRL_ORIGIN.to_owned(),
+        Arc::new(pki.crl_responder()),
+    )]));
+    let guard = Arc::new(AuditGuard::default());
+    let engine = support::engine(&pki, guard.clone(), crl);
+    let key = pki.user_key();
+
+    // Real detached CMS signature under strict (anchored, validity, revocation) validation.
+    let mut signature = Vec::new();
+    {
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+                OperationPolicy::strict_online(),
+                Arc::new(NeverCancelled),
+            )
+            .expect("admission");
+        let mut data = DOCUMENT;
+        let report = engine
+            .sign(
+                SignRequest::cms_create(vec![KeyRequest::new(&key, Some(PASSWORD))], false),
+                Source::sequential(&mut data, Some(DOCUMENT.len() as u64)),
+                &mut signature,
+                &mut ctx,
+            )
+            .expect("sign");
+        assert_eq!(report.bytes_in, DOCUMENT.len() as u64);
+    }
+    assert_eq!(guard.lines.lock().unwrap().len(), 2, "one audited key use");
+
+    let verify = |document: &[u8]| {
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Verify]),
+                OperationPolicy::strict_online(),
+                Arc::new(NeverCancelled),
+            )
+            .expect("admission");
+        let mut sig = signature.as_slice();
+        let mut data = document;
+        engine
+            .verify(
+                &VerifyRequest::cms(),
+                Source::sequential(&mut sig, None),
+                Some(Source::sequential(&mut data, None)),
+                &mut ctx,
+            )
+            .expect("verify")
+            .verdict
+    };
+    assert_eq!(verify(DOCUMENT), Verdict::Valid);
+    let mut altered = DOCUMENT.to_vec();
+    altered[0] ^= 1;
+    assert_eq!(verify(&altered), Verdict::Invalid);
+
+    // Strict signing fails closed, key not applied, when status cannot be established.
+    let offline = support::engine(&pki, Arc::new(AuditGuard::default()), Arc::new(support::NoNetwork));
+    let mut ctx = offline
+        .begin(
+            ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            Arc::new(NeverCancelled),
+        )
+        .expect("admission");
+    let mut data = DOCUMENT;
+    let refused = offline
+        .sign(
+            SignRequest::cms_create(vec![KeyRequest::new(&key, Some(PASSWORD))], false),
+            Source::sequential(&mut data, Some(DOCUMENT.len() as u64)),
+            &mut Vec::new(),
+            &mut ctx,
+        )
+        .expect_err("status is unavailable");
+    assert_eq!(refused.applied_state(), AppliedState::NotApplied);
+
+    println!(
+        "SDK-CONSUMER-OK: {} byte CMS, valid, altered refused, offline signing refused ({:?})",
+        signature.len(),
+        refused.code()
+    );
+}

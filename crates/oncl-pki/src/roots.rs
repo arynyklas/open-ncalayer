@@ -5,47 +5,20 @@ use crate::cert::{self, Certificate};
 use std::sync::LazyLock;
 
 /// DER of the embedded certificates with their `cacerts.jks` aliases, in alias order.
+///
+/// The files live inside the crate (`roots/`) so that its source package is self-contained; the
+/// test below keeps them equal to `fixtures/nca/prod` through `fixtures/nca/SHA256SUMS`.
 const EMBEDDED: [(&str, &[u8]); 10] = [
-    (
-        "rcagost",
-        include_bytes!("../../../fixtures/nca/prod/rcagost.der"),
-    ),
-    (
-        "ncagost",
-        include_bytes!("../../../fixtures/nca/prod/ncagost.der"),
-    ),
-    (
-        "ncagost18",
-        include_bytes!("../../../fixtures/nca/prod/ncagost18.der"),
-    ),
-    (
-        "rcagost22",
-        include_bytes!("../../../fixtures/nca/prod/rcagost22.der"),
-    ),
-    (
-        "ncagost22",
-        include_bytes!("../../../fixtures/nca/prod/ncagost22.der"),
-    ),
-    (
-        "rcarsa",
-        include_bytes!("../../../fixtures/nca/prod/rcarsa.der"),
-    ),
-    (
-        "rcarsa20",
-        include_bytes!("../../../fixtures/nca/prod/rcarsa20.der"),
-    ),
-    (
-        "ncarsa",
-        include_bytes!("../../../fixtures/nca/prod/ncarsa.der"),
-    ),
-    (
-        "ncarsa18",
-        include_bytes!("../../../fixtures/nca/prod/ncarsa18.der"),
-    ),
-    (
-        "ncarsa22",
-        include_bytes!("../../../fixtures/nca/prod/ncarsa22.der"),
-    ),
+    ("rcagost", include_bytes!("../roots/rcagost.der")),
+    ("ncagost", include_bytes!("../roots/ncagost.der")),
+    ("ncagost18", include_bytes!("../roots/ncagost18.der")),
+    ("rcagost22", include_bytes!("../roots/rcagost22.der")),
+    ("ncagost22", include_bytes!("../roots/ncagost22.der")),
+    ("rcarsa", include_bytes!("../roots/rcarsa.der")),
+    ("rcarsa20", include_bytes!("../roots/rcarsa20.der")),
+    ("ncarsa", include_bytes!("../roots/ncarsa.der")),
+    ("ncarsa18", include_bytes!("../roots/ncarsa18.der")),
+    ("ncarsa22", include_bytes!("../roots/ncarsa22.der")),
 ];
 
 static NCA_PRODUCTION: LazyLock<Vec<Certificate>> = LazyLock::new(|| {

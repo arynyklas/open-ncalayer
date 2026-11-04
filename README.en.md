@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the latest pre-release is `0.1.0-alpha.4` ([Releases](https://github.com/arynyklas/OpenNCALayer/releases)); the plugin catalogue, downloads and the original's history are on the [project site](#project-site). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist (see [Windows 7](#windows-7)). Releases from `0.1.0-alpha.3` on build installers for Windows, macOS and Linux, and releases without a suffix an AUR package (see [Installation](#installation)); before each pre-release is published, the project's lab installs and uninstalls its installers on Windows 7, Windows 11 and Linux (not on macOS yet). Ports of 34 third-party plugins of the original (WebAssembly) are here: they install from a `.onclp` file in the «Плагины…» (Plugins…) window, and the plugin catalog works once the builds carry the maintainer's key (see [Plugins](#plugins)). The behaviour has been compared with a running original in the project's lab (P10): the differences found are fixed (with a test), recorded as deviations or judged not observable, and a port whose differences are all closed is marked `conformance = "confirmed"` in its `registry.toml` (all 34 now) — only such ports enter the `stable` channel, and a new core version only with a green comparison on its tag. Fixes made after the last comparison are pinned by tests but have not been repeated against the original yet; known differences of the built-in modules: `getBundles` gives a port's bundle version as in its manifest (the original's is `major.minor.micro`), and `getServices` lists the modules in another order when plugins are installed. Tokens are experimental, off by default and checked on an emulator only (see [Tokens (experimental)](#tokens-experimental)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key and Pages has no signed index (see [Updates](#updates)). Turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the latest pre-release is `0.1.0-alpha.6` ([Releases](https://github.com/arynyklas/OpenNCALayer/releases)); the plugin catalogue, downloads and the original's history are on the [project site](#project-site). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist (see [Windows 7](#windows-7)). Releases from `0.1.0-alpha.3` on build installers for Windows, macOS and Linux, and releases without a suffix an AUR package (see [Installation](#installation)); before each pre-release is published, the project's lab installs and uninstalls its installers on Windows 7, Windows 11 and Linux (not on macOS yet). Ports of 34 third-party plugins of the original (WebAssembly) are here: they install from a `.onclp` file in the «Плагины…» (Plugins…) window, and the plugin catalog works once the builds carry the maintainer's key (see [Plugins](#plugins)). The behaviour has been compared with a running original in the project's lab (P10): the differences found are fixed (with a test), recorded as deviations or judged not observable, and a port whose differences are all closed is marked `conformance = "confirmed"` in its `registry.toml` (all 34 now) — only such ports enter the `stable` channel, and a new core version only with a green comparison on its tag. Fixes made after the last comparison are pinned by tests but have not been repeated against the original yet; known differences of the built-in modules: `getBundles` gives a port's bundle version as in its manifest (the original's is `major.minor.micro`), and `getServices` lists the modules in another order when plugins are installed. Tokens are experimental, off by default and checked on an emulator only (see [Tokens (experimental)](#tokens-experimental)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key and Pages has no signed index (see [Updates](#updates)). Turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -72,6 +72,35 @@ Keys and certificate requests (`generateCsr`; the Applet's `genKeyPairAndGetPKCS
 - `importCertificate` finds the key file in the folder by the certificate's SubjectKeyIdentifier, installs the certificate next to the key (a file with a non-GOST-2015 authentication certificate is renamed to `AUTH_<name>`), then changes the password.
 
 XMLDSig and CMS signatures and our key files are checked in NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md) (in Russian).
+
+### Rust SDK: embedding (unreleased, not on crates.io)
+
+`oncl-core` is the embeddable SDK: streaming signing, verification, validation, inspection and
+time-stamping, with trust, keys, clock, network, audit and resource limits owned by the host. It
+needs no display session, daemon, listener or updater. **Nothing is published to crates.io**
+(and whether the `oncl-*` names are free there is unchecked): depend on a reviewed commit by
+path or git, with the same `[patch.crates-io]` for the locally modified `streebog` and `hmac`:
+
+```toml
+[dependencies]
+oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
+
+[patch.crates-io]
+streebog = { path = "open-ncalayer/vendor/streebog" }
+hmac = { path = "open-ncalayer/vendor/hmac" }
+```
+
+Features: none (the minimal SDK: CMS/CAdES, hashing, PKI validation, key files, batches),
+`tokens`, `xml`, `pdf`, `jose`, `plugins`, and `full` for all of them; none pulls in Slint, the
+desktop, the updater, a server or an async runtime (`cargo xtask sdk closure` checks it).
+Runnable examples that issue a throwaway PKI and need no network:
+`cargo run -p oncl-core --example sign_file`, `--example verify_file -- <dir> <file>` and
+`--example custom_transport` (a host-written HTTP transport; without network strict signing is
+refused before the key is applied). Semver, error and limit contracts, migration notes and the
+publication-readiness status (the packaged source chain is verified offline by
+`cargo xtask sdk smoke`; upload is blocked by the modified `hmac`/`streebog` and was not run):
+[`docs/dev/sdk.md`](docs/dev/sdk.md). Third-party licences of the SDK closure:
+[`crates/oncl-core/THIRD-PARTY.txt`](crates/oncl-core/THIRD-PARTY.txt).
 
 ### SDK platform changes (unreleased)
 

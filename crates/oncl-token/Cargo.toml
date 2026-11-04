@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["smartcard", "pcsc", "apdu", "token", "kazakhstan"]
+categories = ["cryptography", "hardware-support"]
+include = ["/src/**", "/LICENSE", "/NOTICE"]
 
 [features]
 # Software cards for tests and the e2e daemon; never in releases.

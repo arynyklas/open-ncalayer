@@ -5,7 +5,7 @@ exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
@@ -27,24 +27,31 @@ oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 oncl-builtins-build = { path = "crates/oncl-builtins-build" }
 oncl-core = { path = "crates/oncl-core" }
 oncl-desktop = { path = "crates/oncl-desktop" }
+# The SDK's packaged dependency chain (`xtask::sdk_delivery::CHAIN`, docs/dev/sdk.md section 7)
+# pins the exact workspace version: `cargo package` needs a `version` next to each `path`, and
+# it must be bumped together with `[workspace.package]`. These crates (and only these) set
+# `publish = true` in their manifests so that `cargo package` can verify the chain offline;
+# nothing uploads them: the modified `hmac`/`streebog` of `vendor/` are not on crates.io under
+# these names (crates.io's lack the `secret-input` feature), so a registry release is blocked
+# until that is decided. A test (`xtask/tests/sdk_delivery.rs`) keeps the set and its order.
 # The windows, key choice, page paths and page PINs the core gives modules and plugins.
-oncl-flows = { path = "crates/oncl-flows" }
-oncl-gost = { path = "crates/oncl-gost" }
+oncl-flows = { path = "crates/oncl-flows", version = "=0.1.0-alpha.7" }
+oncl-gost = { path = "crates/oncl-gost", version = "=0.1.0-alpha.7" }
 oncl-ipc = { path = "crates/oncl-ipc" }
-oncl-pki = { path = "crates/oncl-pki" }
-oncl-pdf = { path = "crates/oncl-pdf" }
-oncl-pdk = { path = "crates/oncl-pdk" }
+oncl-pki = { path = "crates/oncl-pki", version = "=0.1.0-alpha.7" }
+oncl-pdf = { path = "crates/oncl-pdf", version = "=0.1.0-alpha.7" }
+oncl-pdk = { path = "crates/oncl-pdk", version = "=0.1.0-alpha.7" }
 # Explicit defaults also keep inherited no-default SDK dependencies valid outside this workspace.
-oncl-plugin = { path = "crates/oncl-plugin", default-features = false }
-oncl-protocol = { path = "crates/oncl-protocol" }
-oncl-registry = { path = "crates/oncl-registry" }
+oncl-plugin = { path = "crates/oncl-plugin", default-features = false, version = "=0.1.0-alpha.7" }
+oncl-protocol = { path = "crates/oncl-protocol", version = "=0.1.0-alpha.7" }
+oncl-registry = { path = "crates/oncl-registry", version = "=0.1.0-alpha.7" }
 oncl-testkit = { path = "crates/oncl-testkit" }
 oncl-tls = { path = "crates/oncl-tls" }
-oncl-token = { path = "crates/oncl-token" }
+oncl-token = { path = "crates/oncl-token", version = "=0.1.0-alpha.7" }
 oncl-trust = { path = "crates/oncl-trust" }
 oncl-ui = { path = "crates/oncl-ui" }
-oncl-update = { path = "crates/oncl-update" }
-oncl-xml = { path = "crates/oncl-xml" }
+oncl-update = { path = "crates/oncl-update", version = "=0.1.0-alpha.7" }
+oncl-xml = { path = "crates/oncl-xml", version = "=0.1.0-alpha.7" }
 
 aes = "0.9.0"
 anyhow = "1.0.104"

@@ -15,6 +15,7 @@ pub mod package;
 pub mod plugin;
 pub mod privacy;
 pub mod registry;
+pub mod sdk_delivery;
 pub mod sign;
 pub mod token_emu;
 pub mod upstream;

@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["xmldsig", "xades", "xml", "signature", "gost"]
+categories = ["cryptography", "parser-implementations"]
+include = ["/src/**", "/LICENSE", "/NOTICE"]
 
 [features]
 testing = ["oncl-pki/testing"]

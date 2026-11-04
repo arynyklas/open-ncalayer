@@ -1,0 +1,9 @@
+OpenNCALayer SDK
+Copyright 2026 Aryn Yklas
+
+This package is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+OpenNCALayer is an independent reimplementation of the NCALayer protocol and of the
+operations behind it. It is not affiliated with or endorsed by the National Certification
+Authority of the Republic of Kazakhstan. "NCALayer" and "Kalkan" are used only to describe
+compatibility.
