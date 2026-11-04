@@ -185,6 +185,15 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
         }
         _ => output::store(cli, "-")?,
     };
+    let staging = parents
+        .iter()
+        .next()
+        .filter(|_| parents.len() == 1)
+        .copied()
+        .unwrap_or_else(|| cli.temporary_directory.as_deref().unwrap_or(Path::new(".")));
+    if parents.iter().any(|parent| *parent != staging) {
+        probe_links(staging, &parents)?;
+    }
     let local_failures = manifest.items.len() - submitted.len();
     let (final_record, mut artifacts) = if submitted.is_empty() {
         (None, Vec::new())
@@ -387,4 +396,41 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
     } else {
         worst
     })
+}
+
+/// Publication is a no-clobber hard link from the staging store: every destination
+/// directory must accept one *before* any request leaves the process, otherwise the key
+/// could be applied and its result then be unpublishable. A real link is created and
+/// removed in each directory (this checks the actual capability, not a path comparison).
+fn probe_links(staging: &Path, destinations: &HashSet<&Path>) -> Result<(), Failure> {
+    let refuse = || Failure {
+        code: "DestinationNotLinkable".into(),
+        applied: AppliedState::NotApplied,
+        cancelled: false,
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = format!(".oncl-link-probe-{:x}-{nanos:x}", std::process::id());
+    let source = staging.join(&name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&source)
+        .map_err(|_| refuse())?;
+    let mut result = Ok(());
+    for parent in destinations {
+        let target = parent.join(format!("{name}-d"));
+        match std::fs::hard_link(&source, &target) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&target);
+            }
+            Err(_) => {
+                result = Err(refuse());
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&source);
+    result
 }

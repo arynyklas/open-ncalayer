@@ -22,7 +22,11 @@ use crate::{
 };
 use std::{
     io::Read,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -377,10 +381,32 @@ pub struct ReceivedArtifact {
     pub length: u64,
 }
 
-/// Per-call control: an absolute deadline and a cooperative stop polled between I/O steps.
-pub struct ExecuteOptions<'a> {
+/// A cooperative stop polled while waiting and between I/O steps.
+pub type Control = Arc<dyn Fn() -> Result<(), Stop> + Send + Sync>;
+
+/// Per-call control: an absolute deadline and the stop poll.
+pub struct ExecuteOptions {
     pub deadline: Instant,
-    pub control: &'a (dyn Fn() -> Result<(), Stop> + 'a),
+    pub control: Control,
+}
+
+enum Event {
+    Begin(String, u64),
+    Chunk(Vec<u8>),
+    Done(Result<Completed, ClientError>),
+}
+struct ChannelSink(mpsc::SyncSender<Event>);
+impl ArtifactSink for ChannelSink {
+    fn begin(&mut self, content_id: &str, length: u64) -> std::io::Result<()> {
+        self.0
+            .send(Event::Begin(content_id.to_owned(), length))
+            .map_err(|_| std::io::Error::other("consumer gone"))
+    }
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0
+            .send(Event::Chunk(bytes.to_vec()))
+            .map_err(|_| std::io::Error::other("consumer gone"))
+    }
 }
 
 /// A response whose terminal record, closing delimiter and HTTP entity were all intact.
@@ -394,6 +420,7 @@ pub struct Completed {
     pub document_bytes: u64,
 }
 
+#[derive(Clone)]
 pub struct ApiClient {
     endpoint: Endpoint,
     token: Zeroizing<String>,
@@ -477,17 +504,80 @@ impl ApiClient {
     }
 
     /// Send `request` and stream its answer. See the module docs for the exact meaning of
-    /// the returned [`AppliedState`] on failure.
+    /// the returned [`AppliedState`] on failure. The exchange runs on its own thread and the
+    /// caller polls `control` every 50 ms, so a stop (Ctrl-C, deadline) is observed promptly
+    /// even while the server sends nothing; the abandoned exchange ends at its deadline.
     pub fn execute(
         &self,
         request: Request,
         sink: &mut dyn ArtifactSink,
-        options: &ExecuteOptions<'_>,
+        options: &ExecuteOptions,
     ) -> Result<Completed, ClientError> {
-        let control = options.control;
+        (options.control)().map_err(stop_error_before_send)?;
+        let may_apply = request.may_apply_key;
+        let complete = Arc::new(AtomicBool::new(false));
+        let (events, inbox) = mpsc::sync_channel::<Event>(4);
+        let (client, control, deadline, flag) = (
+            self.clone(),
+            options.control.clone(),
+            options.deadline,
+            complete.clone(),
+        );
+        let finished = events.clone();
+        std::thread::Builder::new()
+            .name("oncl-api-exchange".into())
+            .spawn(move || {
+                let mut sink = ChannelSink(events);
+                let result = client.exchange(request, &mut sink, &*control, deadline, &flag);
+                let _ = finished.send(Event::Done(result));
+            })
+            .map_err(|_| ClientError::local(FailureKind::Transport))?;
+        let applied = || {
+            if complete.load(Ordering::SeqCst) && may_apply {
+                AppliedState::Unknown
+            } else {
+                AppliedState::NotApplied
+            }
+        };
+        loop {
+            match inbox.recv_timeout(Duration::from_millis(50)) {
+                Ok(Event::Begin(id, length)) => {
+                    if sink.begin(&id, length).is_err() {
+                        return Err(ClientError::new(FailureKind::Artifact, applied()));
+                    }
+                }
+                Ok(Event::Chunk(bytes)) => {
+                    if sink.write(&bytes).is_err() {
+                        return Err(ClientError::new(FailureKind::Artifact, applied()));
+                    }
+                }
+                Ok(Event::Done(result)) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Err(stop) = (options.control)() {
+                        let kind = match stop {
+                            Stop::Cancelled => FailureKind::Cancelled,
+                            Stop::DeadlineExceeded => FailureKind::DeadlineExceeded,
+                        };
+                        return Err(ClientError::new(kind, applied()));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(ClientError::new(FailureKind::ResponseLost, applied()));
+                }
+            }
+        }
+    }
+
+    fn exchange(
+        &self,
+        request: Request,
+        sink: &mut dyn ArtifactSink,
+        control: &(dyn Fn() -> Result<(), Stop> + Send + Sync),
+        deadline: Instant,
+        flag: &Arc<AtomicBool>,
+    ) -> Result<Completed, ClientError> {
         control().map_err(stop_error_before_send)?;
-        let remaining = options
-            .deadline
+        let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|left| !left.is_zero())
             .ok_or(ClientError::local(FailureKind::DeadlineExceeded))?;
@@ -496,6 +586,7 @@ impl ApiClient {
         let boundary =
             upload::boundary().map_err(|_| ClientError::local(FailureKind::Transport))?;
         let mut body = upload::Upload::new(&boundary, &request.metadata, request.parts, control);
+        body.share_complete(flag.clone());
         let agent = self.agent(remaining)?;
 
         let mut bearer = ureq::http::HeaderValue::from_str(&format!("Bearer {}", *self.token))
@@ -529,7 +620,7 @@ impl ApiClient {
                     body.failure(),
                     body.complete(),
                     unknown(body.complete()),
-                    options.deadline,
+                    deadline,
                 ));
             }
         };
@@ -544,9 +635,8 @@ impl ApiClient {
             .unwrap_or_default();
         let (_, body_reader) = response.into_parts();
         let reader = body_reader.into_reader();
-        let lost = |error: stream::StreamError| {
-            stream_error(error, status, unknown(complete), options.deadline)
-        };
+        let lost =
+            |error: stream::StreamError| stream_error(error, status, unknown(complete), deadline);
         if status != 200 {
             let applied = unknown(complete);
             let mut error = ClientError::new(FailureKind::UnexpectedStatus, applied);
@@ -592,6 +682,7 @@ impl ApiClient {
             }
         };
         check_artifacts(&parsed, status, unknown(complete))?;
+        check_lengths(&parsed, status, unknown(complete))?;
         Ok(Completed {
             record: parsed.record,
             artifacts: parsed.artifacts,
@@ -752,6 +843,29 @@ fn check_artifacts(
     );
     if !failed && parsed.artifacts.len() != named.len() {
         return Err(violation());
+    }
+    Ok(())
+}
+
+/// Every artifact length the final record states exactly must equal the received length:
+/// a well-framed part of the wrong size is an integrity failure, never a result.
+fn check_lengths(
+    parsed: &stream::Parsed,
+    status: u16,
+    applied: AppliedState,
+) -> Result<(), ClientError> {
+    for (id, stated) in parsed.record.artifact_expectations() {
+        let received = parsed
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.content_id == id)
+            .map(|artifact| artifact.length);
+        if stated.is_some() && stated != received {
+            let mut error = ClientError::new(FailureKind::Protocol, applied);
+            error.status = Some(status);
+            error.detail = Some("artifact length differs from the final record");
+            return Err(error);
+        }
     }
     Ok(())
 }

@@ -603,7 +603,7 @@ impl Session<'_> {
             &mut stager,
             &ExecuteOptions {
                 deadline,
-                control: &check,
+                control: Arc::new(check),
             },
         );
         let Stager {
@@ -673,6 +673,12 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, Failure> {
             .allow_plain_http(cli.allow_plain_http),
     )
     .map_err(|error| Failure::client(&error, None))?;
+    if cli.allow_plain_http && !client.endpoint().is_tls() && !client.endpoint().is_loopback() {
+        // Printed on every run: the explicit flag must stay a visible decision.
+        crate::diagnostic(format_args!(
+            "oncl: warning: --allow-plain-http sends the API token and every document over an unencrypted, unauthenticated connection to a non-loopback host"
+        ));
+    }
     let mut session = Session {
         cli,
         control,

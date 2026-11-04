@@ -219,13 +219,13 @@ mod remote {
             })
             .collect();
         let request = Request::new(Route::Operations, metadata, sources).unwrap();
-        let control = || Ok(());
+        let control = || Ok::<(), oncl_api::client::Stop>(());
         let outcome = client(remote).execute(
             request,
             &mut Discard,
             &ExecuteOptions {
                 deadline: Instant::now() + Duration::from_secs(60),
-                control: &control,
+                control: std::sync::Arc::new(control),
             },
         );
         match outcome {
@@ -1839,5 +1839,266 @@ fn a_complete_response_is_the_only_one_that_commits() {
     ]);
     assert_eq!(exit(&run), 0, "{}", text(&run.stderr));
     assert!(out.exists());
+    assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A well-framed artifact whose size disagrees with the final record is an integrity
+/// failure: nothing is published. (`extract` states `bytes_written` exactly; signing and JWS
+/// `bytes_out` are resource-scope counters, not artifact sizes, so only their identity and
+/// count are checked: see cli.md.)
+#[test]
+fn artifact_of_the_wrong_size_is_never_published() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let s = Session::new(&remote);
+    let doc = s.file("doc.bin", b"integrity payload");
+    let sig = s.path("doc.p7s");
+    let signed = s.run(&[
+        "sign",
+        "--profile",
+        "cms",
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&sig),
+    ]);
+    assert_eq!(exit(&signed), 0, "{}", text(&signed.stderr));
+    for (spot, expect_ok) in [(Spot::Nowhere, true), (Spot::TrimArtifact, false)] {
+        let proxy = Proxy::start(
+            remote.address,
+            Fault {
+                spot,
+                end: End::Clean,
+            },
+        );
+        let via = Session::via(&remote, proxy.endpoint());
+        let out = via.path("extracted.bin");
+        let before = files(via.dir.path());
+        let run = via.run(&["extract", "--input", path(&sig), "--output", path(&out)]);
+        let stderr = text(&run.stderr);
+        if expect_ok {
+            assert_eq!(exit(&run), 0, "{stderr}");
+            assert_eq!(std::fs::read(&out).unwrap(), b"integrity payload");
+        } else {
+            assert_eq!(exit(&run), 1, "{stderr}");
+            assert!(
+                stderr.contains("ProtocolViolation") && stderr.contains("artifact length differs"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("applied=NotApplied"), "{stderr}");
+            assert!(!out.exists());
+            assert_eq!(
+                files(via.dir.path()),
+                before,
+                "temporary results left behind"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reset_during_upload_is_not_applied_because_the_server_starts_work_only_after_the_whole_body() {
+    // operations.rs/intake.rs: the service takes the complete multipart body (and re-checks
+    // authority) before the worker may use a key, so an incomplete upload cannot have applied it.
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let serve = std::thread::spawn(move || {
+        use std::io::Read;
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        let (mut total, mut buffer) = (0usize, [0u8; 8192]);
+        while total < 256 * 1024 {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => total += n,
+            }
+        }
+        // Dropped with unread request bytes in flight: the peer sees a reset.
+    });
+    let s = Session::via(&remote, format!("http://{address}"));
+    let doc = s.file("big.bin", &payload(16 * 1024 * 1024));
+    let out = s.path("never.p7s");
+    let run = s.run(&[
+        "sign",
+        "--profile",
+        "cms",
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--input",
+        path(&doc),
+        "--output",
+        path(&out),
+    ]);
+    serve.join().unwrap();
+    let stderr = text(&run.stderr);
+    assert_eq!(exit(&run), 1, "{stderr}");
+    assert!(stderr.contains("applied=NotApplied"), "{stderr}");
+    assert!(!out.exists());
+    assert_eq!(remote.audit_begins(), 0);
+}
+
+#[test]
+fn redirects_are_never_followed_and_ambient_proxies_are_never_used() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let watch = |listener: &std::net::TcpListener| listener.set_nonblocking(true).unwrap();
+    let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ambient = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    (watch(&target), watch(&ambient));
+    let (target_address, origin_address) =
+        (target.local_addr().unwrap(), origin.local_addr().unwrap());
+    let serve = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = origin.accept().unwrap();
+        let mut buffer = [0u8; 4096];
+        let _ = stream.read(&mut buffer);
+        let _ = write!(
+            stream,
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}/v1/operations\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+    });
+    let s = Session::via(&remote, format!("http://{origin_address}"));
+    let doc = s.file("doc.bin", b"abc");
+    let args = [
+        "--endpoint",
+        &s.endpoint,
+        "--token-file",
+        path(&remote.token_file),
+        "hash",
+        "--algorithm",
+        "sha256",
+        "--input",
+        path(&doc),
+    ];
+    let run = oncl_with_proxy(
+        &args,
+        s.dir.path(),
+        &format!("http://{}", ambient.local_addr().unwrap()),
+    );
+    serve.join().unwrap();
+    let stderr = text(&run.stderr);
+    assert_eq!(exit(&run), 1, "{stderr}");
+    assert!(stderr.contains("UnexpectedStatus (HTTP 307)"), "{stderr}");
+    assert!(!stderr.contains(&remote.token));
+    assert!(
+        matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the redirect (and the bearer token) was followed"
+    );
+    assert!(
+        matches!(ambient.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "an ambient proxy was used"
+    );
+}
+
+#[test]
+fn plain_http_to_a_remote_host_needs_the_flag_and_then_warns_on_every_run() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let s = Session::new(&remote);
+    let doc = s.file("doc.bin", b"abc");
+    let base = |flag: bool| {
+        let mut args = vec![
+            "--endpoint",
+            "http://192.0.2.1:9",
+            "--token-file",
+            path(&remote.token_file),
+            "--timeout-seconds",
+            "2",
+        ];
+        if flag {
+            args.push("--allow-plain-http");
+        }
+        args.extend(["hash", "--algorithm", "sha256", "--input", path(&doc)]);
+        oncl(&args, b"", &[remote.token.as_str()], Some(s.dir.path()))
+    };
+    let refused = base(false);
+    assert_eq!(exit(&refused), 1);
+    assert!(text(&refused.stderr).contains("PlainHttpRefused"));
+    assert!(
+        !text(&refused.stderr).contains("warning"),
+        "a refusal needs no warning"
+    );
+    for _ in 0..2 {
+        let allowed = base(true);
+        let stderr = text(&allowed.stderr);
+        assert_eq!(exit(&allowed), 1, "{stderr}");
+        assert!(
+            stderr.contains("warning: --allow-plain-http") && stderr.contains("unencrypted"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn batch_destinations_are_checked_for_publication_before_any_request() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let proxy = Proxy::start(
+        remote.address,
+        Fault {
+            spot: Spot::Nowhere,
+            end: End::Clean,
+        },
+    );
+    let s = Session::via(&remote, proxy.endpoint());
+    let doc = s.file("doc.bin", b"batch");
+    let (one, two) = (s.path("one"), s.path("two"));
+    std::fs::create_dir(&one).unwrap();
+    let missing = two.join("out2.p7s");
+    let manifest_file = manifest(
+        &s,
+        serde_json::json!([
+            {"op":"sign","id":"a","profile":"cms","input":p(&doc),"output":p(&one.join("out1.p7s"))},
+            {"op":"sign","id":"b","profile":"cms","input":p(&doc),"output":p(&missing)},
+        ]),
+    );
+    let run = s.run(&[
+        "batch",
+        "run",
+        "--manifest",
+        path(&manifest_file),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+    ]);
+    let stderr = text(&run.stderr);
+    assert_eq!(exit(&run), 1, "{stderr}");
+    assert!(
+        stderr.contains("DestinationNotLinkable; applied=NotApplied"),
+        "{stderr}"
+    );
+    assert_eq!(
+        proxy.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a request left before the check"
+    );
+    assert_eq!(remote.audit_begins(), 0);
+    assert!(files(&one).is_empty(), "the link probe left a file behind");
+    // Two real directories on the same volume as the staging store: the batch runs, and each
+    // output is linked into its own directory. (A second volume is not available on this
+    // machine; the probe creates a real hard link in each directory, which is exactly the
+    // capability publication needs, so a destination on another volume is refused the same way.)
+    std::fs::create_dir(&two).unwrap();
+    let run = s.run(&[
+        "batch",
+        "run",
+        "--manifest",
+        path(&manifest_file),
+        "--key-name",
+        "ops-key",
+        "--authorize",
+        "--json",
+    ]);
+    assert_eq!(exit(&run), 0, "{}", text(&run.stderr));
+    assert!(one.join("out1.p7s").exists() && missing.exists());
     assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

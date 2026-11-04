@@ -608,6 +608,9 @@ pub enum Spot {
     AfterPart(&'static str),
     /// In the middle of the closing delimiter.
     MidClosing,
+    /// Relay everything but drop the last byte of the first artifact and state the shorter
+    /// length: still well-framed, wrong size.
+    TrimArtifact,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum End {
@@ -842,6 +845,9 @@ fn respond(client: &mut TcpStream, server: &mut TcpStream, fault: Fault) -> std:
         // Untouched: the original bytes, including the terminal chunk.
         return client.write_all(&raw[..at + 5]);
     };
+    if matches!(fault.spot, Spot::TrimArtifact) {
+        decoded = trim_first_artifact(&decoded, &boundary);
+    }
     let delimiter = format!("--{boundary}\r\n").into_bytes();
     let part = |name: &str| -> Option<(usize, usize, usize)> {
         // (start of the delimiter, start of the body, end of the body)
@@ -861,7 +867,7 @@ fn respond(client: &mut TcpStream, server: &mut TcpStream, fault: Fault) -> std:
         None
     };
     let cut = match fault.spot {
-        Spot::Nowhere => decoded.len(),
+        Spot::Nowhere | Spot::TrimArtifact => decoded.len(),
         Spot::BeforePart(name) => part(name).expect("part present").0,
         Spot::MidPart(name) => {
             let (_, body, end) = part(name).expect("part present");
@@ -1016,4 +1022,49 @@ pub fn files(root: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Drop the last byte of the first `artifact` part and restate its `Content-Length`, so
+/// framing stays valid and only the size disagrees with the final record.
+pub fn trim_first_artifact(decoded: &[u8], boundary: &str) -> Vec<u8> {
+    let marker = format!("--{boundary}\r\n").into_bytes();
+    let mut start = 0;
+    while let Some(s) = find(decoded, &marker, start) {
+        let header_end = find(decoded, b"\r\n\r\n", s).unwrap() + 4;
+        let header = String::from_utf8_lossy(&decoded[s..header_end]).into_owned();
+        if header.contains("name=\"artifact\"") {
+            let length: usize = header
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let shorter = header.replace(
+                &format!("Content-Length: {length}"),
+                &format!("Content-Length: {}", length - 1),
+            );
+            let mut out = decoded[..s].to_vec();
+            out.extend_from_slice(shorter.as_bytes());
+            out.extend_from_slice(&decoded[header_end..header_end + length - 1]);
+            out.extend_from_slice(&decoded[header_end + length..]);
+            return out;
+        }
+        start = s + marker.len();
+    }
+    panic!("no artifact part to trim");
+}
+
+/// Like [`oncl`] with explicit ambient proxy variables (to prove they are never used).
+pub fn oncl_with_proxy(args: &[&str], cwd: &Path, proxy: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_oncl"))
+        .args(args)
+        .env("HTTP_PROXY", proxy)
+        .env("http_proxy", proxy)
+        .env("HTTPS_PROXY", proxy)
+        .env("ALL_PROXY", proxy)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
 }

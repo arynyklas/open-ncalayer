@@ -39,6 +39,7 @@ pub(super) struct Upload<'a> {
     documents: u64,
     total: Option<u64>,
     complete: bool,
+    shared: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     failure: Option<UploadFailure>,
 }
 
@@ -141,6 +142,7 @@ impl<'a> Upload<'a> {
             documents: 0,
             total,
             complete: false,
+            shared: None,
             failure: None,
         }
     }
@@ -191,7 +193,7 @@ impl Read for Upload<'_> {
         loop {
             let counted = self.document_pieces.binary_search(&self.index).is_ok();
             let Some(piece) = self.pieces.get_mut(self.index) else {
-                self.complete = true;
+                self.mark_complete();
                 return Ok(0);
             };
             match piece {
@@ -209,7 +211,7 @@ impl Read for Upload<'_> {
                         self.documents += count as u64;
                     }
                     if self.total == Some(self.handed) {
-                        self.complete = true;
+                        self.mark_complete();
                     }
                     return Ok(count);
                 }
@@ -393,5 +395,19 @@ mod tests {
         assert!(!upload.complete());
         assert_eq!(upload.handed(), 0);
         assert_eq!(upload.failure(), Some(UploadFailure::Stop(Stop::Cancelled)));
+    }
+}
+
+impl Upload<'_> {
+    /// Mirror "the whole body was handed to the transport" to another thread, so a caller
+    /// that stops waiting can still apply the exact applied-state rule.
+    pub(super) fn share_complete(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.shared = Some(flag);
+    }
+    fn mark_complete(&mut self) {
+        self.complete = true;
+        if let Some(flag) = &self.shared {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }

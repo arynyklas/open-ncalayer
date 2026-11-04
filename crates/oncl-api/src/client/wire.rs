@@ -278,3 +278,34 @@ impl ResultRecord {
         }
     }
 }
+
+impl ResultRecord {
+    /// The exact byte length of the artifact this result states, where the contract has one:
+    /// extraction `bytes_written` and the timestamp token length (`bytes_out` of a stamp is
+    /// documented as the token length). Signing, JWS and extension `bytes_out` are resource
+    /// scope counters, not artifact sizes (measured: they differ from the artifact), so they
+    /// are never compared.
+    pub fn artifact_len(&self) -> Option<u64> {
+        match self {
+            Self::Extraction { bytes_written, .. } => Some(*bytes_written),
+            Self::Stamping { bytes_out, .. } => Some(*bytes_out),
+            _ => None,
+        }
+    }
+}
+
+impl FinalRecord {
+    /// `(Content-ID, stated exact length)` of every artifact the record names.
+    pub fn artifact_expectations(&self) -> Vec<(&str, Option<u64>)> {
+        fn of(result: &ResultRecord) -> Option<(&str, Option<u64>)> {
+            result.artifact().map(|id| (id, result.artifact_len()))
+        }
+        match self {
+            Self::Final { results, .. } => results.iter().filter_map(|r| of(&r.result)).collect(),
+            Self::BatchFinal { items, .. } => items
+                .iter()
+                .filter_map(|i| i.result.as_ref().and_then(|r| of(r)))
+                .collect(),
+        }
+    }
+}
