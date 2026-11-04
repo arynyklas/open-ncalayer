@@ -698,7 +698,7 @@ fn installed_version_mismatch_is_failure() {
         ("program version", vec![("EXE_VERSION", "0.1.9")]),
         (
             "arp location",
-            vec![("ARP_LOCATION", "drive_C:\\Somewhere\\Else")],
+            vec![("ARP_LOCATION", "\\\\other-host\\share\\OpenNCALayer")],
         ),
         ("architecture", vec![("ARCH", "x86")]),
     ] {
