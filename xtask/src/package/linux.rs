@@ -448,7 +448,7 @@ pub fn build_in_container(
 }
 
 /// `-v` of `host` at `container`.
-fn mount(host: &Path, container: &str) -> OsString {
+pub(super) fn mount(host: &Path, container: &str) -> OsString {
     let mut arg = std::path::absolute(host)
         .unwrap_or_else(|_| host.to_owned())
         .into_os_string();

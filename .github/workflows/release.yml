@@ -7,6 +7,9 @@ name: Release
 # CycloneDX SBOM and SHA256SUMS, every file with a build provenance attestation. A tag with
 # a pre-release suffix (`v0.1.0-alpha.1`) makes a pre-release. The installers and packages
 # are made by `cargo xtask package` (roadmap P8), the same commands CI runs.
+# The standalone `oncl` and `oncl-server` packages (`cargo xtask package platform`) are built
+# by the `platform` jobs as workflow artifacts (`platform-*`), outside this release: no job
+# of this file publishes them, signs them or uploads them to a registry or a browser store.
 # Then a pull request adds the version to the update indexes (`updates/v1/<channel>.json`:
 # a pre-release to beta, a release to stable and beta), unsigned: the maintainer signs them
 # locally (`cargo xtask sign`), never CI. The AUR package follows a release (aur.yml).
@@ -510,6 +513,135 @@ jobs:
         with:
           name: conformance-${{ matrix.flavor }}
           path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  # The standalone SDK programs as packages of their own: `oncl` (the command line) and
+  # `oncl-server` (the HTTP service, API disabled until the operator enables it), one archive
+  # each per flavor (`cargo xtask package platform`, named `oncl-<version>-<flavor>` and
+  # `oncl-server-<version>-<flavor>`), after the flavor's import gate (static CRT, Windows 7
+  # deny-list, glibc 2.28, universal macOS) and the smoke of the UNPACKED archives on the
+  # runner (hash, verify, a disabled server without a listener, a signature through the
+  # opted-in loopback server, a clean stop). Workflow artifacts only (`platform-*`): `publish`
+  # takes the `release-*` artifacts, so nothing here reaches the GitHub release, a registry or
+  # a browser store, and nothing is signed (no secret is used). The maintainer adds the
+  # archives to a release after review (docs/dev/release.md).
+  platform:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            flavor: win-x64
+          - os: windows-2025
+            target: i686-pc-windows-msvc
+            flavor: win-x86
+          - os: windows-2025
+            flavor: win7-x64
+            win7: x64
+          - os: windows-2025
+            flavor: win7-x86
+            win7: x86
+          - os: ubuntu-24.04
+            flavor: linux-x64
+          - os: macos-15
+            target: universal-apple-darwin
+            flavor: osx
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.win7 && 90 || 60 }}
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      FLAVOR: ${{ matrix.flavor }}
+      BIN: ${{ matrix.win7 && format('target/platform/win7/{0}', matrix.win7) || matrix.flavor == 'linux-x64' && 'target/platform/linux-x64' || matrix.flavor == 'osx' && 'target/platform/osx' || format('target/{0}/release', matrix.target) }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup toolchain install
+          if [ -n "${{ matrix.win7 }}" ]; then
+            # The pinned nightly of `cargo xtask package platform-build` (xtask::win7::TOOLCHAIN).
+            rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+          elif [ "${{ matrix.target }}" = universal-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          elif [ "$RUNNER_OS" = Windows ]; then
+            rustup target add "${{ matrix.target }}"
+          fi
+      # The licence texts of a package come from the unpacked crates of the cargo registry.
+      - name: Fetch the crates
+        run: cargo fetch --locked
+      - name: Build (Windows 10 and 11)
+        if: runner.os == 'Windows' && !matrix.win7
+        run: cargo build --locked --release --target ${{ matrix.target }} -p oncl-cli -p oncl-server
+      - name: Build (Windows 7)
+        if: matrix.win7
+        shell: bash
+        run: cargo xtask package platform-build --flavor "$FLAVOR" --out target/platform/win7
+      - name: Build in the glibc 2.28 container (Linux)
+        if: runner.os == 'Linux'
+        run: cargo xtask package platform-build --flavor linux-x64 --version "$VERSION"
+      # Both slices, joined; `cargo xtask package platform` refuses a program without both.
+      - name: Build (macOS universal)
+        if: matrix.target == 'universal-apple-darwin'
+        shell: bash
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p oncl-cli -p oncl-server
+          done
+          mkdir -p "$BIN"
+          for exe in oncl oncl-server; do
+            lipo -create -output "$BIN/$exe" \
+              "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
+          done
+      - name: Archives, import gate and smoke of the unpacked archives
+        shell: bash
+        run: cargo xtask package platform --flavor "$FLAVOR" --bin "$BIN" --version "$VERSION" --dist platform
+      - name: Checksums
+        shell: bash
+        run: |
+          cd platform
+          if command -v sha256sum > /dev/null; then
+            sha256sum -- * > SHA256SUMS
+          else
+            shasum -a 256 -- * > SHA256SUMS
+          fi
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.flavor }}
+          path: platform/*
+          retention-days: 30
+          if-no-files-found: error
+
+  # One CycloneDX SBOM per standalone program, the dependencies of every platform (AWS-LC is
+  # in `oncl`/`oncl-server` only for the Unix targets). A workflow artifact, like `platform`.
+  platform-sbom:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx@0.5.9
+      - name: SBOM
+        run: |
+          cargo cyclonedx --format json --spec-version 1.5 --target all --no-build-deps \
+            --override-filename sbom --quiet
+          mkdir sbom
+          cp crates/oncl-cli/sbom.json "sbom/oncl-$VERSION.cdx.json"
+          cp crates/oncl-server/sbom.json "sbom/oncl-server-$VERSION.cdx.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-sbom
+          path: sbom/*
           retention-days: 30
           if-no-files-found: error
 

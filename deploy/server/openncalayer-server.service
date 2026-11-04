@@ -1,0 +1,74 @@
+# oncl-server as a systemd service. Installing this file enables and starts nothing: the
+# operator runs `systemctl enable --now openncalayer-server` after writing a private
+# configuration (docs/server.md). The program is updated by the operator replacing the
+# binary and restarting the unit; it never updates itself.
+#
+# Install:
+#   useradd --system --user-group --home-dir /var/lib/oncl-server --shell /usr/sbin/nologin oncl-server
+#   install -d -m 0700 -o oncl-server -g oncl-server /etc/oncl-server
+#   install -m 0755 oncl-server /usr/local/bin/oncl-server
+#   install -m 0644 openncalayer-server.service /etc/systemd/system/
+#   systemctl daemon-reload
+# The unit does not start while /etc/oncl-server/server.toml is absent.
+
+[Unit]
+Description=OpenNCALayer standalone signing service (oncl-server)
+ConditionPathExists=/etc/oncl-server/server.toml
+After=network.target
+
+[Service]
+Type=simple
+User=oncl-server
+Group=oncl-server
+UMask=0077
+ExecStart=/usr/local/bin/oncl-server serve --config /etc/oncl-server/server.toml
+# oncl-server stops gracefully on SIGINT (it drains admitted operations); SIGTERM would
+# end it at once.
+KillSignal=SIGINT
+TimeoutStopSec=330
+Restart=on-failure
+RestartSec=5s
+
+# The state directory (audit journal, scratch) is the only place the service may write.
+StateDirectory=oncl-server
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/oncl-server
+# The private configuration directory is read and written by the program's private-file
+# API (it opens files read-write), so it is a ReadWritePaths entry as well.
+ReadWritePaths=/etc/oncl-server
+
+# Budgets: about twice `total_memory` of server.toml, and the process count of a worker pool.
+MemoryMax=1G
+MemorySwapMax=0
+TasksMax=128
+LimitNOFILE=4096
+LimitCORE=0
+
+# Sandbox.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

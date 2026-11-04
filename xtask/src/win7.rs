@@ -139,6 +139,29 @@ pub fn build(
     target_dir: Option<&Path>,
     builtins: &Path,
 ) -> anyhow::Result<PathBuf> {
+    build_packages(
+        root,
+        arch,
+        out,
+        target_dir,
+        Some(builtins),
+        &PACKAGES,
+        &FILES,
+    )
+}
+
+/// [`build`] of other `packages`: the files of `files` (cargo target, shipping name) of the
+/// result go into `<out>/<arch>/`. `builtins` is `None` for programs that embed no built-in
+/// module.
+pub fn build_packages(
+    root: &Path,
+    arch: Arch,
+    out: &Path,
+    target_dir: Option<&Path>,
+    builtins: Option<&Path>,
+    packages: &[&str],
+    files: &[(&str, &str)],
+) -> anyhow::Result<PathBuf> {
     let mut cargo = Command::new("rustup");
     cargo
         .current_dir(root)
@@ -151,13 +174,15 @@ pub fn build(
     if let Some(dir) = target_dir {
         cargo.arg("--target-dir").arg(dir);
     }
-    for package in PACKAGES {
+    for package in packages {
         cargo.args(["-p", package]);
     }
     // The static CRT: no VC++ redistributable needed. With `--target`, RUSTFLAGS reaches the
     // target's crates only, not build scripts.
+    if let Some(builtins) = builtins {
+        cargo.env(oncl_builtins_build::BUILTINS_DIR_VAR, builtins);
+    }
     cargo
-        .env(oncl_builtins_build::BUILTINS_DIR_VAR, builtins)
         .env("RUSTFLAGS", "-C target-feature=+crt-static")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         // Set for xtask by the stable toolchain running it.
@@ -176,7 +201,7 @@ pub fn build(
     let messages = String::from_utf8(output.stdout).context("cargo messages are not UTF-8")?;
     let dir = out.join(arch.name());
     std::fs::create_dir_all(&dir).with_context(|| format!("{}", dir.display()))?;
-    for (target, file) in FILES {
+    for &(target, file) in files {
         let built = artifact(&messages, target, file)
             .with_context(|| format!("cargo reported no {file} of {target}"))?;
         let copy = dir.join(file);

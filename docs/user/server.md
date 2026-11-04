@@ -46,7 +46,8 @@ memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
-metadata_bytes = 1048576
+# Signing needs more than the 1 MiB product default (a CMS signature with its chain: 2 MiB):
+metadata_bytes = 67108864
 framing_bytes = 67108864
 # Optional, required for multipart public-document snapshots:
 # scratch_directory = "/private/oncl-scratch"
@@ -379,3 +380,117 @@ gauges `oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued
   Revocation checking and client certificates (mTLS) are not supported.
 * An incoming `traceparent`/`tracestate` header is ignored: every request starts its
   own trace, so a client can neither join, force nor suppress sampling of a trace.
+
+## Package, service and container (operations)
+
+`oncl-server` ships as an archive of its own, `oncl-server-<version>-<flavor>.zip` (Windows: `win-x64`, `win-x86`, `win7-x64`, `win7-x86`) or `.tar.gz` (`linux-x64`, built against glibc 2.28; `osx`, universal), next to the separate `oncl-<version>-<flavor>` command-line archive. Neither is part of the OpenNCALayer desktop package, and nothing in them installs, enables or starts anything: no installer, no autostart, no trust-store change, no self-update. An archive holds the program, `README.md`, `server.example.toml` (the API **disabled**, no token, key or secret), `docs/`, `THIRD-PARTY.txt` (the licences of the third-party code of exactly that flavor: the Unix flavors add AWS-LC, which the Windows flavors do not contain), `LICENSE`, `NOTICE`, and on Linux `deploy/openncalayer-server.service` and `deploy/Dockerfile`. It holds no certificate, key, password, token or test file. The maintainer builds, gates and smoke-tests the archives with `cargo xtask package platform` (`cargo xtask package platform --help`); that command uploads and publishes nothing.
+
+**Updating is the operator's act**: unpack the newer archive, replace the program and restart the service (or rebuild the image from the newer archive). The program never contacts an update server. Replacing it does not touch the configuration, key containers or the audit journal.
+
+### What the packaged programs were checked to do
+
+`cargo xtask package platform` unpacks the archives it just made into an empty directory and starts the **unpacked** programs, without a GUI: `oncl --version`, `oncl hash` of a file and of stdin against an independent SHA-256, `oncl verify` refusing a file that is not a signature; then `oncl-server` without a subcommand and `serve` with the shipped example configuration, which must end by themselves while their control pipe stays open, with the operating system's socket table showing no listener on the configured port and a connection to it refused; then the explicit opt-in on loopback (a token from `token-create`, a named synthetic RSA key, loopback OCSP/CRL of a synthetic PKI, `--enable-api`), where the socket table shows exactly one loopback listener of the server process, `oncl --endpoint … sign` makes a CMS signature that `oncl verify` reports `Valid` and `extract` returns the document, the audit journal exists, and a newline on `--shutdown-stdin` stops the service and closes the port. `cargo xtask package platform-smoke` repeats only this part on archives that already exist.
+
+### Linux service account and systemd
+
+The unit is a file you copy; copying it does not enable or start the service, and `ConditionPathExists` keeps it from starting before a configuration exists.
+
+```sh
+tar -xzf oncl-server-<version>-linux-x64.tar.gz
+cd oncl-server-<version>-linux-x64
+sudo useradd --system --user-group --home-dir /var/lib/oncl-server --no-create-home --shell /usr/sbin/nologin oncl-server
+sudo install -m 0755 oncl-server /usr/local/bin/oncl-server
+sudo install -d -m 0700 -o oncl-server -g oncl-server /etc/oncl-server
+sudo install -m 0600 -o oncl-server -g oncl-server server.example.toml /etc/oncl-server/server.toml
+sudo install -m 0644 deploy/openncalayer-server.service /etc/systemd/system/openncalayer-server.service
+sudo systemctl daemon-reload
+```
+
+The unit runs as `oncl-server` with `NoNewPrivileges`, an empty capability set, `ProtectSystem=strict` (only `/var/lib/oncl-server`, its state directory, and `/etc/oncl-server` are writable: the private-file API opens the configuration read-write), `PrivateTmp`, `PrivateDevices`, `PrivateUsers`, no address family but IPv4/IPv6, a system-call filter, `MemoryMax=1G` (about twice `total_memory`: the HTTP stack and framing are outside the document budget), `TasksMax`, no core dumps and `UMask=0077`. `systemd-analyze security` rates it 1.1 (OK). It sets `KillSignal=SIGINT` because the service drains admitted operations on SIGINT only; SIGTERM ends it at once (exit 143). With the example configuration (`enabled = false`) `systemctl start openncalayer-server` ends at once with `disabled: no listener` in the journal and opens no listener. The service starts listening only after you configure a token, enable the API and run `sudo systemctl enable --now openncalayer-server` yourself.
+
+`recover_audit`: a journal that exists is reopened only with `recover_audit = true`; after a clean stop a restart with `false` is refused. A service that restarts (`Restart=on-failure`, a reboot) therefore keeps `recover_audit = true` once it is enabled; the first start creates the journal and is unaffected.
+
+### Token provisioning
+
+Run the real subcommand as the service account. It creates a new 256-bit token file in the private directory, refusing to overwrite one, and prints only its verifier:
+
+```sh
+sudo -u oncl-server /usr/local/bin/oncl-server token-create --directory /etc/oncl-server --name accounting.token
+# verifier=<64 hexadecimal characters>
+```
+
+Put the verifier, never the token, into `server.toml`, and write that file as the service account with `umask 077`: a configuration that anyone else can read or replace is refused.
+
+```sh
+sudo -u oncl-server sh -c 'umask 077 && cat > /etc/oncl-server/server.toml' <<'EOF'
+enabled = true
+bind = "127.0.0.1:13579"
+audit_directory = "/var/lib/oncl-server/audit"
+recover_audit = true
+scratch_directory = "/var/lib/oncl-server/scratch"
+metadata_bytes = 67108864
+
+[[tokens]]
+id = "accounting"
+verifier = "<the verifier printed above>"
+actions = ["hash", "verify"]
+keys = []
+EOF
+```
+
+Deliver `accounting.token` to that client over a channel you trust, into an owner-only directory on the client (`install -d -m 0700 ~/.oncl`, then a file written with `umask 077`; the client refuses a readable token file), and pass it with `--token-file`. Remove it from the server afterwards (`sudo -u oncl-server rm /etc/oncl-server/accounting.token`): the server only needs the verifier. Rotating a token is creating a new one, replacing its verifier and restarting.
+
+The client stages what it downloads (OCSP, CRLs) in its working directory unless `--temporary-directory` says otherwise, and on Unix it refuses a directory that others can reach: run `oncl` from an owner-only directory when it verifies against online PKI.
+
+**Windows.** The private-file check requires files with a protected ACL holding exactly one inheritable entry for the owner. `oncl-server token-create` creates such a file, and so does any program using the same private-file API, but `icacls` and PowerShell `Set-Acl` cannot produce that ACL (measured: the server refuses the result; `Set-Acl` also needs a privilege an ordinary account lacks). There is therefore no command-line recipe for putting `server.toml`, a key container or a password file in place on Windows. The packaged Windows programs are smoke-tested with files created through that API. A Windows operator needs a provisioning subcommand that does the same for arbitrary files; this version does not have one, and none is simulated here.
+
+### TLS provisioning (LAN exposure)
+
+A non-loopback bind needs `hosts` and either real TLS or a trusted proxy ([Explicit LAN exposure](#explicit-lan-exposure)). The service creates no CA and installs no certificate. Create the key as the service account, owner-only, and a request for your CA to sign:
+
+```sh
+sudo -u oncl-server sh -c 'umask 077 && install -d -m 0700 /etc/oncl-server/tls && cd /etc/oncl-server/tls && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out server.key && openssl req -new -key server.key -subj "/CN=signing.internal" -addext "subjectAltName=DNS:signing.internal" -out server.csr'
+```
+
+Install the certificate chain your CA returns (PEM, server certificate first) as `/etc/oncl-server/tls/server.crt`. For a laboratory without a CA, a self-signed **end-entity** certificate (`CA:FALSE`; the default `openssl req -x509` certificate is `CA:TRUE` and the client refused it as a server certificate, `TlsFailed`) that clients then trust explicitly is enough. It is not a production certificate:
+
+```sh
+sudo -u oncl-server sh -c 'umask 077 && cd /etc/oncl-server/tls && openssl req -x509 -key server.key -days 365 -subj "/CN=signing.internal" -addext "subjectAltName=DNS:signing.internal,IP:127.0.0.1" -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=serverAuth" -out server.crt'
+```
+
+```toml
+bind = "0.0.0.0:13579"
+hosts = ["signing.internal:13579"]
+exposure = { mode = "tls", certificate = "/etc/oncl-server/tls/server.crt", private_key = { directory = "/etc/oncl-server/tls", name = "server.key" } }
+```
+
+The client trusts exactly that certificate: `oncl --endpoint https://signing.internal:13579 --ca-file server.crt --token-file ~/.oncl/accounting.token hash --algorithm sha256 --input document.bin`. Without `--ca-file` it fails (`TlsFailed`); there is no flag that skips verification.
+
+### Container
+
+`deploy/Dockerfile` builds the image **from the release archive** (no source, no download) on a Debian 12 slim pinned by digest, as a non-root user (uid/gid 10001) with no configuration inside it. Build from a directory that holds the archive:
+
+```sh
+tar -xzf oncl-server-<version>-linux-x64.tar.gz
+docker build -f oncl-server-<version>-linux-x64/deploy/Dockerfile --build-arg VERSION=<version> -t oncl-server:<version> .
+```
+
+Mounts are explicit: `/etc/oncl-server` (private configuration, key containers, TLS key) and `/var/lib/oncl-server` (the audit journal `audit/` and `scratch/`, created by the service at its first start: mount a **volume** so the journal outlives the container, and do not create `audit/` yourself; an existing empty one is refused). The private-file rules hold inside the container, so prepare the volumes as the image's own user (uid 10001, mode 0700) and never mount a home directory:
+
+```sh
+docker volume create oncl-config
+docker volume create oncl-state
+docker run --rm -i --user 10001:10001 -v oncl-config:/etc/oncl-server --entrypoint sh oncl-server:<version> -c 'umask 077 && cat > /etc/oncl-server/server.toml' < server.toml
+docker run --rm --user 10001:10001 -v oncl-config:/etc/oncl-server oncl-server:<version> token-create --directory /etc/oncl-server --name accounting.token
+docker run -d --name oncl-server --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --memory 1g --memory-swap 1g --pids-limit 256 --tmpfs /tmp:rw,size=64m,mode=1777,noexec,nosuid \
+  -v oncl-config:/etc/oncl-server -v oncl-state:/var/lib/oncl-server \
+  -p 127.0.0.1:13579:13579 oncl-server:<version>
+```
+
+(Put a TLS key into the volume the same way: `… --entrypoint sh … -c 'umask 077 && mkdir -p /etc/oncl-server/tls && cat > /etc/oncl-server/tls/server.key' < server.key`, and read the token out with `--entrypoint cat`.) Inside the container `bind` must be `0.0.0.0:13579` with `hosts` equal to the authority clients use, and TLS or `trusted_proxy`; `-p 127.0.0.1:…` publishes it on the host's loopback only. With the example configuration the container prints `disabled: no listener` and exits 0. Never use `--privileged`. The image sets `STOPSIGNAL SIGINT`, so `docker stop` drains admitted operations (give it `--time` beyond `operation_timeout_ms`; the default Docker grace is 10 s). `--memory 1g` is the container budget for the example's `total_memory`; scratch space is bounded by `total_temp`, so size the `oncl-state` volume for it or lower `temp_per_operation` and `total_temp`. The image's `HEALTHCHECK` only tests that the port (`ONCL_HEALTH_PORT`, default 13579) accepts a TCP connection from inside the container: the authenticated `GET /health` needs a token, which the image must not hold, so probe it from your monitoring with a token that has the `hash` right.
+
+### Not done / not exercised here
+
+* The programs and archives are not signed (no Authenticode, no notarization) and nothing is published to a registry, release or browser store: the release workflow builds the archives as workflow artifacts only.
+* The macOS packaging path (universal check, tar.gz) and the CycloneDX SBOM job were not executed; Windows 7 packages were import-gated and started on Windows 10, not on Windows 7 itself.
