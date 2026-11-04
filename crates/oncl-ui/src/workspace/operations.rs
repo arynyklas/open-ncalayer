@@ -137,6 +137,12 @@ impl SignSpec {
     /// The spec as one label, which the consent binds: another format or other options are
     /// another thing to agree to.
     pub(crate) fn label(&self) -> String {
+        self.label_with(&self.options.evidence.label())
+    }
+
+    /// As [`SignSpec::label`] with the evidence label given: the runner passes the label of the
+    /// evidence bytes it actually loaded, and never re-reads the paths.
+    pub(crate) fn label_with(&self, evidence_label: &str) -> String {
         let name = match self.format {
             SignFormat::Cms => "cms".to_owned(),
             SignFormat::Cades(l) => format!("cades-{}", l.name()),
@@ -151,12 +157,7 @@ impl SignSpec {
         let o = &self.options;
         format!(
             "{name};attached={};add={};target={};parent={};id={};{}",
-            o.attached,
-            o.add,
-            o.target,
-            o.parent,
-            o.signature_id,
-            o.evidence.label()
+            o.attached, o.add, o.target, o.parent, o.signature_id, evidence_label
         )
     }
 

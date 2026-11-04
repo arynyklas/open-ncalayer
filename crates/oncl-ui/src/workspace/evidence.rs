@@ -49,37 +49,43 @@ impl Evidence {
     }
 
     /// The material as one label, which the consent binds: each path and the SHA-256 of what is
-    /// in it now, so that a file swapped between the user's confirmation and the run is not
-    /// the material that was agreed to (the runner compares the label again before the key).
+    /// in it now. The runner does NOT call this again: it compares the label of the bytes it
+    /// actually loaded and froze ([`Loaded::label`]), so a file swapped after the confirmation
+    /// (even swapped back) cannot be the material that was agreed to.
     pub(crate) fn label(&self) -> String {
-        let join = |paths: &[PathBuf]| {
+        let digests = |paths: &[PathBuf]| -> Vec<String> {
             paths
                 .iter()
                 .map(|p| {
-                    let digest = read_limited(
+                    read_limited(
                         p,
                         usize::try_from(evidence_limits().max_item_bytes).unwrap_or(usize::MAX),
                     )
-                    .map_or_else(
-                        |_| "unreadable".to_owned(),
-                        |bytes| {
-                            oncl_pki::key::HashAlg::Sha256
-                                .digest(&bytes)
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect()
-                        },
-                    );
-                    format!("{}#{digest}", p.display())
+                    .map_or_else(|_| "unreadable".to_owned(), |bytes| sha256_hex(&bytes))
                 })
+                .collect()
+        };
+        self.label_with(
+            &digests(&self.certificates),
+            &digests(&self.ocsp),
+            &digests(&self.crls),
+        )
+    }
+
+    fn label_with(&self, certs: &[String], ocsp: &[String], crls: &[String]) -> String {
+        let join = |paths: &[PathBuf], digests: &[String]| {
+            paths
+                .iter()
+                .zip(digests)
+                .map(|(p, d)| format!("{}#{d}", p.display()))
                 .collect::<Vec<_>>()
                 .join("|")
         };
         format!(
             "cert={};ocsp={};crl={}",
-            join(&self.certificates),
-            join(&self.ocsp),
-            join(&self.crls)
+            join(&self.certificates, certs),
+            join(&self.ocsp, ocsp),
+            join(&self.crls, crls)
         )
     }
 
@@ -110,21 +116,36 @@ impl Evidence {
             Ok(bytes)
         };
         let mut loaded = Loaded::default();
+        let (mut cd, mut od, mut rd) = (Vec::new(), Vec::new(), Vec::new());
         for path in &self.certificates {
             let bytes = read(path)?;
+            cd.push(sha256_hex(&bytes));
             loaded.certificates.push(
                 oncl_pki::cert::parse(&bytes)
                     .map_err(|_| JobError::Operation(oncl_core::ErrorCode::InvalidInput))?,
             );
         }
         for path in &self.ocsp {
-            loaded.ocsp.push(read(path)?);
+            let bytes = read(path)?;
+            od.push(sha256_hex(&bytes));
+            loaded.ocsp.push(bytes);
         }
         for path in &self.crls {
-            loaded.crls.push(read(path)?);
+            let bytes = read(path)?;
+            rd.push(sha256_hex(&bytes));
+            loaded.crls.push(bytes);
         }
+        loaded.label = self.label_with(&cd, &od, &rd);
         Ok(loaded)
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    oncl_pki::key::HashAlg::Sha256
+        .digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The material as bytes.
@@ -133,6 +154,8 @@ pub(crate) struct Loaded {
     pub(crate) certificates: Vec<Certificate>,
     ocsp: Vec<Vec<u8>>,
     crls: Vec<Vec<u8>>,
+    /// The label of THESE bytes: what the consent is compared with.
+    pub(crate) label: String,
 }
 
 impl Loaded {

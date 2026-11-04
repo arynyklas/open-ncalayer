@@ -489,7 +489,12 @@ fn sign_inner(
     if !approved.consent.covers(&captured) || approved.consent.alias() != alias {
         return Ok(Outcome::DocumentsChanged(captured));
     }
-    if approved.consent.profile() != spec.label() {
+    // Compared with the label of the evidence bytes loaded and frozen above, never with a fresh
+    // read of the paths: a file swapped after the confirmation (even swapped back) is refused.
+    let evidence_label = loaded
+        .as_ref()
+        .map_or_else(|| spec.options.evidence.label(), |l| l.label.clone());
+    if approved.consent.profile() != spec.label_with(&evidence_label) {
         // The user agreed to another format or other options: nothing agreed to stands.
         return Ok(Outcome::NotApplied(JobError::Operation(
             ErrorCode::PermissionDenied,
@@ -808,6 +813,81 @@ mod tests {
             assert!(std::fs::metadata(sig).unwrap().len() > 100);
         }
         assert_eq!(guard.applications(), 2, "once per document");
+    }
+
+    /// An evidence file swapped between the confirmation and the run: the runner compares the
+    /// consent with the digests of the bytes it LOADED, never with a fresh read of the path.
+    /// Case 1: B is on disk when the evidence is loaded. Case 2 (A->B->A): B is loaded, then A
+    /// is put back before the consent check, so a re-read would see A and match. Both are
+    /// refused before any key use (0 applications) and nothing is written.
+    #[test]
+    fn an_evidence_file_swapped_after_the_confirmation_is_refused_before_any_key_use() {
+        for swap_back in [false, true] {
+            let w = world();
+            let paths = documents(&w, &["a.txt"]);
+            let evidence = evidence_files(&w);
+            let file = evidence.ocsp[0].clone();
+            let original = std::fs::read(&file).unwrap();
+            let spec = SignSpec {
+                format: SignFormat::Cades(crate::workspace::Level::Lt),
+                options: SignOptions {
+                    evidence,
+                    ..SignOptions::default()
+                },
+            };
+            // The page confirmed this label (the files as they were: A).
+            let agreed = spec.label();
+            let (engine, guard) = engine(&w);
+            let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
+            let shown = shown(&engine, &paths);
+            // B replaces A before the run loads the evidence.
+            let mut swapped = original.clone();
+            swapped.push(0);
+            std::fs::write(&file, &swapped).unwrap();
+            let outcome = sign(
+                &engine,
+                &guard,
+                &w.store,
+                &candidates[0].alias,
+                &Zeroizing::new(PASSWORD.to_owned()),
+                &paths,
+                &spec,
+                &Destination::Beside,
+                &Arc::new(JobControl::default()),
+                |frozen| {
+                    if swap_back {
+                        // The evidence was loaded (B) before this callback; A is back now.
+                        std::fs::write(&file, &original).unwrap();
+                    }
+                    let mut c = Controller::new("tools", ActionKind::Sign);
+                    c.dispatch(Event::Documents(shown.clone()));
+                    c.dispatch(Event::Profile(agreed.clone()));
+                    c.dispatch(Event::KeyStore(w.store.display().to_string()));
+                    c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
+                        PASSWORD.to_owned(),
+                    )));
+                    c.dispatch(Event::Unlocked(candidates.clone()));
+                    c.dispatch(Event::CertificateChosen(0));
+                    c.dispatch(Event::Frozen(&frozen.items));
+                    c.dispatch(Event::Arm);
+                    match c.dispatch(Event::Confirm {
+                        frozen: &frozen.items,
+                    }) {
+                        Effect::None => Decision::Proceed(Box::new(c.take_approved().unwrap())),
+                        _ => Decision::Abort,
+                    }
+                },
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    Outcome::NotApplied(JobError::Operation(ErrorCode::PermissionDenied))
+                ),
+                "swap_back={swap_back}: {outcome:?}"
+            );
+            assert_eq!(guard.applications(), 0, "swap_back={swap_back}");
+            assert!(!w.dir.path().join("a.txt.p7s").exists());
+        }
     }
 
     /// The results go where the user said: one folder, not next to the documents; and a
