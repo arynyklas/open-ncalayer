@@ -221,6 +221,20 @@ impl OperationLease {
     pub fn deadline(&self) -> Deadline {
         self.0.deadline
     }
+    /// Non-owning identity probe. It keeps no permit, buffer or authority alive
+    /// and cannot be upgraded back into a lease.
+    pub fn downgrade(&self) -> WeakOperationLease {
+        WeakOperationLease(Arc::downgrade(&self.0))
+    }
+}
+/// Observes only whether every owner of an operation (context, workers,
+/// responses, artifacts) has been dropped.
+#[derive(Clone, Debug)]
+pub struct WeakOperationLease(std::sync::Weak<LeaseInner>);
+impl WeakOperationLease {
+    pub fn is_live(&self) -> bool {
+        self.0.strong_count() > 0
+    }
 }
 
 struct ScopeState {

@@ -177,8 +177,15 @@ impl ServiceHost {
                 .resources()
                 .reserve_metadata(header_bytes)
                 .map_err(processing_error)?;
-            let mut prepared =
-                intake::prepare(&metadata, body, &mut admission, deadline, cancel.clone()).await?;
+            let mut prepared = intake::prepare(
+                &metadata,
+                body,
+                &mut admission,
+                deadline,
+                cancel.clone(),
+                &|m| dispatch::precheck(m, &policy, &principal, inline_enabled),
+            )
+            .await?;
             // Recheck the actual Principal generation and each resolved operation
             // after bounded metadata intake, before the first SDK dispatch.
             let mut actions = Vec::with_capacity(prepared.metadata.items.len());
@@ -322,7 +329,7 @@ impl ServiceHost {
                         result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,
-                            applied: oncl_api::error::AppliedState::NotApplied,
+                            applied: dispatch::applied_of(&result),
                             result,
                         });
                     }

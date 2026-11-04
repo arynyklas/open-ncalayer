@@ -123,6 +123,9 @@ pub struct Pki {
     pub address: std::net::SocketAddr,
     pub origin: String,
     pub inter: KeyEntry,
+    pub crls: Vec<Vec<u8>>,
+    /// Milliseconds the loopback TSA waits before answering (holds native work).
+    pub tsa_delay_ms: Arc<std::sync::atomic::AtomicU64>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     pub requests: Arc<AtomicUsize>,
@@ -154,6 +157,9 @@ impl Pki {
         let inter_crl = MockCrl::new(inter.clone())
             .with_this_update(now - time::Duration::MINUTE)
             .next_update(Some(now + time::Duration::days(1)));
+        let crls = vec![root.der(), inter_crl.der()];
+        let tsa_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let delay = tsa_delay_ms.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
         let (stopped, counted) = (stop.clone(), requests.clone());
@@ -209,6 +215,7 @@ impl Pki {
                     .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.trim().to_owned());
                 let reply = if method == "POST" && path == "/tsa" {
+                    std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
                     tsa.send(&HttpRequest::post(
                         &url,
                         content_type.as_deref(),
@@ -246,6 +253,8 @@ impl Pki {
             address,
             origin,
             inter,
+            crls,
+            tsa_delay_ms,
             stop,
             thread: Some(thread),
             requests,
@@ -488,21 +497,34 @@ pub fn spool_files(root: &Path) -> Vec<PathBuf> {
 pub struct SpoolWatch {
     stop: Arc<AtomicBool>,
     hit: Arc<AtomicBool>,
+    pub scanned: Arc<AtomicUsize>,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl SpoolWatch {
     pub fn start(root: PathBuf, needles: Vec<Vec<u8>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let hit = Arc::new(AtomicBool::new(false));
-        let (s, h) = (stop.clone(), hit.clone());
+        let scanned = Arc::new(AtomicUsize::new(0));
+        let failure = Arc::new(std::sync::Mutex::new(None::<String>));
+        let (s, h, scanned_thread, failure_thread) =
+            (stop.clone(), hit.clone(), scanned.clone(), failure.clone());
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 for file in spool_files(&root) {
-                    if let Ok(bytes) = std::fs::read(&file) {
-                        for needle in &needles {
-                            if bytes.windows(needle.len()).any(|w| w == needle.as_slice()) {
-                                h.store(true, Ordering::SeqCst);
+                    match std::fs::read(&file) {
+                        Ok(bytes) => {
+                            scanned_thread.fetch_add(1, Ordering::SeqCst);
+                            for needle in &needles {
+                                if bytes.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                                    h.store(true, Ordering::SeqCst);
+                                }
                             }
+                        }
+                        // A file removed between listing and reading is normal.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            *failure_thread.lock().unwrap() = Some(error.to_string());
                         }
                     }
                 }
@@ -512,12 +534,18 @@ impl SpoolWatch {
         Self {
             stop,
             hit,
+            scanned,
+            failure,
             thread: Some(thread),
         }
     }
+    /// True if a needle was ever seen. Panics if any scan hit a read error.
     pub fn finish(mut self) -> bool {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
+        if let Some(error) = self.failure.lock().unwrap().take() {
+            panic!("spool watcher read error: {error}");
+        }
         self.hit.load(Ordering::SeqCst)
     }
 }

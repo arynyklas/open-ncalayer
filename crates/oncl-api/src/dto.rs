@@ -61,6 +61,9 @@ pub enum Operation {
         parent: Option<String>,
         #[serde(default)]
         signature_id: Option<String>,
+        /// Public evidence for LT/LTA levels: acquired by the caller, never trust anchors.
+        #[serde(default)]
+        evidence: Vec<EvidenceRef>,
         keys: Vec<KeyRef>,
     },
     /// Keyless public-evidence extension (never opens a private key).
@@ -69,6 +72,8 @@ pub enum Operation {
         input: String,
         #[serde(default)]
         detached: Option<String>,
+        #[serde(default)]
+        evidence: Vec<EvidenceRef>,
     },
     /// Create a JWS over the input payload bytes.
     JwsSign {
@@ -180,6 +185,20 @@ pub enum SignWriteMode {
     Create,
     Add,
 }
+/// A public `document` part carrying DER evidence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRef {
+    pub kind: EvidenceKind,
+    pub input: String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    Certificate,
+    Ocsp,
+    Crl,
+}
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtendKind {
@@ -288,19 +307,22 @@ pub enum OperationResult {
         signers: Vec<SignerChecks>,
     },
     Extraction {
-        artifact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         bytes_written: u64,
     },
     Signing {
         profile: SignKind,
-        artifact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         bytes_in: u64,
         bytes_out: u64,
         signers: Vec<crate::error::AppliedState>,
     },
     Jws {
         serialization: JwsFormat,
-        artifact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         bytes_in: u64,
         bytes_out: u64,
         signers: Vec<crate::error::AppliedState>,
@@ -337,7 +359,8 @@ pub enum OperationResult {
         cms: Option<InspectedCms>,
     },
     Stamping {
-        artifact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         bytes_in: u64,
         bytes_out: u64,
         timestamp: TimestampFacts,
@@ -348,7 +371,8 @@ pub enum OperationResult {
     },
     Extension {
         profile: ExtendKind,
-        artifact: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         bytes_in: u64,
         bytes_out: u64,
         verdicts: Vec<&'static str>,
@@ -411,4 +435,19 @@ pub struct JwsSignerFacts {
     pub crypto: &'static str,
     pub verdict: &'static str,
     pub trust: SignerChecks,
+}
+
+impl OperationResult {
+    /// A failed terminal record withholds every artifact: no Content-ID of
+    /// undelivered output may remain in the results.
+    pub fn withhold_artifact(&mut self) {
+        match self {
+            Self::Extraction { artifact, .. }
+            | Self::Signing { artifact, .. }
+            | Self::Extension { artifact, .. }
+            | Self::Stamping { artifact, .. }
+            | Self::Jws { artifact, .. } => *artifact = None,
+            _ => {}
+        }
+    }
 }

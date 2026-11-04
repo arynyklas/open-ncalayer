@@ -212,7 +212,7 @@ fn responses() -> Value {
         AppliedState::Applied,
         OperationResult::Signing {
             profile: SignKind::CadesB,
-            artifact: "artifact-0".into(),
+            artifact: Some("artifact-0".into()),
             bytes_in: 1024,
             bytes_out: 6144,
             signers: vec![AppliedState::Applied],
@@ -237,7 +237,7 @@ fn responses() -> Value {
         "t2",
         AppliedState::NotApplied,
         OperationResult::Stamping {
-            artifact: "artifact-0".into(),
+            artifact: Some("artifact-0".into()),
             bytes_in: 1024,
             bytes_out: 3500,
             timestamp: timestamp(),

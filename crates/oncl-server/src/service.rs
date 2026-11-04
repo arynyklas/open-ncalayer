@@ -115,10 +115,7 @@ impl ServiceHost {
             config.audit_segment_bytes,
             config.audit_quota_bytes,
             32,
-            // Closed bindings stay as tombstones until their original deadline
-            // (S01 contract), so the table, not max_in_flight, bounds private
-            // requests per operation_timeout window.
-            crate::audit::MAX_BINDINGS,
+            config.max_in_flight as usize,
         )?;
         let audit = if config.audit_directory.exists() {
             DurableAuditGuard::open(audit_config)?

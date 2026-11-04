@@ -58,13 +58,24 @@ pub(super) fn inputs(operation: &Operation) -> std::vec::IntoIter<&str> {
         Operation::Extract { input } => [Some(input.as_str()), None],
         Operation::Verify {
             input, detached, ..
-        }
-        | Operation::Sign {
-            input, detached, ..
+        } => [Some(input.as_str()), detached.as_deref()],
+        Operation::Sign {
+            input,
+            detached,
+            evidence,
+            ..
         }
         | Operation::Extend {
-            input, detached, ..
-        } => [Some(input.as_str()), detached.as_deref()],
+            input,
+            detached,
+            evidence,
+            ..
+        } => {
+            let mut names = vec![input.as_str()];
+            names.extend(detached.as_deref());
+            names.extend(evidence.iter().map(|e| e.input.as_str()));
+            return names.into_iter();
+        }
         Operation::Stamp { input }
         | Operation::JwsSign { input, .. }
         | Operation::JwtEncode { input, .. }
@@ -144,6 +155,60 @@ pub(super) fn secret_kinds(metadata: &OperationMetadata) -> HashMap<&str, Secret
         .iter()
         .flat_map(|item| secret_refs(&item.operation))
         .collect()
+}
+/// Rights that do not depend on received secret bytes. Runs right after the
+/// bounded metadata parse and before any secret byte is reserved or read.
+pub(super) fn precheck(
+    metadata: &OperationMetadata,
+    policy: &AccessPolicy,
+    principal: &Principal,
+    inline_enabled: bool,
+) -> Result<(), ApiError> {
+    let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
+    for item in &metadata.items {
+        let act = action(&item.operation);
+        if act != Action::Sign {
+            policy
+                .authorize(principal, act, None, None)
+                .map_err(|_| denied())?;
+        }
+        let keys = key_refs(&item.operation);
+        if act == Action::Sign && (keys.is_empty() || keys.len() > MAX_KEYS_PER_ITEM) {
+            return Err(invalid_request());
+        }
+        for key in keys {
+            match key {
+                KeyRef::Named { name } => {
+                    policy
+                        .authorize(principal, Action::Sign, Some(name), None)
+                        .map_err(|_| denied())?;
+                }
+                KeyRef::Inline { password, .. } => {
+                    policy
+                        .precheck_inline(principal, Action::Sign, inline_enabled)
+                        .map_err(|_| denied())?;
+                    if password.is_none() {
+                        return Err(invalid_request());
+                    }
+                }
+            }
+        }
+        if let Operation::Inspect {
+            target: InspectTarget::Container { password, .. },
+        } = &item.operation
+        {
+            if password.is_none() {
+                return Err(invalid_request());
+            }
+            if policy
+                .metadata_aliases(principal)
+                .map_or(true, |aliases| aliases.is_empty())
+            {
+                return Err(denied());
+            }
+        }
+    }
+    Ok(())
 }
 pub(super) const MAX_KEYS_PER_ITEM: usize = 8;
 /// Host authorization of every key named by an item, performed after bounded
@@ -317,6 +382,20 @@ fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
         expectations: check_name(facts.expectations()),
     }
 }
+/// Item-level key application derived from the real per-signer/report state.
+pub(super) fn applied_of(result: &OperationResult) -> oncl_api::error::AppliedState {
+    use oncl_api::error::AppliedState as A;
+    match result {
+        OperationResult::Signing { signers, .. } | OperationResult::Jws { signers, .. } => {
+            signers.iter().fold(A::NotApplied, |a, s| match (a, *s) {
+                (A::Unknown, _) | (_, A::Unknown) => A::Unknown,
+                (A::Applied, _) | (_, A::Applied) => A::Applied,
+                _ => A::NotApplied,
+            })
+        }
+        _ => A::NotApplied,
+    }
+}
 pub(super) struct ArtifactSink<'a> {
     pub store: &'a Arc<super::artifact::ArtifactStore>,
     pub owner: &'a Arc<super::ownership::OperationOutput>,
@@ -346,6 +425,51 @@ fn ades_level(kind: SignKind) -> Option<AdesLevel> {
         CadesLt | PadesLt | XadesLt => Some(AdesLevel::Lt),
         CadesLta | PadesLta | XadesLta => Some(AdesLevel::Lta),
     }
+}
+/// Caller-acquired public status/chain evidence. It is never a trust anchor.
+struct Evidence {
+    certificates: Vec<oncl_pki::cert::Certificate>,
+    ocsp: Vec<Vec<u8>>,
+    crls: Vec<Vec<u8>>,
+    _reservations: Vec<ResourceReservation>,
+}
+impl Evidence {
+    fn slices(&self) -> (Vec<&[u8]>, Vec<&[u8]>) {
+        (
+            self.ocsp.iter().map(Vec::as_slice).collect(),
+            self.crls.iter().map(Vec::as_slice).collect(),
+        )
+    }
+}
+fn load_evidence(
+    env: &mut Env<'_>,
+    refs: &[oncl_api::dto::EvidenceRef],
+    ctx: &mut OperationContext,
+) -> Result<Evidence, OperationError> {
+    use oncl_api::dto::EvidenceKind;
+    if refs.len() > 64 {
+        return Err(ProcessingError::MetadataLimit.into());
+    }
+    let mut evidence = Evidence {
+        certificates: Vec::new(),
+        ocsp: Vec::new(),
+        crls: Vec::new(),
+        _reservations: Vec::new(),
+    };
+    for reference in refs {
+        let mut document = env.documents.take(&reference.input)?;
+        let (bytes, reservation) = read_bytes(&mut document, ctx, 1 << 20)?;
+        evidence._reservations.push(reservation);
+        match reference.kind {
+            EvidenceKind::Certificate => evidence.certificates.push(
+                oncl_pki::cert::parse(&bytes)
+                    .map_err(|_| ProcessingError::InvalidInput("invalid evidence certificate"))?,
+            ),
+            EvidenceKind::Ocsp => evidence.ocsp.push(bytes),
+            EvidenceKind::Crl => evidence.crls.push(bytes),
+        }
+    }
+    Ok(evidence)
 }
 fn is_xml(kind: SignKind) -> bool {
     matches!(
@@ -473,6 +597,36 @@ fn certificate(
         .map(Some)
         .map_err(|_| ProcessingError::InvalidInput("invalid public certificate").into())
 }
+/// A host failure after the SDK reported key application keeps its truthful
+/// Applied/Unknown state instead of becoming NotApplied.
+fn after_use<T, E: Into<OperationError>>(
+    applied: oncl_pki::key::AppliedState,
+    result: Result<T, E>,
+) -> Result<T, OperationError> {
+    result.map_err(|error| {
+        let error = error.into();
+        if applied == oncl_pki::key::AppliedState::NotApplied
+            || matches!(error, OperationError::AfterKeyUse { .. })
+        {
+            error
+        } else {
+            OperationError::AfterKeyUse {
+                source: Box::new(error),
+                applied,
+            }
+        }
+    })
+}
+fn strongest(
+    states: impl IntoIterator<Item = oncl_pki::key::AppliedState>,
+) -> oncl_pki::key::AppliedState {
+    use oncl_pki::key::AppliedState::*;
+    states.into_iter().fold(NotApplied, |a, s| match (a, s) {
+        (Unknown, _) | (_, Unknown) => Unknown,
+        (Applied, _) | (_, Applied) => Applied,
+        _ => NotApplied,
+    })
+}
 pub(super) fn run(
     operation: Operation,
     item_id: &str,
@@ -570,7 +724,7 @@ pub(super) fn run(
             let projection = ctx.resources().reserve_metadata(512)?;
             Ok((
                 OperationResult::Extraction {
-                    artifact: output.id,
+                    artifact: Some(output.id),
                     bytes_written: report.bytes_written,
                 },
                 projection,
@@ -586,6 +740,7 @@ pub(super) fn run(
             target,
             parent,
             signature_id,
+            evidence,
             keys,
         } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
@@ -609,10 +764,12 @@ pub(super) fn run(
                 .map(|(selector, password)| KeyRequest::new(selector, password))
                 .collect();
             let limits = evidence_limits(ctx.resources().limits());
+            let evidence = load_evidence(env, &evidence, ctx)?;
+            let (ocsp, crls) = evidence.slices();
             let material = ValidationMaterial {
-                certificates: &[],
-                ocsp: &[],
-                crls: &[],
+                certificates: &evidence.certificates,
+                ocsp: &ocsp,
+                crls: &crls,
             };
             let mut document = env.documents.take(&input)?;
             let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
@@ -694,21 +851,29 @@ pub(super) fn run(
             let report = env
                 .engine
                 .sign_staged(request, reader.source(), &mut staged, ctx)?;
-            reader.finish()?;
+            // Everything below runs after the key may have been used.
+            let state = strongest(report.signer_states());
+            after_use(state, reader.finish())?;
             if let Some(reader) = &mut detached_reader {
-                reader.finish()?;
+                after_use(state, reader.finish())?;
             }
             let signers: Vec<_> = report.signer_states().map(applied).collect();
-            let projection = ctx.resources().reserve_metadata(
-                (signers.len() as u64 * 16)
-                    .checked_add(512)
-                    .ok_or(ProcessingError::MetadataLimit)?,
+            let projection = after_use(
+                state,
+                ctx.resources().reserve_metadata(
+                    (signers.len() as u64 * 16)
+                        .checked_add(512)
+                        .ok_or(ProcessingError::MetadataLimit)?,
+                ),
             )?;
-            let artifact = super::artifact::FinishedArtifact::from_staged(sink.owner, staged)?;
+            let artifact = after_use(
+                state,
+                super::artifact::FinishedArtifact::from_staged(sink.owner, staged),
+            )?;
             Ok((
                 OperationResult::Signing {
                     profile,
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in,
                     bytes_out: report.bytes_out,
                     signers,
@@ -721,10 +886,13 @@ pub(super) fn run(
             profile,
             input,
             detached,
+            evidence,
         } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
             let (level, pdf) = extend_level(profile);
             let limits = evidence_limits(ctx.resources().limits());
+            let evidence = load_evidence(env, &evidence, ctx)?;
+            let (ocsp, crls) = evidence.slices();
             let mut document = env.documents.take(&input)?;
             let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
             let mut staged = staged_output(env, ctx)?;
@@ -741,7 +909,12 @@ pub(super) fn run(
             } else {
                 oncl_core::ExtendRequest::cms(level)
             }
-            .with_evidence_limits(limits);
+            .with_evidence_limits(limits)
+            .with_material(ValidationMaterial {
+                certificates: &evidence.certificates,
+                ocsp: &ocsp,
+                crls: &crls,
+            });
             if let Some(reader) = &mut detached_reader {
                 request = request.with_detached(reader.source());
             }
@@ -766,7 +939,7 @@ pub(super) fn run(
             Ok((
                 OperationResult::Extension {
                     profile,
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in,
                     bytes_out: report.bytes_out,
                     verdicts,
@@ -876,7 +1049,7 @@ pub(super) fn run(
             let projection = ctx.resources().reserve_metadata(1024)?;
             Ok((
                 OperationResult::Stamping {
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in(),
                     bytes_out: token_len,
                     timestamp: timestamp_facts(&report),
@@ -949,15 +1122,17 @@ pub(super) fn run(
                 &mut writer,
                 ctx,
             )?;
-            let artifact = writer.finish(report.bytes_out)?;
+            let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
             let signers = vec![applied(report.applied); report.signer_count];
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            let projection = after_use(
+                report.applied,
+                ctx.resources()
+                    .reserve_metadata(512 + signers.len() as u64 * 16),
+            )?;
             Ok((
                 OperationResult::Jws {
                     serialization,
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in,
                     bytes_out: report.bytes_out,
                     signers,
@@ -1006,15 +1181,17 @@ pub(super) fn run(
                 &mut writer,
                 ctx,
             )?;
-            let artifact = writer.finish(report.bytes_out)?;
+            let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
             let signers = vec![applied(report.applied); report.signer_count];
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            let projection = after_use(
+                report.applied,
+                ctx.resources()
+                    .reserve_metadata(512 + signers.len() as u64 * 16),
+            )?;
             Ok((
                 OperationResult::Jws {
                     serialization,
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in,
                     bytes_out: report.bytes_out,
                     signers,
@@ -1038,15 +1215,17 @@ pub(super) fn run(
             let report = env
                 .engine
                 .jwt_encode(requests.remove(0), &claims, &mut writer, ctx)?;
-            let artifact = writer.finish(report.bytes_out)?;
+            let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
             let signers = vec![applied(report.applied); report.signer_count];
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            let projection = after_use(
+                report.applied,
+                ctx.resources()
+                    .reserve_metadata(512 + signers.len() as u64 * 16),
+            )?;
             Ok((
                 OperationResult::Jws {
                     serialization: oncl_api::dto::JwsFormat::Compact,
-                    artifact: sink.id,
+                    artifact: Some(sink.id),
                     bytes_in: report.bytes_in,
                     bytes_out: report.bytes_out,
                     signers,
@@ -1160,5 +1339,47 @@ pub(super) fn run(
                 None,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oncl_pki::key::AppliedState::*;
+    #[test]
+    fn host_failure_after_key_use_keeps_the_real_applied_state() {
+        for state in [Applied, Unknown] {
+            let error = after_use::<(), _>(state, Err(ProcessingError::MetadataLimit)).unwrap_err();
+            assert_eq!(error.applied_state(), state);
+            // Never wrapped twice and never downgraded.
+            let again = after_use::<(), _>(Unknown, Err(error)).unwrap_err();
+            assert_eq!(again.applied_state(), state);
+        }
+        let plain =
+            after_use::<(), _>(NotApplied, Err(ProcessingError::MetadataLimit)).unwrap_err();
+        assert_eq!(plain.applied_state(), NotApplied);
+        assert_eq!(strongest([NotApplied, Applied, Unknown]), Unknown);
+        assert_eq!(strongest([NotApplied, Applied]), Applied);
+        assert_eq!(strongest([]), NotApplied);
+    }
+    #[test]
+    fn every_private_result_family_maps_its_signers_to_the_item_state() {
+        use oncl_api::error::AppliedState as A;
+        let jws = OperationResult::Jws {
+            serialization: oncl_api::dto::JwsFormat::Compact,
+            artifact: None,
+            bytes_in: 0,
+            bytes_out: 0,
+            signers: vec![A::Applied],
+        };
+        assert_eq!(applied_of(&jws), A::Applied);
+        let signing = OperationResult::Signing {
+            profile: SignKind::Cms,
+            artifact: None,
+            bytes_in: 0,
+            bytes_out: 0,
+            signers: vec![A::NotApplied, A::Unknown],
+        };
+        assert_eq!(applied_of(&signing), A::Unknown);
     }
 }

@@ -224,8 +224,10 @@ authenticated principal and the exact key label; a FINAL follows. Audit failure
 before use is a typed `AuditUnavailable`/`NotApplied` failure. If a failure follows
 a possible key application, the terminal record reports `Applied` or `Unknown`; no
 rollback, retry or exactly-once guarantee is given. Closed audit bindings remain
-as tombstones until the original deadline (accepted S01 contract), so at most
-1024 private requests are accepted per `operation_timeout_ms` window.
+as tombstones (the closed operation id can never rebind) until the original
+deadline or until every owner of that operation (context, worker, response,
+artifact) has been dropped, whichever is first, so completed requests do not
+consume the bounded binding table.
 
 ## Terminal records for streamed responses
 

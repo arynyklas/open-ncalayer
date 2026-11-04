@@ -1536,3 +1536,83 @@ fn current_presence_reserved_and_header_item_fields_fail_closed_without_mutation
         assert_eq!(std::fs::read(file).unwrap(), bytes);
     }
 }
+
+#[test]
+fn closed_tombstone_is_pruned_when_every_owner_is_gone_but_not_while_live() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = DurableAuditGuard::create(
+        AuditConfig::new(temp.path().join("audit"), 1 << 20, 4 << 20, 8, 1).unwrap(),
+    )
+    .unwrap();
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits {
+        max_in_flight: 4,
+        ..ResourceLimits::default()
+    }))
+    .unwrap();
+    let begin = || {
+        engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::offline_report(),
+                Arc::new(Control),
+            )
+            .unwrap()
+    };
+    let key = KeyId::new("key").unwrap();
+    let labels = || [(KeyId::new("key").unwrap(), AuditLabel::new([4; 16]))];
+    let first = begin();
+    drop(binding(&guard, &first, &key));
+    // Same live context: the closed tombstone still blocks rebinding and capacity.
+    assert!(
+        guard
+            .bind(&first, AuditLabel::new([3; 16]), labels())
+            .is_err()
+    );
+    let second = begin();
+    assert!(
+        guard
+            .bind(&second, AuditLabel::new([3; 16]), labels())
+            .is_err()
+    );
+    // Every owner gone: the id can never be presented again, so capacity returns
+    // well before the original deadline.
+    drop(first);
+    assert!(
+        guard
+            .bind(&second, AuditLabel::new([3; 16]), labels())
+            .is_ok()
+    );
+}
+
+#[test]
+fn deadline_expiry_before_use_refuses_that_request_without_poisoning_service_health() {
+    use oncl_core::keys::{KeyUseEvent, KeyUseGuard};
+    let temp = tempfile::tempdir().unwrap();
+    let guard = DurableAuditGuard::create(config(&temp.path().join("audit"))).unwrap();
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits {
+        operation_timeout: std::time::Duration::from_millis(30),
+        max_in_flight: 4,
+        ..ResourceLimits::default()
+    }))
+    .unwrap();
+    let ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let event = KeyUseEvent::new(&ctx, key, Action::Sign);
+    assert!(
+        guard.before_use(&event).is_err(),
+        "expired deadline refuses this use"
+    );
+    assert_eq!(
+        guard.health(),
+        AuditHealth::Healthy,
+        "a slow request must not poison every signer"
+    );
+}

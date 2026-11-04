@@ -261,6 +261,29 @@ impl AccessPolicy {
         }
         Ok(ExecutionGrant::new([action]).with_keys([selector.key_id()]))
     }
+    /// Source-independent inline right check, made BEFORE any secret byte is
+    /// read. The exact immutable InlineID is still authorized after intake.
+    pub fn precheck_inline(
+        &self,
+        principal: &Principal,
+        action: Action,
+        enabled: bool,
+    ) -> io::Result<()> {
+        if !enabled || !matches!(action, Action::Sign | Action::SignDigest) {
+            return Err(denied());
+        }
+        let state = self.state.read().map_err(|_| denied())?;
+        if !Arc::ptr_eq(&principal.owner, &self.identity)
+            || principal.generation != state.generation
+        {
+            return Err(denied());
+        }
+        let record = state.records.get(&principal.id).ok_or_else(denied)?;
+        if !record.inline_pkcs12 || !record.actions.contains(&action) {
+            return Err(denied());
+        }
+        Ok(())
+    }
     /// Exact container aliases the host granted to this principal's inspection.
     pub fn metadata_aliases(&self, principal: &Principal) -> io::Result<Vec<String>> {
         let state = self.state.read().map_err(|_| denied())?;

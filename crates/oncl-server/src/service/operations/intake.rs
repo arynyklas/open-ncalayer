@@ -255,6 +255,7 @@ pub(super) async fn prepare(
     admission: &mut OperationAdmission,
     deadline: Deadline,
     cancel: Arc<Cancellation>,
+    precheck: &(dyn Fn(&OperationMetadata) -> Result<(), ApiError> + Sync),
 ) -> Result<Prepared, ApiError> {
     let content_type = metadata
         .headers
@@ -316,6 +317,7 @@ pub(super) async fn prepare(
         let request: SmallRequest =
             serde_json::from_slice(&bytes).map_err(|_| invalid_request())?;
         validate_metadata(&request.metadata)?;
+        precheck(&request.metadata)?;
         if request
             .metadata
             .parts
@@ -414,6 +416,8 @@ pub(super) async fn prepare(
     let request: OperationMetadata =
         serde_json::from_slice(&bytes).map_err(|_| invalid_request())?;
     validate_metadata(&request)?;
+    // Rights are checked before any secret byte is reserved or read.
+    precheck(&request)?;
     parser
         .install_fields(
             &request

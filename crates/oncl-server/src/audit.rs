@@ -19,7 +19,7 @@ pub const FRAME_BYTES: u64 = 160;
 // v01's zero reserved item bits are unknowable, not authoritative non-batch.
 const MAGIC: &[u8; 8] = b"ONCLAU02";
 const IDENTITY: &str = "oncl-audit.identity";
-pub(crate) const MAX_BINDINGS: usize = 1024;
+const MAX_BINDINGS: usize = 1024;
 const MAX_KEYS_PER_OPERATION: usize = 32;
 const MAX_BATCH_ITEMS: u16 = 1024;
 
@@ -133,6 +133,9 @@ struct Binding {
     keys: HashMap<KeyId, AuditLabel>,
     deadline: Deadline,
     lease: Option<OperationLease>,
+    /// Non-owning; a closed tombstone is pruned once every owner of the
+    /// operation is gone, since its id can then never be presented again.
+    weak: Option<oncl_pki::resource::WeakOperationLease>,
     closed: bool,
 }
 struct Pending {
@@ -605,9 +608,10 @@ impl DurableAuditGuard {
         keys: impl IntoIterator<Item = (KeyId, AuditLabel)>,
     ) -> io::Result<AuditBinding> {
         let mut state = self.lock()?;
-        state
-            .bindings
-            .retain(|_, binding| !binding.deadline.is_expired());
+        state.bindings.retain(|_, binding| {
+            !binding.deadline.is_expired()
+                && !(binding.closed && binding.weak.as_ref().is_some_and(|w| !w.is_live()))
+        });
         if ctx.deadline().is_expired() {
             return Err(invalid());
         }
@@ -625,13 +629,15 @@ impl DurableAuditGuard {
         if mapped.is_empty() {
             return Err(invalid());
         }
+        let lease = ctx.lease();
         state.bindings.insert(
             ctx.id(),
             Binding {
                 principal,
                 keys: mapped,
                 deadline: ctx.deadline(),
-                lease: Some(ctx.lease()),
+                weak: Some(lease.downgrade()),
+                lease: Some(lease),
                 closed: false,
             },
         );
@@ -1021,6 +1027,10 @@ impl DurableAuditGuard {
 impl KeyUseGuard for DurableAuditGuard {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
         let mut state = self.lock().map_err(|_| OperationError::AuditFailed)?;
+        // Refusals decided before any journal I/O (expired deadline, closed or
+        // unknown binding, table capacity) are per-request outcomes. Only a
+        // failure of the journal itself may poison service-wide health.
+        let journal_touched = std::cell::Cell::new(false);
         let result = (|| {
             if state.health != AuditHealth::Healthy
                 || state.pending.len() >= self.shared.config.max_operations
@@ -1044,6 +1054,7 @@ impl KeyUseGuard for DurableAuditGuard {
             if !matches!(event.action, Action::Sign | Action::SignDigest) {
                 return Err(blocked());
             }
+            journal_touched.set(true);
             // One reserved FINAL per pending BEGIN plus a recovery/probe frame.
             let reserved = (state.pending.len() as u64 + 3) * FRAME_BYTES;
             if state
@@ -1114,7 +1125,7 @@ impl KeyUseGuard for DurableAuditGuard {
                 seq,
             ))
         })();
-        if result.is_err() {
+        if result.is_err() && journal_touched.get() {
             state.health = AuditHealth::Failed;
         }
         result.map_err(|_| OperationError::AuditFailed)

@@ -177,7 +177,7 @@ fn execute(
     metadata: OperationMetadata,
     env: &mut dispatch::Env<'_>,
 ) -> Result<StreamFinal, ProcessingError> {
-    let mut results = Vec::with_capacity(metadata.items.len());
+    let mut results: Vec<ItemResult> = Vec::with_capacity(metadata.items.len());
     let mut reservations = Vec::with_capacity(metadata.items.len());
     let mut artifacts = Vec::new();
     let mut applied_any = false;
@@ -214,9 +214,13 @@ fn execute(
                         _ => unreachable!("matched processing"),
                     });
                 }
-                // Artifacts of this request are withheld: no partial success.
+                // Artifacts of this request are withheld: no partial success, and
+                // no Content-ID of undelivered output remains in the results.
                 drop(artifacts);
                 drop(reservations);
+                for item in &mut results {
+                    item.result.withhold_artifact();
+                }
                 let event = root.json_event(&ResponseEvent::Final {
                     operation_id: root.id().get(),
                     status: FinalStatus::Failed,
@@ -230,19 +234,7 @@ fn execute(
             }
         };
         reservations.push(reservation);
-        let item_applied = match &result {
-            OperationResult::Signing { signers, .. } => {
-                if signers
-                    .iter()
-                    .any(|s| *s != oncl_api::error::AppliedState::NotApplied)
-                {
-                    oncl_api::error::AppliedState::Applied
-                } else {
-                    oncl_api::error::AppliedState::NotApplied
-                }
-            }
-            _ => oncl_api::error::AppliedState::NotApplied,
-        };
+        let item_applied = dispatch::applied_of(&result);
         applied_any |= item_applied != oncl_api::error::AppliedState::NotApplied;
         if let Some(artifact) = artifact {
             artifacts.push((id, artifact));
