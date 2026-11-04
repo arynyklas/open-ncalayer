@@ -102,13 +102,15 @@ impl WsseOptions {
         Ok(())
     }
     pub fn verify_profile(&self) -> WsseVerifyProfile {
-        let mut profile = WsseVerifyProfile::default();
-        profile.soap = match self.soap_version {
-            Some(Soap::Soap12) => SoapVersion::Soap12,
-            _ => SoapVersion::Soap11,
+        let mut profile = WsseVerifyProfile {
+            soap: match self.soap_version {
+                Some(Soap::Soap12) => SoapVersion::Soap12,
+                _ => SoapVersion::Soap11,
+            },
+            role: self.wsse_role.clone(),
+            required_headers: self.wsse_required_header.clone(),
+            ..WsseVerifyProfile::default()
         };
-        profile.role = self.wsse_role.clone();
-        profile.required_headers = self.wsse_required_header.clone();
         profile.timestamp.required = self.wsse_timestamp_required;
         if let Some(seconds) = self.wsse_timestamp_max_lifetime {
             profile.timestamp.max_lifetime_seconds = seconds;

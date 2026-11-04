@@ -148,18 +148,27 @@ pub fn start(responder: KeyEntry, tsa: KeyEntry, listener: TcpListener, origin: 
     let stopping = stop.clone();
     let base = origin.clone();
     let join = thread::spawn(move || {
-        let ocsp = MockOcsp::new(responder).with_now(now());
-        let tsa = MockTsa::new(tsa).with_gen_time(now());
+        let ocsp = Arc::new(MockOcsp::new(responder).with_now(now()));
+        let tsa = Arc::new(MockTsa::new(tsa).with_gen_time(now()));
+        let mut handlers = Vec::new();
         while !stopping.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let _ = serve(&mut stream, &base, &ocsp, &tsa);
+                    // One thread per connection: an idle pre-connect must never
+                    // block the next request from the same client.
+                    let (base, ocsp, tsa) = (base.clone(), ocsp.clone(), tsa.clone());
+                    handlers.push(thread::spawn(move || {
+                        let _ = serve(&mut stream, &base, &ocsp, &tsa);
+                    }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1))
                 }
                 Err(e) => panic!("loopback listener: {e}"),
             }
+        }
+        for handler in handlers {
+            let _ = handler.join();
         }
     });
     Server {
@@ -175,7 +184,7 @@ fn serve(
     tsa: &MockTsa,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = Vec::new();
     let mut chunk = [0; 4096];
     let end = loop {

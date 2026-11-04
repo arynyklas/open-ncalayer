@@ -16,7 +16,7 @@ fn openssl() -> Option<String> {
     }
     None
 }
-fn common<'a>(w: &'a World) -> Vec<&'a str> {
+fn common(w: &World) -> Vec<&str> {
     vec![
         "--root",
         path(&w.root),
@@ -326,4 +326,93 @@ fn cades_t_acquires_a_loopback_timestamp_and_verifies_valid() {
     assert_eq!(refused.status.code(), Some(1));
     assert!(!output.exists());
     assert!(!String::from_utf8_lossy(&refused.stderr).contains("private_use"));
+}
+
+fn denied_without_private_use(w: &World, secret: &Path, label: &str) {
+    let document = w.dir.path().join("matrix.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let output = w.dir.path().join(format!("matrix-{label}.der"));
+    let mut args = sign_args(w, &w.rsa_key, &document, &output, &[]);
+    let at = args.iter().position(|a| *a == path(&w.secret)).unwrap();
+    args[at] = path(secret);
+    let result = run(&args, b"");
+    assert_eq!(result.status.code(), Some(1), "{label}: {result:?}");
+    assert!(!output.exists(), "{label}");
+    let text = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !text.contains("private_use") && !text.contains(PASSWORD),
+        "{label}: {text}"
+    );
+}
+#[test]
+fn secret_file_policy_matrix_rejects_unprotected_oversized_and_linked_secrets() {
+    let w = world();
+    // Plain directory (inherited ACL/mode, not an owner-only private namespace).
+    let open = w.dir.path().join("open.secret");
+    std::fs::write(&open, PASSWORD).unwrap();
+    denied_without_private_use(&w, &open, "unprotected-directory");
+    // Oversize inside a genuine protected namespace: 4097 bytes never truncates.
+    let namespace =
+        oncl_pki::private_fs::PrivateDirectory::open(w.secret.parent().unwrap()).unwrap();
+    std::io::Write::write_all(
+        &mut namespace.create_file("big.secret").unwrap(),
+        &vec![b'a'; 4097],
+    )
+    .unwrap();
+    denied_without_private_use(
+        &w,
+        &w.secret.parent().unwrap().join("big.secret"),
+        "oversized",
+    );
+    // A missing file and a directory in place of a file.
+    denied_without_private_use(
+        &w,
+        &w.secret.parent().unwrap().join("absent.secret"),
+        "absent",
+    );
+    denied_without_private_use(&w, w.secret.parent().unwrap(), "directory");
+    // Link/reparse in the private namespace, where the platform grants the privilege.
+    let link = w.secret.parent().unwrap().join("link.secret");
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&w.secret, &link);
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&w.secret, &link);
+    match linked {
+        Ok(()) => denied_without_private_use(&w, &link, "symlink"),
+        Err(error) => eprintln!("symlink privilege unavailable, link case not exercised: {error}"),
+    }
+}
+#[test]
+fn closed_stdout_during_extraction_is_failure_not_success() {
+    let w = world();
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let attached = w.dir.path().join("attached.der");
+    let mut args = vec![
+        "sign",
+        "--profile",
+        "cms",
+        "--input",
+        path(&document),
+        "--output",
+        path(&attached),
+        "--key",
+        path(&w.rsa_key),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+    ];
+    args.extend(common(&w));
+    assert_eq!(run(&args, b"").status.code(), Some(0));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
+        .args(["extract", "--input", path(&attached), "--output", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("Completed"));
 }

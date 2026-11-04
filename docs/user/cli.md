@@ -1,81 +1,76 @@
 # Standalone local CLI (`oncl`)
 
-`cargo run -p oncl-cli -- …` runs the independent local SDK consumer. It does not start the desktop, an HTTP server, a daemon, or a browser session. The workspace version also applies to this binary.
+`cargo run -p oncl-cli -- …` runs the independent local SDK consumer. It does not start the desktop, an HTTP server, a daemon or a browser session, and it has no remote `--endpoint` placeholder.
 
-**Task25 acceptance is not complete.** This checkpoint exposes hash, source-bound CMS/raw/XML/PDF signing and their implemented AdES profiles, format verification, CMS extraction, public inspection, public evidence extension, and standalone timestamps. The CLI still needs JOSE/JWT dispatch, plugin invocation, mixed typed batch manifests, named/token key selection, host DNS-address-pin options, legacy XML selector/profile options, and their complete process/oracle acceptance. The SDK's typed staged and owned-batch output mechanisms are implemented separately; their existence does not mean a CLI batch command exists.
+**Task25 is not complete.** Open items are listed at the end. Encryption/decryption additionally require the genuine G01/G02 SDK backend; no `encrypt`/`decrypt` command and no RSA-only substitute exists.
 
-Encryption/decryption additionally require the genuine G01/G02 SDK backend, documentation, and vectors. WS-Security awaits the parent-reviewed X05 API. Those are external prerequisites, not RSA-only substitutes or fake commands. No `encrypt`, `decrypt`, `plugin`, `batch`, or remote `--endpoint` placeholder is registered.
+## Commands
 
-## Working commands
+| Command | What it does |
+|---|---|
+| `hash --algorithm sha256\|gost2004\|gost2015-512 --input -` | Streaming digest of a file or stdin |
+| `sign --profile …` | Source-bound private signing (see below) |
+| `verify --profile …` | Verification with host trust; detached via `--detached` |
+| `extract` | Raw CMS content; **unverified** |
+| `inspect --profile certificate\|container\|cms` | Public metadata only |
+| `extend --profile cms\|xml\|pdf --level b\|t\|lt\|lta` | Keyless evidence extension |
+| `timestamp acquire\|verify` | Standalone RFC 3161 token |
+| `jws sign\|verify`, `jwt encode\|verify\|decode` | RS256 / ECGOST3410-2015-512 JOSE |
+| `plugin call` | Runtime-only WASM invocation with operator grants |
+| `batch run` | Ordered mixed batch from a JSON manifest |
 
-```text
-oncl hash --algorithm sha256 --input -
-oncl verify --profile cms --input signature.der --detached document.bin --offline --json
-oncl extract --input attached.der --output extracted.bin
-oncl inspect --profile certificate --input certificate.der --json
-oncl inspect --profile cms --input signature.der --json
-oncl inspect --profile container --input certificate.p12 --alias signing --secret-file drive_C:\private\key.secret --json
-```
+Sign profiles: `cms`, `raw`, `digest-sha256|gost2004|gost2015-512`, `xml`, `wsse`, `pdf`, and `cades-`/`xades-`/`pades-` with `b`, `t`, `lt`, `lta`. Verify profiles: `cms`, `xml`, `xml-kalkan`, `wsse`, `pdf`, and the same level families. Profiles and algorithms are never inferred from file names or untrusted tokens.
 
-For example, in Git Bash:
+Example (Git Bash):
 
 ```sh
 printf abc | cargo run -p oncl-cli -- hash --algorithm sha256 --input -
 ```
 
-The SHA-256 result is:
+prints `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`. `--input -` claims stdin for exactly one role; two stdin roles fail before any I/O.
+
+## Private signing, secrets and authority
 
 ```text
-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+oncl sign --profile cms --detached --input document.bin --output signature.der \
+  --key signer.p12 --secret-file drive_C:\private\key.secret --authorize \
+  --root operator-root.der --pki-endpoint https://pki.example.test
 ```
 
-`--input -` claims stdin for exactly one document role. A detached document and signature cannot both claim stdin. Hashing streams the source; it does not buffer the entire document or require a temporary directory, key provider, trust store, network, or runtime.
+* `--authorize` is the explicit confirmation of this exact source, profile, key and destination. A password is not authority. There is no unlocked cache across invocations, and strict certificate/revocation validation always precedes private use (`--offline` only affects the verification policy, never signing).
+* Key source: `--key` (PKCS#12 or JKS; `--alias` when several entries exist) **or** `--token-reader NAME --token-kind … --token-alias …` (real PC/SC; experimental; **not exercised against a physical or emulated token** here — absent readers fail closed with no output).
+* Secrets never appear as arguments. Use `--secret-file` inside an existing **owner-only directory** (the SDK verifies directory and file owner/ACL, link count, reparse points and refuses to repair) or `--secret-interactive` (fixed zeroizing buffers; refused when stdin is a document or not a terminal). Files accept at most 4097 raw bytes / 4096 password bytes and one trailing LF/CRLF; nothing is truncated. Process tests cover unprotected directory, oversized, absent and directory secrets (all refused with no private use); the symlink case needs a privilege this machine lacks and was not exercised.
+* Interactive input: Backspace removes a scalar, Ctrl-U clears, Ctrl-W removes a word, Ctrl-C cancels. Terminal modes are restored on normal/error/unwind. **No real terminal/PTY no-echo run has been performed.** Forced termination or a blocked native read cannot guarantee immediate cancellation or restoration.
+* The default `rpassword 7.5.4`/`rtoolbox 0.0.6` reader was deliberately not used: it grows a `String` and only erases its current length, so retired/truncated copies are not zeroized.
 
-Hash algorithms are `sha256`, `gost2004` (the existing GOST 34.311 profile), and `gost2015-512` (Streebog-512). Algorithms are not inferred from filenames.
+## Trust, network and time
 
-## Private signing and secrets
+Trust comes only from the operator: `--root`, `--intermediate`, `--pki-endpoint` (exact origins; literal IPs pin themselves), `--pki-pin 'http://host:port=IP:port'` for DNS origins (no ambient DNS), `--tsa-url` for CAdES T/LT/LTA acquisition, `--as-of <Unix seconds>` for an explicit clock (default: host UTC). Document-carried certificates are never anchors. All configuration reads share one memory budget: at most 1024 certificate files, 64 endpoints/pins and `--configuration-bytes` (default 16 MiB) of encoded certificates, with every duplicate charged.
 
-```text
-oncl sign --profile cms --input document.bin --output signature.der --key certificate.p12 --secret-file drive_C:\private\key.secret --authorize --root operator-root.der --pki-endpoint http://127.0.0.1:49152
-oncl sign --profile raw --input document.bin --output signature.raw --key certificate.p12 --secret-file drive_C:\private\key.secret --authorize --root operator-root.der --pki-endpoint http://127.0.0.1:49152
-```
-
-The loopback endpoint in these examples is an **operator-supplied synthetic PKI responder**, not a service launched by `oncl`. For real signing, configure genuine operator-approved roots, intermediates, and reachable status endpoints. Strict certificate and revocation validation is mandatory before private use; `--offline` does not bypass it. A key password is not signing authority: `--authorize` additionally authorizes the requested action, source, profile, key, and destination for this invocation. There is no unlocked cross-operation cache.
-
-Key files are PKCS#12 or JKS as supported by the SDK; use `--alias` when the container has multiple entries. No command exports a private key.
-
-Create the secret file **inside an existing owner-only directory**, using the OS account's protected permissions. The SDK verifies the directory and opened file, including owner/ACL policy, link count, and symlink/reparse constraints; it does not repair insecure files. Supply a password obtained from a synthetic fixture's manifest through this protected file, not by copying it into command arguments. Do not put secrets in shell history, environment variables, or batch arguments.
-
-Secret files admit at most 4097 raw bytes and 4096 UTF-8 password bytes. One final LF or CRLF is removed. Consequently a 4096-byte password can use LF but cannot also fit CRLF under the raw-file bound. Unexpected extra bytes, malformed UTF-8, and oversized files fail rather than truncating a password. Secret buffers and the final string are zeroized, including spare allocation capacity; keys/passwords are never document spool contents.
-
-`--secret-interactive` requests a real no-echo terminal instead of a secret file. It is refused when stdin is a document or is not a terminal. The bounded editor accepts at most 4097 raw UTF-8 input bytes including editing/terminator bytes, with at most 4096 password bytes; Enter completes input, EOF does not. Backspace removes a complete scalar; Ctrl-U clears; Ctrl-W removes the last word; Ctrl-C cancels. Removed bytes are wiped. Windows uses Unicode console reads without changing its codepage. Exact terminal mode is restored on ordinary return/error/unwind. Forced termination, blocked native reads, or console destruction cannot guarantee immediate cancellation/restoration. **A real terminal/PTY acceptance run remains outstanding; do not treat compilation or bounded-editor tests as no-echo certification.**
-
-The pinned `rpassword 7.5.4`/`rtoolbox 0.0.6` input path was not reused: its growing `String` and current-length-only erasure do not meet this task's retired/truncated-buffer requirement. This CLI instead uses fixed zeroizing byte/scalar buffers and one fallible final secret-string allocation.
-
-Signing profiles currently registered: `cms`, `raw`, `digest-sha256`, `digest-gost2004`, `digest-gost2015-512`, `xml`, `pdf`, and `cades-…`/`xades-…`/`pades-…` with `b`, `t`, `lt`, `lta` suffixes. Digest profiles read **raw digest bytes**, explicitly grant `SignDigest`, and do not upgrade ordinary document signing to prehash authority. `--add` selects the actual supported CMS/XML Add path; `--detached` creates detached CMS; `--detached-input` supplies CMS Add's detached content. XML IDs use `--target-id`, `--parent-id`, and `--signature-id`.
-
-Higher AdES acquisition requires SDK TSA configuration. This checkpoint does not yet expose its complete CLI configuration, so no successful T/LT/LTA acquisition is claimed merely because those typed profile names are parsed.
-
-## Trust, reports, and exit states
-
-`--root` and `--intermediate` accept explicit host DER certificates. Document-carried certificates never become trust anchors. `--pki-endpoint` limits permitted origins; literal IP origins pin themselves. DNS origins without approved resolved pins cannot silently fall back to ambient DNS. The CLI DNS-pin option is still outstanding. Transport proxy use is disabled in this composition.
-
-`--as-of <Unix-seconds>` explicitly selects a fixed host verification clock. Otherwise the host UTC clock remains dynamic. `--offline` produces `OfflineReport`; unavailable mandatory evidence is not a mathematical-signature-only `Valid`. An untrusted chain is Invalid, whereas absent required status on an otherwise trusted path can be Indeterminate.
+## Reports, exits and output
 
 | Exit | Meaning |
 |---:|---|
-| 0 | Completed non-validation command, or completed verification with `Valid` |
-| 2 | Completed verification with `Invalid` |
-| 3 | Completed verification with `Indeterminate` |
-| 1 | Execution, input, resource, permission, or usage failure |
-| 130 | Cooperative cancellation, with the actual key application state retained |
+| 0 | Completed, or verification `Valid` |
+| 2 | Verification `Invalid` |
+| 3 | Verification `Indeterminate` (for example `--offline`, unavailable status) |
+| 4 | Batch incomplete (failed or not-run items) |
+| 1 | Execution, input, resource, permission or usage failure |
+| 130 | Cooperative cancellation (Ctrl-C/Ctrl-Break) |
 
-Exit 4 is reserved by Task25 for incomplete/partial batches; the CLI batch adapter and its exact cancellation behavior are not yet implemented or accepted. Do not interpret this checkpoint as exercising exit 4 or real process-signal exit 130.
+`--json` writes the report to stdout; `--report <new path>` stages a separate report. Binary `--output -` together with JSON stdout is rejected before any I/O. Usage errors withhold argument values. Artifacts are staged and published no-clobber; an existing destination or the source is never replaced. Report quota, serialization and file synchronization are admitted **before** the document is published; physical report I/O afterwards can still fail and is reported truthfully (document and report are not one atomic transaction, and a private signature is never rolled back).
 
-`--json` sends the report to stdout. `--report <new-path>` stages a separate JSON report. Human artifact-command diagnostics go to stderr. Binary `--output -` plus JSON stdout is rejected before document/key I/O; use a separate report path instead. Usage errors deliberately withhold raw argument values, including unknown options and invalid enum values, to avoid echoing attempted secret arguments.
+Verified process behaviour (real binary, loopback OCSP/TSA, synthetic keys): strict RSA and GOST-2015 sign → `Valid` (0); `--offline` → 3; altered data → 2; independent OpenSSL verifies the RSA CMS and the RS256 JWS signature; CAdES-T acquires a loopback timestamp and verifies at level T.
 
-Verification reports retain their admitted SDK owners while being serialized into a bounded writer. Inspection/extraction are structural and never claim signature validity. Reports are limited to 1 MiB. `--output-limit` is an operation output quota, including emitted report bytes, not a document-only allowance.
+## JWS/JWT, WS-Security, plugins, batch
 
-File artifacts are staged on the destination filesystem and explicitly published no-clobber only after successful production. Existing destinations, including the source itself, are never replaced. A failed operation does not publish its partial stage. Stdio can retain an unsuccessful prefix after an I/O/cancellation failure and must be accepted only with the final process status. Document output and a separate report are not a cross-file atomic transaction: a completely published artifact can remain if subsequent report publication fails; no rollback or exactly-once private-key claim is made.
+* `jws sign|verify --serialization compact|flattened|general [--detached]`; `jwt encode|verify|decode`. `jwt verify` takes `--issuer`, `--audience`, `--leeway-seconds` and the host clock; `jwt decode` is explicitly unverified. JWS payload ≤ 256 KiB, claims ≤ 64 KiB.
+* `sign|verify --profile wsse` with `--soap-version soap11|soap12`, `--wsse-role`, `--wsse-required-header`, `--wsse-timestamp-required`, `--wsse-timestamp-max-lifetime` (verification), and for signing `--wsse-token-reference ncanode-x509-key-identifier|binary-security-token`, `--wsse-token-id`, `--wsse-body-id`, `--wsse-timestamp-id|created|expires`. Misplaced options are rejected before I/O.
+* `plugin call --manifest plugin.toml --module plugin.wasm --operation OP --caller LABEL --allow-import NAME … --args-file args.json --output -`: installation is not authority. The operator names the caller (`LocalOperator`), operation, exact imports, an optional bound key (`--key … --key-handle N --authorize`) and exact PKI bases (`--plugin-pki-endpoint GET=url`). Guest data cannot add imports, keys or origins; mandatory prompts return the typed `InteractionRequired`; there is no GUI.
+* `batch run --manifest batch.json [--key … --secret-file …] --authorize`: items `hash`, `sign` (`cms|cms-detached|raw`), `verify` (optional `detached`), `extract`, each with unique `id`. The whole manifest is admitted before any source or key I/O; destinations must not exist and an output may not feed another item. Each completed output is published when its item completes, so a later failure or cancellation keeps earlier files. A bad source fails only that item. Exit 0/2/3 by worst verification, 4 for any failed/not-run item, 130 for cancellation.
 
-`--timeout-seconds` is finite/nonzero and covers intake and operation control. Native synchronous reads/crypto remain cooperative; cancellation cannot free their actual resources before return. Defaults are accounting limits, not measured 10-GiB/RSS, Win7, or physical-token acceptance evidence.
+Real Ctrl-Break delivery to an owned child process group (Windows) exits 130; reads remain cooperative.
+
+## Not done / not exercised
+
+Legacy `XmlSignSpec`/`XadesSpec` host options; named-alias key sources; a token emulator or physical-token run; PTY/console no-echo certification; disk-full and fragmented-write injection beyond the closed-stdout test; Win7/x86, Linux/macOS, 10 GiB/4 GiB and RSS measurements. `inspect --profile container` needs `--alias`. G01/G02 encryption is an external prerequisite.

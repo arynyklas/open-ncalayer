@@ -152,10 +152,10 @@ fn parse(bytes: &[u8], has_key: bool) -> Result<Manifest, &'static str> {
         {
             return Err("InvalidManifest");
         }
-        if let Some(path) = item.output() {
-            if !outputs.insert(path.to_owned()) || std::fs::symlink_metadata(path).is_ok() {
-                return Err("DestinationExists");
-            }
+        if let Some(path) = item.output()
+            && (!outputs.insert(path.to_owned()) || std::fs::symlink_metadata(path).is_ok())
+        {
+            return Err("DestinationExists");
         }
         if matches!(item, Item::Sign { .. }) && !has_key {
             return Err("InvalidCombination");
@@ -234,15 +234,20 @@ pub fn run(
         )?),
         None => None,
     };
-    let store = output::store(cli, "-")?;
     let mut destinations: Vec<Option<PathBuf>> = Vec::new();
     let mut stages: Vec<Option<StagedArtifact>> = Vec::new();
     for item in &manifest.items {
         destinations.push(item.output().map(Path::to_owned));
-        stages.push(if item.output().is_some() {
-            Some(store.stage(ctx.resources())?)
-        } else {
-            None
+        stages.push(match item.output() {
+            // Same-directory staging, exactly like the single-command path.
+            Some(path) => Some(
+                output::store(
+                    cli,
+                    path.to_str().ok_or(ProcessingError::InvalidInput("path"))?,
+                )?
+                .stage(ctx.resources())?,
+            ),
+            None => None,
         });
     }
     let secret_text = secret.as_ref().map(|s| s.as_str());
