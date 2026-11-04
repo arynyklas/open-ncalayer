@@ -1803,3 +1803,74 @@ fn moved_scoped_signers_keep_exact_buffers_and_admission_until_collection_drop()
     drop(retained);
     let _next = context(&engine, OperationPolicy::strict_online());
 }
+
+/// The `NcalayerCompatibility` relaxation (an anchored time-stamp fixes the validation time
+/// although its TSA's status is unobtainable) with its negative contrasts: it never makes a
+/// signature `Valid`, never hides a revocation before the token's time, is not applied to a
+/// token of another signature, and does not exist in the strict and offline profiles.
+#[test]
+fn compat_time_relaxation_is_narrow_and_never_validates() {
+    let tsa = TsaFixture::new(TSA_OCSP);
+    let stamped = tsa.stamp(&signed("inter-revoked-gost2015-sign"));
+    let run = |input: &[u8], document: CertStatus, policy: OperationPolicy| {
+        let engine = engine(
+            tsa.services(TsaStatus::Missing, document),
+            Duration::from_secs(5),
+        );
+        verify(&engine, input, policy)
+    };
+    // Revoked AFTER the token's time: judged at the token's time, still not Valid.
+    let after = CertStatus::Revoked {
+        time: REVOKED,
+        reason: None,
+    };
+    let report = run(&stamped, after, OperationPolicy::ncalayer_compatibility());
+    let signer = &report.signers[0];
+    assert_eq!(signer.time_basis, TimeBasis::VerifiedTimestamp(PROVEN));
+    assert_eq!(signer.timestamp, CheckStatus::Unavailable);
+    assert_eq!(signer.revocation, CheckStatus::Passed);
+    assert_ne!(report.verdict, Verdict::Valid, "{signer:?}");
+
+    // Revoked BEFORE the token's time: the revocation still counts.
+    let before = CertStatus::Revoked {
+        time: PROVEN - time::Duration::HOUR,
+        reason: None,
+    };
+    let report = run(&stamped, before, OperationPolicy::ncalayer_compatibility());
+    assert_eq!(report.signers[0].revocation, CheckStatus::Failed);
+    assert_eq!(report.verdict, Verdict::Invalid);
+
+    // Strict and offline profiles: the very same input does not move the time.
+    for policy in [
+        OperationPolicy::strict_online(),
+        OperationPolicy::offline_report(),
+    ] {
+        let report = run(&stamped, after, policy);
+        assert_ne!(report.verdict, Verdict::Valid);
+        assert_eq!(report.signers[0].time_basis, TimeBasis::Current(NOW));
+        assert_eq!(report.signers[0].timestamp, CheckStatus::Unavailable);
+    }
+
+    // A token of another signature is not a time proof, in any profile.
+    let other = signed("inter-revoked-gost2015-sign");
+    let old = oncl_pki::cms::verify(&stamped, None)
+        .unwrap()
+        .swap_remove(0)
+        .signature;
+    let new = oncl_pki::cms::verify(&other, None)
+        .unwrap()
+        .swap_remove(0)
+        .signature;
+    assert_eq!(old.len(), new.len());
+    let at = stamped
+        .windows(old.len())
+        .position(|w| w == old.as_slice())
+        .unwrap();
+    let mut forged = stamped.clone();
+    forged[at..at + new.len()].copy_from_slice(&new);
+    let report = run(&forged, after, OperationPolicy::ncalayer_compatibility());
+    let signer = &report.signers[0];
+    assert_eq!(signer.time_basis, TimeBasis::Current(NOW), "{signer:?}");
+    assert_eq!(signer.timestamp, CheckStatus::Failed);
+    assert_ne!(report.verdict, Verdict::Valid);
+}

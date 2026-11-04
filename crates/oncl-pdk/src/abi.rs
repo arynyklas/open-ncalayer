@@ -2034,7 +2034,8 @@ pub enum Problem {
     Net(NetFailure),
 }
 
-/// The time a signer is judged at.
+/// The time a signer was once judged at; now retained for wire compatibility only, see
+/// [`VerifyArgs::at`]. The three variants all behave the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyAt {
@@ -2070,7 +2071,8 @@ pub struct VerifyArgs {
     /// The content of a detached CMS.
     #[serde(default)]
     pub data: Option<Bytes>,
-    /// The time each signer is judged at.
+    /// Ignored for the decision (kept for wire compatibility): a signer is judged at the
+    /// genTime of its anchored time-stamp, otherwise now, never at its own signingTime.
     pub at: VerifyAt,
     /// The CAs of the certification paths: `None`, the ones the core trusts; empty, no
     /// path is built.
@@ -2296,8 +2298,11 @@ pub enum XadesLevel {
     Lt,
 }
 
-/// `keys_sign_xades`: a XAdES-BASELINE signature of the whole document by the key
-/// `handle`, enveloped, the last child of the document element.
+/// `keys_sign_xades`: a XAdES signature of the whole document by the key `handle`,
+/// enveloped, the last child of the document element. The desktop host makes it with the
+/// historical wire API (`xades::sign`), NOT the baseline builder of the core's headless
+/// host: no mandatory `DataObjectFormat`, Inclusive C14N 1.0 (not Exclusive), other `Id`s.
+/// So it is not a complete XAdES-BASELINE signature (see `docs/design/plugins.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XadesArgs {
     /// The key.

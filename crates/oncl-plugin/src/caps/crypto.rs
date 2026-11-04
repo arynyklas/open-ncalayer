@@ -1042,4 +1042,122 @@ mod tests {
             assert!(check_pki_url_in(&nca_pki_hosts(), url).is_err(), "{url}");
         }
     }
+
+    fn validated(
+        validity: CheckStatus,
+        revocation: CheckStatus,
+        timestamp: CheckStatus,
+        at: OffsetDateTime,
+    ) -> SignerValidation {
+        SignerValidation {
+            signature: CheckStatus::Passed,
+            chain: CheckStatus::Passed,
+            validity,
+            revocation,
+            timestamp,
+            key_usage: CheckStatus::Passed,
+            claimed_signing_time: None,
+            time_basis: TimeBasis::Current(at),
+            proof_time: None,
+            ades_level: None,
+            reasons: Vec::new(),
+        }
+    }
+
+    fn facts() -> VerifyReport {
+        let key = oncl_testkit::synthetic("user-gost2015-sign");
+        let entry = oncl_pki::pkcs12::load(&oncl_testkit::read(&key.path), &key.password)
+            .unwrap()
+            .remove(0);
+        VerifyReport {
+            content: None,
+            signers: vec![SignerReport {
+                certificate: Some(der_of(&entry.cert)),
+                signing_time_ms: None,
+                signature: Check::Ok,
+                ess_cert_id: Check::Skipped,
+                validity: Check::Skipped,
+                path: Check::Skipped,
+                revocation: Check::Skipped,
+                tsp: Some(TspReport {
+                    gen_time_ms: Some(1),
+                    check: Check::Ok,
+                    tsa_cert: None,
+                }),
+            }],
+        }
+    }
+
+    /// The projection of the shared validator's result onto the legacy report.
+    #[test]
+    fn apply_validation_projects_validity_net_and_unproven_timestamps() {
+        let legacy = LegacyRules {
+            timestamp_unproven_ok: true,
+            unreachable_status_is_net: true,
+        };
+        let long_ago = OffsetDateTime::UNIX_EPOCH;
+        let now = OffsetDateTime::now_utc();
+        let run = |rules, validity, at, revocation, timestamp| {
+            let mut report = facts();
+            apply_validation(
+                &mut report,
+                &[validated(validity, revocation, timestamp, at)],
+                rules,
+            );
+            report.signers.remove(0)
+        };
+        // Failed validity: before notBefore is `not_yet_valid`, after notAfter `expired`.
+        let signer = run(
+            legacy,
+            CheckStatus::Failed,
+            long_ago,
+            CheckStatus::Passed,
+            CheckStatus::Passed,
+        );
+        assert_eq!(signer.validity, Check::Fail(Problem::NotYetValid));
+        let signer = run(
+            legacy,
+            CheckStatus::Failed,
+            now + time::Duration::days(365 * 200),
+            CheckStatus::Passed,
+            CheckStatus::Passed,
+        );
+        assert_eq!(signer.validity, Check::Fail(Problem::Expired));
+        // An unobtainable status: `net` (ocsp stage) for the live modes, `status_unknown`
+        // otherwise; an unproven TSA keeps a verifying token `ok` only for the legacy rules.
+        let signer = run(
+            legacy,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Unavailable,
+            CheckStatus::Unavailable,
+        );
+        assert!(
+            matches!(&signer.revocation, Check::Fail(Problem::Net(f)) if f.stage == NetStage::Ocsp),
+            "{:?}",
+            signer.revocation
+        );
+        assert_eq!(signer.tsp.unwrap().check, Check::Ok);
+        let signer = run(
+            LegacyRules::STRICT,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Unavailable,
+            CheckStatus::Unavailable,
+        );
+        assert_eq!(signer.revocation, Check::Fail(Problem::StatusUnknown));
+        assert_eq!(
+            signer.tsp.unwrap().check,
+            Check::Fail(Problem::StatusUnknown)
+        );
+        // A failed token fails under the legacy rules too.
+        let signer = run(
+            legacy,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Passed,
+            CheckStatus::Failed,
+        );
+        assert_eq!(signer.tsp.unwrap().check, Check::Fail(Problem::TspInvalid));
+    }
 }
