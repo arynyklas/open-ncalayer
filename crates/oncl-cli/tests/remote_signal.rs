@@ -74,7 +74,9 @@ fn ctrl_break_ends_a_remote_call_to_a_silent_server_promptly() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::thread::sleep(Duration::from_millis(500));
+    // Past the 1 s `Expect: 100-continue` wait: the body is sent and the client is waiting for
+    // a response that never comes (the case a polled upload alone cannot cover).
+    std::thread::sleep(Duration::from_millis(2500));
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
