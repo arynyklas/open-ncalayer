@@ -1,5 +1,7 @@
 //! Invocation-scoped host: no browser session, prompter, key material, UI or dialog turn.
 //! The backend is borrowed for the entire real WASM execution, never stored in an Arc.
+/// The one projection of the shared validator's result onto the legacy `cms_verify` report.
+pub use crate::caps::{LegacyRules, apply_validation};
 use crate::host::{AbiState, Phase, trap};
 use crate::runtime::{Compiled, Guest, LoadError, PluginError};
 use oncl_pdk::abi::{self, Import};
@@ -409,21 +411,8 @@ impl PkiServices<'_> {
         cms: &[u8],
         detached: Option<&[u8]>,
     ) -> abi::HostResult<abi::VerifyReport> {
-        let report = oncl_pki::cms::report(
-            cms,
-            detached,
-            &oncl_pki::cms::ReportSpec {
-                at: oncl_pki::cms::VerifyAt::Now,
-                chain: oncl_pki::cms::ChainPolicy::Skip,
-                trust: self.cas,
-                revocation: oncl_pki::cms::Revocation::None,
-                first_signer_only: false,
-                require_key_usage: oncl_pki::info::KeyUsageBits::default(),
-            },
-            self.http,
-            (self.clock)(),
-        )
-        .map_err(|error| abi::HostError::new(abi::ErrorCode::Invalid, error.to_string()))?;
+        let report = oncl_pki::cms::report(cms, detached, &oncl_pki::cms::ReportSpec::default())
+            .map_err(|error| abi::HostError::new(abi::ErrorCode::Invalid, error.to_string()))?;
         Ok(crate::caps::project_report(report))
     }
 }

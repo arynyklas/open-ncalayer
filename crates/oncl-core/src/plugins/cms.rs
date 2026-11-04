@@ -288,7 +288,6 @@ impl Backend<'_, '_> {
 
 impl Backend<'_, '_> {
     pub(super) fn verify_cms(&mut self, bytes: &[u8]) -> Result<Vec<u8>, OperationError> {
-        use oncl_pki::validation::CheckStatus;
         let args: abi::VerifyArgs = decode(bytes)?;
         let host = self.engine.validation_context(self.ctx, Action::Validate)?;
         self.ctx
@@ -337,45 +336,11 @@ impl Backend<'_, '_> {
         if projected.signers.len() != report.signers.len() {
             return Err(OperationError::InvalidContext);
         }
-        fn checked(status: CheckStatus, detail: abi::Check, fallback: abi::Problem) -> abi::Check {
-            match status {
-                CheckStatus::Passed => abi::Check::Ok,
-                CheckStatus::NotApplicable => abi::Check::Skipped,
-                CheckStatus::Failed => match detail {
-                    abi::Check::Fail(_) => detail,
-                    _ => abi::Check::Fail(fallback),
-                },
-                CheckStatus::Unavailable => abi::Check::Fail(abi::Problem::StatusUnknown),
-            }
-        }
-        for (target, source) in projected.signers.iter_mut().zip(report.signers.iter()) {
-            target.signature = checked(
-                source.signature,
-                target.signature.clone(),
-                abi::Problem::BadSignature,
-            );
-            target.path = checked(source.chain, target.path.clone(), abi::Problem::PathInvalid);
-            target.validity = checked(
-                source.validity,
-                target.validity.clone(),
-                abi::Problem::Expired,
-            );
-            target.revocation = checked(
-                source.revocation,
-                target.revocation.clone(),
-                abi::Problem::StatusUnknown,
-            );
-            if source.key_usage == CheckStatus::Failed {
-                target.path = abi::Check::Fail(abi::Problem::PathInvalid);
-            }
-            if let Some(tsp) = &mut target.tsp {
-                tsp.check = checked(
-                    source.timestamp,
-                    tsp.check.clone(),
-                    abi::Problem::TspInvalid,
-                );
-            }
-        }
+        oncl_plugin::headless::apply_validation(
+            &mut projected,
+            &report.signers,
+            oncl_plugin::headless::LegacyRules::STRICT,
+        );
         if args.first_signer_only {
             projected.signers.truncate(1);
         }

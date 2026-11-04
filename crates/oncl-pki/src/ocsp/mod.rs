@@ -366,28 +366,12 @@ fn nonce_of(extensions: &[u8]) -> Result<Option<Vec<u8>>, OcspError> {
 /// Asks the OCSP responder of `cert` (issued by `issuer`) for its status at `now`, through
 /// `http` within `timeout` (normally [`TIMEOUT`]), connecting within [`CONNECT_TIMEOUT`]:
 /// a responder that cannot be reached fails fast. The responder certificate must chain
-/// through `cas` at `now`.
+/// through `cas` at `now`. The answer carries its thisUpdate and nextUpdate.
 ///
 /// # Errors
 ///
 /// [`OcspError::NoUrl`] without a responder URL; the other [`OcspError`]s when the request
 /// fails or the response is not a valid, trusted and current answer about `cert`.
-pub fn check(
-    cert: &Certificate,
-    issuer: &Certificate,
-    cas: &CaSet,
-    http: &dyn HttpTransport,
-    now: OffsetDateTime,
-    timeout: Duration,
-) -> Result<CertStatus, OcspError> {
-    check_answer(cert, issuer, cas, http, now, timeout).map(|answer| answer.status)
-}
-
-/// [`check`] with the answer's thisUpdate and nextUpdate.
-///
-/// # Errors
-///
-/// As [`check`].
 pub fn check_answer(
     cert: &Certificate,
     issuer: &Certificate,

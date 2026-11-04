@@ -7,7 +7,7 @@ use crate::{
     cms,
     crl::{self, CrlStatus},
     http::HttpTransport,
-    info::{CertInfo, KeyUsageBits, cert_info},
+    info::{CertInfo, cert_info},
     ocsp::{self, CertStatus},
     pkix::{self, CaSet},
 };
@@ -443,19 +443,8 @@ fn validate_prepared_cms_impl(
         None
     };
     let mut signers = Vec::with_capacity(count);
-    let flow = cms::report::visit_prepared_signers(
-        prepared,
-        &cms::ReportSpec {
-            at: cms::VerifyAt::Now,
-            chain: cms::ChainPolicy::Skip,
-            trust: ctx.anchors,
-            revocation: cms::Revocation::None,
-            first_signer_only: false,
-            require_key_usage: KeyUsageBits::default(),
-        },
-        ctx.http,
-        ctx.now,
-        |signer| {
+    let flow =
+        cms::report::visit_prepared_signers(prepared, &cms::ReportSpec::default(), |signer| {
             if let Err(error) = resources.checkpoint() {
                 return std::ops::ControlFlow::Break(error);
             }
@@ -482,7 +471,14 @@ fn validate_prepared_cms_impl(
                     };
                     timestamp = status;
                     timestamp_reason = timestamp_reason_for(status, revoked, time);
-                    if timestamp == CheckStatus::Passed {
+                    // Explicit NCALayer compatibility: a token whose TSA is anchored fixes
+                    // the time even when the TSA's own status cannot be obtained (the
+                    // original never asked); the timestamp stays `Unavailable` in the
+                    // report, so the verdict is never `Valid` on this basis alone.
+                    if timestamp == CheckStatus::Passed
+                        || (timestamp == CheckStatus::Unavailable
+                            && ctx.policy == ValidationPolicy::NcalayerCompatibility)
+                    {
                         proven = Some(time);
                     }
                 }
@@ -553,8 +549,7 @@ fn validate_prepared_cms_impl(
             }
             signers.push(checked);
             std::ops::ControlFlow::Continue(())
-        },
-    )?;
+        })?;
     if let std::ops::ControlFlow::Break(error) = flow {
         return Err(error.into());
     }

@@ -2725,7 +2725,9 @@ mod xml_batch {
                                         baseline_profile,
                                     ),
                                     input: Source::sequential(&mut baseline_input, None),
-                                    output: oncl_core::batch::BatchOutput::Writer(&mut baseline_output),
+                                    output: oncl_core::batch::BatchOutput::Writer(
+                                        &mut baseline_output,
+                                    ),
                                 },
                             )],
                             &mut baseline_context,
@@ -3510,6 +3512,77 @@ mod xml_batch {
             matches!(summary.results()[0].outcome(), BatchOutcome::Completed(BatchReport::Sign(report)) if report.profile == SignProfile::Xades(AdesLevel::B))
         );
         assert_eq!(guard.applied.load(Ordering::SeqCst), 2);
+    }
+
+    /// The desktop plugin host signs XAdES with `oncl_xml::xades::sign`; Core's guarded
+    /// facade (`SignRequest::xades_legacy`, AuthorizedSigner, shared kernels) signs the same
+    /// key, document, spec and time into a different, documented shape.
+    #[test]
+    fn guarded_xades_legacy_b_and_the_desktop_wire_shape_differ_exactly_as_documented() {
+        struct NoHttp;
+        impl oncl_pki::http::HttpTransport for NoHttp {
+            fn send(
+                &self,
+                _: &oncl_pki::http::HttpRequest<'_>,
+            ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+                Err(oncl_pki::http::HttpError::other("level B asks no one"))
+            }
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let engine = fixture::engine(
+            TemporaryStore::new(scratch.path()).unwrap(),
+            Arc::new(fixture::Guard::default()),
+            Arc::new(fixture::Provider::default()),
+            ResourceLimits::default(),
+        );
+        let entry = fixture::raw("user-rsa-sign");
+        let (key, certificate) = fixture::selector_with_certificate("user-rsa-sign");
+        let spec = || oncl_xml::xades::XadesSpec {
+            level: oncl_xml::xades::XadesLevel::B,
+            tsa: None,
+            chain: vec![],
+            signature_method: Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+            digest_method: None,
+        };
+        let expected = oncl_xml::xades::sign(
+            ORIGINAL,
+            &spec(),
+            &entry.key,
+            &certificate,
+            &NoHttp,
+            fixture::NOW,
+        )
+        .unwrap();
+        let mut ctx = begin(&engine, Some(&key), &[Action::Sign]);
+        let mut input = ORIGINAL;
+        let mut output = Vec::new();
+        engine
+            .sign(
+                SignRequest::xades_legacy(KeyRequest::new(&key, Some(fixture::PASSWORD)), spec()),
+                Source::sequential(&mut input, None),
+                &mut output,
+                &mut ctx,
+            )
+            .unwrap();
+        let guarded = String::from_utf8(output).unwrap();
+        let desktop = String::from_utf8(expected).unwrap();
+        // NOT byte-equal, by design, and this test pins exactly how: the desktop plugin
+        // adapter keeps the historical NCALayer wire shape (`xades::sign`); Core's guarded
+        // facade emits the EN 319 132-1 baseline shape from the shared kernels.
+        assert_ne!(guarded, desktop);
+        for (name, text) in [("desktop", &desktop), ("guarded", &guarded)] {
+            assert!(text.contains("SignedProperties"), "{name}");
+            assert!(text.contains("rsa-sha256"), "{name}");
+            let verified = oncl_xml::verify(text.as_bytes()).unwrap();
+            assert_eq!(verified.len(), 1, "{name}");
+            assert_eq!(verified[0].cert, certificate, "{name}");
+        }
+        // The shape differences: mandatory DataObjectFormat only in the baseline, the
+        // legacy canonicalization/reference layout only in the wire shape.
+        assert!(guarded.contains("DataObjectFormat"));
+        assert!(!desktop.contains("DataObjectFormat"));
+        assert!(desktop.contains("REC-xml-c14n-20010315"));
+        assert!(!guarded.contains("REC-xml-c14n-20010315#WithComments"));
     }
 
     #[test]

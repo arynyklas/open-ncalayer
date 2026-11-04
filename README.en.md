@@ -465,7 +465,7 @@ openncalayer run        # start the server with the icon; plain `openncalayer` d
 1. Issue the certificate in the wizard or with `tls init`, and trust the CA with the wizard's button or as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
 2. Start `openncalayer run` and open `https://127.0.0.1:13579/`: the page must load without a certificate warning.
 3. At `https://127.0.0.1:13579/demo/` you can sign a text or a file and download the `.p7s`.
-4. To check a signature: `oncl verify --profile cms --input signature.p7s --root <NCA root certificate>` (the demo page saves the `.p7s` as DER; `oncl verify` reads DER or BER); for a detached signature add `--detached <data file>`, and `--offline` checks no revocation. It checks the signatures and timestamps, the certificate chains of the signer and of the TSA through the roots you pass, validity periods and revocation, and prints a per-check report; the exit code is 0 only for a `Valid` result. Details: [`docs/user/cli.md`](docs/user/cli.md).
+4. To check a signature: `oncl verify --profile cms --input signature.p7s --root <NCA root certificate>` (the demo page saves the `.p7s` as DER; `oncl verify` reads DER or BER, and PEM only with the explicit `--pem` flag: one `CMS`/`PKCS7` block, at most 16 MiB of text; no roots are assumed by default); for a detached signature add `--detached <data file>`, and `--offline` checks no revocation. It checks the signatures and timestamps, the certificate chains of the signer and of the TSA through the roots you pass, validity periods and revocation, and prints a per-check report; the exit code is 0 only for a `Valid` result. Details: [`docs/user/cli.md`](docs/user/cli.md).
 
 Exit codes of `run`:
 - 2 — TLS is not set up;

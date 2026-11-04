@@ -141,11 +141,12 @@ fn cms_verify_through_abi() {
         signer.certificate.as_deref().map(|c| c.as_slice()),
         Some(&synthetic_cert_of("inter-revoked-gost2015-sign")[..])
     );
+    // The decision is the shared validator's: it knows when, not the CRLReason.
     assert_eq!(
         signer.revocation,
         Check::Fail(Problem::Revoked {
             at_ms: REVOKED_AT_MS,
-            reason: Some(1)
+            reason: None
         })
     );
 

@@ -6,9 +6,7 @@ use der::asn1::{AnyRef, BitStringRef, Ia5String, OctetString};
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Sequence, Tag};
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::crl::{
-    self, CrlCache, CrlError, CrlStatus, MAX_BER_CRL_LEN, MAX_CRL_LEN, MockCrl, TIMEOUT,
-};
+use oncl_pki::crl::{self, CrlError, CrlStatus, MAX_BER_CRL_LEN, MAX_CRL_LEN, MockCrl, TIMEOUT};
 use oncl_pki::http::{
     CONNECT_TIMEOUT, GetOptions, HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport,
     RouteTransport, UreqTransport,
@@ -17,11 +15,8 @@ use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
 use oncl_testkit::{fixture, read, synthetic, synthetic_cert};
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::macros::datetime;
 use x509_cert::crl::CertificateList;
@@ -59,34 +54,14 @@ fn this_update(crl: &CertificateList) -> OffsetDateTime {
     OffsetDateTime::UNIX_EPOCH + crl.tbs_cert_list.this_update.to_unix_duration()
 }
 
-/// A fresh cache directory under the target directory, removed when dropped.
-fn temp_dir() -> TempDir {
-    tempfile::Builder::new()
-        .prefix("oncl-crl-")
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
-        .unwrap()
-}
-
-/// `<dir>/<hex sha256(url)>.crl`.
-fn cache_file(dir: &Path, url: &str) -> PathBuf {
-    let hash: String = Sha256::digest(url.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    dir.join(format!("{hash}.crl"))
-}
-
-/// Names of the files in `dir`, sorted.
-fn files(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+/// The status of `cert` in the CRL of `issuer`, as the shared validator asks for it.
+fn check(
+    cert: &Certificate,
+    issuer: &Certificate,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    crl::fetch_for(cert, issuer, http, TIMEOUT, now).map(|(_, status)| status)
 }
 
 /// `leaf` re-issued by the intermediate CA with these CRL distribution point URIs, one
@@ -126,37 +101,6 @@ impl HttpTransport for Fixed {
             HttpMethod::Get => {
                 let (_, _) = (request.url, request.opts);
                 self.0.clone()
-            }
-            HttpMethod::Post => {
-                let (url, _, _, o) = (
-                    request.url,
-                    request.content_type.unwrap_or_default(),
-                    request.body,
-                    request.opts,
-                );
-                self.get_with(url, o)
-            }
-        }
-    }
-}
-
-/// A transport that records every requested URL and fails it.
-#[derive(Default)]
-struct Down(Mutex<Vec<String>>);
-
-impl Down {
-    fn calls(&self) -> Vec<String> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-impl HttpTransport for Down {
-    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
-        match request.method {
-            HttpMethod::Get => {
-                let (url, _) = (request.url, request.opts);
-                self.0.lock().unwrap().push(url.to_owned());
-                Err(HttpError::other("down"))
             }
             HttpMethod::Post => {
                 let (url, _, _, o) = (
@@ -252,8 +196,6 @@ fn verifies_and_finds_revoked_serial() {
 
     // `check` end to end: a leaf against the intermediate's CRL, the intermediate against
     // the root's.
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
     let http = RouteTransport::new(vec![
         (
             INTER_CRL.to_owned(),
@@ -265,18 +207,15 @@ fn verifies_and_finds_revoked_serial() {
         ),
     ]);
     assert_eq!(
-        crl::check(&revoked, &issuer, &cache, &http, now()),
+        check(&revoked, &issuer, &http, now()),
         Ok(CrlStatus::Revoked {
             time: revoked_at,
             reason: None
         })
     );
+    assert_eq!(check(&good, &issuer, &http, now()), Ok(CrlStatus::Good));
     assert_eq!(
-        crl::check(&good, &issuer, &cache, &http, now()),
-        Ok(CrlStatus::Good)
-    );
-    assert_eq!(
-        crl::check(&issuer, &cer("root-gost2015"), &cache, &http, now()),
+        check(&issuer, &cer("root-gost2015"), &http, now()),
         Ok(CrlStatus::Good)
     );
 }
@@ -345,15 +284,8 @@ fn issuer_mismatch_and_bad_signature() {
     // `check` of a certificate the given issuer did not issue.
     let leaf = entry("inter-user-gost2015-sign").cert;
     let http = Fixed(Err(HttpError::other("must not be asked")));
-    let dir = temp_dir();
     assert_eq!(
-        crl::check(
-            &leaf,
-            &cer("root-gost2015"),
-            &CrlCache::new(dir.path()),
-            &http,
-            now()
-        ),
+        check(&leaf, &cer("root-gost2015"), &http, now()),
         Err(CrlError::IssuerMismatch)
     );
 }
@@ -527,66 +459,6 @@ fn delta_and_partitioned_crls_are_rejected() {
 }
 
 #[test]
-fn cache_hit_makes_no_request_until_next_update() {
-    let issuer = cer("inter-gost2015");
-    let start = now();
-    let next = start + time::Duration::HOUR;
-    let mock = MockCrl::new(entry("inter-gost2015.key")).next_update(Some(next));
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path().join("crl"));
-    let file = cache_file(&dir.path().join("crl"), INTER_CRL);
-
-    let first = cache.fetch(INTER_CRL, &issuer, &mock, start).unwrap();
-    assert_eq!(mock.calls(), [INTER_CRL]);
-    assert_eq!(
-        CertificateList::from_der(&read(&file)).unwrap(),
-        first,
-        "the downloaded CRL is cached"
-    );
-    // Written atomically: no temporary file is left behind.
-    assert_eq!(files(&dir.path().join("crl")).len(), 1);
-
-    let later = start + 30 * time::Duration::MINUTE;
-    assert_eq!(cache.fetch(INTER_CRL, &issuer, &mock, later), Ok(first));
-    assert_eq!(mock.calls().len(), 1, "served from the cache");
-    // Another URL has its own file.
-    let other = "http://crl.synthetic.test/other.crl";
-    cache.fetch(other, &issuer, &mock, later).unwrap();
-    assert_eq!(mock.calls(), [INTER_CRL, other]);
-    assert_eq!(files(&dir.path().join("crl")).len(), 2);
-
-    // Past nextUpdate the cache is stale: downloaded again (the mock serves the same
-    // outdated CRL, which is refused).
-    let after = next + time::Duration::SECOND;
-    assert_eq!(
-        cache.fetch(INTER_CRL, &issuer, &mock, after),
-        Err(CrlError::Outdated)
-    );
-    assert_eq!(mock.calls().len(), 3);
-
-    // A corrupt cache file is downloaded again and replaced.
-    std::fs::write(&file, b"corrupt").unwrap();
-    cache.fetch(INTER_CRL, &issuer, &mock, later).unwrap();
-    assert_eq!(mock.calls().len(), 4);
-    assert!(crl::verify_crl(&read(&file), &issuer, later).is_ok());
-    // A cached CRL of another issuer is not used.
-    let twin = cer("inter-gost2015-twin");
-    assert!(matches!(
-        cache.fetch(INTER_CRL, &twin, &mock, later),
-        Err(CrlError::BadSignature(_))
-    ));
-    assert_eq!(mock.calls().len(), 5);
-
-    // Without nextUpdate there is no expiry to cache until: every fetch downloads.
-    let open = MockCrl::new(entry("inter-gost2015.key")).next_update(None);
-    let url = "http://crl.synthetic.test/open.crl";
-    cache.fetch(url, &issuer, &open, start).unwrap();
-    cache.fetch(url, &issuer, &open, start).unwrap();
-    assert_eq!(open.calls().len(), 2);
-    assert!(!cache_file(&dir.path().join("crl"), url).exists());
-}
-
-#[test]
 fn second_url_used_when_first_fails() {
     let issuer = cer("inter-gost2015");
     let leaf = leaf_with_cdp(
@@ -608,10 +480,8 @@ fn second_url_used_when_first_fails() {
         ),
         (INTER_CRL.to_owned(), good.clone()),
     ]);
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
     assert_eq!(
-        crl::check(&leaf, &issuer, &cache, &http, now()),
+        check(&leaf, &issuer, &http, now()),
         Ok(CrlStatus::Revoked {
             time: revoked_at,
             reason: None
@@ -619,58 +489,14 @@ fn second_url_used_when_first_fails() {
     );
     assert_eq!(forged.calls().len(), 1);
     assert_eq!(good.calls().len(), 1);
-    // Only the verified CRL is cached; the next check needs no request.
-    assert_eq!(
-        files(dir.path()),
-        [cache_file(dir.path(), INTER_CRL)
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()]
-    );
-    // A later check uses the cached CRL of the third URL without asking the network for
-    // the first two.
-    let down = Down::default();
-    assert!(matches!(
-        crl::check(&leaf, &issuer, &cache, &down, now()),
-        Ok(CrlStatus::Revoked { .. })
-    ));
-    assert_eq!(down.calls(), [] as [String; 0]);
-    assert!(cache.cached(INTER_CRL, &issuer, now()).is_some());
-    assert!(
-        cache
-            .cached(INTER_CRL, &cer("inter-gost2015-twin"), now())
-            .is_none()
-    );
-    assert!(
-        cache
-            .cached("http://down.synthetic.test/a.crl", &issuer, now())
-            .is_none()
-    );
-    // Past its nextUpdate the cached CRL is not used: the URLs are tried in order.
-    let later = now() + 2 * time::Duration::HOUR;
-    assert_eq!(
-        crl::check(&leaf, &issuer, &cache, &down, later),
-        Err(CrlError::Http(HttpError::other("down")))
-    );
-    assert_eq!(
-        down.calls(),
-        [
-            "http://down.synthetic.test/a.crl",
-            "http://forged.synthetic.test/a.crl",
-            INTER_CRL
-        ]
-    );
 
     // Every URL fails: the error of the last one.
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
     let http = RouteTransport::new(vec![(
         "http://forged.synthetic.test/".to_owned(),
         forged.clone() as Arc<dyn HttpTransport>,
     )]);
     assert_eq!(
-        crl::check(&leaf, &issuer, &cache, &http, now()),
+        check(&leaf, &issuer, &http, now()),
         Err(CrlError::Http(HttpError::other("no route")))
     );
     let http = Fixed(Ok(HttpReply {
@@ -680,14 +506,13 @@ fn second_url_used_when_first_fails() {
         body: b"busy".to_vec(),
     }));
     assert_eq!(
-        crl::check(&leaf, &issuer, &cache, &http, now()),
+        check(&leaf, &issuer, &http, now()),
         Err(CrlError::HttpStatus(503))
     );
-    assert!(files(dir.path()).is_empty());
 
     // No URL at all.
     assert_eq!(
-        crl::check(&leaf_with_cdp(&leaf, &[]), &issuer, &cache, &http, now()),
+        check(&leaf_with_cdp(&leaf, &[]), &issuer, &http, now()),
         Err(CrlError::NoUrl)
     );
 }
@@ -726,10 +551,9 @@ fn oversized_body_is_rejected() {
     assert_eq!(TIMEOUT, Duration::from_secs(30));
     assert_eq!(MAX_CRL_LEN, 64 << 20);
     let http = Oversized(Mutex::new(Vec::new()));
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
+    let leaf = leaf_with_cdp(&entry("inter-user-gost2015-sign").cert, &[INTER_CRL]);
     assert_eq!(
-        cache.fetch(INTER_CRL, &cer("inter-gost2015"), &http, now()),
+        check(&leaf, &cer("inter-gost2015"), &http, now()),
         Err(CrlError::Http(HttpError::other(format!(
             "body exceeds {MAX_CRL_LEN} bytes"
         ))))
@@ -744,7 +568,6 @@ fn oversized_body_is_rejected() {
             redirects: true,
         }]
     );
-    assert!(files(dir.path()).is_empty());
 
     // The mock honours the limit too.
     let mock = MockCrl::new(entry("inter-gost2015.key"));
@@ -800,9 +623,7 @@ fn nca_root_crl_golden_vector() {
         Err(CrlError::BadSignature(_))
     ));
 
-    // Through the cache, offline.
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
+    // Through `fetch_for`, offline.
     let http = Fixed(Ok(HttpReply {
         status: 200,
         content_type: Some("application/pkix-crl".to_owned()),
@@ -810,19 +631,16 @@ fn nca_root_crl_golden_vector() {
         body: der,
     }));
     assert_eq!(
-        crl::check(&nca("ncagost22"), &root, &cache, &http, at),
+        check(&nca("ncagost22"), &root, &http, at),
         Ok(CrlStatus::Good)
     );
-    assert!(cache_file(dir.path(), NCA_ROOT_CRL).exists());
 }
 
 #[test]
 #[ignore = "needs http://crl.root.gov.kz"]
 fn live_crl_nca_root_gost_2022() {
     let (nca, root) = (nca("ncagost22"), nca("rcagost22"));
-    let dir = temp_dir();
-    let cache = CrlCache::new(dir.path());
-    let status = crl::check(&nca, &root, &cache, &UreqTransport::default(), now());
+    let status = check(&nca, &root, &UreqTransport::default(), now());
     println!("CRL {:?}: {status:?}", crl::crl_urls(&nca));
     assert_eq!(status, Ok(CrlStatus::Good));
 }

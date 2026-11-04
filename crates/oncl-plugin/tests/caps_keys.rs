@@ -1091,3 +1091,83 @@ fn platform_line_separator() {
         assert_eq!(platform.line_separator, "\n");
     }
 }
+
+/// The authority model of the desktop host: a key handle exists only after the user's own
+/// consent step (here the page-path confirmation), so every signing import — the CMS and
+/// raw ones and the XML ones that use the historical `Legacy` signer path — is refused with
+/// an unknown handle, signing nothing, when the user declined; and with the consent given the
+/// very same call signs.
+#[test]
+fn no_signing_import_reaches_a_key_before_the_users_consent() {
+    fn code<T: DeserializeOwned>(plugin: &mut Instance) -> Option<ErrorCode> {
+        run::<T>(plugin).err().map(|e| e.code)
+    }
+    let data = Bytes::from(b"d".to_vec());
+    let xml = Bytes::from(b"<a>1</a>".to_vec());
+    let open = || {
+        (
+            Import::KeysOpen,
+            open_args("PKCS12", page_path("user-rsa-sign"), text(PASSWORD)),
+        )
+    };
+    let cms = abi::encode(&abi::SignCmsArgs {
+        handle: 1,
+        data: data.clone(),
+        attached: true,
+        timestamp: false,
+    });
+    let raw = abi::encode(&abi::SignRawArgs { handle: 1, data });
+    let xml_args = abi::encode(&abi::SignXmlArgs {
+        handle: 1,
+        xml: xml.clone(),
+        element: None,
+        parent: None,
+    });
+    let xades = abi::encode(&abi::XadesArgs {
+        handle: 1,
+        xml,
+        level: abi::XadesLevel::B,
+        tsa: abi::TsaChoice::Basics,
+        chain: vec![],
+        signature_method: None,
+        digest_method: None,
+    });
+    for step in [Step::Confirm { yes: false }, Step::CancelConfirm] {
+        for (import, args) in [
+            (Import::KeysSignCms, &cms),
+            (Import::KeysSignRaw, &raw),
+            (Import::KeysSignXml, &xml_args),
+            (Import::KeysSignXades, &xades),
+        ] {
+            let (prompter, services) = scripted(vec![step.clone()]);
+            let mut plugin = guest(&services, KEY_FILES, &[open(), (import, args.clone())]);
+            let refused = if import == Import::KeysSignXades {
+                code::<abi::XadesOutcome>(&mut plugin)
+            } else {
+                code::<Bytes>(&mut plugin)
+            };
+            assert_eq!(
+                refused,
+                Some(ErrorCode::Invalid),
+                "{import:?} after {step:?}"
+            );
+            assert_eq!(
+                prompter.confirm_prompts().len(),
+                1,
+                "the user was asked first"
+            );
+        }
+    }
+    // Consent given: the same calls sign, through the same host.
+    for (import, args) in [
+        (Import::KeysSignCms, &cms),
+        (Import::KeysSignRaw, &raw),
+        (Import::KeysSignXml, &xml_args),
+    ] {
+        let (prompter, services) = scripted(vec![Step::Confirm { yes: true }]);
+        let mut plugin = guest(&services, KEY_FILES, &[open(), (import, args.clone())]);
+        let signed: Bytes = run(&mut plugin).unwrap();
+        assert!(!signed.is_empty(), "{import:?}");
+        assert_eq!(prompter.confirm_prompts().len(), 1);
+    }
+}

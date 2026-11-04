@@ -68,6 +68,10 @@ pub enum Command {
         input: String,
         #[arg(long)]
         detached: Option<String>,
+        /// The CMS input is one PEM block (`CMS` or `PKCS7`), decoded before parsing (at
+        /// most 16 MiB of text). Only for `--profile cms`; never inferred from the content.
+        #[arg(long)]
+        pem: bool,
         #[command(flatten)]
         wsse: crate::wsse::WsseOptions,
     },
@@ -472,6 +476,9 @@ impl Cli {
             Command::Verify {
                 input, detached, ..
             } if input == "-" && detached.as_deref() == Some("-") => Err("StdinConflict"),
+            Command::Verify {
+                profile, pem: true, ..
+            } if !matches!(profile, VerifyProfile::Cms) => Err("InvalidCombination"),
             Command::Verify { profile, wsse, .. }
                 if wsse.any() && !matches!(profile, VerifyProfile::Wsse) =>
             {

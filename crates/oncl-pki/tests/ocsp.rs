@@ -42,12 +42,24 @@ fn cas() -> CaSet {
     CaSet::new(vec![cer("inter-gost2015"), cer("root-gost2015")])
 }
 
+/// The status of `cert` from its responder (the answer's validity times dropped).
+fn check(
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    timeout: Duration,
+) -> Result<CertStatus, OcspError> {
+    ocsp::check_answer(cert, issuer, cas, http, now, timeout).map(|answer| answer.status)
+}
+
 fn serial_hex(cert: &Certificate) -> String {
     let serial = cert.tbs_certificate().serial_number().as_bytes();
     serial.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `ocsp::check` of the key `leaf` (issued by the intermediate CA) through `http`, against
+/// `check` of the key `leaf` (issued by the intermediate CA) through `http`, against
 /// the intermediate PKI, now.
 fn check_leaf(
     leaf: &str,
@@ -55,7 +67,7 @@ fn check_leaf(
     timeout: Duration,
 ) -> Result<CertStatus, OcspError> {
     let leaf = entry(leaf).cert;
-    ocsp::check(
+    check(
         &leaf,
         &cer("inter-gost2015"),
         &cas(),
@@ -385,7 +397,7 @@ fn responder_must_chain_and_be_an_ocsp_signer() {
     let leaf = entry("inter-user-gost2015-sign").cert;
     let root_only = CaSet::new(vec![cer("root-gost2015")]);
     let mock = MockOcsp::new(entry("ocsp-gost2015"));
-    let result = ocsp::check(
+    let result = check(
         &leaf,
         &cer("inter-gost2015"),
         &root_only,
@@ -512,7 +524,7 @@ fn cert_without_aia_is_no_url() {
     assert_eq!(ocsp::ocsp_url(&leaf), None);
     let mock = MockOcsp::new(entry("ocsp-gost2015"));
     assert_eq!(
-        ocsp::check(
+        check(
             &leaf,
             &cer("root-gost2015"),
             &cas(),
@@ -559,7 +571,7 @@ fn recorded_nca_test_answer_is_good() {
     let answer = read(fixture("nca-ocsp/individual_valid_2015.resp.der"));
     let check_at = |now| {
         let http = Fixed::body(Some(OCSP_RESPONSE), &answer);
-        ocsp::check(&leaf, &issuer, &cas, &http, now, TIMEOUT)
+        check(&leaf, &issuer, &cas, &http, now, TIMEOUT)
     };
     // thisUpdate = producedAt = 2026-10-26 00:01:50 UTC, no nextUpdate.
     assert_eq!(
@@ -583,7 +595,7 @@ fn recorded_nca_test_answer_is_good() {
     let other = entry("inter-user-gost2015-sign").cert;
     let http = Fixed::body(Some(OCSP_RESPONSE), &answer);
     assert_eq!(
-        ocsp::check(
+        check(
             &other,
             &issuer,
             &cas,
@@ -600,7 +612,7 @@ fn recorded_nca_test_answer_is_good() {
 fn live_ocsp_nca_test_certificate() {
     let (leaf, issuer, cas) = nca_test_leaf();
     let url = ocsp::ocsp_url(&leaf).expect("OCSP URL in AuthorityInfoAccess");
-    let status = ocsp::check(
+    let status = check(
         &leaf,
         &issuer,
         &cas,

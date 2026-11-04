@@ -1178,20 +1178,22 @@ impl oncl_pki::resource::OperationControl for Unattended {
 }
 
 /// The SDK's own CMS validation (what `oncl verify --profile cms` runs) of `input` against
-/// the synthetic GOST 2015 root, under the explicit NCALayer compatibility policy and with
-/// no network.
-fn validate_offline(
+/// `roots`, under the explicit NCALayer compatibility policy, asking the PKI only through
+/// `http` (and only the `endpoints` origins).
+fn validate_through(
     input: &[u8],
+    roots: Vec<cert::Certificate>,
+    http: Arc<dyn oncl_pki::http::HttpTransport>,
+    endpoints: &[&str],
 ) -> Result<oncl_core::VerificationReport, oncl_core::OperationError> {
     use oncl_core::{Action, EngineServices, ExecutionGrant, OperationPolicy, ValidationServices};
     use oncl_pki::resource::ResourceLimits;
     use oncl_pki::validation::NetworkPolicy;
-    let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
     let validation = ValidationServices::new(
-        CaSet::new(vec![root]),
+        CaSet::new(roots),
         Vec::new(),
-        Arc::new(Offline),
-        NetworkPolicy::only_endpoints::<_, &str>([]).unwrap(),
+        http,
+        NetworkPolicy::only_endpoints(endpoints.iter().copied()).unwrap(),
         Arc::new(OffsetDateTime::now_utc),
     );
     let engine = oncl_core::Engine::new(
@@ -1203,6 +1205,14 @@ fn validate_offline(
         Arc::new(Unattended),
     )?;
     engine.validate_cms(input, None, &mut ctx)
+}
+
+/// [`validate_through`] the synthetic GOST 2015 root with no network at all.
+fn validate_offline(
+    input: &[u8],
+) -> Result<oncl_core::VerificationReport, oncl_core::OperationError> {
+    let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
+    validate_through(input, vec![root], Arc::new(Offline), &[])
 }
 
 #[tokio::test]
@@ -1218,6 +1228,8 @@ async fn core_validation_reports_a_signature_made_through_the_service() {
     .await;
     let reply = json(&next_text(&mut c).await);
     let pem = reply["body"]["result"][0].as_str().unwrap();
+    // The service answers PEM (NCALayer's contract); the SDK validates its DER.
+    assert!(pem.starts_with("-----BEGIN CMS-----"), "{pem}");
 
     let report = validate_offline(&pem_to_der(pem)).unwrap();
     assert_eq!(report.signers.len(), 1);
@@ -1230,8 +1242,10 @@ async fn core_validation_reports_a_signature_made_through_the_service() {
         CheckStatus::Unavailable,
         "no TSA revocation offline"
     );
+    // The explicit NCALayer compatibility profile lets the anchored token fix the time even
+    // though its TSA's status is unobtainable here; the report still says so (Unavailable).
     assert!(
-        matches!(signer.time_basis, TimeBasis::Current(_)),
+        matches!(signer.time_basis, TimeBasis::VerifiedTimestamp(_)),
         "{signer:?}"
     );
     assert_eq!(report.verdict, Verdict::Indeterminate, "{signer:?}");
@@ -1296,6 +1310,151 @@ fn core_validation_rejects_a_token_of_another_signature() {
         "the token covers another signature: {:?}",
         report.signers[0]
     );
+}
+
+/// A DER value of `tag` around `content` (short form: every length here is below 128).
+fn short_der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag, u8::try_from(content.len()).unwrap()];
+    out.extend_from_slice(content);
+    out
+}
+
+/// The synthetic GOST 2015 root issuing the signer, the TSA and the OCSP responder
+/// directly; the signer and the TSA name `http://pki.e2e.test/ocsp`, which a mock responder
+/// answers through a route (no sockets). Every key is a committed synthetic fixture; only
+/// the issuing certificates are re-signed, as the `oncl-cli` loopback PKI does.
+struct LocalPki {
+    root: cert::Certificate,
+    signer: KeyEntry,
+    tsa: KeyEntry,
+    transport: Arc<dyn oncl_pki::http::HttpTransport>,
+}
+
+const LOCAL_ORIGIN: &str = "http://pki.e2e.test";
+
+fn local_pki() -> LocalPki {
+    use oncl_pki::testing::{TestCertSpec, issue_cert};
+    use x509_cert::ext::Extension;
+    let root_key = entry("root-gost2015.key");
+    let ocsp_url = format!("{LOCAL_ORIGIN}/ocsp");
+    let access = [
+        short_der(0x06, &[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01]),
+        short_der(0x86, ocsp_url.as_bytes()),
+    ]
+    .concat();
+    let aia = Extension {
+        extn_id: "1.3.6.1.5.5.7.1.1".parse().unwrap(),
+        critical: false,
+        extn_value: der::asn1::OctetString::new(short_der(0x30, &short_der(0x30, &access)))
+            .unwrap(),
+    };
+    let reissue = |template: &str, serial: u8, with_aia: bool| {
+        let mut key = entry(template);
+        let mut spec = TestCertSpec::from_cert(&key.cert);
+        spec.extensions.retain(|e| {
+            !matches!(
+                e.extn_id.to_string().as_str(),
+                "2.5.29.14" | "2.5.29.35" | "1.3.6.1.5.5.7.1.1" | "2.5.29.31"
+            )
+        });
+        spec.serial = vec![0x72, 4, serial];
+        if with_aia {
+            spec.extensions.push(aia.clone());
+        }
+        key.cert = issue_cert(&root_key, spec);
+        key
+    };
+    let responder = reissue("ocsp-gost2015", 3, false);
+    let transport: Arc<dyn oncl_pki::http::HttpTransport> =
+        Arc::new(oncl_pki::http::RouteTransport::new(vec![(
+            ocsp_url,
+            Arc::new(oncl_pki::ocsp::MockOcsp::new(responder))
+                as Arc<dyn oncl_pki::http::HttpTransport>,
+        )]));
+    LocalPki {
+        root: root_key.cert.clone(),
+        signer: reissue("user-gost2015-sign", 11, true),
+        tsa: reissue("tsa-gost2015", 2, true),
+        transport,
+    }
+}
+
+fn local_validate(pki: &LocalPki, input: &[u8]) -> oncl_core::VerificationReport {
+    validate_through(
+        input,
+        vec![pki.root.clone()],
+        pki.transport.clone(),
+        &[LOCAL_ORIGIN],
+    )
+    .unwrap()
+}
+
+fn stamped_pair(pki: &LocalPki) -> (Vec<u8>, Vec<u8>) {
+    let opts = SignOptions {
+        encapsulate: true,
+        digested: false,
+        signing_time: OffsetDateTime::now_utc(),
+    };
+    let first = sign(&pki.signer, b"doc", &opts).unwrap();
+    let second = sign(&pki.signer, b"doc", &opts).unwrap();
+    let tsa = MockTsa::new(pki.tsa.clone());
+    let stamped = timestamp_signer(&first, 0, &TsaProfile::basics_default(), &tsa).unwrap();
+    (stamped, second)
+}
+
+/// The positive control the daemon's old checker had: with the PKI answering, a stamped
+/// signature is `Valid`, judged at the time-stamp's proven time, and the PEM form is the
+/// same CMS as its DER.
+#[test]
+fn core_validation_accepts_a_stamped_signature_with_proven_status() {
+    use oncl_pki::validation::{CheckStatus, TimeBasis, Verdict};
+    let pki = local_pki();
+    let (stamped, _) = stamped_pair(&pki);
+    let report = local_validate(&pki, &stamped);
+    let signer = &report.signers[0];
+    assert_eq!(signer.signature, CheckStatus::Passed, "{signer:?}");
+    assert_eq!(signer.chain, CheckStatus::Passed, "{signer:?}");
+    assert_eq!(signer.validity, CheckStatus::Passed, "{signer:?}");
+    assert_eq!(signer.revocation, CheckStatus::Passed, "{signer:?}");
+    assert_eq!(signer.timestamp, CheckStatus::Passed, "{signer:?}");
+    assert!(matches!(signer.time_basis, TimeBasis::VerifiedTimestamp(_)));
+    assert_eq!(report.verdict, Verdict::Valid, "{signer:?}");
+
+    let pem = oncl_pki::cms::to_pem(&stamped);
+    assert!(pem.starts_with("-----BEGIN CMS-----"), "{pem}");
+    assert_eq!(pem_to_der(&pem), stamped);
+}
+
+/// The token of another signature is caught even when everything else is provable.
+#[test]
+fn core_validation_rejects_a_forged_token_with_a_proving_pki() {
+    use oncl_pki::validation::{CheckStatus, Verdict};
+    let pki = local_pki();
+    let (stamped, second) = stamped_pair(&pki);
+    let old = verify(&stamped, None).unwrap().swap_remove(0).signature;
+    let new = verify(&second, None).unwrap().swap_remove(0).signature;
+    assert_eq!(old.len(), new.len());
+    assert_ne!(old, new);
+    let at: Vec<usize> = stamped
+        .windows(old.len())
+        .enumerate()
+        .filter(|(_, w)| *w == old.as_slice())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 1);
+    let mut forged = stamped.clone();
+    forged[at[0]..at[0] + new.len()].copy_from_slice(&new);
+    assert_eq!(
+        verify(&forged, None).unwrap().len(),
+        1,
+        "the signature itself verifies"
+    );
+
+    let report = local_validate(&pki, &forged);
+    let signer = &report.signers[0];
+    assert_eq!(signer.signature, CheckStatus::Passed, "{signer:?}");
+    assert_eq!(signer.timestamp, CheckStatus::Failed, "{signer:?}");
+    assert_eq!(report.verdict, Verdict::Invalid, "{signer:?}");
 }
 
 #[test]
