@@ -94,7 +94,7 @@ fn unsafe_names_are_refused_and_create_nothing() {
         "\\\\server\\share\\x",
         "x/..",
         "PROGRA~1",
-        "\\\\?\\\x43:\\x",
+        "\\\\?\\UNC\\server\\x",
         "name\u{e9}",
     ] {
         let out = install(&directory, name, b"SECRET-MATERIAL");
@@ -146,4 +146,15 @@ fn a_refusal_never_removes_or_changes_an_existing_directory() {
     assert!(install(&directory, "keep.p12", b"kept").status.success());
     assert!(!install(&directory, "a b", b"x").status.success());
     assert_eq!(std::fs::read(directory.join("keep.p12")).unwrap(), b"kept");
+}
+
+#[test]
+fn an_existing_empty_directory_is_left_as_it_was() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("operator");
+    assert!(install(&directory, "first.p12", b"x").status.success());
+    std::fs::remove_file(directory.join("first.p12")).unwrap();
+    assert!(!install(&directory, "a b", b"x").status.success());
+    assert!(directory.is_dir());
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
 }

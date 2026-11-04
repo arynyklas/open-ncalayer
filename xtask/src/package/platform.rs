@@ -579,6 +579,7 @@ fn pack(stage: &Path, top: &str, archive: &Path, os: Os) -> anyhow::Result<()> {
     match os {
         Os::Windows => {
             let options = SimpleFileOptions::default()
+                .system(zip::System::Unix)
                 .compression_method(CompressionMethod::Deflated)
                 .last_modified_time(DateTime::default());
             let mut zip = ZipWriter::new(
@@ -701,7 +702,7 @@ pub enum Kind {
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub name: String,
-    pub mode: Option<u32>,
+    pub mode: u32,
     pub kind: Kind,
 }
 
@@ -731,10 +732,8 @@ fn parse_tar(tar: &[u8]) -> anyhow::Result<Vec<Entry>> {
         if !prefix.is_empty() {
             name = format!("{prefix}/{name}");
         }
-        let mode = Some(
-            u32::from_str_radix(&text(100, 108), 8)
-                .with_context(|| format!("the mode field of {name}"))?,
-        );
+        let mode = u32::from_str_radix(&text(100, 108), 8)
+            .with_context(|| format!("the mode field of {name}"))?;
         let size = usize::from_str_radix(&text(124, 136), 8).context("a tar size")?;
         let kind = match header[156] {
             b'0' | 0 => Kind::File,
@@ -917,14 +916,15 @@ fn parse_zip_directory(bytes: &[u8]) -> anyhow::Result<Vec<Entry>> {
         )?;
         let mode = attributes >> 16;
         let kind = match mode & 0o170_000 {
-            0o120_000 => Kind::Other,
-            0o040_000 => Kind::Directory,
-            _ if name.ends_with('/') => Kind::Directory,
-            _ => Kind::File,
+            // An allow-list: regular files and directories only; symlinks, devices, fifos,
+            // sockets and entries without a Unix type are `Other`.
+            0o100_000 if !name.ends_with('/') => Kind::File,
+            0o040_000 if name.ends_with('/') => Kind::Directory,
+            _ => Kind::Other,
         };
         found.push(Entry {
             name,
-            mode: Some(mode & 0o7777),
+            mode: mode & 0o7777,
             kind,
         });
         at += 46 + name_length + extra + comment;
@@ -950,7 +950,7 @@ pub fn check_entries(
         if entry.kind == Kind::Other {
             bail!("{}: not a regular file or directory", entry.name);
         }
-        let Some(mode) = entry.mode else { continue };
+        let mode = entry.mode;
         let relative = entry.name.strip_prefix(&format!("{top}/")).unwrap_or("");
         let expected = if entry.kind == Kind::Directory
             || is_program(relative)
@@ -1085,8 +1085,8 @@ mod tests {
             .iter()
             .find(|e| e.name.ends_with("/oncl-server"))
             .unwrap();
-        assert_eq!(program.mode, Some(0o755));
-        for bad in [Some(0o777), Some(0o4755), Some(0o664)] {
+        assert_eq!(program.mode, 0o755);
+        for bad in [0o777, 0o4755, 0o664] {
             let mut changed = found.clone();
             changed
                 .iter_mut()
@@ -1133,9 +1133,9 @@ mod tests {
                 .find(|e| e.name.ends_with("oncl.exe"))
                 .unwrap()
                 .mode,
-            Some(0o755)
+            0o755
         );
-        for bad in [Some(0o664), Some(0o777), Some(0o4755)] {
+        for bad in [0o664, 0o777, 0o4755] {
             let mut changed = found.clone();
             changed
                 .iter_mut()
@@ -1147,6 +1147,50 @@ mod tests {
         let mut link = found.clone();
         link[0].kind = Kind::Other;
         assert!(check_entries(&link, Product::Cli, &version(), &flavor).is_err());
+    }
+
+    #[test]
+    fn central_directory_attribute_bytes_are_an_allow_list() {
+        let flavor = flavor("win-x64").unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let top = dir_name(Product::Cli, &version(), &flavor);
+        let stage = temporary.path().join(&top);
+        for file in expected_files(Product::Cli, &flavor) {
+            let path = stage.join(&file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let archive = temporary.path().join("a.zip");
+        pack(&stage, &top, &archive, Os::Windows).unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        let name = format!("{top}/NOTICE");
+        let at = bytes
+            .windows(name.len())
+            .rposition(|w| w == name.as_bytes())
+            .unwrap()
+            - 46;
+        assert_eq!(&bytes[at..at + 4], &[0x50, 0x4b, 0x01, 0x02]);
+        let check = |attributes: u32| {
+            let mut patched = bytes.clone();
+            patched[at + 38..at + 42].copy_from_slice(&attributes.to_le_bytes());
+            let found = parse_zip_directory(&patched).unwrap();
+            check_entries(&found, Product::Cli, &version(), &flavor)
+        };
+        check(0o100_644 << 16).unwrap();
+        for bad in [
+            0o100_664_u32 << 16,
+            0o104_644 << 16,
+            0o102_644 << 16,
+            0o120_644 << 16,
+            0o020_644 << 16,
+            0o060_644 << 16,
+            0o010_644 << 16,
+            0o140_644 << 16,
+            0o040_755 << 16,
+            0,
+        ] {
+            assert!(check(bad).is_err(), "{bad:o} was accepted");
+        }
     }
 
     #[test]

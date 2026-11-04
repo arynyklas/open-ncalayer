@@ -453,7 +453,7 @@ oncl-server token-create --directory %ProgramData%\oncl-operator --name accounti
 oncl-server serve --config %ProgramData%\oncl-operator\server.toml --enable-api
 ```
 
-`--directory` is created owner-only if absent or must already be private; `--name` is one plain file name (no path, drive, stream or reserved device name such as `NUL`); input is at most 16 MiB; nothing is created on any error. The same command works on Linux in place of `install -m 0600`. Delete the plain source files afterwards.
+`--directory` is created owner-only if absent or must already be private; `--name` is one plain file name (no path, drive, stream or reserved device name such as `NUL`); input is at most 16 MiB; a refused name or oversized input creates nothing (not even the directory); if writing the file fails, the file is removed and a directory created by this command is left empty, and a failure of the final directory sync leaves the completed file in place. The same command works on Linux in place of `install -m 0600`. Delete the plain source files afterwards.
 
 ### TLS provisioning (LAN exposure)
 
