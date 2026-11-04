@@ -3,6 +3,7 @@
 // of results and errors are composed in Rust.
 
 import { SigningPage } from "signing.slint";
+import { ToolPage } from "tools.slint";
 import { Button, ComboBox, LineEdit, Palette, ProgressIndicator, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
 
 // A label above a field.
@@ -23,7 +24,8 @@ export component WorkspaceWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 580px;
 
-    // 0: overview, 1: sign, 2: hash, 3: inspect.
+    // 0: overview, 1: sign, 2: verify, 3: extend, 4: extract, 5: timestamp, 6: hash,
+    // 7: inspect.
     in-out property <int> section;
 
     in-out property <string> hash-path;
@@ -54,6 +56,12 @@ export component WorkspaceWindow inherits Window {
     callback start-inspect();
     callback browse();
     callback cancel();
+    // The sidebar picked another page.
+    callback section-changed(int);
+
+    changed section => {
+        root.section-changed(root.section);
+    }
 
     // Escape anywhere that does not use it cancels what runs; the Cancel button is on the Tab
     // ring too.
@@ -77,8 +85,8 @@ export component WorkspaceWindow inherits Window {
                         x: 8px;
                         y: 8px;
                         width: parent.width - 16px;
-                        height: 4 * 40px + 8px;
-                        model: [{ text: @tr("Overview") }, { text: @tr("Sign") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
+                        height: 8 * 40px + 8px;
+                        model: [{ text: @tr("Overview") }, { text: @tr("Sign") }, { text: @tr("Verify") }, { text: @tr("Extend") }, { text: @tr("Extract") }, { text: @tr("Timestamp") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
                         current-item <=> root.section;
                     }
                 }
@@ -108,7 +116,7 @@ export component WorkspaceWindow inherits Window {
                             }
 
                             Text {
-                                text: @tr("Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key.");
+                                text: @tr("Sign: sign documents with a key store file as CMS, CAdES, XML, XAdES, SOAP, PDF, PAdES, JWS or JWT; you see exactly what is signed, in which format and with which certificate, then confirm. Verify: check signatures of any of these formats; the report says what was proven, what could not be checked and why. Extend: add time and validation evidence to CAdES, XAdES and PAdES. Extract: take the content out of a signature container, without checking it. Timestamp: get or check a time stamp. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Only Sign uses a private key.");
                                 wrap: word-wrap;
                             }
 
@@ -124,22 +132,33 @@ export component WorkspaceWindow inherits Window {
                                 }
 
                                 Button {
-                                    text: @tr("Hash a file");
+                                    text: @tr("Verify signatures");
                                     clicked => {
                                         root.section = 2;
                                     }
                                 }
 
                                 Button {
+                                    text: @tr("Hash a file");
+                                    clicked => {
+                                        root.section = 6;
+                                    }
+                                }
+
+                                Button {
                                     text: @tr("Inspect");
                                     clicked => {
-                                        root.section = 3;
+                                        root.section = 7;
                                     }
                                 }
                             }
                         }
                         if root.section == 1: SigningPage { }
-                        if root.section == 2: VerticalLayout {
+                        if root.section >= 2 && root.section <= 5: ToolPage {
+                            busy: root.busy;
+                            error: root.error-section == root.section ? root.error-text : "";
+                        }
+                        if root.section == 6: VerticalLayout {
                             spacing: 8px;
                             Text {
                                 text: @tr("Hash a file");
@@ -183,7 +202,7 @@ export component WorkspaceWindow inherits Window {
                                 current-index <=> root.hash-algorithm;
                             }
 
-                            if root.error-section == 2 && root.error-text != "": PageError {
+                            if root.error-section == 6 && root.error-text != "": PageError {
                                 text: root.error-text;
                             }
                             HorizontalLayout {
@@ -216,7 +235,7 @@ export component WorkspaceWindow inherits Window {
                                 }
                             }
                         }
-                        if root.section == 3: VerticalLayout {
+                        if root.section == 7: VerticalLayout {
                             spacing: 8px;
                             Text {
                                 text: @tr("Inspect");
@@ -289,7 +308,7 @@ export component WorkspaceWindow inherits Window {
                                     }
                                 }
                             }
-                            if root.error-section == 3 && root.error-text != "": PageError {
+                            if root.error-section == 7 && root.error-text != "": PageError {
                                 text: root.error-text;
                             }
                             HorizontalLayout {

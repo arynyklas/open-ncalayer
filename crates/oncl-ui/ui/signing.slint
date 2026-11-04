@@ -3,7 +3,8 @@
 // result. The caller and the action stay on screen in every step. All texts that depend on
 // the state are composed in Rust.
 
-import { Button, ComboBox, LineEdit, Palette, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
+import { ReportRow, ReportView } from "report.slint";
 
 export global SigningState {
     // 0: documents and key store, 1: password and certificate, 2: confirmation, 3: running,
@@ -37,6 +38,33 @@ export global SigningState {
     in property <string> result;
     in property <string> error;
     in property <bool> busy;
+    // What is made of the documents. The format is a family; the level is for the formats that
+    // have one (CMS/CAdES, XML/XAdES, PDF/PAdES).
+    // 0: CMS/CAdES, 1: XML/XAdES, 2: WS-Security, 3: PDF/PAdES, 4: JWS, 5: JWT.
+    in-out property <int> format-index: 0;
+    // 0: plain, 1: B, 2: T, 3: LT, 4: LTA.
+    in-out property <int> level-index: 0;
+    // 0: next to each document, 1: one folder.
+    in-out property <int> destination-index: 0;
+    in-out property <string> destination-path;
+    // The options that are rarely needed stay folded until asked for.
+    in-out property <bool> show-advanced: false;
+    in-out property <bool> attached: false;
+    in-out property <bool> add-signature: false;
+    in-out property <string> xml-target;
+    in-out property <string> xml-parent;
+    in-out property <string> signature-id;
+    // LT and LTA of CAdES and PAdES: the files their evidence is built from, each field a list
+    // of paths separated by «;».
+    in-out property <string> evidence-certificates;
+    in-out property <string> evidence-ocsp;
+    in-out property <string> evidence-crls;
+    // «Format … · options …» of the operation, shown at the confirmation.
+    in property <string> profile-line;
+    // The report of the result: how the batch ended, then each document, signer and check.
+    in property <string> report-headline;
+    in property <int> report-tone: 3;
+    in property <[ReportRow]> report-rows;
 
     callback add-doc();
     callback clear-docs();
@@ -56,6 +84,7 @@ export global SigningState {
     callback back();
     callback cancel();
     callback finish();
+    callback browse-folder();
 }
 
 component Heading inherits Text {
@@ -154,6 +183,130 @@ export component SigningPage inherits VerticalLayout {
             model: SigningState.docs;
             accessible-label: @tr("Documents to sign");
         }
+
+        Label {
+            text: @tr("Format of the signature");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                horizontal-stretch: 1;
+                model: [@tr("CMS / CAdES (signature file)"), @tr("XML (XMLDSig / XAdES)"), @tr("SOAP message (WS-Security)"), @tr("PDF (PAdES)"), @tr("JWS (JSON Web Signature)"), @tr("JWT (signed token)")];
+                current-index <=> SigningState.format-index;
+                accessible-label: @tr("Format of the signature");
+            }
+
+            if SigningState.format-index == 0 || SigningState.format-index == 1 || SigningState.format-index == 3: ComboBox {
+                model: [@tr("Plain, no level"), @tr("B: basic"), @tr("T: with a time stamp"), @tr("LT: with validation data"), @tr("LTA: for long-term archival")];
+                current-index <=> SigningState.level-index;
+                accessible-label: @tr("Level of the signature");
+            }
+        }
+
+        Label {
+            text: @tr("Where the results are written");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                model: [@tr("Next to each document"), @tr("In one folder")];
+                current-index <=> SigningState.destination-index;
+                accessible-label: @tr("Where the results are written");
+            }
+
+            if SigningState.destination-index == 1: LineEdit {
+                horizontal-stretch: 1;
+                text <=> SigningState.destination-path;
+                placeholder-text: @tr("Path to the folder");
+                accessible-label: @tr("Folder for the results");
+            }
+            if SigningState.destination-index == 1: Button {
+                text: @tr("Browse…");
+                clicked => {
+                    SigningState.browse-folder();
+                }
+            }
+        }
+
+        CheckBox {
+            text: @tr("Show the options that are rarely needed");
+            checked <=> SigningState.show-advanced;
+            accessible-label: @tr("Show the options that are rarely needed");
+        }
+
+        if SigningState.show-advanced: VerticalLayout {
+            spacing: 6px;
+            if SigningState.format-index == 0: CheckBox {
+                text: @tr("Put the content inside the signature (attached)");
+                checked <=> SigningState.attached;
+                accessible-label: @tr("Put the content inside the signature (attached)");
+            }
+            if SigningState.format-index == 1 || SigningState.format-index == 2: CheckBox {
+                text: @tr("Add a signature to a document that is already signed");
+                checked <=> SigningState.add-signature;
+                accessible-label: @tr("Add a signature to a document that is already signed");
+            }
+            if SigningState.format-index == 1: VerticalLayout {
+                spacing: 4px;
+                Label {
+                    text: @tr("Element to sign (XML ID)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.xml-target;
+                    accessible-label: @tr("Element to sign (XML ID)");
+                }
+
+                Label {
+                    text: @tr("Element that gets the signature (XML ID)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.xml-parent;
+                    accessible-label: @tr("Element that gets the signature (XML ID)");
+                }
+
+                Label {
+                    text: @tr("Identity of the signature (XML ID)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.signature-id;
+                    accessible-label: @tr("Identity of the signature (XML ID)");
+                }
+            }
+        }
+            if (SigningState.format-index == 0 || SigningState.format-index == 3) && SigningState.level-index >= 3: VerticalLayout {
+                spacing: 4px;
+                Label {
+                    text: @tr("Evidence: certificates of the chain (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-certificates;
+                    accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
+                }
+
+                Label {
+                    text: @tr("Evidence: OCSP responses (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-ocsp;
+                    accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
+                }
+
+                Label {
+                    text: @tr("Evidence: CRLs (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-crls;
+                    accessible-label: @tr("Evidence: CRLs (files, separated by ;)");
+                }
+            }
 
         Label {
             text: @tr("Key store (PKCS#12, JKS)");
@@ -322,6 +475,11 @@ export component SigningPage inherits VerticalLayout {
             wrap: word-wrap;
         }
 
+        Text {
+            text: SigningState.profile-line;
+            wrap: word-wrap;
+        }
+
         Label {
             text: @tr("Documents (names are as given, not checked)");
         }
@@ -382,12 +540,16 @@ export component SigningPage inherits VerticalLayout {
     }
     if SigningState.step == 4: VerticalLayout {
         spacing: 8px;
-        TextEdit {
-            read-only: true;
-            wrap: word-wrap;
-            min-height: 140px;
+        if SigningState.result != "": Text {
             text: SigningState.result;
-            accessible-label: @tr("Result");
+            wrap: word-wrap;
+            accessible-role: text;
+            accessible-label: SigningState.result;
+        }
+        ReportView {
+            headline: SigningState.report-headline;
+            tone: SigningState.report-tone;
+            rows: SigningState.report-rows;
         }
 
         HorizontalLayout {

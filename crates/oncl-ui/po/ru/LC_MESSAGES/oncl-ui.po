@@ -455,14 +455,110 @@ msgstr "Показать подтверждение"
 msgid "Documents (names are as given, not checked)"
 msgstr "Документы (имена как заданы, не проверялись)"
 
-msgid "Result"
-msgstr "Результат"
-
 msgid "New signing"
 msgstr "Новая подпись"
 
-msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
-msgstr "Подпись: подписать документы файлом хранилища ключей; вы видите, что именно подписывается и каким сертификатом, и затем подтверждаете. Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; практического ограничения по времени нет (24 ч), остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Хеш и сведения не используют закрытый ключ."
-
 msgid "Recent key stores"
 msgstr "Недавние хранилища"
+
+msgid "Add a signature to a document that is already signed"
+msgstr "Добавить подпись к уже подписанному документу"
+
+msgid "B: basic"
+msgstr "B: базовый"
+
+msgid "CMS / CAdES (signature file)"
+msgstr "CMS / CAdES (файл подписи)"
+
+msgid "Documents"
+msgstr "Документы"
+
+msgid "Element that gets the signature (XML ID)"
+msgstr "Элемент, в который помещается подпись (XML ID)"
+
+msgid "Element to sign (XML ID)"
+msgstr "Подписываемый элемент (XML ID)"
+
+msgid "Extend"
+msgstr "Продление"
+
+msgid "Extract"
+msgstr "Извлечение"
+
+msgid "Folder for the results"
+msgstr "Папка для результатов"
+
+msgid "Format of the signature"
+msgstr "Формат подписи"
+
+msgid "Identity of the signature (XML ID)"
+msgstr "Идентификатор подписи (XML ID)"
+
+msgid "In one folder"
+msgstr "В одну папку"
+
+msgid "JWS (JSON Web Signature)"
+msgstr "JWS (JSON Web Signature)"
+
+msgid "JWT (signed token)"
+msgstr "JWT (подписанный токен)"
+
+msgid "LT: with validation data"
+msgstr "LT: с данными проверки"
+
+msgid "LTA: for long-term archival"
+msgstr "LTA: для долгого хранения"
+
+msgid "Level of the signature"
+msgstr "Уровень подписи"
+
+msgid "Next to each document"
+msgstr "Рядом с каждым документом"
+
+msgid "PDF (PAdES)"
+msgstr "PDF (PAdES)"
+
+msgid "Path to the folder"
+msgstr "Путь к папке"
+
+msgid "Plain, no level"
+msgstr "Простая, без уровня"
+
+msgid "Put the content inside the signature (attached)"
+msgstr "Поместить содержимое внутрь подписи"
+
+msgid "SOAP message (WS-Security)"
+msgstr "SOAP-сообщение (WS-Security)"
+
+msgid "Show the options that are rarely needed"
+msgstr "Показать редко нужные параметры"
+
+msgid "Sign: sign documents with a key store file as CMS, CAdES, XML, XAdES, SOAP, PDF, PAdES, JWS or JWT; you see exactly what is signed, in which format and with which certificate, then confirm. Verify: check signatures of any of these formats; the report says what was proven, what could not be checked and why. Extend: add time and validation evidence to CAdES, XAdES and PAdES. Extract: take the content out of a signature container, without checking it. Timestamp: get or check a time stamp. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Only Sign uses a private key."
+msgstr "Подпись: подписать документы файлом хранилища ключей как CMS, CAdES, XML, XAdES, SOAP, PDF, PAdES, JWS или JWT; вы видите, что именно подписывается, в каком формате и каким сертификатом, затем подтверждаете. Проверка: проверить подписи любого из этих форматов; отчёт говорит, что доказано, что не удалось проверить и почему. Продление: добавить доказательства времени и проверки к CAdES, XAdES и PAdES. Извлечение: достать содержимое из контейнера подписи без его проверки. Метка времени: получить или проверить метку времени. Хеш: дайджест файла до 10 ГиБ, читаемого частями; практического ограничения по времени нет (24 ч), «Отмена» останавливает. Осмотр: открытые сведения о сертификате, файле подписи, хранилище ключей или подключённых токенах. Закрытый ключ применяет только «Подпись»."
+
+msgid "T: with a time stamp"
+msgstr "T: с меткой времени"
+
+msgid "Timestamp"
+msgstr "Метка времени"
+
+msgid "Verify"
+msgstr "Проверка"
+
+msgid "Verify signatures"
+msgstr "Проверить подписи"
+
+msgid "Where the results are written"
+msgstr "Куда записываются результаты"
+
+msgid "XML (XMLDSig / XAdES)"
+msgstr "XML (XMLDSig / XAdES)"
+
+msgid "Evidence: CRLs (files, separated by ;)"
+msgstr "Данные проверки: списки отзыва CRL (файлы, через ;)"
+
+msgid "Evidence: OCSP responses (files, separated by ;)"
+msgstr "Данные проверки: ответы OCSP (файлы, через ;)"
+
+msgid "Evidence: certificates of the chain (files, separated by ;)"
+msgstr "Данные проверки: сертификаты цепочки (файлы, через ;)"

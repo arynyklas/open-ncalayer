@@ -11,17 +11,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use der::Encode;
-use oncl_core::batch::{BatchEvent, BatchItem, BatchOperation, BatchOutcome, BatchOutput};
+use oncl_core::batch::{BatchEvent, BatchItem, BatchOutput};
 use oncl_core::keys::{KeyId, KeyRequest, KeySelector, KeySources, KeyUseEvent, KeyUseGuard};
 use oncl_core::keys::{KeyUseOutcome, KeyUseReceipt};
 use oncl_core::{
-    Action, Engine, EngineServices, ErrorCode, ExecutionGrant, OperationError, OperationPolicy,
-    SignRequest, ValidationServices,
+    Action, CadesConfiguration, Engine, EngineServices, ErrorCode, ExecutionGrant, OperationError,
+    OperationPolicy, ValidationServices,
 };
+use oncl_pki::cms::ades::ValidationMaterial;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::info::cert_info;
 use oncl_pki::io::{Source, TemporaryStore};
-use oncl_pki::key::{AppliedState, HashAlg};
+use oncl_pki::key::HashAlg;
 use oncl_pki::pkix::CaSet;
 use oncl_pki::resource::ResourceLimits;
 use oncl_pki::validation::NetworkPolicy;
@@ -29,7 +30,12 @@ use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
 use super::controller::{Approved, Candidate, Item, Unsuitable};
-use crate::workspace::{JobControl, JobError};
+use crate::reports::controller::{BatchView, Family};
+use crate::workspace::{
+    Destination, JobControl, JobError, PlannedOutput, SignFormat, SignInput, SignSpec,
+    batch_operation_error, open_regular, plan_output, read_limited, sign_operation,
+    view_of_summary,
+};
 
 /// The origins of the national certification authority's revocation and time services; the
 /// only network the signing checks may reach unless the host adds its own.
@@ -75,6 +81,13 @@ impl ConsentGuard {
             action,
             uses_left: uses,
         });
+    }
+
+    /// Allows the engine to apply `key` `uses` times for `operation`, as the consented run does;
+    /// for tests that drive the SDK directly.
+    #[cfg(test)]
+    pub(crate) fn allow_for_tests(&self, operation: u64, key: KeyId, action: Action, uses: usize) {
+        self.allow(operation, key, action, uses);
     }
 
     /// How many times the engine was allowed to apply the key.
@@ -148,6 +161,8 @@ pub fn desktop_engine(
         .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
 
     let store = TemporaryStore::new(spool)?;
+    let tsa = crate::workspace::tsa_spec(HashAlg::Sha256, Some(crate::workspace::NCA_TSA_POLICY))
+        .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("TSA"))?;
     let services = EngineServices::hash_only(limits)
         .with_keys(Arc::new(KeySources::new()), guard.clone())
         .with_validation(ValidationServices::new(
@@ -156,6 +171,10 @@ pub fn desktop_engine(
             http,
             network,
             clock,
+        ))
+        .with_cades(CadesConfiguration::new(
+            crate::workspace::evidence_limits(),
+            tsa,
         ))
         .with_temporary_store(store);
     Ok((Engine::new(services)?, guard))
@@ -281,17 +300,6 @@ pub(crate) fn open_key_store(
         .collect()
 }
 
-/// What happened to one document.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Signed {
-    pub name: String,
-    /// The signature file, if it was written.
-    pub output: Option<PathBuf>,
-    pub error: Option<ErrorCode>,
-    /// Whether the key was applied for this document, whatever came after.
-    pub applied: AppliedState,
-}
-
 /// The handshake between the worker and the page: the worker freezes the documents, hands
 /// over what it froze, and waits. `Proceed` carries the controller's permission; `Abort`
 /// (or a closed channel) ends the operation before any key is touched.
@@ -303,8 +311,9 @@ pub(crate) enum Decision {
 /// How a signing operation ended.
 #[derive(Debug)]
 pub(crate) enum Outcome {
-    /// Per document.
-    Done(Vec<Signed>),
+    /// Per document, as the engine reported each: whether it completed, what it wrote and
+    /// whether the key was applied.
+    Done(BatchView),
     /// The documents the engine froze are not the ones the user agreed to; no key was used.
     DocumentsChanged(Vec<Item>),
     /// Not started or stopped before any key was applied.
@@ -312,10 +321,11 @@ pub(crate) enum Outcome {
 }
 
 /// Freezes `documents` (batch capture), reports what was frozen to `frozen`, waits for the
-/// decision, and signs each document into `<name>.p7s` next to it.
+/// decision, and signs each document as `spec` says into `destination`.
 ///
 /// `frozen` runs on the worker and must hand the items to the controller; the controller's
-/// answer comes back as the [`Decision`].
+/// answer comes back as the [`Decision`]. The consent must be for exactly these documents, this
+/// key and this `spec`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sign(
     engine: &Engine,
@@ -324,11 +334,22 @@ pub(crate) fn sign(
     alias: &str,
     password: &Zeroizing<String>,
     documents: &[PathBuf],
+    spec: &SignSpec,
+    destination: &Destination,
     control: &Arc<JobControl>,
     frozen: impl FnOnce(Frozen) -> Decision,
 ) -> Outcome {
     match sign_inner(
-        engine, guard, key_store, alias, password, documents, control, frozen,
+        engine,
+        guard,
+        key_store,
+        alias,
+        password,
+        documents,
+        spec,
+        destination,
+        control,
+        frozen,
     ) {
         Ok(outcome) => outcome,
         Err(e) => Outcome::NotApplied(e),
@@ -343,11 +364,25 @@ fn sign_inner(
     alias: &str,
     password: &Zeroizing<String>,
     documents: &[PathBuf],
+    spec: &SignSpec,
+    destination: &Destination,
     control: &Arc<JobControl>,
     frozen: impl FnOnce(Frozen) -> Decision,
 ) -> Result<Outcome, JobError> {
     // The key store is read once; listing's certificate is compared with this copy below, and
     // the engine signs with this copy only, so a file swapped later is never used.
+    // LT and LTA of CAdES and PAdES cannot be built from nothing, and the engine would only say
+    // so after the key was applied: refused here, before anything is read or used.
+    let loaded = if spec.needs_material() {
+        spec.options.evidence.require()?;
+        Some(spec.options.evidence.load()?)
+    } else {
+        None
+    };
+    let (ocsp, crls) = loaded.as_ref().map_or((Vec::new(), Vec::new()), |l| {
+        (l.ocsp_slices(), l.crl_slices())
+    });
+    let certificates = loaded.as_ref().map_or(&[][..], |l| &l.certificates[..]);
     let bytes = read_key_store(key_store)?;
     let selector = KeySelector::inline(bytes.to_vec(), Some(alias.to_owned()));
     let key_id = selector.key_id();
@@ -360,51 +395,68 @@ fn sign_inner(
         .reserve_memory(bytes.len() as u64 * 4)
         .map_err(OperationError::from)?;
     let entry_certificate = certificate_of(&bytes, password, alias)?;
-    let mut files = Vec::with_capacity(documents.len());
-    let mut stages = Vec::with_capacity(documents.len());
-    let mut destinations = Vec::with_capacity(documents.len());
+    control.set_items(documents.len());
+    let payload_limit = if spec.format == SignFormat::Jws {
+        oncl_core::jose::MAX_PAYLOAD_BYTES
+    } else {
+        oncl_core::jose::MAX_CLAIMS_BYTES
+    };
+    let mut files: Vec<Option<(File, u64)>> = Vec::with_capacity(documents.len());
+    let mut payloads: Vec<Option<Vec<u8>>> = Vec::with_capacity(documents.len());
+    let mut outputs: Vec<PlannedOutput> = Vec::with_capacity(documents.len());
+    let mut claimed = Vec::new();
     for path in documents {
-        let file = File::open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(JobError::NotRegular);
+        if spec.signs_a_payload() {
+            payloads.push(Some(read_limited(path, payload_limit)?));
+            files.push(None);
+        } else {
+            files.push(Some(open_regular(path)?));
+            payloads.push(None);
         }
-        let len = file.metadata()?.len();
-        control.set_total(len.max(1));
-        files.push((file, len));
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let store = TemporaryStore::new(parent).map_err(OperationError::from)?;
-        stages.push(Some(
-            store.stage(ctx.resources()).map_err(OperationError::from)?,
-        ));
-        let mut name = path.as_os_str().to_owned();
-        name.push(".p7s");
-        let destination = PathBuf::from(name);
-        preflight_destination(&destination, parent)?;
-        destinations.push(destination);
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        outputs.push(plan_output(
+            destination,
+            path,
+            &spec.output_name(&name),
+            &mut claimed,
+            &mut ctx,
+        )?);
     }
     let ids: Vec<String> = (0..documents.len()).map(|i| format!("doc{i}")).collect();
     let mut items = Vec::with_capacity(documents.len());
-    for (((file, len), stage), id) in files.iter_mut().zip(stages.iter_mut()).zip(&ids) {
-        items.push(BatchItem::new(
-            id,
-            BatchOperation::Sign {
-                request: SignRequest::cms_create(
-                    vec![KeyRequest::new(&selector, Some(password.as_str()))],
-                    false,
-                ),
-                input: Source::seekable(file, Some(*len)),
-                output: BatchOutput::OwnedStaged(
-                    stage.take().ok_or(OperationError::InvalidKeySource)?,
-                ),
+    for (((file, payload), planned), id) in files
+        .iter_mut()
+        .zip(&payloads)
+        .zip(outputs.iter_mut())
+        .zip(&ids)
+    {
+        let stage = planned
+            .stage
+            .take()
+            .ok_or(OperationError::InvalidKeySource)?;
+        let input = match (file, payload) {
+            (Some((file, len)), _) => SignInput::Source(Source::seekable(file, Some(*len))),
+            (None, Some(bytes)) => SignInput::Payload(bytes),
+            (None, None) => return Err(JobError::Operation(ErrorCode::InvalidInput)),
+        };
+        let operation = sign_operation(
+            spec,
+            KeyRequest::new(&selector, Some(password.as_str())),
+            input,
+            BatchOutput::OwnedStaged(stage),
+            ValidationMaterial {
+                certificates,
+                ocsp: &ocsp,
+                crls: &crls,
             },
-        ));
+        )?;
+        items.push(BatchItem::new(id, operation));
     }
     let plan = engine
         .capture_batch(items, &mut ctx)
-        .map_err(|e| JobError::from(operation_of(e)))?;
+        .map_err(|e| JobError::from(batch_operation_error(e)))?;
     let mut captured = Vec::with_capacity(documents.len());
     for (view, path) in plan.items().zip(documents) {
         let [source] = view.sources else {
@@ -425,6 +477,7 @@ fn sign_inner(
             sha256,
         });
     }
+    let destinations: Vec<PathBuf> = outputs.iter().map(|o| o.destination.clone()).collect();
     let approved = match frozen(Frozen {
         items: captured.clone(),
         outputs: destinations.clone(),
@@ -432,9 +485,20 @@ fn sign_inner(
         Decision::Proceed(approved) => approved,
         Decision::Abort => return Err(JobError::Cancelled),
     };
-    // The consent must be for exactly what was frozen, and for this key.
+    // The consent must be for exactly what was frozen, for this key and for what is made of it.
     if !approved.consent.covers(&captured) || approved.consent.alias() != alias {
         return Ok(Outcome::DocumentsChanged(captured));
+    }
+    // Compared with the label of the evidence bytes loaded and frozen above, never with a fresh
+    // read of the paths: a file swapped after the confirmation (even swapped back) is refused.
+    let evidence_label = loaded
+        .as_ref()
+        .map_or_else(|| spec.options.evidence.label(), |l| l.label.clone());
+    if approved.consent.profile() != spec.label_with(&evidence_label) {
+        // The user agreed to another format or other options: nothing agreed to stands.
+        return Ok(Outcome::NotApplied(JobError::Operation(
+            ErrorCode::PermissionDenied,
+        )));
     }
     // The certificate shown is the certificate of the bytes the engine will use.
     if approved.consent.certificate() != Some(&entry_certificate) {
@@ -442,14 +506,21 @@ fn sign_inner(
     }
     let approval = plan
         .authorize(&ctx)
-        .map_err(|e| JobError::from(operation_of(e)))?;
+        .map_err(|e| JobError::from(batch_operation_error(e)))?;
+    // From here the key may be applied: the window's close path reads this to tell «never
+    // used» from «unknown».
+    control.mark_key_gate_passed();
     guard.allow(ctx.id().get(), key_id, Action::Sign, documents.len());
     let mut published = vec![false; documents.len()];
     let summary = engine.run_batch_with_outputs(
         plan,
         approval,
         &mut ctx,
-        |_: BatchEvent<'_>| {},
+        |event: BatchEvent<'_>| {
+            if let BatchEvent::ItemStarted { index, .. } = event {
+                control.begin_item(index);
+            }
+        },
         |index, _id, _report, completed| {
             completed.commit(&destinations[index])?;
             published[index] = true;
@@ -459,27 +530,22 @@ fn sign_inner(
     guard.revoke();
     // Cancelled maps to JobError::Cancelled only before any key use; after key use a cancel
     // ends in Done with the per-item applied state.
-    let summary = summary.map_err(|e| JobError::from(operation_of(e)))?;
-    let mut done = Vec::with_capacity(documents.len());
-    for (i, result) in summary.results().iter().enumerate() {
-        let name = captured.get(i).map(|c| c.name.clone()).unwrap_or_default();
-        let error = match result.outcome() {
-            BatchOutcome::Completed(_) => None,
-            BatchOutcome::Failed(e) => Some(e.code()),
-            BatchOutcome::NotRun => Some(ErrorCode::Cancelled),
-        };
-        done.push(Signed {
-            name,
-            output: published
-                .get(i)
-                .copied()
-                .unwrap_or(false)
-                .then(|| destinations[i].clone()),
-            error,
-            applied: result.applied_state(),
-        });
-    }
-    Ok(Outcome::Done(done))
+    let summary = summary.map_err(|e| JobError::from(batch_operation_error(e)))?;
+    let names: Vec<String> = captured.iter().map(|c| c.name.clone()).collect();
+    let position: Vec<usize> = (0..documents.len()).collect();
+    let paths: Vec<Option<PathBuf>> = destinations.into_iter().map(Some).collect();
+    let mut view = view_of_summary(
+        Family::Sign,
+        &names,
+        &position,
+        &[],
+        &paths,
+        &published,
+        spec.format_name(),
+        &summary,
+    );
+    view.network = spec.uses_network();
+    Ok(Outcome::Done(view))
 }
 
 /// What the engine froze and where the signatures will go.
@@ -526,44 +592,6 @@ fn certificate_of(bytes: &[u8], password: &str, alias: &str) -> Result<[u8; 32],
     Ok(sha256_of(&der))
 }
 
-/// Before any key is used: the signature file must not exist, and the folder must be able to
-/// publish one without replacing anything (publication is an exclusive hard link).
-fn preflight_destination(destination: &Path, parent: &Path) -> Result<(), JobError> {
-    if std::fs::symlink_metadata(destination).is_ok() {
-        return Err(JobError::DestinationExists);
-    }
-    // Names no one else uses (process, a counter, the clock); the first is created exclusively
-    // (never through a link someone planted), and only what this call created is removed.
-    static PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    );
-    let a = parent.join(format!(".oncl-probe-{unique}-a"));
-    let b = parent.join(format!(".oncl-probe-{unique}-b"));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&a)?;
-    let linked = std::fs::hard_link(&a, &b);
-    let _ = std::fs::remove_file(&a);
-    if linked.is_ok() {
-        let _ = std::fs::remove_file(&b);
-    }
-    linked.map_err(|_| JobError::NoLinks)
-}
-
-fn operation_of(e: oncl_core::batch::BatchError) -> OperationError {
-    match e {
-        oncl_core::batch::BatchError::Operation(e) => e,
-        oncl_core::batch::BatchError::ConsentMismatch => OperationError::PermissionDenied,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -572,8 +600,19 @@ mod tests {
     use oncl_pki::testing::{TestCertSpec, issue_cert};
 
     use super::*;
+    use crate::reports::controller::{Headline, Outcome as ItemOutcome};
     use crate::signing::controller::{ActionKind, Controller, Effect, Event};
     use crate::signing::testing::*;
+    use crate::workspace::SignOptions;
+    use oncl_pki::key::AppliedState;
+
+    /// The format the plain tests sign as: a detached CMS next to each document.
+    fn cms() -> SignSpec {
+        SignSpec {
+            format: SignFormat::Cms,
+            options: SignOptions::default(),
+        }
+    }
 
     /// The page's side: a controller driven to the confirmation for `shown`, then confirmed
     /// against what the engine froze, or not confirmed at all (`confirm == false`).
@@ -584,6 +623,7 @@ mod tests {
         confirm: bool,
         applications: &AtomicUsize,
         guard_probe: &ConsentGuard,
+        spec: &SignSpec,
     ) -> Decision {
         assert_eq!(
             applications.load(Ordering::SeqCst),
@@ -593,6 +633,7 @@ mod tests {
         let _ = guard_probe;
         let mut c = Controller::new("tools", ActionKind::Sign);
         c.dispatch(Event::Documents(shown.to_vec()));
+        c.dispatch(Event::Profile(spec.label()));
         c.dispatch(Event::KeyStore(w.store.display().to_string()));
         assert_eq!(
             c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
@@ -620,6 +661,19 @@ mod tests {
         shown: &[Item],
         confirm: bool,
     ) -> (Outcome, Arc<ConsentGuard>) {
+        run_as(w, paths, shown, confirm, &cms(), &Destination::Beside)
+    }
+
+    /// Signs `paths` as `spec` says into `destination`, the page confirming for the spec it
+    /// was shown (`confirm`) or not at all.
+    fn run_as(
+        w: &World,
+        paths: &[PathBuf],
+        shown: &[Item],
+        confirm: bool,
+        spec: &SignSpec,
+        destination: &Destination,
+    ) -> (Outcome, Arc<ConsentGuard>) {
         let (engine, guard) = engine(w);
         let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
         let outcome = sign(
@@ -629,6 +683,8 @@ mod tests {
             &candidates[0].alias,
             &Zeroizing::new(PASSWORD.to_owned()),
             paths,
+            spec,
+            destination,
             &Arc::new(JobControl::default()),
             |frozen| {
                 page(
@@ -638,6 +694,7 @@ mod tests {
                     confirm,
                     &AtomicUsize::new(guard.applications()),
                     &guard,
+                    spec,
                 )
             },
         );
@@ -731,21 +788,6 @@ mod tests {
         ));
     }
 
-    /// The probe leaves nothing behind, in a folder that can link and in one that cannot.
-    #[test]
-    fn the_destination_probe_leaves_no_files() {
-        let dir = tempfile::tempdir().unwrap();
-        preflight_destination(&dir.path().join("x.p7s"), dir.path()).unwrap();
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-        let taken = dir.path().join("y.p7s");
-        std::fs::write(&taken, b"x").unwrap();
-        assert_eq!(
-            preflight_destination(&taken, dir.path()),
-            Err(JobError::DestinationExists)
-        );
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
     /// A two-document packet is signed once the user confirmed what the engine froze: both
     /// signature files exist and the key was applied once per document.
     #[test]
@@ -758,9 +800,13 @@ mod tests {
         let Outcome::Done(done) = outcome else {
             panic!("{outcome:?}");
         };
-        assert_eq!(done.len(), 2);
-        for (item, path) in done.iter().zip(&paths) {
-            assert_eq!(item.error, None, "{item:?}");
+        assert_eq!(done.items.len(), 2);
+        assert_eq!(done.headline(), Headline::AllSucceeded { total: 2 });
+        for (item, path) in done.items.iter().zip(&paths) {
+            assert!(
+                matches!(item.outcome, ItemOutcome::Completed(_)),
+                "{item:?}"
+            );
             assert_eq!(item.applied, AppliedState::Applied);
             let sig = item.output.as_ref().expect("a signature file");
             assert_eq!(
@@ -770,6 +816,146 @@ mod tests {
             assert!(std::fs::metadata(sig).unwrap().len() > 100);
         }
         assert_eq!(guard.applications(), 2, "once per document");
+    }
+
+    /// An evidence file swapped between the confirmation and the run: the runner compares the
+    /// consent with the digests of the bytes it LOADED, never with a fresh read of the path.
+    /// Case 1: B is on disk when the evidence is loaded. Case 2 (A->B->A): B is loaded, then A
+    /// is put back before the consent check, so a re-read would see A and match. Both are
+    /// refused before any key use (0 applications) and nothing is written.
+    #[test]
+    fn an_evidence_file_swapped_after_the_confirmation_is_refused_before_any_key_use() {
+        for swap_back in [false, true] {
+            let w = world();
+            let paths = documents(&w, &["a.txt"]);
+            let evidence = evidence_files(&w);
+            let file = evidence.ocsp[0].clone();
+            let original = std::fs::read(&file).unwrap();
+            let spec = SignSpec {
+                format: SignFormat::Cades(crate::workspace::Level::Lt),
+                options: SignOptions {
+                    evidence,
+                    ..SignOptions::default()
+                },
+            };
+            // The page confirmed this label (the files as they were: A).
+            let agreed = spec.label();
+            let (engine, guard) = engine(&w);
+            let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
+            let shown = shown(&engine, &paths);
+            // B replaces A before the run loads the evidence.
+            let mut swapped = original.clone();
+            swapped.push(0);
+            std::fs::write(&file, &swapped).unwrap();
+            let outcome = sign(
+                &engine,
+                &guard,
+                &w.store,
+                &candidates[0].alias,
+                &Zeroizing::new(PASSWORD.to_owned()),
+                &paths,
+                &spec,
+                &Destination::Beside,
+                &Arc::new(JobControl::default()),
+                |frozen| {
+                    if swap_back {
+                        // The evidence was loaded (B) before this callback; A is back now.
+                        std::fs::write(&file, &original).unwrap();
+                    }
+                    let mut c = Controller::new("tools", ActionKind::Sign);
+                    c.dispatch(Event::Documents(shown.clone()));
+                    c.dispatch(Event::Profile(agreed.clone()));
+                    c.dispatch(Event::KeyStore(w.store.display().to_string()));
+                    c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
+                        PASSWORD.to_owned(),
+                    )));
+                    c.dispatch(Event::Unlocked(candidates.clone()));
+                    c.dispatch(Event::CertificateChosen(0));
+                    c.dispatch(Event::Frozen(&frozen.items));
+                    c.dispatch(Event::Arm);
+                    match c.dispatch(Event::Confirm {
+                        frozen: &frozen.items,
+                    }) {
+                        Effect::None => Decision::Proceed(Box::new(c.take_approved().unwrap())),
+                        _ => Decision::Abort,
+                    }
+                },
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    Outcome::NotApplied(JobError::Operation(ErrorCode::PermissionDenied))
+                ),
+                "swap_back={swap_back}: {outcome:?}"
+            );
+            assert_eq!(guard.applications(), 0, "swap_back={swap_back}");
+            assert!(!w.dir.path().join("a.txt.p7s").exists());
+        }
+    }
+
+    /// The results go where the user said: one folder, not next to the documents; and a
+    /// consent for another format than the one that is run is refused by the runner itself,
+    /// before any key use.
+    #[test]
+    fn the_destination_is_honoured_and_a_consent_for_another_format_is_refused() {
+        let w = world();
+        let paths = documents(&w, &["a.txt"]);
+        let out = w.dir.path().join("results");
+        std::fs::create_dir(&out).unwrap();
+        let (e, _) = engine(&w);
+        let before = shown(&e, &paths);
+        let (outcome, guard) = run_as(
+            &w,
+            &paths,
+            &before,
+            true,
+            &cms(),
+            &Destination::Folder(out.clone()),
+        );
+        let Outcome::Done(done) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(
+            done.items[0].output.as_deref(),
+            Some(out.join("a.txt.p7s").as_path())
+        );
+        assert!(out.join("a.txt.p7s").exists());
+        assert!(
+            !w.dir.path().join("a.txt.p7s").exists(),
+            "not beside the document"
+        );
+        assert_eq!(guard.applications(), 1);
+        // The page agreed to a detached CMS; the engine is asked for an attached one.
+        let attached = SignSpec {
+            format: SignFormat::Cms,
+            options: SignOptions {
+                attached: true,
+                ..SignOptions::default()
+            },
+        };
+        let (engine, guard) = engine(&w);
+        let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
+        let outcome = sign(
+            &engine,
+            &guard,
+            &w.store,
+            &candidates[0].alias,
+            &Zeroizing::new(PASSWORD.to_owned()),
+            &paths,
+            &attached,
+            &Destination::Beside,
+            &Arc::new(JobControl::default()),
+            |frozen| confirmed(&w, &before, &frozen),
+        );
+        assert!(
+            matches!(
+                outcome,
+                Outcome::NotApplied(JobError::Operation(ErrorCode::PermissionDenied))
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(guard.applications(), 0);
+        assert!(!w.dir.path().join("a.txt.p7m").exists());
     }
 
     /// Without the confirmation no key is applied and nothing is written.
@@ -833,6 +1019,7 @@ mod tests {
             true,
             &AtomicUsize::new(0),
             &ConsentGuard::default(),
+            &cms(),
         )
     }
 
@@ -859,10 +1046,13 @@ mod tests {
             &candidates[0].alias,
             &Zeroizing::new(PASSWORD.to_owned()),
             &paths,
+            &cms(),
+            &Destination::Beside,
             &Arc::new(JobControl::default()),
             |frozen| {
                 let mut c = Controller::new("tools", ActionKind::Sign);
                 c.dispatch(Event::Documents(before.clone()));
+                c.dispatch(Event::Profile(cms().label()));
                 c.dispatch(Event::KeyStore(w.store.display().to_string()));
                 c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
                     PASSWORD.to_owned(),
@@ -922,6 +1112,8 @@ mod tests {
             &candidates[0].alias,
             &Zeroizing::new(PASSWORD.to_owned()),
             &paths,
+            &cms(),
+            &Destination::Beside,
             &Arc::new(JobControl::default()),
             |frozen| {
                 std::fs::write(&late, b"appeared").unwrap();
@@ -931,14 +1123,28 @@ mod tests {
         let Outcome::Done(done) = outcome else {
             panic!("{outcome:?}");
         };
-        assert_eq!(done[0].error, None);
-        assert!(done[0].output.is_some());
-        assert!(done[1].error.is_some(), "{:?}", done[1]);
-        assert!(done[1].output.is_none());
+        assert!(matches!(done.items[0].outcome, ItemOutcome::Completed(_)));
+        assert!(done.items[0].output.is_some());
+        assert!(
+            matches!(done.items[1].outcome, ItemOutcome::Failed(_)),
+            "{:?}",
+            done.items[1]
+        );
+        assert!(done.items[1].output.is_none());
         assert_eq!(
-            done[1].applied,
+            done.items[1].applied,
             AppliedState::Applied,
             "the key was used for it"
+        );
+        // A failure after the key was applied stops the batch (the engine's own rule): the
+        // headline says it was stopped, never that everything was done.
+        assert_eq!(
+            done.headline(),
+            Headline::Stopped {
+                completed: 1,
+                total: 2
+            },
+            "a batch with a failed item is never completed-all"
         );
         assert_eq!(guard.applications(), 2);
         assert_eq!(
@@ -966,10 +1172,13 @@ mod tests {
             &candidates[0].alias,
             &Zeroizing::new(PASSWORD.to_owned()),
             &paths,
+            &cms(),
+            &Destination::Beside,
             &Arc::new(JobControl::default()),
             |_frozen| {
                 let mut c = Controller::new("tools", ActionKind::Sign);
                 c.dispatch(Event::Documents(other.clone()));
+                c.dispatch(Event::Profile(cms().label()));
                 c.dispatch(Event::KeyStore(w.store.display().to_string()));
                 c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
                     PASSWORD.to_owned(),

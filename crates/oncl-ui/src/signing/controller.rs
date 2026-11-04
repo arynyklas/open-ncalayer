@@ -72,6 +72,7 @@ pub struct UserConsent {
     certificate: Option<[u8; 32]>,
     alias: String,
     items: Vec<Item>,
+    profile: String,
 }
 
 impl UserConsent {
@@ -90,6 +91,10 @@ impl UserConsent {
     }
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+    /// What is made of the documents (the format and its options), as the user chose it.
+    pub fn profile(&self) -> &str {
+        &self.profile
     }
     /// Whether the documents an engine captured are exactly the ones agreed to, in order.
     pub fn covers(&self, captured: &[Item]) -> bool {
@@ -114,6 +119,9 @@ pub enum Event<'a> {
     Documents(Vec<Item>),
     /// The key store to unlock.
     KeyStore(String),
+    /// What is made of the documents: the format and its options, as one label. It is part of
+    /// what the user agrees to; changing it is possible only before the key store is chosen.
+    Profile(String),
     /// Enter in the password field, with the password: the page asks the host to open the
     /// key store. It confirms nothing.
     PasswordSubmitted(Zeroizing<String>),
@@ -176,6 +184,7 @@ pub struct Controller {
     action: ActionKind,
     step: Step,
     items: Vec<Item>,
+    profile: String,
     key_store: Option<String>,
     secret: Option<Zeroizing<String>>,
     candidates: Vec<Candidate>,
@@ -203,6 +212,7 @@ impl Controller {
             action,
             step: Step::Source,
             items: Vec::new(),
+            profile: String::new(),
             key_store: None,
             secret: None,
             candidates: Vec::new(),
@@ -245,6 +255,9 @@ impl Controller {
     pub fn items(&self) -> &[Item] {
         &self.items
     }
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
@@ -284,6 +297,10 @@ impl Controller {
                     return Effect::Refused(Refusal::NoDocuments);
                 }
                 c.items = items;
+                Effect::None
+            }),
+            Event::Profile(profile) => self.in_step(Step::Source, |c| {
+                c.profile = profile;
                 Effect::None
             }),
             Event::KeyStore(path) => self.in_step(Step::Source, |c| {
@@ -407,6 +424,7 @@ impl Controller {
                 certificate: chosen.sha256,
                 alias: chosen.alias,
                 items: self.items.clone(),
+                profile: self.profile.clone(),
             },
         });
         self.step = Step::Running;

@@ -1,17 +1,21 @@
 //! What the tools window does with its operations, without Slint: one operation at a time, run
-//! on a worker thread, cancelled from the event loop, its progress read from atomics, its
-//! outcome delivered once and only to the operation that is still the current one.
+//! on a worker thread, cancelled from the event loop, its progress queued for the event loop
+//! ([`progress`](super::progress)), its outcome delivered once and only to the operation that
+//! is still the current one of the window that is still open.
 //!
 //! The [`JobControl`] of an operation is the only thing the event loop and the worker share
-//! (`Arc` and atomics; the SDK checks it at every checkpoint). Everything with `Rc`, `RefCell`
-//! or a Slint handle stays on the event loop.
+//! (`Arc`, atomics and the bounded queue of the [`Reporter`]; the SDK checks it at every
+//! checkpoint). Everything with `Rc`, `RefCell` or a Slint handle stays on the event loop.
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use oncl_core::{ErrorCode, OperationError};
 use oncl_pki::resource::{OperationControl, ProcessingError, Progress};
+
+use super::progress::{Lifecycle, Reporter, Stamp, Update};
 
 /// What an operation does; which page of the window owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +24,8 @@ pub(crate) enum Job {
     Inspect,
     /// A step of the signing page: freezing a document, opening a key store, signing.
     Sign,
+    /// A run of one of the tools that use no private key: verify, extend, extract, timestamp.
+    Tool,
 }
 
 /// Why an operation did not complete.
@@ -35,6 +41,8 @@ pub(crate) enum JobError {
     DestinationExists,
     /// The folder of a document cannot publish a signature file (no hard links).
     NoLinks,
+    /// Two documents would be written to the same file: nothing is done.
+    DuplicateOutput,
     /// The key store changed after the certificate was shown: no key is used.
     StoreChanged,
     /// The SDK refused or failed it.
@@ -51,6 +59,10 @@ pub(crate) enum MissingField {
     Path,
     Password,
     Aliases,
+    /// The folder the results are to be written to.
+    Folder,
+    /// The certificates and the OCSP responses or CRLs the LT and LTA levels are built from.
+    Evidence,
 }
 
 impl From<OperationError> for JobError {
@@ -68,36 +80,120 @@ impl From<io::Error> for JobError {
     }
 }
 
-/// The cancel flag and the progress of one operation.
-#[derive(Debug, Default)]
-pub(crate) struct JobControl {
+/// How often a running operation tells the event loop how far it is: more often is not seen.
+const REPORT_EVERY: Duration = Duration::from_millis(50);
+
+/// The cancel flag and the progress of one operation. `Send + Sync`: the SDK calls it from the
+/// worker, the event loop cancels it.
+#[derive(Debug)]
+pub struct JobControl {
     cancelled: AtomicBool,
+    /// Set by the signing runner when the consent was accepted and the key was allowed to be
+    /// applied: from then on whether it was applied is only known from the engine's answer.
+    key_gate_passed: AtomicBool,
     bytes_in: AtomicU64,
     total: AtomicU64,
+    items: AtomicUsize,
+    begun: AtomicUsize,
+    reporter: Option<Reporter>,
+    clock: Instant,
+    /// Milliseconds after `clock` of the last word queued, plus one (0: none yet).
+    last_report: AtomicU64,
+}
+
+impl Default for JobControl {
+    fn default() -> Self {
+        JobControl {
+            cancelled: AtomicBool::new(false),
+            key_gate_passed: AtomicBool::new(false),
+            bytes_in: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+            items: AtomicUsize::new(0),
+            begun: AtomicUsize::new(0),
+            reporter: None,
+            clock: Instant::now(),
+            last_report: AtomicU64::new(0),
+        }
+    }
 }
 
 impl JobControl {
+    /// A control whose progress goes to `reporter`'s window.
+    pub fn reporting(reporter: Reporter) -> JobControl {
+        JobControl {
+            reporter: Some(reporter),
+            ..JobControl::default()
+        }
+    }
+
+    /// The queue this control's progress goes to; the outcome of the operation goes through it
+    /// too ([`Reporter::finish`]).
+    pub fn reporter(&self) -> Option<&Reporter> {
+        self.reporter.as_ref()
+    }
+
+    /// The runner has let the key be applied for this operation.
+    pub(crate) fn mark_key_gate_passed(&self) {
+        self.key_gate_passed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the key could have been applied by this operation (the gate was passed).
+    pub(crate) fn key_gate_passed(&self) -> bool {
+        self.key_gate_passed.load(Ordering::SeqCst)
+    }
+
     /// Asks the operation to stop at its next checkpoint.
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// The size of the input, once the worker knows it.
-    pub(crate) fn set_total(&self, total: u64) {
+    /// The size of the input, once the worker knows it. Never 0: «unknown» is a different thing.
+    pub fn set_total(&self, total: u64) {
         self.total.store(total.max(1), Ordering::SeqCst);
     }
 
+    /// The operation is a batch of `items` documents, being prepared. Told at once, not by the
+    /// clock.
+    pub fn set_items(&self, items: usize) {
+        self.items.store(items, Ordering::SeqCst);
+        self.begun.store(0, Ordering::SeqCst);
+        self.publish();
+    }
+
+    /// The document `index` (zero-based) of the batch begins. Told at once.
+    pub fn begin_item(&self, index: usize) {
+        self.begun.store(index + 1, Ordering::SeqCst);
+        self.publish();
+    }
+
     /// Bytes read so far and the size of the input, if known.
-    pub(crate) fn progress(&self) -> (u64, Option<u64>) {
+    pub fn progress(&self) -> (u64, Option<u64>) {
         let total = self.total.load(Ordering::SeqCst);
         (
             self.bytes_in.load(Ordering::SeqCst),
             (total != 0).then_some(total),
         )
+    }
+
+    fn snapshot(&self) -> Update {
+        let (bytes_in, total) = self.progress();
+        Update {
+            bytes_in,
+            total,
+            items: self.items.load(Ordering::SeqCst),
+            started: self.begun.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Queues the current state for the window. Never waits and never calls the UI.
+    fn publish(&self) {
+        if let Some(reporter) = &self.reporter {
+            reporter.report(self.snapshot());
+        }
     }
 }
 
@@ -105,21 +201,34 @@ impl OperationControl for JobControl {
     fn checkpoint(&self, progress: Progress) -> Result<(), ProcessingError> {
         self.bytes_in.fetch_max(progress.bytes_in, Ordering::SeqCst);
         if self.is_cancelled() {
-            Err(ProcessingError::Cancelled)
-        } else {
-            Ok(())
+            return Err(ProcessingError::Cancelled);
         }
+        if self.reporter.is_some() {
+            // Checkpoints come for every chunk of a large file: the window is told at most
+            // every [`REPORT_EVERY`].
+            let now = u64::try_from(self.clock.elapsed().as_millis()).unwrap_or(u64::MAX) + 1;
+            let last = self.last_report.load(Ordering::Relaxed);
+            let due = last == 0 || now.saturating_sub(last) >= REPORT_EVERY.as_millis() as u64;
+            if due
+                && self
+                    .last_report
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                self.publish();
+            }
+        }
+        Ok(())
     }
 }
 
 /// An operation that was started.
 pub(crate) struct Started {
-    pub(crate) id: u64,
+    pub(crate) stamp: Stamp,
     pub(crate) control: Arc<JobControl>,
 }
 
 struct Active {
-    id: u64,
     job: Job,
     control: Arc<JobControl>,
 }
@@ -136,30 +245,30 @@ pub(crate) enum Settled<T> {
     Failed(Job, JobError),
 }
 
-/// Ids are unique across windows: the late result of an operation of a window that was closed
-/// never matches the operation of the window opened since.
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// One operation at a time.
+/// One operation at a time, for one window. Its [`Lifecycle`] numbers the window and the
+/// operations uniquely across the process: the late word of a window that was closed never
+/// matches the operation of the window opened since.
 #[derive(Default)]
 pub(crate) struct Controller {
+    life: Lifecycle,
     active: Option<Active>,
 }
 
 impl Controller {
-    /// Starts `job`, unless another is running.
-    pub(crate) fn begin(&mut self, job: Job) -> Result<Started, Busy> {
-        if self.active.is_some() {
-            return Err(Busy);
-        }
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let control = Arc::new(JobControl::default());
+    /// Starts `job`, unless another is running or the window is closed. `control` makes the
+    /// operation's control from its stamp (the one that tells the window how far it is).
+    pub(crate) fn begin(
+        &mut self,
+        job: Job,
+        control: impl FnOnce(Stamp) -> JobControl,
+    ) -> Result<Started, Busy> {
+        let stamp = self.life.begin().ok_or(Busy)?;
+        let control = Arc::new(control(stamp));
         self.active = Some(Active {
-            id,
             job,
             control: Arc::clone(&control),
         });
-        Ok(Started { id, control })
+        Ok(Started { stamp, control })
     }
 
     /// Asks the running operation to stop; whether one runs. It ends when the worker
@@ -174,15 +283,41 @@ impl Controller {
         }
     }
 
+    /// The window is closed: the running operation is asked to stop and nothing it says is
+    /// accepted any more.
+    pub(crate) fn close(&mut self) {
+        self.cancel();
+        self.active = None;
+        self.life.close();
+    }
+
     /// The running operation and its control.
     pub(crate) fn running(&self) -> Option<(Job, &Arc<JobControl>)> {
         self.active.as_ref().map(|a| (a.job, &a.control))
     }
 
-    /// Takes the outcome of operation `id`. `None` if `id` is not the running operation (a
-    /// result that arrives twice, or after the window was left): nothing changes then.
-    pub(crate) fn finish<T>(&mut self, id: u64, result: Result<T, JobError>) -> Option<Settled<T>> {
-        let active = self.active.take_if(|a| a.id == id)?;
+    /// The stamp of the running operation, if any.
+    pub(crate) fn running_stamp(&self) -> Option<Stamp> {
+        self.life.running()
+    }
+
+    /// Whether a word of `stamp` is for the running operation of this window.
+    pub(crate) fn accepts(&self, stamp: Stamp) -> bool {
+        self.life.accepts(stamp)
+    }
+
+    /// Takes the outcome of the operation `stamp`. `None` if it is not the running operation
+    /// of this window (a result that arrives twice, or after the window was left): nothing
+    /// changes then.
+    pub(crate) fn finish<T>(
+        &mut self,
+        stamp: Stamp,
+        result: Result<T, JobError>,
+    ) -> Option<Settled<T>> {
+        if !self.life.end(stamp) {
+            return None;
+        }
+        let active = self.active.take()?;
         Some(match result {
             Ok(value) => Settled::Done(active.job, value),
             Err(JobError::Cancelled) => Settled::Cancelled(active.job),
@@ -228,30 +363,39 @@ mod tests {
         }
     }
 
+    /// Starts `job` with a control that reports to nobody.
+    fn begin(c: &mut Controller, job: Job) -> Result<Started, Busy> {
+        c.begin(job, |_| JobControl::default())
+    }
+
     #[test]
     fn a_second_operation_waits_for_the_first() {
         let mut c = Controller::default();
-        let first = c.begin(Job::Hash).unwrap();
-        assert_eq!(c.begin(Job::Inspect).err(), Some(Busy));
-        c.finish::<()>(first.id, Ok(())).unwrap();
-        assert!(c.begin(Job::Inspect).is_ok());
+        let first = begin(&mut c, Job::Hash).unwrap();
+        assert_eq!(begin(&mut c, Job::Inspect).err(), Some(Busy));
+        c.finish::<()>(first.stamp, Ok(())).unwrap();
+        assert!(begin(&mut c, Job::Inspect).is_ok());
     }
 
     #[test]
     fn a_result_of_another_operation_changes_nothing() {
         let mut c = Controller::default();
-        let first = c.begin(Job::Hash).unwrap();
+        let first = begin(&mut c, Job::Hash).unwrap();
         assert_eq!(
-            c.finish(first.id, Ok(1)),
+            c.finish(first.stamp, Ok(1)),
             Some(Settled::Done(Job::Hash, 1)),
             "the first result is taken"
         );
-        let second = c.begin(Job::Inspect).unwrap();
-        assert_eq!(c.finish(first.id, Ok(2)), None, "a repeat is dropped");
-        assert_eq!(c.finish(second.id + 1000, Ok(3)), None, "a stranger too");
+        let second = begin(&mut c, Job::Inspect).unwrap();
+        assert_eq!(c.finish(first.stamp, Ok(2)), None, "a repeat is dropped");
+        let stranger = Stamp {
+            generation: second.stamp.generation + 1000,
+            ..second.stamp
+        };
+        assert_eq!(c.finish(stranger, Ok(3)), None, "a stranger too");
         assert!(c.running().is_some(), "the second still runs");
         assert_eq!(
-            c.finish(second.id, Err::<u8, _>(JobError::Worker)),
+            c.finish(second.stamp, Err::<u8, _>(JobError::Worker)),
             Some(Settled::Failed(Job::Inspect, JobError::Worker))
         );
         assert!(c.running().is_none());
@@ -262,25 +406,41 @@ mod tests {
     #[test]
     fn a_late_result_of_a_closed_window_is_dropped_by_the_next_one() {
         let mut old = Controller::default();
-        let late = old.begin(Job::Hash).unwrap();
-        old.cancel();
+        let late = begin(&mut old, Job::Hash).unwrap();
+        old.close();
+        assert!(
+            late.control.is_cancelled(),
+            "closing asks the operation to stop"
+        );
         drop(old);
         let mut new = Controller::default();
-        let current = new.begin(Job::Hash).unwrap();
-        assert_ne!(late.id, current.id);
-        assert_eq!(new.finish(late.id, Ok(1)), None);
+        let current = begin(&mut new, Job::Hash).unwrap();
+        assert_ne!(late.stamp, current.stamp);
+        assert_eq!(new.finish(late.stamp, Ok(1)), None);
         assert!(new.running().is_some(), "the new window's action goes on");
         assert_eq!(
-            new.finish(current.id, Ok(2)),
+            new.finish(current.stamp, Ok(2)),
             Some(Settled::Done(Job::Hash, 2))
         );
+    }
+
+    /// A closed window accepts no word of its own operation any more, and starts none.
+    #[test]
+    fn a_closed_window_hears_nothing_of_its_own_operation() {
+        let mut c = Controller::default();
+        let started = begin(&mut c, Job::Hash).unwrap();
+        assert!(c.accepts(started.stamp));
+        c.close();
+        assert!(!c.accepts(started.stamp));
+        assert_eq!(c.finish(started.stamp, Ok(1)), None);
+        assert_eq!(begin(&mut c, Job::Hash).err(), Some(Busy));
     }
 
     #[test]
     fn cancelling_without_an_operation_is_not_an_operation() {
         let mut c = Controller::default();
         assert!(!c.cancel());
-        let started = c.begin(Job::Hash).unwrap();
+        let started = begin(&mut c, Job::Hash).unwrap();
         assert!(c.cancel());
         assert!(started.control.is_cancelled());
     }
@@ -291,7 +451,7 @@ mod tests {
     fn cancelling_stops_a_hash_that_is_reading() {
         let engine = engine();
         let mut c = Controller::default();
-        let started = c.begin(Job::Hash).unwrap();
+        let started = begin(&mut c, Job::Hash).unwrap();
         let control = Arc::clone(&started.control);
         let canceller = Arc::clone(&control);
         let total = 64 << 20;
@@ -314,7 +474,7 @@ mod tests {
         assert!(input.left > 0, "the input was read to its end");
         assert!(matches!(result, Err(JobError::Cancelled)), "{result:?}");
         assert_eq!(
-            c.finish(started.id, result),
+            c.finish(started.stamp, result),
             Some(Settled::Cancelled(Job::Hash))
         );
         assert!(c.running().is_none(), "the window is free again");
@@ -325,7 +485,7 @@ mod tests {
     fn a_hash_that_finished_is_not_cancelled_by_a_late_cancel() {
         let engine = engine();
         let mut c = Controller::default();
-        let started = c.begin(Job::Hash).unwrap();
+        let started = begin(&mut c, Job::Hash).unwrap();
         let mut input: &[u8] = b"abc";
         let result = jobs::hash(
             &engine,
@@ -334,7 +494,7 @@ mod tests {
             &started.control,
         );
         c.cancel();
-        let Some(Settled::Done(Job::Hash, out)) = c.finish(started.id, result) else {
+        let Some(Settled::Done(Job::Hash, out)) = c.finish(started.stamp, result) else {
             panic!("the digest is lost");
         };
         assert_eq!(

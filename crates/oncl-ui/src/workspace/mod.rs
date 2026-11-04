@@ -13,11 +13,24 @@
 //! once an action has started.
 
 mod controller;
+mod evidence;
 mod jobs;
+mod operations;
+#[doc(hidden)]
+pub mod progress;
 mod sign;
+mod tools;
 
-pub(crate) use self::controller::{JobControl, JobError};
+pub use self::controller::JobControl;
+pub(crate) use self::controller::JobError;
+pub(crate) use self::evidence::Evidence;
 pub(crate) use self::jobs::hash_file;
+pub(crate) use self::operations::{
+    Destination, Document, ExtendFormat, Level, NCA_TSA_POLICY, PlannedOutput, SignFormat,
+    SignInput, SignOptions, SignSpec, StampOptions, ToolSpec, VerifyFormat, VerifyOptions,
+    batch_operation_error, evidence_limits, open_regular, plan_output, read_limited, run_tool,
+    sign_operation, tsa_spec, view_of_summary,
+};
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -29,15 +42,17 @@ use oncl_core::{Engine, ErrorCode};
 use oncl_flows::Locale;
 use oncl_pki::key::HashAlg;
 use oncl_token::{ScanProblem, TokenKind, Tokens};
-use slint::{CloseRequestResponse, ComponentHandle, PlatformError, Timer, TimerMode};
+use slint::{CloseRequestResponse, ComponentHandle, PlatformError};
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
 use self::controller::{Busy, Controller, Job, MissingField, Settled};
 use self::jobs::{Entry, HashOutput, Inspect, InspectOutput};
+use self::progress::{Reporter, Stamp, Update};
 use crate::foreground;
 use crate::prompter::select_desktop_language;
-use crate::ui::WorkspaceWindow;
+use crate::reports::controller::BatchView;
+use crate::ui::{ReportRow, WorkspaceWindow};
 use crate::windows;
 
 /// What the tools window works with: the engine of this program and its hardware tokens.
@@ -57,11 +72,8 @@ pub struct DesktopEngineServices {
 
 /// The pages of the window, as the sidebar numbers them.
 const SECTION_SIGN: i32 = 1;
-const SECTION_HASH: i32 = 2;
-const SECTION_INSPECT: i32 = 3;
-
-/// How often the progress of a running action is read.
-const POLL: Duration = Duration::from_millis(100);
+const SECTION_HASH: i32 = 6;
+const SECTION_INSPECT: i32 = 7;
 
 /// What an action gives back to its page.
 enum Output {
@@ -69,19 +81,20 @@ enum Output {
     Hash(HashOutput, i32),
     Inspect(InspectOutput),
     Sign(sign::SignOutput),
+    /// The report of a run of a tool that uses no key.
+    Tool(BatchView),
 }
 
 struct Workspace {
     ui: WorkspaceWindow,
     services: DesktopEngineServices,
     controller: RefCell<Controller>,
-    /// Reads the running action's progress.
-    poll: Timer,
     /// The language the texts were composed in.
     locale: Cell<Locale>,
     /// What the page was asked to inspect by the action that runs or ran last.
     inspect_kind: Cell<i32>,
     sign: RefCell<sign::State>,
+    tools: RefCell<tools::State>,
 }
 
 thread_local! {
@@ -136,7 +149,11 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     ui.on_browse(|| with_open(browse));
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
+    tools::connect(&ui);
     ui.window().on_close_requested(|| {
+        if closing_is_blocked() {
+            return CloseRequestResponse::KeepWindowShown;
+        }
         close();
         CloseRequestResponse::HideWindow
     });
@@ -144,12 +161,12 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
         ui: ui.clone_strong(),
         services,
         controller: RefCell::new(Controller::default()),
-        poll: Timer::default(),
         locale: Cell::new(locale),
         inspect_kind: Cell::new(0),
         sign: RefCell::new(sign::State::new(
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
+        tools: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -175,17 +192,18 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
     ui.on_browse(|| with_open(browse));
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
+    tools::connect(&ui);
     let settings_path = services.settings_path.clone();
     let workspace = Rc::new(Workspace {
         ui,
         services,
         controller: RefCell::new(Controller::default()),
-        poll: Timer::default(),
         locale: Cell::new(Locale::En),
         inspect_kind: Cell::new(0),
         sign: RefCell::new(sign::State::new(
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
+        tools: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -204,8 +222,8 @@ fn close() {
     let Some(open) = OPEN.take() else {
         return;
     };
-    open.controller.borrow_mut().cancel();
-    open.poll.stop();
+    abandon_signing(&open);
+    open.controller.borrow_mut().close();
     if let Err(e) = open.ui.hide() {
         tracing::warn!(error = %e, "cannot hide the tools window");
     }
@@ -253,6 +271,20 @@ pub fn desktop_limits() -> oncl_pki::resource::ResourceLimits {
 /// A path as typed or pasted: Explorer's «Copy as path» wraps it in quotes.
 fn typed_path(text: slint::SharedString) -> String {
     text.trim().trim_matches('"').trim().to_owned()
+}
+
+/// The rows of a report as the page's model.
+fn report_rows(rows: &[crate::reports::Row]) -> slint::ModelRc<ReportRow> {
+    slint::ModelRc::new(slint::VecModel::from(
+        rows.iter()
+            .map(|row| ReportRow {
+                depth: row.depth,
+                tone: crate::reports::tone_number(row.tone),
+                text: row.text.as_str().into(),
+                detail: row.detail.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn start_hash(open: &Rc<Workspace>) {
@@ -308,7 +340,9 @@ fn start_inspect(open: &Rc<Workspace>) {
     });
 }
 
-/// Starts `work` on a worker thread; its result comes back to [`settle`].
+/// Starts `work` on a worker thread; its result comes back to [`settle`], and how far it is to
+/// [`apply_progress`], both on the event loop and both only if the window and the operation
+/// they were started by are still the current ones ([`progress`]).
 fn start(
     open: &Rc<Workspace>,
     job: Job,
@@ -316,7 +350,9 @@ fn start(
     + Send
     + 'static,
 ) {
-    let started = match open.controller.borrow_mut().begin(job) {
+    let started = match open.controller.borrow_mut().begin(job, |stamp| {
+        JobControl::reporting(Reporter::new(stamp, apply_progress))
+    }) {
         Ok(started) => started,
         Err(Busy) => return,
     };
@@ -330,19 +366,24 @@ fn start(
         match job {
             Job::Hash => t.hashing,
             Job::Inspect => t.inspecting,
-            Job::Sign => t.working,
+            Job::Sign | Job::Tool => t.working,
         }
         .into(),
     );
     if job == Job::Sign {
         sign::render(open);
     }
-    open.poll
-        .start(TimerMode::Repeated, POLL, || with_open(show_progress));
-    let (id, control) = (started.id, started.control);
+    let (stamp, control) = (started.stamp, started.control);
     let services = open.services.clone();
     #[cfg(test)]
     let ui_thread = std::thread::current().id();
+    let Some(reporter) = control.reporter().cloned() else {
+        // The control was made above with its reporter: a missing one is a bug, said as a
+        // failure to start, never as silence.
+        tracing::error!("an operation without a reporter");
+        settle(stamp, Err(JobError::Worker));
+        return;
+    };
     let spawned = std::thread::Builder::new()
         .name("workspace".into())
         .spawn(move || {
@@ -358,12 +399,33 @@ fn start(
                 );
                 Err(JobError::Worker)
             });
-            deliver(move || settle(id, result));
+            // On its own path: a full progress queue cannot lose the outcome.
+            reporter.finish(result, settle);
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "cannot start a worker thread");
-        settle(id, Err(JobError::Worker));
+        settle(stamp, Err(JobError::Worker));
     }
+}
+
+/// The way a worker's closure reaches the event loop, for the progress handoff: whether it was
+/// handed over. The same function serves the application and the integration test on a real
+/// event loop; the unit tests of the windows have none and pump their queue instead.
+#[cfg(not(test))]
+fn deliver_boxed(f: Box<dyn FnOnce() + Send>) -> bool {
+    match slint::invoke_from_event_loop(f) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(error = %e, "a worker's word or outcome is lost: the event loop is gone");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+fn deliver_boxed(f: Box<dyn FnOnce() + Send>) -> bool {
+    deliver(f);
+    true
 }
 
 /// Hands `f` from a worker to the event loop. Tests have no loop: they pump the queue.
@@ -373,6 +435,9 @@ pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
         tracing::warn!(error = %e, "a worker's answer is lost");
     }
 }
+
+#[cfg(test)]
+mod parity;
 
 #[cfg(test)]
 type Delivery = Box<dyn FnOnce() + Send>;
@@ -450,44 +515,157 @@ pub(crate) fn pump() -> usize {
     n
 }
 
-/// The progress of the running action into the window.
-fn show_progress(open: &Rc<Workspace>) {
-    let controller = open.controller.borrow();
-    let Some((job, control)) = controller.running() else {
-        return;
-    };
-    // The signing page tells its own state; its documents are small and the user's pace rules.
-    if control.is_cancelled() || job == Job::Sign {
-        return;
-    }
-    let t = Texts::of(open.locale.get());
-    let (done, total) = control.progress();
-    match (job, total) {
-        (_, Some(total)) => {
-            open.ui
-                .set_progress((done as f64 / total as f64).min(1.0) as f32);
-            open.ui.set_status_text(
-                t.progress
-                    .replace("{0}", &size(t, done))
-                    .replace("{1}", &size(t, total))
-                    .into(),
+/// A word of a running action reaches the event loop: shown only if the window and the
+/// operation it names are still the current ones.
+fn apply_progress(stamp: Stamp, update: Update) {
+    with_open(|open| {
+        let controller = open.controller.borrow();
+        if !controller.accepts(stamp) {
+            return;
+        }
+        let Some((job, control)) = controller.running() else {
+            return;
+        };
+        // «Cancelling…» stays until the action ends; the signing page tells its own state
+        // while it waits for the user's confirmation.
+        if control.is_cancelled() || (job == Job::Sign && !sign::shows_progress(open)) {
+            return;
+        }
+        let (fraction, text) = describe(Texts::of(open.locale.get()), update);
+        open.ui.set_progress(fraction);
+        open.ui.set_status_text(text.into());
+    });
+}
+
+/// How far the action is, for the status line: the fraction of the bar (below 0: not known)
+/// and the words. A batch counts documents: the bytes of each pass over each document are not
+/// known beforehand, so they are told as they are and never turned into a percentage.
+fn describe(t: &Texts, update: Update) -> (f32, String) {
+    if update.items > 0 {
+        if update.started == 0 {
+            return (
+                -1.0,
+                t.preparing
+                    .replace("{0}", &update.items.to_string())
+                    .replace("{1}", &size(t, update.bytes_in)),
             );
         }
-        (_, None) => open.ui.set_progress(-1.0),
+        let before = (update.started - 1).min(update.items);
+        return (
+            before as f32 / update.items as f32,
+            t.document
+                .replace("{0}", &update.started.to_string())
+                .replace("{1}", &update.items.to_string())
+                .replace("{2}", &size(t, update.bytes_in)),
+        );
+    }
+    match update.total {
+        Some(total) => (
+            (update.bytes_in as f64 / total as f64).min(1.0) as f32,
+            t.progress
+                .replace("{0}", &size(t, update.bytes_in))
+                .replace("{1}", &size(t, total)),
+        ),
+        None => (
+            -1.0,
+            t.progress_unknown.replace("{0}", &size(t, update.bytes_in)),
+        ),
     }
 }
 
-/// The outcome of action `id` into the window; a result that is not the running action's
-/// (its window was closed and another opened) changes nothing.
-fn settle(id: u64, result: Result<Output, JobError>) {
+/// A signing that the user confirmed is running (and no cancel has run out its wait): the window
+/// stays, and says why. After the cancel notice the step is Result, so the window may be closed
+/// («Close anyway»): see [`abandon_signing`].
+fn closing_is_blocked() -> bool {
+    current().is_some_and(|open| closing_is_blocked_for(&open))
+}
+
+fn closing_is_blocked_for(open: &Rc<Workspace>) -> bool {
+    if sign::is_running(open) {
+        open.ui.set_status_kind(4);
+        open.ui
+            .set_status_text(Texts::of(open.locale.get()).signing_running.into());
+        true
+    } else {
+        false
+    }
+}
+
+/// The window is closed while a signing worker is alive. Whether the key could have been applied
+/// is read from the operation's own control, which the runner marks when it lets the key be
+/// applied (never from the UI step): before that gate (the worker waits for the decision) the key
+/// was never used and the worker is aborted: logged quietly with `key_use="none"`; after it the
+/// answer is only the engine's, so it is `key_use="unknown"` at error level. The worker is left
+/// to finish in the background (it holds no UI handle: its words and outcome are refused by the
+/// closed window's lifecycle and logged). Returns the stamp and whether the key may have been
+/// applied.
+fn abandon_signing(open: &Rc<Workspace>) -> Option<(Stamp, bool)> {
+    let controller = open.controller.borrow();
+    let (job, control) = controller.running()?;
+    if job != Job::Sign {
+        return None;
+    }
+    let stamp = controller.running_stamp()?;
+    let may_have_applied = control.key_gate_passed();
+    if may_have_applied {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            key_use = "unknown",
+            "the window was closed while a signing had not answered: whether the key was applied is unknown; the worker finishes in the background"
+        );
+    } else {
+        tracing::info!(
+            window = stamp.window,
+            generation = stamp.generation,
+            key_use = "none",
+            "the window was closed before the key could be used; the waiting worker is aborted"
+        );
+    }
+    Some((stamp, may_have_applied))
+}
+
+/// What an outcome says, for the log when it cannot be shown: for a signing, the key use of each
+/// item by number (never a document's name).
+fn lost_summary(result: &Result<Output, JobError>) -> String {
+    match result {
+        Ok(Output::Sign(sign::SignOutput::Signed(crate::signing::runner::Outcome::Done(view)))) => {
+            let items: Vec<String> = view
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| format!("#{i} {:?}", item.applied))
+                .collect();
+            format!("a signing finished, key use per item: {}", items.join(", "))
+        }
+        Ok(_) => "a result".to_owned(),
+        Err(e) => format!("a failure: {e:?}"),
+    }
+}
+
+/// The outcome of the action `stamp` into the window; a result that is not the running
+/// action's of the open window (its window was closed and another opened) changes nothing.
+fn settle(stamp: Stamp, result: Result<Output, JobError>) {
+    let summary = lost_summary(&result);
     let Some(open) = current() else {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            outcome = %summary,
+            "an outcome arrived with no window open and is dropped"
+        );
         return;
     };
-    let settled = open.controller.borrow_mut().finish(id, result);
+    let settled = open.controller.borrow_mut().finish(stamp, result);
     let Some(settled) = settled else {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            outcome = %summary,
+            "the outcome of an operation that was left or whose window was closed is dropped"
+        );
         return;
     };
-    open.poll.stop();
     let ui = &open.ui;
     ui.set_busy(false);
     let t = Texts::of(open.locale.get());
@@ -512,6 +690,24 @@ fn settle(id: u64, result: Result<Output, JobError>) {
             sign::settled(&open, Ok(out));
             done(ui, t.ready);
         }
+        Settled::Done(_, Output::Tool(view)) => {
+            use crate::reports::controller::Tone;
+            let (tone, headline) = tools::settled(&open, &view);
+            match tone {
+                Tone::Success => done(ui, &headline),
+                // Not proven either way, or partial: not styled as done.
+                Tone::Caution | Tone::Neutral => {
+                    ui.set_status_kind(4);
+                    ui.set_status_text(headline.into());
+                    ui.set_progress(-1.0);
+                }
+                Tone::Failure => {
+                    ui.set_status_kind(3);
+                    ui.set_status_text(headline.into());
+                    ui.set_progress(-1.0);
+                }
+            }
+        }
         Settled::Cancelled(Job::Sign) => {
             sign::settled(&open, Err(JobError::Cancelled));
             done(ui, t.ready);
@@ -530,6 +726,8 @@ fn settle(id: u64, result: Result<Output, JobError>) {
                 Job::Hash => SECTION_HASH,
                 Job::Inspect => SECTION_INSPECT,
                 Job::Sign => SECTION_SIGN,
+                // The error goes next to the fields of the page the tool runs on.
+                Job::Tool => open.ui.get_section(),
             };
             reject(&open, section, &error);
         }
@@ -589,9 +787,16 @@ struct Texts {
     inspect_done: &'static str,
     /// `{0}` of `{1}`.
     progress: &'static str,
+    /// `{0}` read so far; the size is not known.
+    progress_unknown: &'static str,
+    /// A batch being prepared: `{0}` documents, `{1}` read so far.
+    preparing: &'static str,
+    /// A batch at work: document `{0}` of `{1}`, `{2}` processed so far.
+    document: &'static str,
     /// `{0}` human size, `{1}` bytes, `{2}` algorithm.
     hash_summary: &'static str,
     pick_title: &'static str,
+    pick_folder_title: &'static str,
     gost2004: &'static str,
     gost2015: &'static str,
     alias: &'static str,
@@ -606,6 +811,10 @@ struct Texts {
     no_path: &'static str,
     no_password: &'static str,
     no_aliases: &'static str,
+    no_folder: &'static str,
+    no_evidence: &'static str,
+    signing_running: &'static str,
+    duplicate_output: &'static str,
     not_found: &'static str,
     access_denied: &'static str,
     unreadable: &'static str,
@@ -659,8 +868,12 @@ static RU: Texts = Texts {
     hash_done: "Хеш вычислен",
     inspect_done: "Сведения получены",
     progress: "Прочитано {0} из {1}",
+    progress_unknown: "Прочитано {0} (размер неизвестен)",
+    preparing: "Подготовка документов: {0}, прочитано {1}",
+    document: "Документ {0} из {1}, обработано {2}",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Выберите файл",
+    pick_folder_title: "Выберите папку",
     gost2004: "ГОСТ Р 34.11-94",
     gost2015: "ГОСТ Р 34.11-2012 (512)",
     alias: "Имя ключа",
@@ -668,13 +881,17 @@ static RU: Texts = Texts {
     busy_engine: "Предыдущая операция ещё завершается. Повторите через несколько секунд.",
     not_regular: "Это не обычный файл (канал или устройство): его нельзя прочитать.",
     no_such_key: "В хранилище нет ключа с таким именем.",
-    dest_exists: "Файл подписи (.p7s) рядом с документом уже есть: он не будет заменён. Переименуйте или уберите его; ключ не применялся.",
-    no_links: "В папке документа нельзя создать файл подписи надёжно (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Скопируйте документ на другой диск; ключ не применялся.",
+    dest_exists: "Файл с именем результата уже есть в папке назначения: он не будет заменён. Переименуйте или уберите его; ничего не выполнялось, ключ не применялся.",
+    no_links: "В папке назначения нельзя создать файл результата надёжно (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Выберите другую папку или диск; ничего не выполнялось, ключ не применялся.",
     store_changed: "Файл хранилища ключей изменился после показа сертификата. Откройте его заново; ключ не применялся.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Укажите путь к файлу.",
     no_password: "Введите пароль.",
     no_aliases: "Укажите имена ключей, которые показать.",
+    no_folder: "Укажите папку для результатов.",
+    no_evidence: "Для уровней LT и LTA нужны данные проверки: сертификаты цепочки и хотя бы один ответ OCSP или список отзыва (CRL). Укажите файлы; ничего не выполнялось, ключ не применялся.",
+    signing_running: "Идёт подпись: ключ мог быть уже применён. Дождитесь результата или нажмите «Отмена»; окно не закрывается, чтобы вы узнали, чем всё кончилось.",
+    duplicate_output: "Два документа дали бы один и тот же файл результата. Уберите один из них или выберите другое назначение; ничего не выполнялось.",
     not_found: "Файл не найден.",
     access_denied: "Нет доступа к файлу.",
     unreadable: "Файл не удалось прочитать.",
@@ -717,8 +934,12 @@ static KK: Texts = Texts {
     hash_done: "Хеш есептелді",
     inspect_done: "Мәліметтер алынды",
     progress: "{1} ішінен {0} оқылды",
+    progress_unknown: "{0} оқылды (көлемі белгісіз)",
+    preparing: "Құжаттарды дайындау: {0}, {1} оқылды",
+    document: "Құжат {0}/{1}: {2} өңделді",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Файлды таңдаңыз",
+    pick_folder_title: "Қалтаны таңдаңыз",
     gost2004: "ГОСТ Р 34.11-94",
     gost2015: "ГОСТ Р 34.11-2012 (512)",
     alias: "Кілт атауы",
@@ -726,13 +947,17 @@ static KK: Texts = Texts {
     busy_engine: "Алдыңғы операция әлі аяқталуда. Бірнеше секундтан кейін қайталаңыз.",
     not_regular: "Бұл қарапайым файл емес (арна немесе құрылғы): оны оқуға болмайды.",
     no_such_key: "Қоймада мұндай атты кілт жоқ.",
-    dest_exists: "Құжаттың жанында қолтаңба файлы (.p7s) бар: ол ауыстырылмайды. Атын өзгертіңіз немесе алыңыз; кілт қолданылмады.",
-    no_links: "Құжат қалтасында қолтаңба файлын сенімді жасау мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Құжатты басқа дискіге көшіріңіз; кілт қолданылмады.",
+    dest_exists: "Нәтиже файлының аты бар файл тағайындалған қалтада бұрыннан бар: ол ауыстырылмайды. Атын өзгертіңіз немесе алыңыз; ештеңе орындалмады, кілт қолданылмады.",
+    no_links: "Тағайындалған қалтада нәтиже файлын сенімді жасау мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Басқа қалта немесе диск таңдаңыз; ештеңе орындалмады, кілт қолданылмады.",
     store_changed: "Сертификат көрсетілгеннен кейін кілттер қоймасының файлы өзгерген. Оны қайта ашыңыз; кілт қолданылмады.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Файлға жолды көрсетіңіз.",
     no_password: "Құпиясөзді енгізіңіз.",
     no_aliases: "Көрсетілетін кілт атауларын жазыңыз.",
+    no_folder: "Нәтижелерге арналған қалтаны көрсетіңіз.",
+    no_evidence: "LT және LTA деңгейлеріне тексеру деректері қажет: тізбек сертификаттары және кемінде бір OCSP жауабы немесе күшін жою тізімі (CRL). Файлдарды көрсетіңіз; ештеңе орындалмады, кілт қолданылмады.",
+    signing_running: "Қол қою жүріп жатыр: кілт қолданылған болуы мүмкін. Нәтижені күтіңіз немесе «Бас тарту» басыңыз; немен аяқталғанын білуіңіз үшін терезе жабылмайды.",
+    duplicate_output: "Екі құжат бір нәтиже файлын берер еді. Біреуін алыңыз немесе басқа тағайындауды таңдаңыз; ештеңе орындалмады.",
     not_found: "Файл табылмады.",
     access_denied: "Файлға қол жеткізу жоқ.",
     unreadable: "Файлды оқу мүмкін болмады.",
@@ -775,8 +1000,12 @@ static EN: Texts = Texts {
     hash_done: "Hash computed",
     inspect_done: "Details read",
     progress: "Read {0} of {1}",
+    progress_unknown: "Read {0} (the size is not known)",
+    preparing: "Preparing {0} document(s): read {1}",
+    document: "Document {0} of {1}, {2} processed",
     hash_summary: "{0} ({1} bytes), algorithm {2}",
     pick_title: "Choose a file",
+    pick_folder_title: "Choose a folder",
     gost2004: "GOST R 34.11-94",
     gost2015: "GOST R 34.11-2012 (512)",
     alias: "Key name",
@@ -784,13 +1013,17 @@ static EN: Texts = Texts {
     busy_engine: "The previous operation is still finishing. Try again in a few seconds.",
     not_regular: "This is not a regular file (a pipe or a device): it cannot be read.",
     no_such_key: "The key store has no key with that name.",
-    dest_exists: "A signature file (.p7s) already exists next to the document and will not be replaced. Rename or remove it; no key was used.",
-    no_links: "The document's folder cannot publish a signature file safely (it needs hard links, which FAT, exFAT and some network shares lack). Copy the document to another drive; no key was used.",
+    dest_exists: "A file with the result's name already exists in the destination and will not be replaced. Rename or remove it; nothing was done and no key was used.",
+    no_links: "The destination folder cannot publish a result file safely (it needs hard links, which FAT, exFAT and some network shares lack). Choose another folder or drive; nothing was done and no key was used.",
     store_changed: "The key store file changed after the certificate was shown. Open it again; no key was used.",
     units: ["B", "KiB", "MiB", "GiB"],
     no_path: "Enter the path to a file.",
     no_password: "Enter the password.",
     no_aliases: "Enter the names of the keys to show.",
+    no_folder: "Enter the folder for the results.",
+    no_evidence: "Levels LT and LTA need validation data: the certificates of the chain and at least one OCSP response or CRL. Name the files; nothing was done and no key was used.",
+    signing_running: "A signing is running: the key may be applied already. Wait for the result or press Cancel; the window stays open so that you learn how it ended.",
+    duplicate_output: "Two documents would give the same result file. Remove one of them or choose another destination; nothing was done.",
     not_found: "The file was not found.",
     access_denied: "No access to the file.",
     unreadable: "The file could not be read.",
@@ -845,6 +1078,9 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
         JobError::Input(MissingField::Path) => t.no_path,
         JobError::Input(MissingField::Password) => t.no_password,
         JobError::Input(MissingField::Aliases) => t.no_aliases,
+        JobError::Input(MissingField::Folder) => t.no_folder,
+        JobError::Input(MissingField::Evidence) => t.no_evidence,
+        JobError::DuplicateOutput => t.duplicate_output,
         JobError::Worker => t.worker,
         JobError::NotRegular => t.not_regular,
         JobError::DestinationExists => t.dest_exists,

@@ -1,0 +1,314 @@
+// The page of the tools that use no private key: verify, extend, extract and the timestamp
+// tools. One page serves them all; the host sets what each of them asks for in `ToolState`
+// (the labels, the lists, which fields are shown), from the tool the sidebar selected. Rarely
+// needed options stay folded until asked for. The report of a run is the shared `ReportView`.
+// All texts that depend on the state are composed in Rust.
+
+import { Button, CheckBox, ComboBox, LineEdit, Palette, StandardListView } from "std-widgets.slint";
+import { ReportRow, ReportView } from "report.slint";
+
+export global ToolState {
+    in property <string> title;
+    in property <string> hint;
+    in property <string> first-label;
+    in-out property <string> doc-path;
+    in property <[StandardListViewItem]> docs;
+    in property <string> second-label;
+    in property <bool> show-second;
+    in-out property <string> second-path;
+    // What the tool works as: the families (or modes) and the levels of the chosen one.
+    in property <string> format-label;
+    in property <[string]> formats;
+    in-out property <int> format-index: 0;
+    in property <bool> show-level;
+    in property <string> level-label;
+    in property <[string]> levels;
+    in-out property <int> level-index: 0;
+    in property <bool> show-destination;
+    in-out property <int> destination-index: 0;
+    in-out property <string> destination-path;
+    in-out property <bool> show-advanced: false;
+    in property <bool> has-advanced;
+    // Extending CAdES or PAdES to LT or LTA: the files the evidence is built from, each field a
+    // list of paths separated by «;».
+    in property <bool> show-evidence;
+    in-out property <string> evidence-certificates;
+    in-out property <string> evidence-ocsp;
+    in-out property <string> evidence-crls;
+    in property <string> opt1-label;
+    in property <bool> show-opt1;
+    in-out property <string> opt1;
+    in property <string> opt2-label;
+    in property <bool> show-opt2;
+    in-out property <string> opt2;
+    in property <string> flag1-label;
+    in property <bool> show-flag1;
+    in-out property <bool> flag1;
+    in property <string> flag2-label;
+    in property <bool> show-flag2;
+    in-out property <bool> flag2;
+    in property <string> action-label;
+    in property <string> report-headline;
+    in property <int> report-tone: 3;
+    in property <[ReportRow]> report-rows;
+
+    callback add-doc();
+    callback clear-docs();
+    callback browse-doc();
+    callback browse-second();
+    callback browse-folder();
+    // The format or the level changed: the fields that depend on them are set again.
+    callback changed();
+    callback run();
+}
+
+component Heading inherits Text {
+    font-size: 22px;
+    font-weight: 700;
+}
+
+component Label inherits Text {
+    font-weight: 600;
+}
+
+component ErrorText inherits Text {
+    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
+    wrap: word-wrap;
+}
+
+export component ToolPage inherits VerticalLayout {
+    // Set by the window: an operation runs, and the error of the page's last action.
+    in property <bool> busy;
+    in property <string> error;
+    spacing: 8px;
+    Heading {
+        text: ToolState.title;
+    }
+
+    Text {
+        text: ToolState.hint;
+        wrap: word-wrap;
+    }
+
+    if ToolState.formats.length > 0: Label {
+        text: ToolState.format-label;
+    }
+    if ToolState.formats.length > 0: HorizontalLayout {
+        spacing: 8px;
+        ComboBox {
+            horizontal-stretch: 1;
+            enabled: !root.busy;
+            model: ToolState.formats;
+            current-index <=> ToolState.format-index;
+            accessible-label: ToolState.format-label;
+            selected => {
+                ToolState.changed();
+            }
+        }
+
+        if ToolState.show-level: ComboBox {
+            enabled: !root.busy;
+            model: ToolState.levels;
+            current-index <=> ToolState.level-index;
+            accessible-label: ToolState.level-label;
+            selected => {
+                ToolState.changed();
+            }
+        }
+    }
+
+    Label {
+        text: ToolState.first-label;
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: !root.busy;
+            text <=> ToolState.doc-path;
+            placeholder-text: @tr("Path to the file");
+            accessible-label: ToolState.first-label;
+            accepted => {
+                ToolState.add-doc();
+            }
+        }
+
+        Button {
+            text: @tr("Browse…");
+            enabled: !root.busy;
+            clicked => {
+                ToolState.browse-doc();
+            }
+        }
+    }
+
+    if ToolState.show-second: Label {
+        text: ToolState.second-label;
+    }
+    if ToolState.show-second: HorizontalLayout {
+        spacing: 8px;
+        LineEdit {
+            horizontal-stretch: 1;
+            enabled: !root.busy;
+            text <=> ToolState.second-path;
+            placeholder-text: @tr("Path to the file");
+            accessible-label: ToolState.second-label;
+            accepted => {
+                ToolState.add-doc();
+            }
+        }
+
+        Button {
+            text: @tr("Browse…");
+            enabled: !root.busy;
+            clicked => {
+                ToolState.browse-second();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: @tr("Add");
+            enabled: !root.busy;
+            clicked => {
+                ToolState.add-doc();
+            }
+        }
+
+        Button {
+            text: @tr("Clear documents");
+            enabled: !root.busy;
+            clicked => {
+                ToolState.clear-docs();
+            }
+        }
+    }
+
+    StandardListView {
+        height: 90px;
+        model: ToolState.docs;
+        accessible-label: @tr("Documents");
+    }
+
+    if ToolState.show-destination: Label {
+        text: @tr("Where the results are written");
+    }
+    if ToolState.show-destination: HorizontalLayout {
+        spacing: 8px;
+        ComboBox {
+            enabled: !root.busy;
+            model: [@tr("Next to each document"), @tr("In one folder")];
+            current-index <=> ToolState.destination-index;
+            accessible-label: @tr("Where the results are written");
+        }
+
+        if ToolState.destination-index == 1: LineEdit {
+            horizontal-stretch: 1;
+            enabled: !root.busy;
+            text <=> ToolState.destination-path;
+            placeholder-text: @tr("Path to the folder");
+            accessible-label: @tr("Folder for the results");
+        }
+        if ToolState.destination-index == 1: Button {
+            text: @tr("Browse…");
+            enabled: !root.busy;
+            clicked => {
+                ToolState.browse-folder();
+            }
+        }
+    }
+
+    if ToolState.show-evidence: VerticalLayout {
+        spacing: 4px;
+        Label {
+            text: @tr("Evidence: certificates of the chain (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-certificates;
+            accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
+        }
+
+        Label {
+            text: @tr("Evidence: OCSP responses (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-ocsp;
+            accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
+        }
+
+        Label {
+            text: @tr("Evidence: CRLs (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-crls;
+            accessible-label: @tr("Evidence: CRLs (files, separated by ;)");
+        }
+    }
+    if ToolState.has-advanced: CheckBox {
+        text: @tr("Show the options that are rarely needed");
+        checked <=> ToolState.show-advanced;
+        accessible-label: @tr("Show the options that are rarely needed");
+    }
+    if ToolState.has-advanced && ToolState.show-advanced: VerticalLayout {
+        spacing: 6px;
+        if ToolState.show-flag1: CheckBox {
+            enabled: !root.busy;
+            text: ToolState.flag1-label;
+            checked <=> ToolState.flag1;
+            accessible-label: ToolState.flag1-label;
+        }
+        if ToolState.show-flag2: CheckBox {
+            enabled: !root.busy;
+            text: ToolState.flag2-label;
+            checked <=> ToolState.flag2;
+            accessible-label: ToolState.flag2-label;
+        }
+        if ToolState.show-opt1: Label {
+            text: ToolState.opt1-label;
+        }
+        if ToolState.show-opt1: LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.opt1;
+            accessible-label: ToolState.opt1-label;
+        }
+        if ToolState.show-opt2: Label {
+            text: ToolState.opt2-label;
+        }
+        if ToolState.show-opt2: LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.opt2;
+            accessible-label: ToolState.opt2-label;
+        }
+    }
+
+    if root.error != "": ErrorText {
+        text: root.error;
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: ToolState.action-label;
+            primary: true;
+            enabled: !root.busy;
+            clicked => {
+                ToolState.run();
+            }
+        }
+    }
+
+    ReportView {
+        headline: ToolState.report-headline;
+        tone: ToolState.report-tone;
+        rows: ToolState.report-rows;
+    }
+}
