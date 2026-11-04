@@ -884,13 +884,21 @@ mod guard_tests {
                 Ok(())
             }
         }
-        let scope = budget.begin(ResourceLimits::default(), Arc::new(C)).unwrap();
+        let scope = budget
+            .begin(ResourceLimits::default(), Arc::new(C))
+            .unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
         let lease = scope.lease();
         assert!(lease.attach_guard(Box::new(Flag(Arc::clone(&dropped)))));
-        assert!(!lease.attach_guard(Box::new(())), "only the first guard is kept");
+        assert!(
+            !lease.attach_guard(Box::new(())),
+            "only the first guard is kept"
+        );
         drop(scope);
-        assert!(!dropped.load(Ordering::SeqCst), "a worker still owns the lease");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "a worker still owns the lease"
+        );
         drop(lease);
         assert!(dropped.load(Ordering::SeqCst));
     }

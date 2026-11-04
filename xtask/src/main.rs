@@ -562,7 +562,9 @@ fn package(command: PackageCommand) -> anyhow::Result<()> {
             let flavor = windows::flavor(&flavor)?;
             let made = windows::winget_setup(&entry, &setup, &version, &flavor, &dist)?;
             print_published(&[made]);
-            println!("the installer entry is not signed: sign it (Authenticode) before it is published");
+            println!(
+                "the installer entry is not signed: sign it (Authenticode) before it is published"
+            );
         }
         PackageCommand::Macos {
             bin,

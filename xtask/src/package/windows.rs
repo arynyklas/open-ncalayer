@@ -142,10 +142,13 @@ pub fn winget_setup(
 
     // What was written is what a user will run: read it back the way the installer does.
     let written = fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
-    let embedded = payload::read(&written)
-        .with_context(|| format!("{} does not read back", out.display()))?;
+    let embedded =
+        payload::read(&written).with_context(|| format!("{} does not read back", out.display()))?;
     if embedded.setup != setup_bytes || embedded.version != *version || embedded.arch != arch {
-        bail!("{} does not carry the Setup it was made from", out.display());
+        bail!(
+            "{} does not carry the Setup it was made from",
+            out.display()
+        );
     }
     no_redistributable([out.clone()])?;
     Ok(out)
