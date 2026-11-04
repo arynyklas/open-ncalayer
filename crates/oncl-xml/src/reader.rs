@@ -135,6 +135,9 @@ pub struct XmlEvent {
     pub(crate) xml_declaration: bool,
     pub attributes: Vec<XmlAttribute>,
     namespaces: Vec<(String, String)>,
+    /// Bounded QName and exact whitespace-inclusive attribute extent, including
+    /// namespace declarations. Used only for format-owned insertion accounting.
+    pub(crate) lexical_attributes: Vec<(String, Region)>,
     pub(crate) ids: Vec<String>,
 }
 impl XmlEvent {
@@ -148,6 +151,11 @@ impl XmlEvent {
     pub(crate) fn take_namespaces(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.namespaces)
     }
+}
+struct StartTag {
+    raw: Vec<u8>,
+    spans: Vec<Region>,
+    lexical: Vec<(String, Region)>,
 }
 struct Frame {
     qname: String,
@@ -248,6 +256,7 @@ impl<'a> Reader<'a> {
             name: None,
             attributes: Vec::new(),
             namespaces: Vec::new(),
+            lexical_attributes: Vec::new(),
             ids: Vec::new(),
         }
     }
@@ -346,10 +355,11 @@ impl<'a> Reader<'a> {
             };
         }
     }
-    fn start_tag(&mut self, first: u8) -> Result<(Vec<u8>, Vec<Region>)> {
+    fn start_tag(&mut self, first: u8) -> Result<StartTag> {
         let mut raw = Vec::with_capacity(self.limits.max_markup_bytes);
         raw.extend_from_slice(&[b'<', first]);
         let mut spans = Vec::with_capacity(self.limits.max_attributes);
+        let mut lexical = Vec::with_capacity(self.limits.max_attributes);
         // QName and attribute syntax remain bounded. Only ordinary value bytes
         // are elided from this one-tag parser input; their exact spans survive.
         while let Some(b) = self.peek()? {
@@ -363,6 +373,7 @@ impl<'a> Reader<'a> {
         }
         let mut count = 0;
         loop {
+            let attribute_start = self.position;
             let mut spaced = false;
             while self
                 .peek()?
@@ -456,12 +467,23 @@ impl<'a> Reader<'a> {
                     len: self.position - start - 1,
                 });
             }
+            lexical.push((
+                name.to_owned(),
+                Region {
+                    offset: attribute_start,
+                    len: self.position - attribute_start,
+                },
+            ));
             raw.push(quote);
             if raw.len() >= self.limits.max_markup_bytes {
                 return Err(ProcessingError::MetadataLimit);
             }
         }
-        Ok((raw, spans))
+        Ok(StartTag {
+            raw,
+            spans,
+            lexical,
+        })
     }
     fn normalized_id(&mut self, span: Region) -> Result<String> {
         if span.len > self.limits.max_markup_bytes as u64 {
@@ -510,7 +532,11 @@ impl<'a> Reader<'a> {
                 }
             }
         }
-        let (raw, spans) = if first == b'?' || first == b'/' {
+        let StartTag {
+            raw,
+            spans,
+            lexical,
+        } = if first == b'?' || first == b'/' {
             let mut raw = Vec::with_capacity(self.limits.max_markup_bytes);
             raw.extend_from_slice(&[b'<', first]);
             loop {
@@ -523,7 +549,11 @@ impl<'a> Reader<'a> {
                     break;
                 }
             }
-            (raw, Vec::new())
+            StartTag {
+                raw,
+                spans: Vec::new(),
+                lexical: Vec::new(),
+            }
         } else {
             self.start_tag(first)?
         };
@@ -716,6 +746,7 @@ impl<'a> Reader<'a> {
         event.name = Some(name);
         event.attributes = attributes;
         event.namespaces = namespaces;
+        event.lexical_attributes = lexical;
         if empty {
             let frame = self.stack.pop().ok_or_else(invalid)?;
             let mut end = self.event(XmlEventKind::End, start);

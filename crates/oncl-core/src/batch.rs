@@ -549,6 +549,29 @@ impl Engine {
         use oncl_xml::{C14nProfile, XmlSignMode, XmlSignProfile, XmlVerifyProfile};
         let profile = match operation {
             Dispatch::Sign(request, _) => match &mut request.mode {
+                SignMode::Wsse(_, profile) => {
+                    self.validation_context(ctx, Action::Sign)?;
+                    profile.verification.xml.allowed_signature_algorithms = batch_xml_algorithms(
+                        profile.verification.xml.allowed_signature_algorithms,
+                        ctx.policy.allowed_signature_algorithms,
+                    );
+                    if profile
+                        .verification
+                        .xml
+                        .allowed_signature_algorithms
+                        .is_empty()
+                    {
+                        return Err(OperationError::Key(
+                            oncl_pki::key::KeyError::UnsupportedAlgorithm,
+                        ));
+                    }
+                    let _profile_admission =
+                        profile.preflight(&ctx.scope).map_err(crate::xml::error)?;
+                    if profile.mode != XmlSignMode::Add {
+                        return Ok(None);
+                    }
+                    profile.verification.xml.clone()
+                }
                 SignMode::Xml(_, profile, level) => {
                     self.validation_context(ctx, Action::Sign)?;
                     profile.allowed_signature_algorithms = batch_xml_algorithms(
@@ -635,6 +658,22 @@ impl Engine {
                 _ => return Ok(None),
             },
             Dispatch::Verify(request) => {
+                if request.profile() == VerifyProfile::Wsse {
+                    self.validation_context(ctx, Action::Verify)?;
+                    let mut profile = request
+                        .wsse
+                        .as_ref()
+                        .ok_or(oncl_pki::resource::ProcessingError::InvalidInput(
+                            "missing WSSE profile",
+                        ))?
+                        .xml
+                        .clone();
+                    profile.allowed_signature_algorithms = crate::xml::intersect_verification(
+                        profile.allowed_signature_algorithms,
+                        ctx.policy.allowed_signature_algorithms,
+                    );
+                    return Ok(Some(profile));
+                }
                 match request.profile() {
                     VerifyProfile::Xml | VerifyProfile::XmlKalkan | VerifyProfile::Xades(_) => {}
                     _ => return Ok(None),
@@ -804,7 +843,9 @@ impl Engine {
                     #[cfg(feature = "xml")]
                     let signed_xml = matches!(&request.mode,
                         crate::request::SignMode::Xml(_, profile, _)
-                        if profile.mode == oncl_xml::XmlSignMode::Add);
+                        if profile.mode == oncl_xml::XmlSignMode::Add)
+                        || matches!(&request.mode, crate::request::SignMode::Wsse(_, profile)
+                            if profile.mode == oncl_xml::XmlSignMode::Add);
                     #[cfg(not(feature = "xml"))]
                     let signed_xml = false;
                     if signed_xml {
@@ -842,6 +883,7 @@ impl Engine {
                         }
                         #[cfg(feature = "xml")]
                         crate::request::SignMode::Xml(k, ..)
+                        | crate::request::SignMode::Wsse(k, _)
                         | crate::request::SignMode::XmlLegacy(k, _)
                         | crate::request::SignMode::XadesLegacy(k, _) => {
                             (std::slice::from_ref(k), Action::Sign)
@@ -854,6 +896,7 @@ impl Engine {
                     let deferred = matches!(
                         &request.mode,
                         crate::request::SignMode::Xml(..)
+                            | crate::request::SignMode::Wsse(..)
                             | crate::request::SignMode::XmlLegacy(..)
                             | crate::request::SignMode::XadesLegacy(..)
                     );
@@ -1178,6 +1221,7 @@ impl Engine {
                 use crate::request::SignMode;
                 let key = match &request.mode {
                     SignMode::Xml(key, ..)
+                    | SignMode::Wsse(key, _)
                     | SignMode::XmlLegacy(key, _)
                     | SignMode::XadesLegacy(key, _) => Some(key),
                     _ => None,
@@ -1462,6 +1506,8 @@ impl Engine {
                     SignMode::Pades(k, p, l, m, e) => SignMode::Pades(k, p, l, m, e),
                     #[cfg(feature = "xml")]
                     SignMode::Xml(k, p, l) => SignMode::Xml(k, p, l),
+                    #[cfg(feature = "xml")]
+                    SignMode::Wsse(k, p) => SignMode::Wsse(k, p),
                     #[cfg(feature = "xml")]
                     SignMode::XmlLegacy(k, s) => SignMode::XmlLegacy(k, s),
                     #[cfg(feature = "xml")]
