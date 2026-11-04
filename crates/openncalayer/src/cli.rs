@@ -10,6 +10,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use oncl_desktop::original::EntryState;
@@ -68,6 +69,10 @@ pub enum Command {
         #[command(subcommand)]
         command: TlsCommand,
     },
+    #[command(
+        about = "Открыть окно инструментов (хеш файла, сведения о сертификатах): в запущенной копии или, если её нет, запустив программу"
+    )]
+    Tools,
     #[command(about = "Хост native messaging для расширения браузера")]
     Nm {
         #[command(subcommand)]
@@ -160,6 +165,89 @@ pub enum IntegrationCommand {
     Uninstall,
     #[command(about = "Показать, как программа встроена")]
     Status,
+}
+
+/// The `version` of a bridge greeting.
+fn running_version(hello: &[u8]) -> Option<String> {
+    let hello: serde_json::Value = serde_json::from_slice(hello).ok()?;
+    hello.get("version")?.as_str().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod greeting_tests {
+    use super::running_version;
+
+    #[test]
+    fn the_running_copys_version_is_read_from_its_greeting() {
+        let hello = br#"{"t":"hello","v":1,"version":"0.1.0","compat":"1.4"}"#;
+        assert_eq!(running_version(hello).as_deref(), Some("0.1.0"));
+        assert_eq!(running_version(b"not json"), None);
+        assert_eq!(running_version(br#"{"t":"hello"}"#), None);
+    }
+}
+
+/// Asks the running OpenNCALayer of this user and data directory to show the tools window, over
+/// the bridge's endpoint. `Ok(true)`: asked; `Ok(false)`: none is running. On failure the
+/// message is already printed and exit code 1 returned.
+pub fn ask_running_for_tools() -> Result<bool, ExitCode> {
+    use oncl_ipc::{connect, endpoint, read_frame, write_frame};
+    let paths = data_paths()?;
+    let endpoint = endpoint(&paths.data).map_err(|e| {
+        eprintln!("Не удалось определить канал запущенной копии: {e}");
+        ExitCode::FAILURE
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            eprintln!("Не удалось запустить обмен с запущенной копией: {e}");
+            ExitCode::FAILURE
+        })?;
+    runtime.block_on(async {
+        let mut stream = match connect(&endpoint).await {
+            Ok(stream) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(e) => {
+                eprintln!("Не удалось связаться с запущенной копией {endpoint}: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        // The running copy greets first; then it takes the request.
+        let greeting = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()));
+        let asked = match greeting {
+            Ok(Some(hello)) => match running_version(&hello) {
+                Some(version) if version == env!("CARGO_PKG_VERSION") => {
+                    write_frame(&mut stream, br#"{"t":"workspace"}"#).await
+                }
+                // An older copy would ignore the request and show nothing.
+                other => {
+                    eprintln!(
+                        "Запущена другая версия OpenNCALayer ({}): закройте её (значок в области уведомлений, «Выход») и повторите команду.",
+                        other.as_deref().unwrap_or("неизвестна")
+                    );
+                    return Err(ExitCode::FAILURE);
+                }
+            },
+            Ok(None) => Err(io::ErrorKind::UnexpectedEof.into()),
+            Err(e) => Err(e),
+        };
+        match asked {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                eprintln!("Запущенная копия не приняла запрос: {e}");
+                Err(ExitCode::FAILURE)
+            }
+        }
+    })
 }
 
 /// Everything `run` sets up before the servers start: data paths, logging, the bound IPC

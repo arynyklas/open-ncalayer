@@ -98,7 +98,7 @@ fn open_now(window: DesktopWindow) {
 }
 
 /// Whether a window of the daemon is open: settings, the TLS wizard, About, stopping the
-/// original, the plugins or a plugin's installation. On the event loop (each window lives in
+/// original, the plugins, a plugin's installation or the tools window. On the event loop (each window lives in
 /// its thread's slot); elsewhere it is `false`.
 pub fn any_window_open() -> bool {
     settings_view::is_open()
@@ -107,6 +107,7 @@ pub fn any_window_open() -> bool {
         || crate::stop_original::is_open()
         || plugins_view::is_open()
         || crate::install_plugin::is_open()
+        || crate::workspace::is_open()
 }
 
 /// After a signing dialog: the open window of the daemon gets its language back (the

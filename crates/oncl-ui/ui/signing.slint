@@ -1,0 +1,404 @@
+// The signing page of the tools window: one operation in one place, step by step: documents
+// and key store → password and certificate → the confirmation that names the action → the
+// result. The caller and the action stay on screen in every step. All texts that depend on
+// the state are composed in Rust.
+
+import { Button, ComboBox, LineEdit, Palette, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
+
+export global SigningState {
+    // 0: documents and key store, 1: password and certificate, 2: confirmation, 3: running,
+    // 4: result.
+    in property <int> step;
+    in property <string> step-title;
+    // «Request from … · Action …»: composed by the host, never from a document.
+    in property <string> trust-line;
+    in-out property <string> doc-path;
+    in property <[StandardListViewItem]> docs;
+    in property <[string]> recent;
+    in-out property <int> recent-index: -1;
+    in property <[string]> recent-stores;
+    in-out property <int> recent-store-index: -1;
+    in-out property <string> store-path;
+    in-out property <string> password;
+    in property <[StandardListViewItem]> certs;
+    in-out property <int> cert-index: -1;
+    in property <[StandardListViewItem]> frozen;
+    in property <string> cert-line;
+    // Where the signature files will be written.
+    in property <string> outputs;
+    in property <string> confirm-label;
+    // The documents are frozen by the engine: until then the action cannot be confirmed.
+    in property <bool> frozen-ready;
+    // The confirmation may be pressed: it is the step, the documents are frozen and the page has
+    // been quiet. Set by the host from the controller, never from a running job: the job that
+    // freezes the documents waits for this very button.
+    in property <bool> confirm-enabled;
+    in property <string> favorite-label;
+    in property <string> result;
+    in property <string> error;
+    in property <bool> busy;
+
+    callback add-doc();
+    callback clear-docs();
+    callback pick-recent();
+    callback pick-recent-store();
+    callback browse-doc();
+    callback browse-store();
+    callback to-unlock();
+    callback unlock();
+    // A click on a certificate: the host tells a double-click from two single ones.
+    callback cert-clicked(int);
+    // Enter in the list or a double-click: shows the confirmation, signs nothing.
+    callback cert-chosen(int);
+    callback toggle-favorite();
+    callback clear-remembered();
+    callback confirm();
+    callback back();
+    callback cancel();
+    callback finish();
+}
+
+component Heading inherits Text {
+    font-size: 22px;
+    font-weight: 700;
+}
+
+component Label inherits Text {
+    font-weight: 600;
+}
+
+component ErrorText inherits Text {
+    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
+    wrap: word-wrap;
+}
+
+export component SigningPage inherits VerticalLayout {
+    spacing: 8px;
+    Heading {
+        text: SigningState.step-title;
+    }
+
+    Rectangle {
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 4px;
+        VerticalLayout {
+            padding: 8px;
+            Text {
+                text: SigningState.trust-line;
+                wrap: word-wrap;
+                accessible-role: text;
+            }
+        }
+    }
+
+    if SigningState.step == 0: VerticalLayout {
+        spacing: 8px;
+        Label {
+            text: @tr("Documents to sign");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                horizontal-stretch: 1;
+                enabled: !SigningState.busy;
+                text <=> SigningState.doc-path;
+                placeholder-text: @tr("Path to the file");
+                accessible-label: @tr("Documents to sign");
+                accepted => {
+                    SigningState.add-doc();
+                }
+            }
+
+            Button {
+                text: @tr("Browse…");
+                clicked => {
+                    SigningState.browse-doc();
+                }
+            }
+
+            Button {
+                text: @tr("Add");
+                clicked => {
+                    SigningState.add-doc();
+                }
+            }
+        }
+
+        if SigningState.recent.length > 0: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Recent");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                horizontal-stretch: 1;
+                model: SigningState.recent;
+                current-index <=> SigningState.recent-index;
+                selected => {
+                    SigningState.pick-recent();
+                }
+            }
+
+            Button {
+                text: @tr("Forget recent and favourites");
+                clicked => {
+                    SigningState.clear-remembered();
+                }
+            }
+        }
+        StandardListView {
+            height: 90px;
+            model: SigningState.docs;
+            accessible-label: @tr("Documents to sign");
+        }
+
+        Label {
+            text: @tr("Key store (PKCS#12, JKS)");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> SigningState.store-path;
+                placeholder-text: @tr("Path to the file");
+                accessible-label: @tr("Key store (PKCS#12, JKS)");
+                accepted => {
+                    SigningState.to-unlock();
+                }
+            }
+
+            Button {
+                text: @tr("Browse…");
+                clicked => {
+                    SigningState.browse-store();
+                }
+            }
+        }
+
+        if SigningState.recent-stores.length > 0: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Recent key stores");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                horizontal-stretch: 1;
+                model: SigningState.recent-stores;
+                current-index <=> SigningState.recent-store-index;
+                selected => {
+                    SigningState.pick-recent-store();
+                }
+            }
+        }
+        if SigningState.error != "": ErrorText {
+            text: SigningState.error;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Continue");
+                primary: true;
+                clicked => {
+                    SigningState.to-unlock();
+                }
+            }
+
+            Button {
+                text: @tr("Clear documents");
+                clicked => {
+                    SigningState.clear-docs();
+                }
+            }
+        }
+    }
+    if SigningState.step == 1: VerticalLayout {
+        spacing: 8px;
+        Label {
+            text: @tr("Password of the key store");
+        }
+
+        LineEdit {
+            enabled: !SigningState.busy;
+            input-type: password;
+            text <=> SigningState.password;
+            accessible-label: @tr("Password of the key store");
+            // Enter opens the key store and shows its certificates; it agrees to nothing.
+            accepted => {
+                SigningState.unlock();
+            }
+        }
+
+        if SigningState.error != "": ErrorText {
+            text: SigningState.error;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Open key store");
+                primary: SigningState.certs.length == 0;
+                enabled: !SigningState.busy;
+                clicked => {
+                    SigningState.unlock();
+                }
+            }
+
+            Button {
+                text: @tr("Back");
+                enabled: !SigningState.busy;
+                clicked => {
+                    SigningState.back();
+                }
+            }
+        }
+
+        if SigningState.certs.length > 0: VerticalLayout {
+            spacing: 8px;
+            Label {
+                text: @tr("Choose the certificate");
+            }
+
+            FocusScope {
+                key-pressed(event) => {
+                    if event.text == "\n" && SigningState.cert-index >= 0 {
+                        SigningState.cert-chosen(SigningState.cert-index);
+                        return accept;
+                    }
+                    reject
+                }
+                StandardListView {
+                    height: 120px;
+                    model: SigningState.certs;
+                    current-item <=> SigningState.cert-index;
+                    accessible-label: @tr("Choose the certificate");
+                    item-pointer-event(i, event, position) => {
+                        if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                            SigningState.cert-clicked(i);
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button {
+                    text: @tr("Show the confirmation");
+                    enabled: SigningState.cert-index >= 0;
+                    clicked => {
+                        SigningState.cert-chosen(SigningState.cert-index);
+                    }
+                }
+
+                Button {
+                    text: SigningState.favorite-label;
+                    enabled: SigningState.cert-index >= 0;
+                    clicked => {
+                        SigningState.toggle-favorite();
+                    }
+                }
+            }
+        }
+    }
+    if SigningState.step == 2: VerticalLayout {
+        spacing: 8px;
+        Label {
+            text: @tr("Certificate");
+        }
+
+        Text {
+            text: SigningState.cert-line;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: SigningState.outputs;
+            wrap: word-wrap;
+        }
+
+        Label {
+            text: @tr("Documents (names are as given, not checked)");
+        }
+
+        StandardListView {
+            height: 110px;
+            model: SigningState.frozen;
+            accessible-label: @tr("Documents (names are as given, not checked)");
+        }
+
+        if SigningState.error != "": ErrorText {
+            text: SigningState.error;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            // The one button that agrees; it names the action. Enter does not press it.
+            Button {
+                text: SigningState.confirm-label;
+                primary: true;
+                enabled: SigningState.confirm-enabled;
+                clicked => {
+                    SigningState.confirm();
+                }
+            }
+
+            Button {
+                text: @tr("Back");
+                clicked => {
+                    SigningState.back();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    SigningState.cancel();
+                }
+            }
+        }
+    }
+    if SigningState.step == 3: VerticalLayout {
+        spacing: 8px;
+        Text {
+            text: SigningState.result;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    SigningState.cancel();
+                }
+            }
+        }
+    }
+    if SigningState.step == 4: VerticalLayout {
+        spacing: 8px;
+        TextEdit {
+            read-only: true;
+            wrap: word-wrap;
+            min-height: 140px;
+            text: SigningState.result;
+            accessible-label: @tr("Result");
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: @tr("New signing");
+                primary: true;
+                clicked => {
+                    SigningState.finish();
+                }
+            }
+        }
+    }
+}

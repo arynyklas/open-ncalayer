@@ -4583,11 +4583,15 @@ dependencies = [
 name = "oncl-ui"
 version = "0.1.0-alpha.7"
 dependencies = [
+ "der 0.8.2",
  "ksni",
+ "oncl-core",
  "oncl-desktop",
  "oncl-flows",
  "oncl-pki",
+ "oncl-testkit",
  "oncl-tls",
+ "oncl-token",
  "oncl-trust",
  "png",
  "raw-window-handle",
@@ -4602,6 +4606,7 @@ dependencies = [
  "tray-icon",
  "webbrowser",
  "windows-sys 0.61.2",
+ "x509-cert",
  "zbus",
  "zeroize",
 ]

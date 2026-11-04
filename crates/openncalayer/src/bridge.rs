@@ -37,6 +37,10 @@ const OUT_QUEUE: usize = 16;
 /// Most live sockets of a connection: the browser's own WebSocket limits, for every tab of
 /// a profile together, with room to spare.
 const MAX_SOCKETS: usize = 4096;
+/// What the bridge does when a second start asks for the tools window; callable from any
+/// thread, returns at once.
+pub type WorkspaceOpener = Arc<dyn Fn() + Send + Sync>;
+
 /// Longest JSON-escaped form of one character inside a string (`\u0001`).
 const MAX_ESCAPED_CHAR: usize = 6;
 
@@ -46,7 +50,11 @@ const MAX_ESCAPED_CHAR: usize = 6;
 /// # Errors
 ///
 /// None at present: the signature leaves room for fatal listener errors.
-pub async fn serve_ipc(mut listener: IpcListener, registry: Arc<Registry>) -> io::Result<()> {
+pub async fn serve_ipc(
+    mut listener: IpcListener,
+    registry: Arc<Registry>,
+    on_workspace: WorkspaceOpener,
+) -> io::Result<()> {
     loop {
         let stream = match listener.accept().await {
             Ok(stream) => stream,
@@ -57,8 +65,9 @@ pub async fn serve_ipc(mut listener: IpcListener, registry: Arc<Registry>) -> io
             }
         };
         let registry = Arc::clone(&registry);
+        let on_workspace = Arc::clone(&on_workspace);
         tokio::spawn(async move {
-            match connection(stream, registry, Limits::DAEMON).await {
+            match connection(stream, registry, Limits::DAEMON, on_workspace).await {
                 Ok(()) => debug!("bridge connection closed"),
                 // A relay speaking another protocol: every socket of it is gone.
                 Err(e) if e.kind() == io::ErrorKind::InvalidData => {
@@ -152,6 +161,9 @@ enum Request {
     Close {
         sid: u32,
     },
+    /// `openncalayer tools` of a second start: show the tools window. Carries no socket and
+    /// no data; whoever can connect to the bridge is this user, who may open any window.
+    Workspace,
     /// A frame type of a newer protocol: ignored.
     Unknown(String),
 }
@@ -224,6 +236,7 @@ fn parse(frame: &[u8]) -> io::Result<Request> {
         "close" => Request::Close {
             sid: sid.ok_or_else(|| field("sid"))?,
         },
+        "workspace" => Request::Workspace,
         _ => Request::Unknown(t),
     })
 }
@@ -367,7 +380,12 @@ impl Drop for Socket {
 
 /// One IPC connection: a reader task, a writer task fed through a queue, and a task per
 /// socket. Ends when the relay closes the connection or reading or writing fails.
-async fn connection<S>(stream: S, registry: Arc<Registry>, limits: Limits) -> io::Result<()>
+async fn connection<S>(
+    stream: S,
+    registry: Arc<Registry>,
+    limits: Limits,
+    on_workspace: WorkspaceOpener,
+) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -378,7 +396,7 @@ where
     // connection's budget until their message is answered.
     let (frames_tx, frames) = mpsc::channel(1);
     let reader = tokio::spawn(read_frames(reader, frames_tx));
-    let result = relay_frames(frames, &out, &mut writer, &registry, limits).await;
+    let result = relay_frames(frames, &out, &mut writer, &registry, limits, &on_workspace).await;
     // Both halves must go for the pipe to close.
     reader.abort();
     writer.abort();
@@ -392,6 +410,7 @@ async fn relay_frames(
     writer: &mut JoinHandle<io::Result<()>>,
     registry: &Arc<Registry>,
     limits: Limits,
+    on_workspace: &WorkspaceOpener,
 ) -> io::Result<()> {
     let hello = Outbound::Hello {
         v: PROTOCOL_VERSION,
@@ -499,6 +518,10 @@ async fn relay_frames(
                 Some(_) => debug!(sid, "socket closed by the extension"),
                 None => debug!(sid, "close of an unknown socket ignored"),
             },
+            Request::Workspace => {
+                info!("the tools window is asked for over the bridge");
+                on_workspace();
+            }
             Request::Unknown(t) => debug!(t, "frame of an unknown type ignored"),
         }
     }
@@ -697,8 +720,16 @@ mod tests {
 
     impl Relay {
         async fn start(registry: Registry, limits: Limits) -> Relay {
+            Relay::start_with(registry, limits, Arc::new(|| {})).await
+        }
+
+        async fn start_with(
+            registry: Registry,
+            limits: Limits,
+            on_workspace: WorkspaceOpener,
+        ) -> Relay {
             let (relay, daemon) = tokio::io::duplex(1 << 16);
-            tokio::spawn(connection(daemon, Arc::new(registry), limits));
+            tokio::spawn(connection(daemon, Arc::new(registry), limits, on_workspace));
             let mut relay = Relay(relay);
             assert!(relay.next().await.starts_with(r#"{"t":"hello""#));
             relay
@@ -741,6 +772,29 @@ mod tests {
                 format!(r#"{{"t":"msg","sid":{sid},"data":"--heartbeat--"}}"#)
             );
         }
+    }
+
+    /// A second start's `workspace` frame reaches the host once per frame, takes no socket and
+    /// leaves the connection as it was.
+    #[tokio::test]
+    async fn a_workspace_frame_asks_the_host_and_nothing_else() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&asked);
+        let mut relay = Relay::start_with(
+            Registry::default(),
+            SMALL,
+            Arc::new(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .await;
+        relay.send(serde_json::json!({"t": "workspace"})).await;
+        // Frames are handled in order: once the socket opens, the first one was handled.
+        relay.open(1).await;
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        relay.send(serde_json::json!({"t": "workspace"})).await;
+        relay.heartbeat(1).await;
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// The budget holds 150 bytes of data in two pieces.
@@ -1143,6 +1197,7 @@ mod tests {
             parse(br#"{"t":"close","sid":3}"#).unwrap(),
             Request::Close { sid: 3 }
         );
+        assert_eq!(parse(br#"{"t":"workspace"}"#).unwrap(), Request::Workspace);
         assert_eq!(
             parse(br#"{"t":"ping","sid":"x","data":[1],"more":0}"#).unwrap(),
             Request::Unknown("ping".to_owned())

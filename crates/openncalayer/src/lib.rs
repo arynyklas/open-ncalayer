@@ -24,7 +24,7 @@ mod settings;
 pub mod update;
 pub mod wss;
 
-pub use bridge::{NM_FRAME_LIMIT, serve_ipc, split_message};
+pub use bridge::{NM_FRAME_LIMIT, WorkspaceOpener, serve_ipc, split_message};
 pub use paths::{DATA_DIR_VAR, Paths};
 pub use server::{
     DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, NoPlugins, PORT_VAR, Plugins,

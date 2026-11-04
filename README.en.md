@@ -16,6 +16,7 @@ P1 provides:
 - attached and detached signatures, co-signing, NCA timestamps (TSP);
 - storage and key selection dialogs (Russian, Kazakh, English);
 - a command-line TLS wizard: `openncalayer tls init|import|status` ([guide, in Russian](docs/user/tls.md));
+- a tools window (the hash of a file; the public details of a certificate, a signature file, a key store and the tokens plugged in): «Tools…» in the tray menu or `openncalayer tools`, which asks the running copy to show it and starts the program if none runs; a site's request and the login do not open it;
 - signature checking: `oncl verify --profile cms` of the SDK command line ([guide](docs/user/cli.md)) — signatures, timestamps, certificate chains to the roots you pass, validity periods and revocation (OCSP, CRL) under the SDK's strict policy;
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 
@@ -329,6 +330,7 @@ Design, the family table, the PIN, the emulator and the `ONCL_TOKEN_TRACE=1` tra
 `openncalayer run` shows the OpenNCALayer icon (`tray-icon` on Windows and macOS, a StatusNotifierItem over D-Bus on Linux). Its menu:
 - «Настройки…» (Settings…);
 - «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
+- «Инструменты…» (Tools…) — the tools window (the hash of a file, the public details of certificates);
 - «Плагины…» (Plugins…) — the plugin window (see [Plugins](#plugins));
 - «Журнал» (Log) — opens the `logs/` directory in the file manager;
 - «Проверить обновления» (Check for updates);

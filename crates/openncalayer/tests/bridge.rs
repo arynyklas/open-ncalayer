@@ -114,7 +114,7 @@ async fn start_ipc(registry: Arc<Registry>) -> (TempDir, Endpoint) {
     let dir = data_dir();
     let ep = endpoint(dir.path()).unwrap();
     let listener = oncl_ipc::bind(&ep).await.unwrap();
-    tokio::spawn(serve_ipc(listener, registry));
+    tokio::spawn(serve_ipc(listener, registry, Arc::new(|| {})));
     (dir, ep)
 }
 

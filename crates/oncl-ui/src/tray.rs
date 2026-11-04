@@ -35,6 +35,8 @@ const TOOLTIP_UNITS: usize = 127;
 /// What the user picked in the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
+    /// «Инструменты…»: the tools window.
+    Tools,
     /// «Настройки…»: the settings window.
     Settings,
     /// «Сертификат для браузера…»: the TLS wizard.
@@ -57,7 +59,8 @@ pub enum TrayCommand {
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 impl TrayCommand {
     /// Every command, for [`TrayCommand::from_id`].
-    const ALL: [TrayCommand; 8] = [
+    const ALL: [TrayCommand; 9] = [
+        TrayCommand::Tools,
         TrayCommand::Settings,
         TrayCommand::TlsWizard,
         TrayCommand::Plugins,
@@ -71,6 +74,7 @@ impl TrayCommand {
     /// The menu item id of the command.
     fn id(self) -> &'static str {
         match self {
+            TrayCommand::Tools => "tools",
             TrayCommand::Settings => "settings",
             TrayCommand::TlsWizard => "tls-wizard",
             TrayCommand::Plugins => "plugins",
@@ -360,6 +364,7 @@ impl TrayModel {
             ]);
         }
         rows.extend([
+            MenuRow::Item(TrayCommand::Tools, t.tools),
             MenuRow::Item(TrayCommand::Settings, t.settings),
             MenuRow::Item(TrayCommand::TlsWizard, t.tls_wizard),
             MenuRow::Item(TrayCommand::Plugins, t.plugins),
@@ -413,6 +418,7 @@ impl TrayModel {
 #[derive(Debug, PartialEq, Eq)]
 struct Texts {
     stop_original: &'static str,
+    tools: &'static str,
     settings: &'static str,
     tls_wizard: &'static str,
     plugins: &'static str,
@@ -427,6 +433,7 @@ impl Texts {
         match l {
             Locale::Kk => &Texts {
                 stop_original: "Түпнұсқаны тоқтату…",
+                tools: "Құралдар…",
                 settings: "Баптаулар…",
                 tls_wizard: "Браузерге арналған сертификат…",
                 plugins: "Плагиндер…",
@@ -437,6 +444,7 @@ impl Texts {
             },
             Locale::Ru => &Texts {
                 stop_original: "Остановить оригинал…",
+                tools: "Инструменты…",
                 settings: "Настройки…",
                 tls_wizard: "Сертификат для браузера…",
                 plugins: "Плагины…",
@@ -447,6 +455,7 @@ impl Texts {
             },
             Locale::En => &Texts {
                 stop_original: "Stop the original…",
+                tools: "Tools…",
                 settings: "Settings…",
                 tls_wizard: "Certificate for browsers…",
                 plugins: "Plugins…",
@@ -484,68 +493,53 @@ mod tests {
         assert_eq!(told.get(), 1);
     }
 
+    /// Every command the user can pick is in the menu once, the exit is last and after a
+    /// separator, and every row has a label in every language.
     #[test]
-    fn menu_has_the_items_of_the_spec_in_order() {
-        let menu = TrayModel::new(Locale::Ru).menu();
-        assert_eq!(
-            menu,
-            [
-                MenuRow::Item(TrayCommand::Settings, "Настройки…"),
-                MenuRow::Item(TrayCommand::TlsWizard, "Сертификат для браузера…"),
-                MenuRow::Item(TrayCommand::Plugins, "Плагины…"),
-                MenuRow::Item(TrayCommand::OpenLogs, "Журнал"),
-                MenuRow::Item(TrayCommand::CheckUpdates, "Проверить обновления"),
-                MenuRow::Item(TrayCommand::About, "О программе"),
-                MenuRow::Separator,
-                MenuRow::Item(TrayCommand::Quit, "Выход"),
-            ]
-        );
-    }
-
-    #[test]
-    fn menu_is_translated() {
+    fn the_menu_offers_every_command_once_with_the_exit_last() {
         for locale in [Locale::Kk, Locale::Ru, Locale::En] {
             let menu = TrayModel::new(locale).menu();
-            let labels: Vec<&str> = menu
+            let commands: Vec<TrayCommand> = menu
                 .iter()
                 .filter_map(|row| match row {
-                    MenuRow::Item(_, label) => Some(*label),
+                    MenuRow::Item(command, label) => {
+                        assert!(!label.is_empty(), "{locale:?} {command:?}");
+                        Some(*command)
+                    }
                     MenuRow::Separator => None,
                 })
                 .collect();
-            assert_eq!(labels.len(), 7, "{locale:?}");
-            assert!(labels.iter().all(|l| !l.is_empty()), "{locale:?}");
+            assert_eq!(commands.last(), Some(&TrayCommand::Quit), "{locale:?}");
+            assert_eq!(menu[menu.len() - 2], MenuRow::Separator, "{locale:?}");
+            for command in TrayCommand::ALL {
+                let offered = commands.iter().filter(|c| **c == command).count();
+                let expected = usize::from(command != TrayCommand::StopOriginal);
+                assert_eq!(offered, expected, "{locale:?} {command:?}");
+            }
         }
-        assert_eq!(
-            TrayModel::new(Locale::En).menu().last(),
-            Some(&MenuRow::Item(TrayCommand::Quit, "Quit"))
-        );
-        assert_eq!(
-            TrayModel::new(Locale::Kk).menu().last(),
-            Some(&MenuRow::Item(TrayCommand::Quit, "Шығу"))
-        );
     }
 
     #[test]
     fn stopping_the_original_is_offered_only_when_it_holds_the_port() {
         let mut model = TrayModel::new(Locale::Ru);
         let plain = model.menu();
-        assert!(!plain.contains(&MenuRow::Item(
-            TrayCommand::StopOriginal,
-            "Остановить оригинал…"
-        )));
+        assert!(
+            !plain
+                .iter()
+                .any(|row| matches!(row, MenuRow::Item(TrayCommand::StopOriginal, _)))
+        );
         assert!(model.set_state(TrayState {
             warning: Some("Порт занят оригинальным NCALayer".to_owned()),
             stop_original: true,
         }));
         let menu = model.menu();
-        assert_eq!(
+        assert!(matches!(
             menu[..2],
             [
-                MenuRow::Item(TrayCommand::StopOriginal, "Остановить оригинал…"),
+                MenuRow::Item(TrayCommand::StopOriginal, label),
                 MenuRow::Separator,
-            ]
-        );
+            ] if !label.is_empty()
+        ));
         assert_eq!(menu[2..], plain[..]);
         for locale in [Locale::Kk, Locale::En] {
             assert!(model.set_locale(locale));

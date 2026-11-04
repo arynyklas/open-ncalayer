@@ -24,6 +24,7 @@ token-emulator = ["oncl-token/emulator"]
 oncl-flows.workspace = true
 # The accessory module's name, which the About window asks for the bundles.
 oncl-builtin-accessory.workspace = true
+oncl-core.workspace = true
 oncl-desktop.workspace = true
 oncl-ipc.workspace = true
 oncl-pki.workspace = true

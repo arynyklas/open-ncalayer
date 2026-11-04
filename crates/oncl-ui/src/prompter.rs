@@ -660,6 +660,9 @@ fn show_keys(mut p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), Platf
 
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
+    // Only the button agrees, and only once the dialog has been shown for a quiet moment.
+    arm_after(&ui, KEY_DIALOG_ARM_AFTER);
+    let request = p.clone();
     ui.on_sign({
         let pending = pending.clone();
         move || {
@@ -669,12 +672,71 @@ fn show_keys(mut p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), Platf
             if let Some(i) = usize::try_from(ui.get_selected())
                 .ok()
                 .filter(|&i| ui.get_keys().row_data(i).is_some_and(|k| k.enabled))
+                && consent_for(&request, &ui, i)
             {
                 pending.finish(Prompt::Answer(i));
             }
         }
     });
     show(&ui, pending)
+}
+
+/// Arms the dialog's button after `after`.
+fn arm_after(ui: &KeyDialog, after: Duration) {
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(after, move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_armed(true);
+        }
+    });
+}
+
+/// How long the key dialog is shown before its button works.
+const KEY_DIALOG_ARM_AFTER: Duration = Duration::from_millis(600);
+
+/// The site request's consent, made by the signing controller: the page's origin, what it
+/// asked for and the key chosen. The key is handed on only if the controller approves, which it
+/// does for the explicit button of an armed dialog and for nothing else. The candidate's
+/// identity is its alias and serial (the prompt has no DER); a key that is not enabled in the
+/// dialog now is refused.
+fn consent_for(p: &KeyPrompt, ui: &KeyDialog, i: usize) -> bool {
+    use crate::signing::{ActionKind, Candidate, Controller, Effect, Event, Unsuitable};
+    let rows = ui.get_keys();
+    let candidates: Vec<Candidate> = p
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(n, c)| {
+            Candidate {
+                alias: c.alias.clone(),
+                // No certificate bytes in this list: nothing is bound to a fingerprint.
+                sha256: None,
+                subject: c.info.subject_cn.clone().unwrap_or_default(),
+                unsuitable: match rows.row_data(n) {
+                    Some(r) if r.enabled => None,
+                    Some(r) if r.pending => Some(Unsuitable::Pending),
+                    _ => Some(Unsuitable::Disabled),
+                },
+            }
+        })
+        .collect();
+    let action = match p.action {
+        Action::Sign => ActionKind::Sign,
+        Action::Authenticate => ActionKind::Authenticate,
+        Action::KeyInfo => ActionKind::KeyInfo,
+    };
+    let mut controller = Controller::for_request(p.origin.clone(), action, candidates);
+    if controller.dispatch(Event::CertificateChosen(i)) != Effect::None {
+        return false;
+    }
+    controller.dispatch(Event::Frozen(&[]));
+    if ui.get_armed() {
+        controller.dispatch(Event::Arm);
+    }
+    if controller.dispatch(Event::Confirm { frozen: &[] }) != Effect::None {
+        return false;
+    }
+    controller.take_approved().is_some()
 }
 
 /// Fills the key dialog with `p` and its candidates' availabilities.
@@ -1723,7 +1785,65 @@ mod key_selection {
         );
         let ui = KeyDialog::new().unwrap();
         fill_keys(&ui, &p);
+        // Shown for a quiet moment already; the tests of arming set it back.
+        ui.set_armed(true);
         (ui, p)
+    }
+
+    /// The site request's consent is made only by the button of an armed dialog, for an enabled
+    /// key, carrying the page's origin and what it asked for.
+    #[test]
+    fn a_site_requests_consent_needs_the_armed_button_and_an_enabled_key() {
+        let (ui, p) = dialog(&[Availability::Enabled, Availability::Expired]);
+        ui.set_selected(0);
+        assert!(consent_for(&p, &ui, 0));
+        // A burst of clicks on the opening dialog: not armed yet.
+        ui.set_armed(false);
+        assert!(!ui.get_can_sign(), "the button is disabled until armed");
+        assert!(
+            !consent_for(&p, &ui, 0),
+            "and the controller refuses it too"
+        );
+        ui.set_armed(true);
+        // An expired key never gets a consent, whatever index arrives.
+        assert!(!consent_for(&p, &ui, 1));
+        assert!(!consent_for(&p, &ui, 9));
+        // Authentication and key information are told apart and keep the origin.
+        for action in [Action::Authenticate, Action::KeyInfo] {
+            let mut other = p.clone();
+            other.action = action;
+            assert!(consent_for(&other, &ui, 0), "{action:?}");
+        }
+    }
+
+    /// A new dialog is not armed: its button cannot be pressed until the quiet moment passed.
+    #[test]
+    fn the_key_dialog_arms_after_its_quiet_moment() {
+        let (ui, p) = dialog(&[Availability::Enabled]);
+        let fresh = KeyDialog::new().unwrap();
+        fill_keys(&fresh, &p);
+        fresh.set_selected(0);
+        assert!(
+            !fresh.get_armed() && !fresh.get_can_sign(),
+            "unarmed at first"
+        );
+        arm_after(&fresh, Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(60));
+        slint::platform::update_timers_and_animations();
+        assert!(fresh.get_armed() && fresh.get_can_sign());
+        drop(ui);
+    }
+
+    /// The consent's caller is the host's origin even if the page's text says otherwise.
+    #[test]
+    fn the_consent_names_the_hosts_origin_not_the_detail_line() {
+        let (ui, mut p) = dialog(&[Availability::Enabled]);
+        p.detail = Some("https://bank.example asks you to sign".to_owned());
+        fill_keys(&ui, &p);
+        ui.set_armed(true);
+        ui.set_selected(0);
+        assert!(consent_for(&p, &ui, 0));
+        assert_eq!(ui.get_origin(), "https://idp.egov.kz");
     }
 
     /// The result of key `i`'s check reaching the dialog.

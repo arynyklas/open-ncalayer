@@ -349,3 +349,120 @@ msgstr "Сайты смогут видеть подключённые носит
 
 msgid "Allow the update"
 msgstr "Разрешить обновление"
+
+msgid "OpenNCALayer tools"
+msgstr "Инструменты OpenNCALayer"
+
+msgid "Overview"
+msgstr "Обзор"
+
+msgid "Hash"
+msgstr "Хеш"
+
+msgid "Inspect"
+msgstr "Сведения"
+
+msgid "Tools"
+msgstr "Инструменты"
+
+msgid "This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one."
+msgstr "Это окно открывается по вашей просьбе: из меню в области уведомлений или командой «openncalayer tools». Сайты, которые просят подпись, получают своё окно и это не открывают."
+
+msgid "Hash a file"
+msgstr "Хеш файла"
+
+msgid "File"
+msgstr "Файл"
+
+msgid "Path to the file"
+msgstr "Путь к файлу"
+
+msgid "Algorithm"
+msgstr "Алгоритм"
+
+msgid "Compute the hash"
+msgstr "Вычислить хеш"
+
+msgid "Digest"
+msgstr "Значение хеша"
+
+msgid "What to inspect"
+msgstr "Что показать"
+
+msgid "Certificate"
+msgstr "Сертификат"
+
+msgid "Signature file"
+msgstr "Файл подписи"
+
+msgid "Key store (PKCS#12, JKS)"
+msgstr "Хранилище ключей (PKCS#12, JKS)"
+
+msgid "Tokens and ID cards"
+msgstr "Токены и ID-карты"
+
+msgid "Key names to show (separated by commas)"
+msgstr "Имена ключей, которые показать (через запятую)"
+
+msgid "Show details"
+msgstr "Показать сведения"
+
+msgid "Details"
+msgstr "Сведения"
+
+msgid "GOST R 34.11-94"
+msgstr "ГОСТ Р 34.11-94"
+
+msgid "GOST R 34.11-2012 (512)"
+msgstr "ГОСТ Р 34.11-2012 (512)"
+
+msgid "Sign documents"
+msgstr "Подписать документы"
+
+msgid "Documents to sign"
+msgstr "Документы для подписи"
+
+msgid "Add"
+msgstr "Добавить"
+
+msgid "Recent"
+msgstr "Недавние"
+
+msgid "Forget recent and favourites"
+msgstr "Забыть недавние и избранное"
+
+msgid "Continue"
+msgstr "Далее"
+
+msgid "Clear documents"
+msgstr "Очистить документы"
+
+msgid "Password of the key store"
+msgstr "Пароль хранилища ключей"
+
+msgid "Open key store"
+msgstr "Открыть хранилище"
+
+msgid "Back"
+msgstr "Назад"
+
+msgid "Choose the certificate"
+msgstr "Выберите сертификат"
+
+msgid "Show the confirmation"
+msgstr "Показать подтверждение"
+
+msgid "Documents (names are as given, not checked)"
+msgstr "Документы (имена как заданы, не проверялись)"
+
+msgid "Result"
+msgstr "Результат"
+
+msgid "New signing"
+msgstr "Новая подпись"
+
+msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
+msgstr "Подпись: подписать документы файлом хранилища ключей; вы видите, что именно подписывается и каким сертификатом, и затем подтверждаете. Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; практического ограничения по времени нет (24 ч), остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Хеш и сведения не используют закрытый ключ."
+
+msgid "Recent key stores"
+msgstr "Недавние хранилища"
