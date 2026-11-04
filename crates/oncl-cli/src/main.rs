@@ -12,6 +12,7 @@ mod local;
 mod output;
 mod plugin;
 mod public;
+mod remote;
 mod reports;
 mod secrets;
 mod sign;
@@ -65,19 +66,21 @@ fn entry() -> i32 {
         crate::diagnostic(format_args!("oncl: {code}"));
         return 1;
     }
-    match local::run(&cli, control) {
+    // `--endpoint` is the only way to leave this process; the failure contract is the same
+    // `oncl: <code>; applied=<state>` line and exit status for local and remote runs.
+    let outcome = if cli.endpoint.is_some() {
+        remote::run(&cli, control)
+    } else {
+        local::run(&cli, control).map_err(remote::Failure::from)
+    };
+    match outcome {
         Ok(exit) => exit,
-        Err(error) => {
+        Err(failure) => {
             crate::diagnostic(format_args!(
-                "oncl: {:?}; applied={:?}",
-                error.code(),
-                error.applied_state()
+                "oncl: {}; applied={:?}",
+                failure.code, failure.applied
             ));
-            if error.code() == oncl_core::ErrorCode::Cancelled {
-                130
-            } else {
-                1
-            }
+            if failure.cancelled { 130 } else { 1 }
         }
     }
 }

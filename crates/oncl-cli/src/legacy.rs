@@ -24,7 +24,7 @@ pub enum Algorithm {
     Gost2015_512,
 }
 impl Algorithm {
-    fn signature_uri(self) -> &'static str {
+    pub fn signature_uri(self) -> &'static str {
         match self {
             Self::RsaSha256 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
             Self::Gost2004 => "http://www.w3.org/2001/04/xmldsig-more#gost34310-gost34311",
@@ -33,7 +33,7 @@ impl Algorithm {
             }
         }
     }
-    fn digest_uri(self) -> &'static str {
+    pub fn digest_uri(self) -> &'static str {
         match self {
             Self::RsaSha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
             Self::Gost2004 => "http://www.w3.org/2001/04/xmldsig-more#gost34311",

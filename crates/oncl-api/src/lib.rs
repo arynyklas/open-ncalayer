@@ -3,6 +3,8 @@
 //! service, key store, desktop state or an authority factory.
 pub mod dto;
 pub mod error;
+#[cfg(feature = "client")]
+pub mod client;
 #[cfg(feature = "server")]
 pub mod multipart;
 #[cfg(feature = "server")]

@@ -144,6 +144,10 @@ pub fn timestamp(
             tsa: url,
             algorithm,
         } => {
+            // `--tsa` is mandatory locally (clap requires it unless `--endpoint` is given).
+            let url = url
+                .as_deref()
+                .ok_or(ProcessingError::InvalidInput("TSA endpoint required"))?;
             let request = oncl_core::StampRequest::new(tsa(
                 url,
                 algorithm.sdk(),

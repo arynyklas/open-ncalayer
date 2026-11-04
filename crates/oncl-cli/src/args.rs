@@ -50,6 +50,29 @@ pub struct Cli {
     pub timeout_seconds: u64,
     #[arg(long, global = true)]
     pub temporary_directory: Option<PathBuf>,
+    /// Remote mode: run every operation on this `oncl-server` (`https://host:port`, or
+    /// `http://` only for a loopback host). Explicit; there is no discovery. Local files are
+    /// always read and written by this client, never opened by the server.
+    #[arg(long, global = true)]
+    pub endpoint: Option<String>,
+    /// File holding the individual API token (an owner-only directory, like `--secret-file`).
+    /// Remote mode only; exactly one of `--token-file` / `--token-stdin`.
+    #[arg(long, global = true)]
+    pub token_file: Option<PathBuf>,
+    /// Read the API token from standard input (instead of a token file).
+    #[arg(long, global = true)]
+    pub token_stdin: bool,
+    /// PEM or DER trust anchor(s) of an `https://` endpoint, replacing the built-in roots
+    /// (repeatable). Certificate verification can never be skipped.
+    #[arg(long, global = true)]
+    pub ca_file: Vec<PathBuf>,
+    /// Permit `http://` to a non-loopback host: the token and documents travel unencrypted.
+    #[arg(long, global = true)]
+    pub allow_plain_http: bool,
+    /// Explicit remote inline mode: send the PKCS#12 container (`--key`) and its password
+    /// to the server. Without it only operator-named keys (`--key-name`) are used.
+    #[arg(long, global = true)]
+    pub inline_key: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -174,7 +197,7 @@ pub struct PrivateKeyArgs {
     pub alias: Option<String>,
     /// Select an operator-configured key by name (see `--key-config`); the
     /// container path or token reader never appears on the command line.
-    #[arg(long, requires = "key_config", conflicts_with = "token_reader")]
+    #[arg(long, conflicts_with = "token_reader")]
     pub key_name: Option<String>,
     /// Operator JSON file of named key sources (no secrets).
     #[arg(long, requires = "key_name")]
@@ -301,9 +324,39 @@ impl Cli {
             _ => None,
         }
     }
+    /// A local named key is resolved through its operator `--key-config`; only a remote
+    /// session names a key the *server* configures.
+    fn named_key_without_config(&self) -> bool {
+        let (named, configured) = match &self.command {
+            Command::Inspect(args) => (args.key_name.is_some(), args.key_config.is_some()),
+            Command::Batch { command } => {
+                let args = command.args();
+                (args.key_name.is_some(), args.key_config.is_some())
+            }
+            _ => match self.private_key() {
+                Some(args) => (args.key_name.is_some(), args.key_config.is_some()),
+                None => (false, false),
+            },
+        };
+        named && !configured
+    }
     pub fn preflight(&self) -> Result<(), &'static str> {
         if self.timeout_seconds == 0 {
             return Err("InvalidTimeout");
+        }
+        if self.endpoint.is_none()
+            && (self.token_file.is_some()
+                || self.token_stdin
+                || !self.ca_file.is_empty()
+                || self.allow_plain_http
+                || self.inline_key)
+        {
+            return Err("EndpointRequired");
+        }
+        if self.endpoint.is_some() {
+            crate::remote::preflight(self)?;
+        } else if self.named_key_without_config() {
+            return Err("InvalidCombination");
         }
         if self.pki_pin.iter().any(|pin| {
             pin.split_once('=')
@@ -496,7 +549,9 @@ impl Cli {
                     P::NamedKey if !keyed || args.input.is_some() => Err("InvalidCombination"),
                     P::NamedKey => Ok(()),
                     _ if keyed || args.input.is_none() => Err("InvalidCombination"),
-                    P::Container if args.alias.is_empty() => Err("AliasRequired"),
+                    P::Container if args.alias.is_empty() && self.endpoint.is_none() => {
+                        Err("AliasRequired")
+                    }
                     _ => Ok(()),
                 }
             }

@@ -68,3 +68,28 @@ pub fn read(
     }
     crate::terminal::read(ctx)
 }
+
+/// The API token of a remote session from standard input: at most 4096 bytes and one
+/// trailing LF/CRLF, read into wiped fixed memory. Nothing is truncated: a longer input is
+/// refused. Stdin is then not available as a document.
+pub fn read_stdin(ctx: &mut OperationContext) -> Result<Zeroizing<String>, OperationError> {
+    ctx.resources().checkpoint()?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    bytes
+        .try_reserve_exact(4098)
+        .map_err(|_| ProcessingError::MemoryLimit)?;
+    io::stdin()
+        .lock()
+        .take(4098)
+        .read_to_end(&mut bytes)
+        .map_err(ProcessingError::from)?;
+    ctx.resources().checkpoint()?;
+    let token = bytes
+        .strip_suffix(b"\r\n")
+        .or_else(|| bytes.strip_suffix(b"\n"))
+        .unwrap_or(&bytes);
+    if token.is_empty() || token.len() > 4096 {
+        return Err(OperationError::SecretRequired);
+    }
+    crate::terminal::finish(token)
+}

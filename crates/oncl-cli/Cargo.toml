@@ -1,6 +1,6 @@
 [package]
 name = "oncl-cli"
-description = "Standalone local OpenNCALayer SDK command line"
+description = "Standalone OpenNCALayer SDK command line, local or as a streaming client of oncl-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,6 +28,8 @@ oncl-pdf.workspace = true
 oncl-token.workspace = true
 oncl-plugin = { workspace = true, default-features = false }
 oncl-pdk.workspace = true
+# The streaming HTTP client of the typed contract (`--endpoint`): ureq only, no server stack.
+oncl-api = { path = "../oncl-api", features = ["client"] }
 clap.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -42,6 +44,10 @@ oncl-pki = { workspace = true, features = ["testing"] }
 base64.workspace = true
 wat.workspace = true
 x509-cert.workspace = true
+# `tests/remote.rs`: a real in-process oncl-server on loopback and a private CA for TLS.
+oncl-server = { path = "../oncl-server" }
+tokio = { workspace = true, features = ["sync"] }
+rcgen.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
