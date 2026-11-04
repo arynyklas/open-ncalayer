@@ -1953,7 +1953,8 @@ fn redirects_are_never_followed_and_ambient_proxies_are_never_used() {
     let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let ambient = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    (watch(&target), watch(&ambient));
+    watch(&target);
+    watch(&ambient);
     let (target_address, origin_address) =
         (target.local_addr().unwrap(), origin.local_addr().unwrap());
     let serve = std::thread::spawn(move || {
