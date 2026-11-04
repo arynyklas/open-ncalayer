@@ -28,10 +28,7 @@ use crate::{offscreen, scale};
 
 /// A name no line break can be found in: a long path, a file name, an origin.
 fn long_name() -> String {
-    format!(
-        "drive_C:\\Users\\Someone\\{}.p12",
-        "VeryLongFolderName".repeat(12)
-    )
+    format!("keys\\Someone\\{}.p12", "VeryLongFolderName".repeat(12))
 }
 
 /// A long error: many words, a long unbreakable name among them.
