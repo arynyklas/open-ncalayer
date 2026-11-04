@@ -56,6 +56,7 @@ pub fn execute(
     args: &SignArgs,
     selector: &KeySelector,
     store: &TemporaryStore,
+    evidence: &crate::evidence::Material,
     ctx: &mut OperationContext,
 ) -> Result<(oncl_pki::io::StagedArtifact, oncl_core::OperationReport), OperationError> {
     let _secret_memory = ctx.resources().reserve_memory(16384)?;
@@ -72,10 +73,11 @@ pub fn execute(
         .as_deref()
         .map(Input::open)
         .transpose()?;
-    let material = oncl_pki::cms::ades::ValidationMaterial {
-        certificates: &[],
-        ocsp: &[],
-        crls: &[],
+    let (ocsp, crls) = (evidence.ocsp_slices(), evidence.crl_slices());
+    let material = || oncl_pki::cms::ades::ValidationMaterial {
+        certificates: &evidence.certificates,
+        ocsp: &ocsp,
+        crls: &crls,
     };
     let xml = || oncl_xml::XmlSignProfile {
         target: args.target_id.as_deref(),
@@ -166,7 +168,7 @@ pub fn execute(
                 key(),
                 oncl_pdf::PdfSignProfile::default(),
                 level,
-                material,
+                material(),
                 evidence_limits(),
             )
         }
@@ -182,7 +184,7 @@ pub fn execute(
                     vec![key()],
                     detached.as_mut().map(Input::source),
                     level,
-                    material,
+                    material(),
                     evidence_limits(),
                 )
             } else {
@@ -190,7 +192,7 @@ pub fn execute(
                     vec![key()],
                     !args.detached,
                     level,
-                    material,
+                    material(),
                     evidence_limits(),
                 )
             }

@@ -2,6 +2,7 @@ mod args;
 mod batch;
 mod bounded;
 mod control;
+mod evidence;
 mod families;
 mod jose;
 mod jose_args;

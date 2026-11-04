@@ -26,6 +26,16 @@ pub struct Cli {
     /// TSA endpoint (POST) used when CAdES T/LT/LTA evidence is acquired.
     #[arg(long, global = true)]
     pub tsa_url: Option<String>,
+    /// Public DER certificate (issuers, TSA certificate; the root may be included) embedded as
+    /// CAdES/PAdES LT/LTA validation material or used for `extend`. Repeatable, at most 64.
+    #[arg(long, global = true)]
+    pub evidence_certificate: Vec<PathBuf>,
+    /// Complete DER OCSPResponse for a certificate of the path (repeatable, at most 64).
+    #[arg(long, global = true)]
+    pub evidence_ocsp: Vec<PathBuf>,
+    /// DER CRL for a certificate of the path (repeatable, at most 64).
+    #[arg(long, global = true)]
+    pub evidence_crl: Vec<PathBuf>,
     /// Dotted TSA policy OID requested and required of every token (needed for XAdES T/LT/LTA).
     #[arg(long, global = true)]
     pub tsa_policy: Option<String>,
@@ -307,6 +317,51 @@ impl Cli {
             .is_some_and(|policy| policy.parse::<der::asn1::ObjectIdentifier>().is_err())
         {
             return Err("InvalidCombination");
+        }
+        if self.evidence_certificate.len() > crate::evidence::MAX_ITEMS
+            || self.evidence_ocsp.len() > crate::evidence::MAX_ITEMS
+            || self.evidence_crl.len() > crate::evidence::MAX_ITEMS
+        {
+            return Err("ConfigurationLimit");
+        }
+        if crate::evidence::any(self) {
+            let uses = match &self.command {
+                Command::Extend(_) => true,
+                Command::Sign(args) => {
+                    matches!(
+                        args.profile,
+                        SignProfile::CadesB
+                            | SignProfile::CadesT
+                            | SignProfile::CadesLt
+                            | SignProfile::CadesLta
+                            | SignProfile::PadesB
+                            | SignProfile::PadesT
+                            | SignProfile::PadesLt
+                            | SignProfile::PadesLta
+                    ) && !args.legacy.legacy
+                }
+                _ => false,
+            };
+            if !uses {
+                return Err("InvalidCombination");
+            }
+        }
+        // LT/LTA evidence cannot be built from nothing: the CLI refuses before any I/O
+        // (sufficiency is still checked by the SDK and reported truthfully if it fails
+        // after key use).
+        if let Command::Sign(args) = &self.command
+            && !args.legacy.legacy
+            && matches!(
+                args.profile,
+                SignProfile::CadesLt
+                    | SignProfile::CadesLta
+                    | SignProfile::PadesLt
+                    | SignProfile::PadesLta
+            )
+            && (self.evidence_certificate.is_empty()
+                || (self.evidence_ocsp.is_empty() && self.evidence_crl.is_empty()))
+        {
+            return Err("EvidenceMaterialRequired");
         }
         if self.root.len().saturating_add(self.intermediate.len()) > 1024
             || self.pki_endpoint.len() > 64

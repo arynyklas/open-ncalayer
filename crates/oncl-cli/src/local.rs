@@ -74,6 +74,7 @@ fn validation(
     (
         ValidationServices,
         oncl_pki::resource::ConfigurationReservation,
+        crate::evidence::Material,
     ),
     OperationError,
 > {
@@ -165,6 +166,7 @@ fn validation(
         &mut encoded_total,
         &mut reservation,
     )?;
+    let material = crate::evidence::load(cli, control, &mut reservation)?;
     Ok((
         ValidationServices::new(
             CaSet::new(roots),
@@ -176,6 +178,7 @@ fn validation(
             clock,
         ),
         reservation,
+        material,
     ))
 }
 pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
@@ -220,7 +223,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     // ONE application budget exists before host configuration is read; the
     // retained configuration reservation lives until Engine/context drop.
     let budget = Arc::new(oncl_pki::resource::SharedBudget::new(limits.clone())?);
-    let (validation, _configuration) = if matches!(
+    let (validation, _configuration, evidence) = if matches!(
         action,
         Action::Verify
             | Action::Sign
@@ -229,10 +232,10 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             | Action::Stamp
             | Action::VerifyStamp
     ) {
-        let (services, reservation) = validation(cli, &control, &budget)?;
-        (Some(services), Some(reservation))
+        let (services, reservation, material) = validation(cli, &control, &budget)?;
+        (Some(services), Some(reservation), material)
     } else {
-        (None, None)
+        (None, None, crate::evidence::Material::default())
     };
     let plan = if let Some(args) = cli.private_key() {
         Some(args.plan()?)
@@ -390,6 +393,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
                 args,
                 selector.as_ref().ok_or(OperationError::InvalidKeySource)?,
                 &output_store,
+                &evidence,
                 &mut ctx,
             )?;
             let complete = (|| {
@@ -454,7 +458,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Inspect(args) => {
             crate::public::inspect(&engine, args, selector.as_ref(), cli, &mut ctx)
         }
-        Command::Extend(args) => crate::public::extend(&engine, args, cli, &mut ctx),
+        Command::Extend(args) => crate::public::extend(&engine, args, cli, &evidence, &mut ctx),
         Command::Timestamp { command } => crate::public::timestamp(&engine, command, cli, &mut ctx),
         Command::Batch { command } => {
             crate::batch::run(&engine, command, cli, selector.as_ref(), &mut ctx)

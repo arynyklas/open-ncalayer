@@ -58,6 +58,7 @@ pub fn extend(
     engine: &Engine,
     args: &ExtendArgs,
     cli: &Cli,
+    evidence: &crate::evidence::Material,
     ctx: &mut OperationContext,
 ) -> Result<i32, OperationError> {
     let mut source = Input::open(&args.input)?;
@@ -70,6 +71,12 @@ pub fn extend(
         }
     }
     .with_evidence_limits(evidence_limits());
+    let (ocsp, crls) = (evidence.ocsp_slices(), evidence.crl_slices());
+    let request = request.with_material(oncl_pki::cms::ades::ValidationMaterial {
+        certificates: &evidence.certificates,
+        ocsp: &ocsp,
+        crls: &crls,
+    });
     let request = if let Some(detached) = &mut detached {
         request.with_detached(detached.source())
     } else {
