@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(updater.releases.load(Ordering::SeqCst), 0);
 
         updater.busy.store(false, Ordering::SeqCst);
-        let Reply::Granted { restart } = installer.hold().await.unwrap() else {
+        let Reply::Granted { restart, .. } = installer.hold().await.unwrap() else {
             panic!("an idle host refused");
         };
         assert_eq!(restart, ["run", "--no-tray"]);

@@ -339,6 +339,8 @@ fn force_stop(root: &Path) {
 fn install(setup: &Path, root: &Path) -> std::io::Result<()> {
     let version = var("ONCL_HARNESS_VERSION").expect("version");
     let arch = var("ONCL_HARNESS_ARCH").unwrap_or_else(|| "x64".to_owned());
+    let id = var("ONCL_HARNESS_ID").unwrap_or_else(|| "OpenNCALayer".to_owned());
+    let main_exe = var("ONCL_HARNESS_MAIN_EXE").unwrap_or_else(|| "openncalayer.exe".to_owned());
     // The processes just ended may still hold their files for a moment.
     let started = Instant::now();
     while root.exists() {
@@ -357,9 +359,9 @@ fn install(setup: &Path, root: &Path) -> std::io::Result<()> {
         format!(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
              <package xmlns=\"http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd\">\n\
-             <metadata>\n<id>OpenNCALayer</id>\n<version>{version}</version>\n\
+             <metadata>\n<id>{id}</id>\n<version>{version}</version>\n\
              <title>OpenNCALayer</title>\n<authors>OpenNCALayer</authors>\n\
-             <channel>win-{arch}</channel>\n<mainExe>openncalayer.exe</mainExe>\n<os>win</os>\n\
+             <channel>win-{arch}</channel>\n<mainExe>{main_exe}</mainExe>\n<os>win</os>\n\
              <osMinVersion>10</osMinVersion>\n<machineArchitecture>{arch}</machineArchitecture>\n\
              </metadata>\n</package>"
         ),
@@ -380,7 +382,8 @@ fn install(setup: &Path, root: &Path) -> std::io::Result<()> {
             ("Publisher", "OpenNCALayer".to_owned()),
             (
                 "UninstallString",
-                format!("\"{}\" --uninstall", update.display()),
+                var("ONCL_HARNESS_UNINSTALL")
+                    .unwrap_or_else(|| format!("\"{}\" --uninstall", update.display())),
             ),
         ] {
             oncl_registry::set_string(&key, Some(name), &value)?;

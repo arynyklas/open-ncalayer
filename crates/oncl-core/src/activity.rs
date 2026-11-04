@@ -38,6 +38,28 @@ impl Default for ActivityGate {
     }
 }
 
+/// A test seam: what runs between an operation's count and its look at `held`.
+#[cfg(test)]
+mod gap {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn run() {
+        HOOK.with_borrow(|hook| {
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+    }
+
+    pub(super) fn set(hook: Option<Box<dyn Fn()>>) {
+        HOOK.with_borrow_mut(|slot| *slot = hook);
+    }
+}
+
 /// An operation being answered, from [`ActivityGate::begin`] to its drop.
 #[derive(Debug)]
 #[must_use = "the operation counts as running only while this is alive"]
@@ -70,6 +92,10 @@ impl ActivityGate {
     pub fn begin(self: &Arc<Self>) -> ActivityLease {
         loop {
             self.in_flight.fetch_add(1, Ordering::SeqCst);
+            // The gap between the count and the look at `held`: a hold taken here must see
+            // the count (and be refused). Tests run a hold exactly here.
+            #[cfg(test)]
+            gap::run();
             if !self.held.load(Ordering::SeqCst) {
                 return ActivityLease {
                     gate: Arc::clone(self),
@@ -107,10 +133,20 @@ impl ActivityGate {
         {
             return false;
         }
+        // Given back if `now` or `blocked` unwinds, or says no.
+        struct Undo<'a>(&'a ActivityGate, bool);
+        impl Drop for Undo<'_> {
+            fn drop(&mut self) {
+                if !self.1 {
+                    self.0.release();
+                }
+            }
+        }
+        let mut undo = Undo(self, false);
         if self.idle(quiet, now()) && !blocked() {
+            undo.1 = true;
             return true;
         }
-        self.release();
         false
     }
 
@@ -295,6 +331,26 @@ mod tests {
         // The holder dies without a word: its lease is dropped.
         drop(lease);
         request.join().unwrap();
+    }
+
+    #[test]
+    fn a_hold_in_the_gap_between_an_operations_count_and_its_look_is_refused() {
+        // Deterministic: the hold is attempted exactly between the two steps of `begin`.
+        let activity = gate();
+        let attempt = Arc::clone(&activity);
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&granted);
+        gap::set(Some(Box::new(move || {
+            seen.store(attempt.hold(Duration::ZERO, Instant::now), Ordering::SeqCst);
+        })));
+        let lease = activity.begin();
+        gap::set(None);
+        assert!(
+            !granted.load(Ordering::SeqCst),
+            "a hold was granted while an operation was starting: both would succeed"
+        );
+        assert!(!activity.is_held(), "the operation runs, nothing holds it");
+        drop(lease);
     }
 
     #[test]

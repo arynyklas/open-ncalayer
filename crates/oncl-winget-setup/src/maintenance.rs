@@ -44,9 +44,15 @@ pub struct Lease {
     client: Client,
     runtime: Runtime,
     restart: Vec<String>,
+    pid: u32,
 }
 
 impl Lease {
+    /// The process that holds still.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// The arguments the program runs with, for starting it again.
     pub fn restart_args(&self) -> &[String] {
         &self.restart
@@ -91,7 +97,8 @@ pub fn acquire(endpoint: &Endpoint, wait: Duration, poll: Duration) -> Result<Ac
         Err(e) => return Err(Refusal::Unreachable(e)),
     };
     match runtime.block_on(client.hold_within(wait, poll)) {
-        Ok(Reply::Granted { restart }) => Ok(Acquired::Held(Lease {
+        Ok(Reply::Granted { restart, pid }) => Ok(Acquired::Held(Lease {
+            pid,
             client,
             runtime,
             restart,

@@ -321,6 +321,11 @@ impl Drop for Fixture {
             }
         }
         for pid in pids {
+            // A recorded PID may belong to another program by now: only a process whose
+            // image is the harness or lies under this fixture's directory is ended.
+            if !is_ours(pid, self.dir.path()) {
+                continue;
+            }
             // SAFETY: plain calls; the handle is checked and closed.
             unsafe {
                 let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
@@ -333,6 +338,19 @@ impl Drop for Fixture {
         // Let the images go before the directory does.
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Whether process `pid` runs the harness or a program under `dir`: what this test started.
+fn is_ours(pid: u32, dir: &Path) -> bool {
+    let norm = |path: &Path| {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let text = path.to_string_lossy().to_lowercase();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    };
+    oncl_winget_setup::processes::image_of(pid).is_some_and(|image| {
+        let image = norm(&image);
+        image.starts_with(&norm(dir)) || image == norm(Path::new(HARNESS))
+    })
 }
 
 fn nuspec(version: &str, arch: &str) -> String {
@@ -642,7 +660,7 @@ fn quiet_rechecked_after_hold() {
     let mut fx = Fixture::new();
     // A quiet time much longer than starting the entry takes, so that the first attempt is
     // certainly within it.
-    fx.quiet_ms = 3000;
+    fx.quiet_ms = 10_000;
     fx.install_before("0.1.0");
     fx.entry_image("0.2.0");
     let mut desktop = fx.start_desktop();
@@ -701,6 +719,12 @@ fn installed_version_mismatch_is_failure() {
             vec![("ARP_LOCATION", "\\\\other-host\\share\\OpenNCALayer")],
         ),
         ("architecture", vec![("ARCH", "x86")]),
+        ("another app id", vec![("ID", "SomethingElse")]),
+        ("another main program", vec![("MAIN_EXE", "other.exe")]),
+        (
+            "uninstaller of another installation",
+            vec![("UNINSTALL", "\"elsewhere\\Update.exe\" --uninstall")],
+        ),
     ] {
         let mut fx = Fixture::new();
         let mut env = vec![("SETUP", "install")];
@@ -731,6 +755,15 @@ fn a_setup_that_fails_is_not_a_success_and_leaves_the_program_running() {
     assert_eq!(code, Exit::SetupFailed as u8, "{message}");
     assert!(desktop.alive());
     assert_eq!(fx.arp_version().as_deref(), Some("0.1.0"));
+    // Only the test's own start of the desktop: nothing was started again.
+    assert_eq!(
+        fx.log_lines()
+            .iter()
+            .filter(|l| l.contains("program started"))
+            .count(),
+        1,
+        "a program that never stopped was started again"
+    );
     // Not left held.
     desktop.send("begin 1");
     desktop.expect("began 1");
@@ -894,4 +927,39 @@ fn a_program_that_starts_while_the_installer_prepares_is_asked_not_stopped() {
         .filter(|l| l.ends_with("program started: run --allow-no-wss"))
         .count();
     assert_eq!(started, 2, "{:?}", fx.log_lines());
+}
+
+#[test]
+fn another_program_under_the_root_is_not_force_stopped_by_setup() {
+    // Setup ends EVERY process under the installation: the daemon that answered is asked,
+    // but a second program of the installation (here a plain one, as `openncalayer tls …`
+    // is) cannot be, so the installer must not start Setup at all.
+    let mut fx = Fixture::new();
+    fx.install_before("0.1.0");
+    let before = fx.tree();
+    let mut desktop = fx.start_desktop();
+    let mut other = Command::new(fx.program())
+        .arg("idle")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fx.children.push(other.id());
+    std::thread::sleep(Duration::from_millis(300));
+    let (code, message) = fx.run_entry("0.2.0", 0, &[("FORCE_STOP", "1"), ("SETUP", "install")]);
+    assert_eq!(code, busy(), "{message}");
+    assert_eq!(
+        fx.setups_started(),
+        0,
+        "Setup ran with another program under the root"
+    );
+    assert!(desktop.alive());
+    assert!(fx.running().iter().any(|p| p.pid == other.id()));
+    assert_eq!(fx.tree(), before);
+    // The hold was given back.
+    desktop.send("begin 1");
+    desktop.expect("began 1");
+    drop(other.kill());
+    drop(other.wait());
 }

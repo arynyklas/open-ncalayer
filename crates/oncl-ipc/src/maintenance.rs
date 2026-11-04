@@ -29,8 +29,11 @@ pub const MAX_LEASE: Duration = Duration::from_secs(20 * 60);
 
 const MAGIC: &[u8; 5] = b"ONCLM";
 const VERSION: u8 = 1;
-/// The largest request or reply this module reads.
+/// The largest reply the client reads (the server reads requests of any size up to
+/// [`crate::MAX_FRAME`] but a request is 7 bytes; same-user peers only).
 const MAX_MESSAGE: usize = 64 * 1024;
+/// How long the server waits after a failed accept before it takes the next client.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 const OP_HOLD: u8 = 1;
 const OP_RELEASE: u8 = 2;
@@ -82,13 +85,42 @@ impl<H: Host> Drop for Held<H> {
 ///
 /// The listener fails.
 pub async fn serve<H: Host>(
-    mut listener: IpcListener,
+    listener: IpcListener,
+    host: Arc<H>,
+    max_lease: Duration,
+) -> io::Result<()> {
+    serve_on(listener, host, max_lease).await
+}
+
+/// Where clients come from: an [`IpcListener`], or (in tests) one that fails now and then.
+#[doc(hidden)]
+pub trait Accept: Send {
+    /// The next client.
+    fn accept(&mut self) -> impl std::future::Future<Output = io::Result<IpcStream>> + Send;
+}
+
+impl Accept for IpcListener {
+    fn accept(&mut self) -> impl std::future::Future<Output = io::Result<IpcStream>> + Send {
+        IpcListener::accept(self)
+    }
+}
+
+/// [`serve`] on any [`Accept`]. A failed accept is not the end of the endpoint.
+#[doc(hidden)]
+pub async fn serve_on<A: Accept, H: Host>(
+    mut listener: A,
     host: Arc<H>,
     max_lease: Duration,
 ) -> io::Result<()> {
     loop {
-        let stream = listener.accept().await?;
-        tokio::spawn(connection(stream, Arc::clone(&host), max_lease));
+        match Accept::accept(&mut listener).await {
+            Ok(stream) => {
+                tokio::spawn(connection(stream, Arc::clone(&host), max_lease));
+            }
+            // A client that vanished while connecting must not end the endpoint for the
+            // life of the program: back off and take the next one, as the relay's loop does.
+            Err(_) => tokio::time::sleep(ACCEPT_BACKOFF).await,
+        }
     }
 }
 
@@ -167,6 +199,8 @@ fn granted<H: Host>(host: &H) -> Vec<u8> {
         .take(usize::from(u16::MAX))
         .collect();
     let mut status = vec![STATUS_GRANTED];
+    // Who holds: the program's process, for the maintainer to tell it from other processes.
+    status.extend_from_slice(&std::process::id().to_le_bytes());
     status.extend_from_slice(&u16::try_from(args.len()).unwrap_or(0).to_le_bytes());
     for arg in &args {
         status.extend_from_slice(&u16::try_from(arg.len()).unwrap_or(0).to_le_bytes());
@@ -183,6 +217,8 @@ pub enum Reply {
     Granted {
         /// The arguments (after the program's name) to start it again with.
         restart: Vec<String>,
+        /// The process id of the program that holds still.
+        pid: u32,
     },
     /// An operation runs or ended within the quiet time, a window is open or another
     /// maintainer holds the program. Nothing is held.
@@ -218,7 +254,8 @@ impl Client {
         let status = self.ask(OP_HOLD).await?;
         match status.split_first() {
             Some((&STATUS_GRANTED, rest)) => Ok(Reply::Granted {
-                restart: parse_args(rest).ok_or_else(invalid)?,
+                pid: u32::from_le_bytes(rest.get(..4).ok_or_else(invalid)?.try_into().unwrap()),
+                restart: parse_args(&rest[4..]).ok_or_else(invalid)?,
             }),
             Some((&STATUS_BUSY, [])) => Ok(Reply::Busy),
             Some((&STATUS_REFUSED, _)) => Err(io::Error::new(

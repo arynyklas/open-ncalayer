@@ -109,10 +109,11 @@ async fn an_idle_host_grants_the_hold_and_the_release_lets_go() {
     let host = Arc::new(FakeHost::default());
     let (_dir, ep) = serving(&host, Duration::from_secs(60)).await;
     let mut client = Client::connect(&ep).await.expect("connect");
-    let Reply::Granted { restart } = client.hold().await.expect("hold") else {
+    let Reply::Granted { restart, pid } = client.hold().await.expect("hold") else {
         panic!("an idle host refused the hold");
     };
     assert_eq!(restart, ["run", "--allow-no-wss"]);
+    assert_eq!(pid, std::process::id(), "the server is this test process");
     assert!(host.held.load(Ordering::SeqCst));
     client.release().await.expect("release");
     assert!(!host.held.load(Ordering::SeqCst));
@@ -266,4 +267,58 @@ async fn without_a_server_the_connection_fails_clearly() {
         ),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn clients_that_vanish_while_connecting_do_not_end_the_endpoint() {
+    let host = Arc::new(FakeHost::default());
+    let (_dir, ep) = serving(&host, Duration::from_secs(60)).await;
+    // Connect and drop at once, again and again: whatever that does to the listener, the
+    // endpoint keeps serving the next honest client.
+    for _ in 0..200 {
+        drop(connect(&ep).await);
+    }
+    let mut client = Client::connect(&ep).await.expect("connect");
+    assert!(matches!(
+        client.hold().await.expect("hold"),
+        Reply::Granted { .. }
+    ));
+}
+
+/// A listener whose first accepts fail, as a transient transport error does.
+struct Flaky {
+    inner: oncl_ipc::IpcListener,
+    failures: usize,
+}
+
+impl maintenance::Accept for Flaky {
+    async fn accept(&mut self) -> std::io::Result<oncl_ipc::IpcStream> {
+        if self.failures > 0 {
+            self.failures -= 1;
+            return Err(std::io::Error::other("injected accept error"));
+        }
+        self.inner.accept().await
+    }
+}
+
+#[tokio::test]
+async fn a_failed_accept_does_not_end_the_endpoint() {
+    let host = Arc::new(FakeHost::default());
+    let dir = unique_dir();
+    let ep = maintenance::endpoint(dir.path()).expect("endpoint");
+    let listener = Flaky {
+        inner: bind(&ep).await.expect("bind"),
+        failures: 3,
+    };
+    let served = tokio::spawn(maintenance::serve_on(
+        listener,
+        Arc::clone(&host),
+        Duration::from_secs(60),
+    ));
+    let mut client = Client::connect(&ep).await.expect("connect");
+    assert!(matches!(
+        client.hold().await.expect("hold"),
+        Reply::Granted { .. }
+    ));
+    assert!(!served.is_finished(), "the endpoint stopped");
 }

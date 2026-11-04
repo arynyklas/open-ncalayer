@@ -6,9 +6,6 @@ use std::path::PathBuf;
 
 use oncl_tls::TlsFiles;
 
-/// Overrides the data directory (tests and development runs).
-pub use oncl_ipc::DATA_DIR_VAR;
-
 /// Locations of OpenNCALayer's files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -59,6 +56,8 @@ fn data_dir(var: impl Fn(&str) -> Option<OsString>) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use oncl_ipc::DATA_DIR_VAR;
 
     use super::*;
 

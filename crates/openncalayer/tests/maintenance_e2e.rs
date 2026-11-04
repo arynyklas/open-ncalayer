@@ -174,6 +174,11 @@ impl Drop for Fixture {
             }
         }
         for pid in pids {
+            // A recorded PID may belong to another program by now: only a process whose
+            // image is the daemon, the harness or lies under this fixture is ended.
+            if !is_ours(pid, self.dir.path()) {
+                continue;
+            }
             // SAFETY: plain calls; the handle is checked and closed.
             unsafe {
                 let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
@@ -186,6 +191,20 @@ impl Drop for Fixture {
         let _ = self.daemon.wait();
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn is_ours(pid: u32, dir: &Path) -> bool {
+    let norm = |path: &Path| {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let text = path.to_string_lossy().to_lowercase();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    };
+    oncl_winget_setup::processes::image_of(pid).is_some_and(|image| {
+        let image = norm(&image);
+        image.starts_with(&norm(dir))
+            || image == norm(&harness())
+            || image == norm(Path::new(env!("CARGO_BIN_EXE_openncalayer")))
+    })
 }
 
 fn runtime() -> tokio::runtime::Runtime {

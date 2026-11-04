@@ -75,9 +75,11 @@ pub struct Config {
     pub temp_root: PathBuf,
     /// Whether this process runs with an elevated token (`production` sets
     /// [`crate::is_elevated`]); asked before anything is read or written.
+    #[doc(hidden)]
     pub elevation: fn() -> std::io::Result<bool>,
     /// Run right before the last look for a program that started meanwhile; `None` in
     /// production. Tests use it to start one.
+    #[doc(hidden)]
     pub before_setup_check: Option<fn()>,
 }
 
@@ -207,46 +209,19 @@ mod windows {
                 );
             }
         };
-        if let Some(hook) = config.before_setup_check {
-            hook();
-        }
-        match &mut lease {
-            Some(lease) => {
-                if let Err(e) = lease.confirm() {
-                    return Report::new(
-                        Exit::Unreachable,
-                        format!(
-                            "the running program no longer holds still ({e}); Setup was not started"
-                        ),
-                    );
-                }
-            }
-            // Nothing ran when it was looked at first. Setup ends whatever runs under the
-            // installation, so look once more right before it starts: a program that
-            // started meanwhile is asked like any other (this is the same single look, not
-            // a retry loop). What remains is the instant between this look and Setup's own
-            // stop of the processes, which only Setup could close.
-            None => match hold(config) {
-                Ok(found) => lease = found,
-                Err(mut report) => {
-                    report.message = format!(
-                        "OpenNCALayer started while the installer was preparing: {}",
-                        report.message
-                    );
-                    return report;
-                }
-            },
-        }
-
-        let end = match install::run_setup(&copy, &embedded.sha256, config.setup_timeout) {
+        // The last look is the last step before Setup is started (after its re-hash).
+        let end = match install::run_setup(&copy, &embedded.sha256, config.setup_timeout, || {
+            last_look(config, &mut lease)
+        }) {
             Ok(end) => end,
             Err(e) => {
-                restore(config, lease.as_ref(), old.as_ref());
+                restore(config, lease.as_mut(), old.as_ref());
                 return Report::new(Exit::Failed, format!("Setup could not be run: {e}"));
             }
         };
         let status = match end {
             SetupEnd::Exited(status) => status,
+            SetupEnd::Refused(report) => return report,
             SetupEnd::TimedOut => {
                 return Report::new(
                     Exit::Failed,
@@ -260,7 +235,7 @@ mod windows {
             }
         };
         if !status.success() {
-            restore(config, lease.as_ref(), old.as_ref());
+            restore(config, lease.as_mut(), old.as_ref());
             return Report::new(
                 Exit::SetupFailed,
                 format!(
@@ -271,7 +246,7 @@ mod windows {
         }
         // Exit code 0 proves nothing: look at what is installed.
         if let Err(why) = install::verify(&config.install_root, &config.arp_key, &expected) {
-            restore(config, lease.as_ref(), old.as_ref());
+            restore(config, lease.as_mut(), old.as_ref());
             return Report::new(
                 Exit::NotInstalled,
                 format!(
@@ -293,6 +268,72 @@ mod windows {
             Exit::Success,
             format!("OpenNCALayer {} is installed{tail}", expected.version),
         )
+    }
+
+    /// The last look before Setup starts, which ends every process under the installation:
+    /// a program that runs but was not asked (another `openncalayer.exe`, `Update.exe`, a
+    /// second daemon) refuses the start; the held daemon is confirmed once more; with nothing
+    /// held, a program that started since the first look is asked like any other. One look,
+    /// no retries. It sits right before the spawn; what is left is the time Setup itself needs
+    /// to start up and reach its own stop of the processes (seconds), which only Setup could
+    /// close.
+    fn last_look(config: &Config, lease: &mut Option<Lease>) -> Option<Report> {
+        if let Some(hook) = config.before_setup_check {
+            hook();
+        }
+        if lease.is_none() {
+            match hold(config) {
+                Ok(found) => *lease = found,
+                Err(mut report) => {
+                    report.message = format!(
+                        "OpenNCALayer started while the installer was preparing: {}",
+                        report.message
+                    );
+                    return Some(report);
+                }
+            }
+        }
+        let held_pid = match lease {
+            Some(lease) => {
+                if let Err(e) = lease.confirm() {
+                    return Some(Report::new(
+                        Exit::Unreachable,
+                        format!(
+                            "the running program no longer holds still ({e}); Setup was not started"
+                        ),
+                    ));
+                }
+                Some(lease.pid())
+            }
+            None => None,
+        };
+        let running = match processes::running_from(&config.install_root) {
+            Ok(running) => running,
+            Err(e) => {
+                return Some(Report::new(
+                    Exit::Failed,
+                    format!("the running programs cannot be listed ({e}); Setup was not started"),
+                ));
+            }
+        };
+        let own = std::process::id();
+        let other = running.iter().find(|process| {
+            let relay = process
+                .image
+                .file_stem()
+                .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("nmhost"));
+            process.pid != own && Some(process.pid) != held_pid && !relay
+        })?;
+        Some(Report::new(
+            Exit::Busy,
+            format!(
+                "{} runs (process {}) besides the program that was asked to hold still; Setup \
+                 would end it by force, so it was not started. Close it and run the installer \
+                 again. The installation was not changed",
+                other.image.display(),
+                other.pid
+            ),
+        ))
     }
 
     /// Holds the running program, if one runs: `Ok(None)` if nothing of the installation
@@ -357,10 +398,15 @@ mod windows {
 
     /// After a Setup that did not install: the program that ran before, if the old copy is
     /// still the installation, runs again.
-    fn restore(config: &Config, lease: Option<&Lease>, old: Option<&semver::Version>) {
+    fn restore(config: &Config, lease: Option<&mut Lease>, old: Option<&semver::Version>) {
         let (Some(lease), Some(old)) = (lease, old) else {
             return;
         };
+        // A program that still answers on its held connection was never stopped (Setup failed
+        // or did nothing before it ended processes): it runs, nothing to start.
+        if lease.confirm().is_ok() {
+            return;
+        }
         if installed_version(&config.install_root).ok().as_ref() == Some(old) {
             let _ = start_again(&config.install_root, lease.restart_args());
         }
@@ -370,9 +416,17 @@ mod windows {
     /// installer's job ends with it, and the program must outlive it.
     fn start_again(root: &Path, args: &[String]) -> io::Result<()> {
         let program = root.join("current").join(install::MAIN_EXE);
+        // Only what the daemon starts with (`run` and its two flags): the arguments the
+        // program announced are not trusted blindly.
+        let mut allowed: Vec<&str> = vec!["run"];
+        for arg in args.iter().map(String::as_str) {
+            if matches!(arg, "--allow-no-wss" | "--no-tray") && !allowed.contains(&arg) {
+                allowed.push(arg);
+            }
+        }
         let mut command = Command::new(program);
         command
-            .args(args)
+            .args(allowed)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

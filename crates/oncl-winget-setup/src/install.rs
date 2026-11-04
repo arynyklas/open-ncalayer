@@ -290,18 +290,30 @@ pub enum SetupEnd {
     Exited(ExitStatus),
     /// It is still running after the time given; it was not stopped.
     TimedOut,
+    /// The last look before it starts found a reason not to start it: nothing was changed.
+    Refused(crate::run::Report),
 }
 
 /// Runs the checked copy with `--silent` and no other switch, and waits for it for
-/// `timeout`. A Setup that runs longer is left running: ending it halfway through
+/// `timeout`; `last_look` runs after the copy was checked and right before it is started,
+/// and may refuse. A Setup that runs longer is left running: ending it halfway through
 /// replacing the installation is worse than waiting for it.
 ///
 /// # Errors
 ///
 /// The copy changed since it was checked, or cannot be started or waited for.
-pub fn run_setup(copy: &PrivateCopy, sha256: &[u8; 32], timeout: Duration) -> io::Result<SetupEnd> {
+pub fn run_setup(
+    copy: &PrivateCopy,
+    sha256: &[u8; 32],
+    timeout: Duration,
+    last_look: impl FnOnce() -> Option<crate::run::Report>,
+) -> io::Result<SetupEnd> {
     // The handle that holds the file lets nobody write to it: what runs is what was read.
     copy.check(sha256)?;
+    // The last thing before the spawn, so that nothing but the spawn itself follows it.
+    if let Some(report) = last_look() {
+        return Ok(SetupEnd::Refused(report));
+    }
     let mut child = Command::new(copy.path())
         .arg("--silent")
         .stdin(Stdio::null())

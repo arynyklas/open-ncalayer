@@ -79,7 +79,7 @@ pub fn running_from(root: &Path) -> io::Result<Vec<Running>> {
 }
 
 /// The image path of process `pid`, if this user may ask for it.
-fn image_of(pid: u32) -> Option<PathBuf> {
+pub fn image_of(pid: u32) -> Option<PathBuf> {
     // SAFETY: plain call; the handle is checked and closed below.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
     if process.is_null() {
@@ -101,17 +101,14 @@ mod tests {
     #[test]
     fn a_root_is_a_directory_not_a_prefix_of_a_name() {
         assert!(under(
-            r"c:\users\a\openncalayer",
-            r"c:\users\a\openncalayer\current\x.exe"
+            r"root\openncalayer",
+            r"root\openncalayer\current\x.exe"
         ));
         assert!(!under(
-            r"c:\users\a\openncalayer",
-            r"c:\users\a\openncalayer-other\x.exe"
+            r"root\openncalayer",
+            r"root\openncalayer-other\x.exe"
         ));
-        assert!(!under(
-            r"c:\users\a\openncalayer",
-            r"c:\users\a\openncalayer"
-        ));
+        assert!(!under(r"root\openncalayer", r"root\openncalayer"));
     }
 
     #[test]

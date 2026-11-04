@@ -26,7 +26,7 @@ pub mod update;
 pub mod wss;
 
 pub use bridge::{NM_FRAME_LIMIT, WorkspaceOpener, serve_ipc, split_message};
-pub use paths::{DATA_DIR_VAR, Paths};
+pub use paths::Paths;
 pub use server::{
     DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, NoPlugins, PORT_VAR, Plugins,
     ServerConfig, about_bundles, build_registry, build_registry_from, builtin_modules, listen_port,
