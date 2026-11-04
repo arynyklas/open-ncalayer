@@ -17,6 +17,7 @@ oncl-core = { workspace = true, features = ["xml", "pdf", "jose", "plugins", "to
 oncl-pki.workspace = true
 oncl-xml.workspace = true
 oncl-pdf.workspace = true
+oncl-token.workspace = true
 oncl-plugin = { workspace = true, default-features = false }
 oncl-pdk.workspace = true
 clap.workspace = true

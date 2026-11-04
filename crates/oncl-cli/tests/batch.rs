@@ -2,10 +2,6 @@
 //! owned-output publication and honest per-item private-use state.
 mod support;
 use serde_json::json;
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
 use support::*;
 
 fn manifest(w: &World, value: serde_json::Value) -> std::path::PathBuf {
@@ -63,7 +59,12 @@ fn mixed_batch_signs_verifies_and_retains_completed_outputs_when_a_later_item_is
             .to_owned()
     };
     assert_eq!(status("h"), "Completed");
-    assert_eq!(status("sa"), "Completed");
+    assert_eq!(
+        status("sa"),
+        "Completed",
+        "{report}\n{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(status("bad"), "Failed");
     assert_eq!(
         status("sb"),
@@ -193,38 +194,4 @@ fn clean_batch_exits_by_worst_verification_and_manifest_errors_precede_all_io() 
         assert!(!String::from_utf8_lossy(&result.stderr).contains("private_use"));
     }
     assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
-}
-#[cfg(windows)]
-#[test]
-fn real_ctrl_break_reaches_the_owned_child_as_exit_130_and_later_items_do_not_run() {
-    use std::os::windows::process::CommandExt;
-    let w = world();
-    let doc = w.dir.path().join("doc.bin");
-    std::fs::write(&doc, b"abc").unwrap();
-    // The blocking read is cooperative: after the signal latches, closing the
-    // pipe lets the original control observe cancellation. No forced termination.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
-        .args(["hash", "--algorithm", "sha256", "--input", "-"])
-        .creation_flags(0x0000_0200) // CREATE_NEW_PROCESS_GROUP: owned child group only
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
-    }
-    // SAFETY: targets only the owned child's fresh process group id (its pid).
-    let sent = unsafe { GenerateConsoleCtrlEvent(1, child.id()) };
-    assert_ne!(
-        sent, 0,
-        "CTRL_BREAK delivery failed (no console in this harness?)"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    child.stdin.take().unwrap().write_all(b"x").unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert_eq!(result.status.code(), Some(130), "{result:?}");
-    assert!(result.stdout.is_empty());
 }

@@ -265,8 +265,16 @@ pub struct World {
     pub pki: Pki,
 }
 pub fn world() -> World {
+    world_host(None)
+}
+/// `host` names the PKI origin in certificate AIA URLs (for DNS-pin tests).
+pub fn world_host(host: Option<&str>) -> World {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let address = listener.local_addr().unwrap();
+    let origin = match host {
+        Some(host) => format!("http://{host}:{}", address.port()),
+        None => format!("http://{address}"),
+    };
     let pki = pki(&origin);
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root.cer");

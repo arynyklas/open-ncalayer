@@ -180,3 +180,150 @@ fn wrong_secret_or_missing_authority_never_reaches_private_use_or_output() {
         "{text}"
     );
 }
+
+#[test]
+fn absent_token_reader_fails_closed_without_output_or_private_use() {
+    let w = world();
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let output = w.dir.path().join("token.der");
+    let mut args = vec![
+        "sign",
+        "--profile",
+        "cms",
+        "--detached",
+        "--input",
+        path(&document),
+        "--output",
+        path(&output),
+        "--token-reader",
+        "No Such PC/SC Reader",
+        "--token-kind",
+        "kaztoken",
+        "--token-alias",
+        "synthetic",
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+    ];
+    args.extend(common(&w));
+    let result = run(&args, b"");
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(!output.exists());
+    let text = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !text.contains("private_use") && !text.contains(PASSWORD),
+        "{text}"
+    );
+    // A file key and a token are mutually exclusive, and one is mandatory.
+    let mut both = args.clone();
+    both.extend(["--key", path(&w.rsa_key)]);
+    assert_eq!(run(&both, b"").status.code(), Some(1));
+}
+
+#[test]
+fn dns_origin_needs_an_operator_pin_and_never_resolves_ambiently() {
+    let w = world_host(Some("pki.synthetic.test"));
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let port = w.origin.rsplit(':').next().unwrap();
+    let pin = format!("{}=127.0.0.1:{port}", w.origin);
+    let (unpinned, pinned) = (
+        w.dir.path().join("unpinned.der"),
+        w.dir.path().join("pinned.der"),
+    );
+    let result = run(&sign_args(&w, &w.rsa_key, &document, &unpinned, &[]), b"");
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "no pin must fail closed: {result:?}"
+    );
+    assert!(!unpinned.exists());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("private_use"));
+    let signed = run(
+        &sign_args(&w, &w.rsa_key, &document, &pinned, &["--pki-pin", &pin]),
+        b"",
+    );
+    assert_eq!(signed.status.code(), Some(0), "{signed:?}");
+    let mut verify = vec![
+        "verify",
+        "--profile",
+        "cms",
+        "--input",
+        path(&pinned),
+        "--detached",
+        path(&document),
+        "--pki-pin",
+        &pin,
+    ];
+    verify.extend(common(&w));
+    assert_eq!(run(&verify, b"").status.code(), Some(0));
+    let bad = run(
+        &[
+            "verify",
+            "--profile",
+            "cms",
+            "--input",
+            "x",
+            "--pki-pin",
+            "not-a-pin",
+        ],
+        b"",
+    );
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("InvalidCombination"));
+}
+#[test]
+fn cades_t_acquires_a_loopback_timestamp_and_verifies_valid() {
+    let w = world();
+    let document = w.dir.path().join("document.bin");
+    std::fs::write(&document, b"abc").unwrap();
+    let signature = w.dir.path().join("cades-t.der");
+    let tsa = format!("{}/tsa", w.origin);
+    let mut args = vec![
+        "sign",
+        "--profile",
+        "cades-t",
+        "--detached",
+        "--input",
+        path(&document),
+        "--output",
+        path(&signature),
+        "--key",
+        path(&w.rsa_key),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+        "--tsa-url",
+        &tsa,
+    ];
+    args.extend(common(&w));
+    let signed = run(&args, b"");
+    assert_eq!(signed.status.code(), Some(0), "{signed:?}");
+    let mut verify = vec![
+        "verify",
+        "--profile",
+        "cades-t",
+        "--input",
+        path(&signature),
+        "--detached",
+        path(&document),
+        "--json",
+    ];
+    verify.extend(common(&w));
+    let valid = run(&verify, b"");
+    assert_eq!(valid.status.code(), Some(0), "{valid:?}");
+    let report: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(report["ades_level"], "T");
+    // Without a configured TSA the T level fails before private use.
+    let mut missing = args.clone();
+    let at = missing.iter().position(|a| *a == "--tsa-url").unwrap();
+    missing.drain(at..at + 2);
+    let output = w.dir.path().join("no-tsa.der");
+    let at = missing.iter().position(|a| *a == path(&signature)).unwrap();
+    missing[at] = path(&output);
+    let refused = run(&missing, b"");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(!output.exists());
+    assert!(!String::from_utf8_lossy(&refused.stderr).contains("private_use"));
+}

@@ -134,8 +134,23 @@ fn validation(
         } else {
             Arc::new(time::OffsetDateTime::now_utc)
         };
-    let network = NetworkPolicy::only_endpoints(cli.pki_endpoint.iter().map(String::as_str))
+    let mut network = NetworkPolicy::only_endpoints(cli.pki_endpoint.iter().map(String::as_str))
         .map_err(|_| ProcessingError::InvalidInput("invalid host PKI endpoint"))?;
+    let mut pins: std::collections::BTreeMap<&str, Vec<std::net::SocketAddr>> = Default::default();
+    for pin in &cli.pki_pin {
+        let (origin, address) = pin
+            .split_once('=')
+            .ok_or(ProcessingError::InvalidInput("invalid PKI pin"))?;
+        let address = address
+            .parse()
+            .map_err(|_| ProcessingError::InvalidInput("invalid PKI pin"))?;
+        pins.entry(origin).or_default().push(address);
+    }
+    for (origin, addresses) in pins {
+        network = network
+            .with_resolved_endpoint(origin, addresses)
+            .map_err(|_| ProcessingError::InvalidInput("invalid PKI pin"))?;
+    }
     let roots = certificates(
         &cli.root,
         control,
@@ -220,10 +235,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         (None, None)
     };
     let selector = if let Some(args) = cli.private_key() {
-        Some(oncl_core::keys::KeySelector::file(
-            &args.key,
-            args.alias.clone(),
-        )?)
+        Some(args.selector()?)
     } else if let Command::Plugin { command } = &cli.command {
         command.key_selector()?
     } else if let Command::Batch { command } = &cli.command {
@@ -261,13 +273,29 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         services = services.with_validation(validation);
     }
     if let Some(authority) = &authority {
-        services = services.with_keys(
-            Arc::new(oncl_core::keys::KeySources::new()),
-            authority.clone(),
-        );
+        let mut sources = oncl_core::keys::KeySources::new();
+        if cli.private_key().is_some_and(|args| args.uses_token()) {
+            let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
+                .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
+            sources = sources.with_tokens(
+                oncl_token::Tokens::new(Arc::new(oncl_token::PcscBackend::new()), true),
+                Arc::new(gates),
+            );
+        }
+        services = services.with_keys(Arc::new(sources), authority.clone());
     }
     if let Some(store) = &store {
         services = services.with_temporary_store(store.clone());
+    }
+    if let Some(url) = &cli.tsa_url {
+        services = services.with_cades(oncl_core::CadesConfiguration::new(
+            crate::args::evidence_limits(),
+            crate::public::tsa(
+                url,
+                oncl_pki::key::HashAlg::Sha256,
+                std::time::Duration::from_secs(cli.timeout_seconds),
+            ),
+        ));
     }
     if let Some(registry) = plugin_registry {
         services = services.with_plugins(registry);

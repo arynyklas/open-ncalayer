@@ -20,6 +20,12 @@ pub struct Cli {
     pub intermediate: Vec<PathBuf>,
     #[arg(long, global = true)]
     pub pki_endpoint: Vec<String>,
+    /// Operator-resolved address for a DNS PKI origin: `http://host:port=IP:port`.
+    #[arg(long, global = true)]
+    pub pki_pin: Vec<String>,
+    /// TSA endpoint (POST) used when CAdES T/LT/LTA evidence is acquired.
+    #[arg(long, global = true)]
+    pub tsa_url: Option<String>,
     /// Aggregate encoded host certificate bytes, including duplicate roots.
     #[arg(long, global = true, default_value_t = 16_777_216)]
     pub configuration_bytes: u64,
@@ -144,10 +150,22 @@ impl VerifyProfile {
 }
 #[derive(Args)]
 pub struct PrivateKeyArgs {
-    #[arg(long)]
-    pub key: PathBuf,
-    #[arg(long)]
+    /// PKCS#12/JKS container file. Exactly one of --key or --token-reader.
+    #[arg(
+        long,
+        conflicts_with = "token_reader",
+        required_unless_present = "token_reader"
+    )]
+    pub key: Option<PathBuf>,
+    #[arg(long, conflicts_with = "token_reader")]
     pub alias: Option<String>,
+    /// Exact PC/SC reader name of a real token (experimental; no emulator in this binary).
+    #[arg(long, requires_all = ["token_kind", "token_alias"])]
+    pub token_reader: Option<String>,
+    #[arg(long, value_enum)]
+    pub token_kind: Option<TokenFamily>,
+    #[arg(long)]
+    pub token_alias: Option<String>,
     #[arg(long)]
     pub secret_file: Option<PathBuf>,
     #[arg(long, conflicts_with = "secret_file")]
@@ -155,6 +173,47 @@ pub struct PrivateKeyArgs {
     /// Authorize only this operation's exact source, key, profile and destination.
     #[arg(long)]
     pub authorize: bool,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub enum TokenFamily {
+    Kaztoken,
+    KzIdCard,
+    EToken72k,
+    EToken5110,
+    Jacarta,
+    Akey,
+}
+impl PrivateKeyArgs {
+    pub fn uses_token(&self) -> bool {
+        self.token_reader.is_some()
+    }
+    pub fn selector(&self) -> Result<oncl_core::keys::KeySelector, oncl_core::OperationError> {
+        use oncl_token::{TokenKind, execution::TokenDeviceId};
+        if let (Some(reader), Some(kind), Some(alias)) =
+            (&self.token_reader, self.token_kind, &self.token_alias)
+        {
+            let kind = match kind {
+                TokenFamily::Kaztoken => TokenKind::Kaztoken,
+                TokenFamily::KzIdCard => TokenKind::KzIdCard,
+                TokenFamily::EToken72k => TokenKind::EToken72K,
+                TokenFamily::EToken5110 => TokenKind::EToken5110,
+                TokenFamily::Jacarta => TokenKind::JaCarta,
+                TokenFamily::Akey => TokenKind::AKey,
+            };
+            let device = TokenDeviceId::new(reader.clone())
+                .map_err(|_| oncl_core::OperationError::InvalidKeySource)?;
+            return Ok(oncl_core::keys::KeySelector::token(
+                device,
+                kind,
+                alias.clone(),
+            ));
+        }
+        let key = self
+            .key
+            .as_ref()
+            .ok_or(oncl_core::OperationError::InvalidKeySource)?;
+        oncl_core::keys::KeySelector::file(key, self.alias.clone())
+    }
 }
 #[derive(Args)]
 pub struct SignArgs {
@@ -217,8 +276,15 @@ impl Cli {
         if self.timeout_seconds == 0 {
             return Err("InvalidTimeout");
         }
+        if self.pki_pin.iter().any(|pin| {
+            pin.split_once('=')
+                .is_none_or(|(_, address)| address.parse::<std::net::SocketAddr>().is_err())
+        }) {
+            return Err("InvalidCombination");
+        }
         if self.root.len().saturating_add(self.intermediate.len()) > 1024
             || self.pki_endpoint.len() > 64
+            || self.pki_pin.len() > 64
             || self.configuration_bytes > 16_777_216
         {
             return Err("ConfigurationLimit");
