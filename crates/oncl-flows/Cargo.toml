@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["ncalayer", "dialogs", "key-selection", "kazakhstan"]
+categories = ["authentication"]
+include = ["/src/**", "/LICENSE", "/NOTICE"]
 
 [features]
 # `testing`: `ScriptedPrompter` and `MemoryRecentPath` for tests of this crate and its users.

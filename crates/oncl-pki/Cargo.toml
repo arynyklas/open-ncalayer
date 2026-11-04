@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["pki", "cms", "x509", "gost", "kazakhstan"]
+categories = ["cryptography", "authentication"]
+include = ["/src/**", "/roots/**", "/testing-data/**", "/LICENSE", "/NOTICE"]
 
 [features]
 # Test helpers: `tsp::MockTsa` (an in-process time-stamping authority),
@@ -59,7 +62,9 @@ libc.workspace = true
 aws-lc-rs.workspace = true
 
 [dev-dependencies]
-oncl-xml.workspace = true
+# Path only, no version: `cargo package` drops it, so that oncl-xml (which depends on this
+# crate) is not a cycle of the published chain.
+oncl-xml = { path = "../oncl-xml" }
 hex-literal.workspace = true
 oncl-testkit.workspace = true
 tempfile.workspace = true

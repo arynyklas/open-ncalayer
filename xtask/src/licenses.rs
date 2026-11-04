@@ -377,7 +377,7 @@ fn workspace_members(root: &Path) -> anyhow::Result<BTreeSet<String>> {
 
 /// The crates.io packages of the lock file, from the local cargo registry or, if patched, from
 /// [`VENDOR`].
-fn registry_packages(root: &Path) -> anyhow::Result<HashMap<(String, String), Package>> {
+pub fn registry_packages(root: &Path) -> anyhow::Result<HashMap<(String, String), Package>> {
     let metadata = metadata(root, &[])?;
     let vendor = root.join(VENDOR);
     let text = |p: &Value, key: &str| p[key].as_str().map(str::to_owned);
@@ -462,7 +462,7 @@ fn needs_download(stderr: &str) -> bool {
 }
 
 /// The licences `deny.toml` accepts (`[licenses] allow`).
-fn accepted_licenses(root: &Path) -> anyhow::Result<BTreeSet<String>> {
+pub fn accepted_licenses(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     let path = root.join("deny.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let deny: toml::Table = toml::from_str(&text).with_context(|| path.display().to_string())?;
@@ -479,7 +479,7 @@ fn accepted_licenses(root: &Path) -> anyhow::Result<BTreeSet<String>> {
 }
 
 /// The standard texts in `dir`: SPDX id (the file stem of `<id>.txt`) → text.
-fn standard_texts(dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+pub fn standard_texts(dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let mut texts = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();

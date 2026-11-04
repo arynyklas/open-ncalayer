@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["plugin", "wasm", "abi", "ncalayer", "sdk"]
+categories = ["wasm", "api-bindings"]
+include = ["/src/**", "/LICENSE", "/NOTICE"]
 
 [dependencies]
 ciborium.workspace = true

@@ -6,7 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = true
+keywords = ["windows", "registry"]
+categories = ["os::windows-apis"]
+include = ["/src/**", "/LICENSE", "/NOTICE"]
 
 [features]
 # `TestKey`: a throw-away `HKCU\Software\OpenNCALayer-test-*` key, deleted on drop.

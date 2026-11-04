@@ -73,6 +73,35 @@ Keys and certificate requests (`generateCsr`; the Applet's `genKeyPairAndGetPKCS
 
 XMLDSig and CMS signatures and our key files are checked in NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md) (in Russian).
 
+### Rust SDK: embedding (unreleased, not on crates.io)
+
+`oncl-core` is the embeddable SDK: streaming signing, verification, validation, inspection and
+time-stamping, with trust, keys, clock, network, audit and resource limits owned by the host. It
+needs no display session, daemon, listener or updater. **Nothing is published to crates.io**
+(and whether the `oncl-*` names are free there is unchecked): depend on a reviewed commit by
+path or git, with the same `[patch.crates-io]` for the locally modified `streebog` and `hmac`:
+
+```toml
+[dependencies]
+oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
+
+[patch.crates-io]
+streebog = { path = "open-ncalayer/vendor/streebog" }
+hmac = { path = "open-ncalayer/vendor/hmac" }
+```
+
+Features: none (the minimal SDK: CMS/CAdES, hashing, PKI validation, key files, batches),
+`tokens`, `xml`, `pdf`, `jose`, `plugins`, and `full` for all of them; none pulls in Slint, the
+desktop, the updater, a server or an async runtime (`cargo xtask sdk closure` checks it).
+Runnable examples that issue a throwaway PKI and need no network:
+`cargo run -p oncl-core --example sign_file`, `--example verify_file -- <dir> <file>` and
+`--example custom_transport` (a host-written HTTP transport; without network strict signing is
+refused before the key is applied). Semver, error and limit contracts, migration notes and the
+publication-readiness status (the packaged source chain is verified offline by
+`cargo xtask sdk smoke`; upload is blocked by the modified `hmac`/`streebog` and was not run):
+[`docs/dev/sdk.md`](docs/dev/sdk.md). Third-party licences of the SDK closure:
+[`crates/oncl-core/THIRD-PARTY.txt`](crates/oncl-core/THIRD-PARTY.txt).
+
 ### SDK platform changes (unreleased)
 
 The Rust SDK adds separate CAdES B/T/LT/LTA operations:

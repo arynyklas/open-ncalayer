@@ -73,6 +73,35 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 Подписи XMLDSig и CMS и наши файлы ключей проверены в NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
 
+### Rust SDK: встраивание (ещё не выпуск, не в crates.io)
+
+`oncl-core` — встраиваемый SDK: потоковые подпись, проверка, валидация, инспекция и метки
+времени; доверие, ключи, часы, сеть, аудит и лимиты ресурсов задаёт хозяин приложения. Ему не
+нужны ни графическая сессия, ни демон, ни слушающий порт, ни самообновление. **Ничего не
+опубликовано в crates.io** (свободны ли имена `oncl-*`, не проверялось): подключайте проверенный
+коммит по path или git и тот же `[patch.crates-io]` для изменённых `streebog` и `hmac`:
+
+```toml
+[dependencies]
+oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
+
+[patch.crates-io]
+streebog = { path = "open-ncalayer/vendor/streebog" }
+hmac = { path = "open-ncalayer/vendor/hmac" }
+```
+
+Features: без них (минимальный SDK: CMS/CAdES, хеширование, PKI-валидация, файлы ключей,
+пакеты), `tokens`, `xml`, `pdf`, `jose`, `plugins` и `full` — всё сразу; ни одно не тянет Slint,
+desktop, апдейтер, сервер или асинхронный рантайм (проверяет `cargo xtask sdk closure`).
+Исполняемые примеры выпускают одноразовую PKI и не ходят в сеть:
+`cargo run -p oncl-core --example sign_file`, `--example verify_file -- <каталог> <файл>` и
+`--example custom_transport` (транспорт HTTP хозяина; без сети строгая подпись отклоняется до
+применения ключа). Semver, контракты ошибок и лимитов, заметки о миграции и готовность к
+публикации (цепочка упакованных исходников проверяется офлайн `cargo xtask sdk smoke`; загрузка
+заблокирована изменёнными `hmac`/`streebog` и не выполнялась) — в
+[`docs/dev/sdk.md`](docs/dev/sdk.md) (на английском). Сторонние лицензии замыкания SDK —
+[`crates/oncl-core/THIRD-PARTY.txt`](crates/oncl-core/THIRD-PARTY.txt).
+
 ### SDK: изменения платформы (ещё не выпуск)
 
 Rust SDK добавляет отдельные CAdES B/T/LT/LTA: `SignRequest::cades_create` /

@@ -1,0 +1,26 @@
+OpenNCALayer SDK
+Copyright 2026 Aryn Yklas
+
+This package is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+OpenNCALayer is an independent reimplementation of the NCALayer protocol and of the
+operations behind it. It is not affiliated with or endorsed by the National Certification
+Authority of the Republic of Kazakhstan. "NCALayer" and "Kalkan" are used only to describe
+compatibility.
+
+oncl-pki embeds, in its `roots/` directory, the public CA certificates of the National
+Certification Authority of the Republic of Kazakhstan (production PKI), exactly as the
+original NCALayer ships them in `cacerts.jks`. They are public documents distributed for free
+use; the rights to the certificates themselves belong to their issuer and are not licensed
+under Apache-2.0. Their SHA-256 sums are in the repository's `fixtures/nca/SHA256SUMS`.
+
+oncl-pki's `testing-data/rsa.pk8.der` is a synthetic RSA test key with no value: it
+protects nothing and is used only by the `testing` feature's mocks.
+
+The workspace builds oncl-gost and oncl-pki against locally modified copies of the
+RustCrypto `streebog` 0.11.0 and `hmac` 0.13.0 crates (additive secret-input variants of
+the key-agreement and key-wrap paths; the public-document hash and HMAC paths are unchanged).
+Both are MIT OR Apache-2.0, Copyright (c) The RustCrypto Project Developers and Artyom
+Pavlov. The modified sources and the full notice are in the repository's `vendor/` and
+`NOTICE`; this package does not contain them. The third-party crates of the whole SDK closure
+with their licence texts are listed in `THIRD-PARTY.txt` of the oncl-core package.

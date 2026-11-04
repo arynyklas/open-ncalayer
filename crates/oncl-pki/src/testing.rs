@@ -15,8 +15,9 @@ use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::Validity;
 
 /// A second RSA key for mocks that sign with the wrong key of an RSA signer: the synthetic
-/// OpenSSL key of `fixtures/openssl`, which no CA or responder fixture uses.
-const OTHER_RSA_KEY: &[u8] = include_bytes!("../../../fixtures/openssl/rsa.pk8.der");
+/// OpenSSL key of `fixtures/openssl`, which no CA or responder fixture uses. A copy lives in
+/// `testing-data/` so that the crate's source package builds with the `testing` feature.
+const OTHER_RSA_KEY: &[u8] = include_bytes!("../testing-data/rsa.pk8.der");
 
 /// The signature algorithm of a key: GOST 34.310-2004, GOST 34.10-2015-512 or
 /// sha256WithRSA.
@@ -171,5 +172,11 @@ mod tests {
                     .unwrap();
             assert!(public.verify(alg, b"tbs", &signature).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn crate_local_other_key_is_the_workspace_fixture() {
+        let fixture = oncl_testkit::fixture("openssl/rsa.pk8.der");
+        assert_eq!(read(&fixture), OTHER_RSA_KEY);
     }
 }

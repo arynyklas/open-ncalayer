@@ -4080,7 +4080,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oncl-api"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "axum",
  "der 0.8.2",
@@ -4110,7 +4110,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtin-accessory"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-pdk",
  "serde_json",
@@ -4118,7 +4118,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtin-applet"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "oncl-pdk",
@@ -4127,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtin-basics"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtin-commonutils"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "oncl-pdk",
@@ -4145,7 +4145,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtin-tests"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -4174,7 +4174,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-builtins-build"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-plugin",
  "serde",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-cli"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "clap",
@@ -4215,10 +4215,11 @@ dependencies = [
 
 [[package]]
 name = "oncl-core"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "der 0.8.2",
+ "getrandom 0.4.3",
  "lopdf",
  "oncl-pdf",
  "oncl-pdk",
@@ -4227,6 +4228,7 @@ dependencies = [
  "oncl-testkit",
  "oncl-token",
  "oncl-xml",
+ "rcgen",
  "roxmltree",
  "serde",
  "serde_json",
@@ -4241,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-desktop"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "libc",
  "oncl-flows",
@@ -4256,7 +4258,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-flows"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "der 0.8.2",
  "oncl-pki",
@@ -4272,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-gost"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "crypto-bigint",
  "getrandom 0.4.3",
@@ -4287,7 +4289,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-ipc"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "libc",
@@ -4299,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-nmhost"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-ipc",
  "serde",
@@ -4310,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-pdf"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "der 0.8.2",
  "flate2",
@@ -4325,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-pdk"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "ciborium",
  "oncl-protocol",
@@ -4337,7 +4339,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-pki"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -4376,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-plugin"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -4412,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-tests"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "aes",
  "base64",
@@ -4440,7 +4442,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-protocol"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "hashbrown 0.17.1",
@@ -4451,14 +4453,14 @@ dependencies = [
 
 [[package]]
 name = "oncl-registry"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "oncl-server"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -4506,7 +4508,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-testkit"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "object",
  "serde",
@@ -4519,7 +4521,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-tls"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "der 0.8.2",
  "rand_chacha 0.3.1",
@@ -4539,7 +4541,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-token"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "der 0.8.2",
  "flate2",
@@ -4563,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-trust"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-tls",
  "rusqlite",
@@ -4579,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-ui"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "ksni",
  "oncl-desktop",
@@ -4606,7 +4608,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-update"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -4626,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-win7shim-combase"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-testkit",
  "windows-sys 0.61.2",
@@ -4634,14 +4636,14 @@ dependencies = [
 
 [[package]]
 name = "oncl-win7shim-winrt-error"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "oncl-testkit",
 ]
 
 [[package]]
 name = "oncl-xml"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -4657,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "openncalayer"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64",
  "clap",
@@ -8320,7 +8322,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "anyhow",
  "base64",
