@@ -553,10 +553,16 @@ fn a_storage_is_chosen_from_the_keyboard_and_an_unsupported_one_is_skipped() {
 
 // ---- the windows drawn by Slint's software renderer (not a native smoke) ----
 
-/// Draws `ui` as a window of `logical` pixels at `step` into `target/service-windows/<name>.png`.
-fn draw<C: ComponentHandle>(ui: &C, logical: (f32, f32), step: UiScale, name: &str) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/service-windows");
-    std::fs::create_dir_all(&dir).unwrap();
+thread_local! {
+    static DRAWN: offscreen::Last = offscreen::install();
+}
+
+/// Draws `ui` as a window of `logical` pixels at `step`: its size in pixels and the pixels.
+fn render<C: ComponentHandle>(
+    ui: &C,
+    logical: (f32, f32),
+    step: UiScale,
+) -> (PhysicalSize, Vec<slint::Rgb8Pixel>) {
     open(ui, logical);
     scale::apply_to(ui.window(), 1.0, step);
     slint::platform::update_timers_and_animations();
@@ -568,8 +574,17 @@ fn draw<C: ComponentHandle>(ui: &C, logical: (f32, f32), step: UiScale, name: &s
         let drew = window.draw_if_needed(|renderer| {
             renderer.render(&mut pixels, size.width as usize);
         });
-        assert!(drew, "{name}: nothing was drawn");
+        assert!(drew, "nothing was drawn");
     });
+    ui.hide().unwrap();
+    (size, pixels)
+}
+
+/// Draws `ui` into `target/service-windows/<name>.png`.
+fn draw<C: ComponentHandle>(ui: &C, logical: (f32, f32), step: UiScale, name: &str) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/service-windows");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (size, pixels) = render(ui, logical, step);
     let file = std::fs::File::create(dir.join(format!("{name}.png"))).unwrap();
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.width, size.height);
     encoder.set_color(png::ColorType::Rgb);
@@ -580,11 +595,86 @@ fn draw<C: ComponentHandle>(ui: &C, logical: (f32, f32), step: UiScale, name: &s
         .unwrap()
         .write_image_data(&bytes)
         .unwrap();
-    ui.hide().unwrap();
 }
 
-thread_local! {
-    static DRAWN: offscreen::Last = offscreen::install();
+/// The rows of pixels at the bottom of the window, where the actions are: as many as the
+/// button row and the padding under it take at 100%, scaled.
+fn action_strip(
+    size: PhysicalSize,
+    pixels: &[slint::Rgb8Pixel],
+    step: UiScale,
+) -> Vec<(u8, u8, u8)> {
+    let rows = (40.0 * step.factor()) as usize;
+    let from = (size.height as usize - rows) * size.width as usize;
+    pixels[from..].iter().map(|p| (p.r, p.g, p.b)).collect()
+}
+
+/// However long its text, a window draws nothing over its actions: the body is clipped to its
+/// own area (and scrolls), so the buttons look the same under a short text and a very long
+/// one.
+#[test]
+fn a_long_body_is_never_drawn_over_the_actions() {
+    DRAWN.with(|_| {});
+    let (dialog, form) = (narrowest(Class::Dialog), narrowest(Class::Form));
+    for step in [UiScale::P100, UiScale::P200] {
+        macro_rules! same_under_long_text {
+            ($window:ident, $logical:expr, |$ui:ident, $long:ident| $fill:block) => {{
+                let shown = |$long: bool| {
+                    let $ui = $window::new().unwrap();
+                    $fill
+                    let (size, pixels) = render(&$ui, $logical, step);
+                    action_strip(size, &pixels, step)
+                };
+                assert!(
+                    shown(false) == shown(true),
+                    "{}: a long text is drawn over the buttons at {}%",
+                    stringify!($window),
+                    step.percent()
+                );
+            }};
+        }
+
+        same_under_long_text!(MessageDialog, dialog, |ui, long| {
+            ui.set_origin(
+                if long {
+                    long_name()
+                } else {
+                    "https://a.test".into()
+                }
+                .into(),
+            );
+            ui.set_text(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(ConfirmDialog, dialog, |ui, long| {
+            ui.set_text(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(PasswordDialog, dialog, |ui, long| {
+            ui.set_message(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(InstallPluginWindow, dialog, |ui, long| {
+            ui.set_warning(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(ReaderDialog, dialog, |ui, long| {
+            ui.set_reader_note(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(StopOriginalWindow, dialog, |ui, long| {
+            ui.set_question(if long { long_error() } else { "Text".into() }.into());
+        });
+        same_under_long_text!(CsrDialog, form, |ui, long| {
+            ui.set_origin(
+                if long {
+                    long_name()
+                } else {
+                    "https://a.test".into()
+                }
+                .into(),
+            );
+            ui.set_path(if long { long_name() } else { "k".into() }.into());
+        });
+        same_under_long_text!(SettingsWindow, form, |ui, long| {
+            ui.set_original_state(if long { long_error() } else { "Text".into() }.into());
+        });
+    }
 }
 
 /// `cargo test -p oncl-ui --lib service_windows_drawn -- --ignored`: every service window at
