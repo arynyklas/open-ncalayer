@@ -34,17 +34,23 @@ use std::{
 pub struct PadesReport {
     pub verdict: Verdict,
     level: Option<AdesLevel>,
-    /// Level each signature reached on its own, in `signatures()` order.
+    /// Level each signature ACHIEVED on its own (what its proofs support, possibly above
+    /// what a request asked for), in `signatures()` order.
     signature_levels: Vec<Option<AdesLevel>>,
     verification: PdfVerification,
 }
 impl PadesReport {
-    /// The minimum level over all signatures, only when every signature validated.
+    /// The minimum ACHIEVED level over all signatures, only when every signature validated.
+    /// It is a floor over every signature, not the level an operation requested.
     pub fn level(&self) -> Option<AdesLevel> {
         self.level
     }
-    /// The honest level each signature reached, parallel to [`Self::signatures`]:
-    /// `None` for a signature that did not validate.
+    /// The level each signature ACHIEVED, parallel to [`Self::signatures`]: what its own
+    /// proofs (signature timestamp, covering document timestamps, DSS) support, never
+    /// lowered to a request and never raised without validated evidence. A signature
+    /// appended at level `L` therefore reports `>= L`: it can report more when the file
+    /// already holds covering DSS evidence (e.g. a new T signature in an LTA file reports
+    /// LT). `None` for a signature that did not validate.
     pub fn signature_levels(&self) -> &[Option<AdesLevel>] {
         &self.signature_levels
     }
@@ -771,11 +777,15 @@ fn verify_output(
     })
 }
 /// Final check after appending ONE new signature to a possibly already signed PDF:
-/// every signature must validate at its own honest level (a present signature is never
-/// upgraded or ignored), and the newly appended signature, the last one in file order,
-/// must itself reach `required`. Earlier signatures are not demanded to reach it.
+/// every signature must validate at its own achieved level (a present signature is never
+/// upgraded or ignored), and the signature this operation appended must itself reach
+/// `required`. That signature is identified by its ByteRange: it is the one whose signed
+/// extent ends exactly at `appended_end`, the output length when the operation finished
+/// writing it (before any evidence augmentation). Earlier signatures are not demanded to
+/// reach `required`.
 fn verify_new_signature(
     required: AdesLevel,
+    appended_end: u64,
     output: &mut StagedArtifact,
     limits: &PdfLimits,
     services: &AdesServices<'_>,
@@ -783,13 +793,16 @@ fn verify_new_signature(
     scope: &ResourceScope,
 ) -> Result<PadesReport> {
     let report = verify_output(AdesLevel::B, output, limits, services, allowed, scope)?;
-    let newest = report
+    let mut appended = report
         .signatures()
         .iter()
         .zip(report.signature_levels())
-        .max_by_key(|(signature, _)| signature.revision_end)
-        .and_then(|(_, level)| *level);
-    if newest.is_none_or(|level| level < required) {
+        .filter(|(signature, _)| signature.byte_range.signed_end() == appended_end)
+        .map(|(_, level)| *level);
+    let (Some(achieved), None) = (appended.next(), appended.next()) else {
+        return Err(PdfError::Malformed("appended signature identity"));
+    };
+    if achieved.is_none_or(|level| level < required) {
         return Err(PdfError::Unsupported(
             "new PAdES signature did not reach the requested level",
         ));
@@ -843,9 +856,11 @@ pub fn sign(
         output,
         scope,
     )?;
+    let appended_end = output.len();
     let result = (|| {
         verify_new_signature(
             level.min(AdesLevel::T),
+            appended_end,
             output,
             &profile.limits,
             services,
@@ -875,6 +890,7 @@ pub fn sign(
         } else {
             verify_new_signature(
                 level,
+                appended_end,
                 output,
                 &profile.limits,
                 services,

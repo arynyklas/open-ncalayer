@@ -611,6 +611,14 @@ fn with_tsa<T>(
     gen_time: OffsetDateTime,
     action: impl FnOnce(&AdesServices<'_>) -> T,
 ) -> T {
+    with_tsa_counted(f, now, gen_time, |services, _| action(services))
+}
+fn with_tsa_counted<T>(
+    f: &Fixture,
+    now: OffsetDateTime,
+    gen_time: OffsetDateTime,
+    action: impl FnOnce(&AdesServices<'_>, &MockTsa) -> T,
+) -> T {
     let temp = tempfile::tempdir().unwrap();
     let store = TemporaryStore::new(temp.path()).unwrap();
     let http = MockTsa::new(f.tsa.clone()).with_gen_time(gen_time);
@@ -650,7 +658,7 @@ fn with_tsa<T>(
             crls: &crls,
         },
     };
-    action(&services)
+    action(&services, &http)
 }
 struct CountSigner {
     key: KeyEntry,
@@ -1576,96 +1584,146 @@ fn final_pades_host_clock_must_not_move_backwards_from_initial_host_context() {
     });
 }
 
-/// Sign a NEW signature at `level` onto a PDF that already carries a signature at
-/// `prior` (a different signer certificate). Returns the signer call count and result.
-fn sign_onto(
-    f: &Fixture,
-    prior: AdesLevel,
-    level: AdesLevel,
-) -> (
-    usize,
-    Result<(Vec<u8>, ades::PadesReport), oncl_pdf::PdfError>,
-) {
-    let (old, _) = f.run(None, prior);
+const LEVELS: [AdesLevel; 4] = [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta];
+
+/// The second signer: another certificate from the same root, long lived.
+fn second_signer(f: &Fixture) -> KeyEntry {
     let mut second = f.doc.clone();
     let mut spec = TestCertSpec::from_cert(&f.doc.cert);
     spec.serial = vec![0x63, 0x17, 9];
+    spec.validity = *entry("user-rsa-sign").cert.tbs_certificate().validity();
     second.cert = issue_cert(&f.root, spec);
+    second
+}
+/// One attempt to sign at `level` onto `old`, with every observable side effect.
+struct Onto {
+    /// Private-key uses of the new signer.
+    calls: usize,
+    /// TimeStampReq's the TSA received.
+    tsa_requests: usize,
+    /// Whether the staged output can be read back afterwards.
+    output_readable: bool,
+    result: Result<(Vec<u8>, ades::PadesReport), oncl_pdf::PdfError>,
+}
+fn run_onto(f: &Fixture, old: &[u8], level: AdesLevel) -> Onto {
     let mut signer = CountSigner {
-        key: second,
+        key: second_signer(f),
         calls: 0,
     };
-    let result = with_tsa(f, NOW, NOW, |services| {
+    let (tsa_requests, output_readable, result) = with_tsa_counted(f, NOW, NOW, |services, tsa| {
         let mut s = scope();
         let mut output = services.temporary.stage(&mut s).unwrap();
-        ades::sign(
+        let signed = ades::sign(
             level,
-            Source::sequential(&mut Cursor::new(&old), None),
+            Source::sequential(&mut Cursor::new(old), None),
             &PdfSignProfile::default(),
             &mut signer,
             services,
             &mut output,
             &s,
-        )?;
+        );
         let mut bytes = Vec::new();
-        output.copy_to(&mut bytes).unwrap();
-        assert!(bytes.starts_with(&old), "previous revisions are untouched");
-        let report = ades::verify(
-            AdesLevel::B,
-            Source::sequential(&mut Cursor::new(&bytes), None),
-            &PdfLimits::default(),
-            services,
-            &[SigAlg::RsaSha256],
-            &mut s,
-        )?;
-        Ok((bytes, report))
+        let readable = output.copy_to(&mut bytes).is_ok();
+        let result = signed.and_then(|_| {
+            assert!(bytes.starts_with(old), "previous revisions are untouched");
+            let report = ades::verify(
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(&bytes), None),
+                &PdfLimits::default(),
+                services,
+                &[SigAlg::RsaSha256],
+                &mut s,
+            )?;
+            Ok((bytes, report))
+        });
+        (tsa.requests().len(), readable, result)
     });
-    (signer.calls, result)
+    Onto {
+        calls: signer.calls,
+        tsa_requests,
+        output_readable,
+        result,
+    }
 }
 #[test]
 fn signing_onto_an_already_signed_pdf_succeeds_at_every_level() {
     let f = Fixture::new();
-    for prior in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
-        for level in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
-            let (calls, result) = sign_onto(&f, prior, level);
-            let (_, report) = result.unwrap_or_else(|e| panic!("{prior:?} then {level:?}: {e:?}"));
-            assert_eq!(calls, 1, "{prior:?} then {level:?}");
-            assert_eq!(report.signatures().len(), 2, "{prior:?} then {level:?}");
-            assert_eq!(report.verdict, Verdict::Valid, "{prior:?} then {level:?}");
-            // Honest per-signer levels: the new signature reaches the request; an old
-            // signature is only elevated by the evidence appended for LT/LTA (DSS and
-            // document timestamps), never relabelled, and the aggregate is the minimum.
+    for prior in LEVELS {
+        let (old, _) = f.run(None, prior);
+        for level in LEVELS {
+            let label = format!("{prior:?} then {level:?}");
+            let onto = run_onto(&f, &old, level);
+            let (_, report) = onto.result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert!(onto.output_readable, "{label}");
+            // The provider signs exactly once, for the new signature only.
+            assert_eq!(onto.calls, 1, "{label}");
+            // TSA requests: the new signature's own timestamp (T and above), one
+            // document timestamp when an old B signature has to be brought to T before
+            // the DSS, and one closing document timestamp for LTA.
+            let timestamps = usize::from(level >= AdesLevel::T)
+                + usize::from(level >= AdesLevel::Lt && prior == AdesLevel::B)
+                + usize::from(level == AdesLevel::Lta);
+            assert_eq!(onto.tsa_requests, timestamps, "{label}");
+            assert_eq!(report.signatures().len(), 2, "{label}");
+            assert_eq!(report.verdict, Verdict::Valid, "{label}");
+            // `signature_levels` are ACHIEVED levels. An old signature is only elevated
+            // by the evidence appended for LT/LTA (DSS and document timestamps), never
+            // relabelled; the new one reaches at least the request. The aggregate is the
+            // minimum achieved level, not the requested one.
             let old_expected = match level {
                 AdesLevel::B | AdesLevel::T => prior,
                 AdesLevel::Lt => AdesLevel::Lt,
                 AdesLevel::Lta => AdesLevel::Lta,
             };
-            let levels = report.signature_levels();
-            // A new T signature in a file that already holds DSS material is honestly
-            // proven against it, so it reports LT there; never below the request.
+            // A new T signature in a file that already holds DSS material is proven
+            // against it, so it achieves LT there (above the request, never below it).
             let new_expected = if level == AdesLevel::T && prior >= AdesLevel::Lt {
                 AdesLevel::Lt
             } else {
                 level
             };
             assert_eq!(
-                levels,
+                report.signature_levels(),
                 [Some(old_expected), Some(new_expected)],
-                "{prior:?} then {level:?}"
+                "{label}"
             );
             assert_eq!(
                 report.level(),
                 Some(old_expected.min(new_expected)),
-                "{prior:?} then {level:?}"
+                "{label}"
             );
         }
     }
 }
+/// Signing onto `bytes` must be refused BEFORE any private use: a typed pre-key error
+/// (never `AfterKeyUse`), no provider call, no TSA request, no readable output.
+fn assert_refused_before_key_use(f: &Fixture, bytes: &[u8], what: &str) {
+    for level in LEVELS {
+        let onto = run_onto(f, bytes, level);
+        let error = onto
+            .result
+            .err()
+            .unwrap_or_else(|| panic!("{what} {level:?}"));
+        assert!(
+            !matches!(
+                error,
+                oncl_pdf::PdfError::Ades(oncl_pki::cms::ades::AdesError::AfterKeyUse { .. })
+            ),
+            "{what} {level:?}: {error:?}"
+        );
+        assert_eq!(onto.calls, 0, "{what} {level:?}: no private use");
+        assert_eq!(onto.tsa_requests, 0, "{what} {level:?}: no TSA request");
+        assert!(!onto.output_readable, "{what} {level:?}: no output");
+    }
+}
+fn flip_hex(byte: u8) -> u8 {
+    if byte == b'0' { b'1' } else { b'0' }
+}
 #[test]
 fn a_bad_present_signature_blocks_signing_before_any_key_use() {
+    // A revoked old signer.
     let mut f = Fixture::new();
     let (old, _) = f.run(None, AdesLevel::B);
-    // The first signer's certificate is revoked before the document was signed.
     f.crl = MockCrl::new(f.root.clone())
         .with_this_update(NOW - time::Duration::MINUTE)
         .next_update(Some(NOW + time::Duration::HOUR))
@@ -1674,33 +1732,218 @@ fn a_bad_present_signature_blocks_signing_before_any_key_use() {
             NOW - time::Duration::HOUR,
         )
         .der();
-    let mut second = f.doc.clone();
+    assert_refused_before_key_use(&f, &old, "revoked old signer");
+}
+#[test]
+fn a_tampered_old_signature_timestamp_or_dss_blocks_signing_before_any_key_use() {
+    let f = Fixture::new();
+    // The control: the same untampered files accept a new signature at every level.
+    for prior in [AdesLevel::B, AdesLevel::T, AdesLevel::Lta] {
+        let (old, _) = f.run(None, prior);
+        assert!(
+            run_onto(&f, &old, AdesLevel::Lta).result.is_ok(),
+            "{prior:?}"
+        );
+    }
+    let valid = |bytes: &[u8]| {
+        f.inspect(bytes, AdesLevel::B, NOW, &f.crl)
+            .is_ok_and(|report| report.verdict == Verdict::Valid)
+    };
+    // (1) Signed document bytes of an old B signature (inside its ByteRange) changed.
+    let (b, _) = f.run(None, AdesLevel::B);
+    let mut content = b.clone();
+    let at = content
+        .windows(6)
+        .position(|part| part == b"endobj")
+        .unwrap();
+    content[at + 5] = b'k';
+    assert!(!valid(&content));
+    assert_refused_before_key_use(&f, &content, "tampered signed content");
+    // (2) The old signature value itself changed.
+    let (t, _) = f.run(None, AdesLevel::T);
+    let contents = t
+        .windows(b"/Contents <".len())
+        .position(|part| part == b"/Contents <")
+        .unwrap()
+        + b"/Contents <".len();
+    let end = contents + t[contents..].iter().position(|b| *b == b'>').unwrap();
+    let last = contents + t[contents..end].iter().rposition(|b| *b != b'0').unwrap();
+    // (3) The signature timestamp token of an old T signature: its tail is the TSA's
+    // own signature value.
+    let mut token = t.clone();
+    token[last - 40] = flip_hex(token[last - 40]);
+    assert!(!valid(&token));
+    assert_refused_before_key_use(&f, &token, "bad old timestamp token");
+    let mut signature = t.clone();
+    let offset = signature[contents..end]
+        .windows(2)
+        .position(|part| part == b"30")
+        .unwrap();
+    // The first CMS bytes are structure: any change fails the old signature.
+    signature[contents + offset + 2] = flip_hex(signature[contents + offset + 2]);
+    assert!(!valid(&signature));
+    assert_refused_before_key_use(&f, &signature, "changed old CMS");
+    // (4) A bad entry in the DSS of an old LTA file.
+    let (lta, _) = f.run(None, AdesLevel::Lta);
+    let mut dss = lta.clone();
+    let offset = dss
+        .windows(f.crl.len())
+        .position(|part| part == f.crl)
+        .unwrap();
+    dss[offset + f.crl.len() - 1] ^= 1;
+    assert!(!valid(&dss));
+    assert_refused_before_key_use(&f, &dss, "altered DSS entry");
+    // (5) The closing document timestamp of the old LTA file.
+    let mut closing = lta.clone();
+    let start = closing
+        .windows(b"/ETSI.RFC3161".len())
+        .rposition(|part| part == b"/ETSI.RFC3161")
+        .unwrap();
+    let gap = start
+        + closing[start..]
+            .windows(11)
+            .position(|part| part == b"/Contents <")
+            .unwrap()
+        + 11;
+    closing[gap + 100] ^= 1;
+    assert!(!valid(&closing));
+    assert_refused_before_key_use(&f, &closing, "altered document timestamp");
+}
+#[test]
+fn a_revision_appended_over_signed_ranges_is_rejected_by_the_whole_file_checks() {
+    let f = Fixture::new();
+    let (old, _) = f.run(None, AdesLevel::B);
+    let (two, _) = run_onto(&f, &old, AdesLevel::B).result.unwrap();
+    let doc = lopdf::Document::load_mem(&two).unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let mut page_value = doc.get_object(page).unwrap().as_dict().unwrap().clone();
+    page_value.set("MediaBox", vec![0.into(), 0.into(), 1.into(), 1.into()]);
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let mut catalog = doc.get_object(root).unwrap().as_dict().unwrap().clone();
+    catalog.set("Perms", lopdf::Object::Name(b"Forged".to_vec()));
+    let forgeries = [
+        (
+            "page changed under both signatures",
+            vec![(page, lopdf::Object::Dictionary(page_value))],
+        ),
+        (
+            "catalog permissions injected",
+            vec![(root, lopdf::Object::Dictionary(catalog))],
+        ),
+    ];
+    for (what, objects) in forgeries {
+        let forged = append_objects(&two, objects);
+        // Neither the verifier nor a later signing operation accepts it.
+        assert!(
+            !f.inspect(&forged, AdesLevel::B, NOW, &f.crl)
+                .is_ok_and(|report| report.verdict == Verdict::Valid),
+            "{what}"
+        );
+        assert_refused_before_key_use(&f, &forged, what);
+    }
+}
+/// Moves the host clock when the TSA replies, i.e. after the private key was used.
+struct JumpAfterReply {
+    tsa: MockTsa,
+    now: Arc<std::sync::Mutex<OffsetDateTime>>,
+    after: OffsetDateTime,
+}
+impl oncl_pki::http::HttpTransport for JumpAfterReply {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        let reply = oncl_pki::http::HttpTransport::send(&self.tsa, request)?;
+        *self.now.lock().unwrap() = self.after;
+        Ok(reply)
+    }
+}
+#[test]
+fn final_check_rejects_an_old_signature_that_stopped_validating_after_key_use() {
+    use der::asn1::UtcTime;
+    let mut f = Fixture::new();
+    // The old signer's certificate ends 30 minutes after NOW.
     let mut spec = TestCertSpec::from_cert(&f.doc.cert);
-    spec.serial = vec![0x63, 0x17, 9];
-    second.cert = issue_cert(&f.root, spec);
-    for level in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+    spec.validity.not_after = x509_cert::time::Time::UtcTime(
+        UtcTime::from_unix_duration(std::time::Duration::from_secs(
+            (NOW + time::Duration::minutes(30)).unix_timestamp() as u64,
+        ))
+        .unwrap(),
+    );
+    f.doc.cert = issue_cert(&f.root, spec);
+    let (old, _) = f.run(None, AdesLevel::B);
+    for (after, expect_ok) in [
+        // Control: the clock moves on, the old certificate is still valid.
+        (NOW + time::Duration::minutes(10), true),
+        // Past the old certificate's end, before the CRL's nextUpdate.
+        (NOW + time::Duration::minutes(40), false),
+    ] {
         let mut signer = CountSigner {
-            key: second.clone(),
+            key: second_signer(&f),
             calls: 0,
         };
-        with_tsa(&f, NOW, NOW, |services| {
+        let (result, readable) = f.context(NOW, &f.crl, |base| {
+            let now = Arc::new(std::sync::Mutex::new(NOW));
+            let clock = || *now.lock().unwrap();
+            let http = JumpAfterReply {
+                tsa: MockTsa::new(f.tsa.clone()).with_gen_time(NOW),
+                now: now.clone(),
+                after,
+            };
+            let validation = ValidationContext {
+                http: &http,
+                ..*base.validation
+            };
+            let mut profile = TsaProfile::kalkan_default();
+            profile.url = URL.into();
+            profile.method = TsaMethod::Post;
+            let mut tsa = TsaSpec::from(profile);
+            tsa.check_skew = None;
+            let services = AdesServices {
+                validation: &validation,
+                host_clock: Some(&clock),
+                network: base.network,
+                temporary: base.temporary,
+                limits: base.limits,
+                tsa: Some(&tsa),
+                material: ValidationMaterial {
+                    certificates: base.material.certificates,
+                    ocsp: base.material.ocsp,
+                    crls: base.material.crls,
+                },
+            };
             let mut s = scope();
             let mut output = services.temporary.stage(&mut s).unwrap();
-            assert!(
-                ades::sign(
-                    level,
-                    Source::sequential(&mut Cursor::new(&old), None),
-                    &PdfSignProfile::default(),
-                    &mut signer,
-                    services,
-                    &mut output,
-                    &s,
-                )
-                .is_err(),
-                "{level:?}"
+            let result = ades::sign(
+                AdesLevel::T,
+                Source::sequential(&mut Cursor::new(&old), None),
+                &PdfSignProfile::default(),
+                &mut signer,
+                &services,
+                &mut output,
+                &s,
             );
-            assert!(output.copy_to(&mut Vec::new()).is_err());
+            (result, output.copy_to(&mut Vec::new()).is_ok())
         });
-        assert_eq!(signer.calls, 0, "{level:?}: refused before private use");
+        assert_eq!(signer.calls, 1, "{after}: the key was used once");
+        if expect_ok {
+            result.unwrap();
+            assert!(readable);
+        } else {
+            // Fail closed and honest: no output, and the key use is reported.
+            assert!(
+                matches!(
+                    result,
+                    Err(oncl_pdf::PdfError::Ades(
+                        oncl_pki::cms::ades::AdesError::AfterKeyUse {
+                            applied: oncl_pki::key::AppliedState::Applied,
+                            ..
+                        }
+                    ))
+                ),
+                "{result:?}"
+            );
+            assert!(!readable);
+        }
     }
 }

@@ -553,9 +553,33 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
     } else {
         b'0'
     };
+    // The OLD B signature inside a new B-then-LTA file: its signature value is changed.
+    let mut old_signature = b_then_lta.clone();
+    let first = old_signature
+        .windows(b"/Contents <".len())
+        .position(|b| b == b"/Contents <")
+        .ok_or("missing old signature contents")?
+        + b"/Contents <".len();
+    let last = first
+        + old_signature[first..]
+            .iter()
+            .position(|b| *b == b'>')
+            .ok_or("unterminated old signature")?;
+    let value = first
+        + old_signature[first..last]
+            .iter()
+            .rposition(|b| *b != b'0')
+            .ok_or("empty old signature")?
+        - 40;
+    old_signature[value] = if old_signature[value] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
     for (name, bytes) in [
         ("negative-dss.pdf", dss),
         ("negative-doctimestamp.pdf", timestamp),
+        ("negative-old-signature.pdf", old_signature),
     ] {
         if verify(&evidence, &bytes, AdesLevel::B).is_ok_and(|r| r.verdict == Verdict::Valid) {
             return Err("P03 bad proof was laundered as B".into());
@@ -563,8 +587,11 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
         if extend(&evidence, &bytes, AdesLevel::Lta, material()).is_ok() {
             return Err("P03 bad proof was laundered by renewal".into());
         }
+        if sign(&signer, &keys[1], &bytes, AdesLevel::Lta, material()).is_ok() {
+            return Err("P03 bad proof was laundered by a new signature".into());
+        }
         std::fs::write(out.join(name), bytes)?;
-        summary.push_str(&format!("{name}=Rejected B-and-renewal\n"));
+        summary.push_str(&format!("{name}=Rejected B-renewal-and-new-signature\n"));
     }
     if guard.calls.load(Ordering::SeqCst) != before || before != 9 {
         return Err(format!("P03 unexpected private operations {before}").into());

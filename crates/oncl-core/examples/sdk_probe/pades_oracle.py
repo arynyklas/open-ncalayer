@@ -6,6 +6,7 @@ an explicit synthetic root/clock PKI exercise, not NCA/qualified certification.
 """
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 from datetime import datetime, timezone
@@ -36,6 +37,34 @@ def timestamp_ok(status):
     return bool(status.intact and status.valid and status.trusted
                 and status.coverage.name in ('ENTIRE_FILE', 'ENTIRE_REVISION'))
 KU = KeyUsageConstraints(key_usage={'digital_signature'})
+
+
+def dss_problems(dss_store, signature):
+    """Why the DSS does not carry THIS signer's own validation material (empty = it does).
+
+    The signer's VRI entry (key: uppercase SHA-1 of the CMS) must hold the signer
+    certificate and revocation data about it: a CRL of its issuer or an OCSP response
+    for its serial number.
+    """
+    vri = dss_store.vri_entries.get('/' + hashlib.sha1(signature.pkcs7_content).hexdigest().upper())
+    if vri is None:
+        return ['no VRI entry for the signature']
+
+    def load(key, cls):
+        return [cls.load(ref.get_object().data) for ref in (vri.get(key) or [])]
+    signer = signature.signer_cert
+    problems = []
+    if not any(c.serial_number == signer.serial_number and c.issuer == signer.issuer
+               for c in load('/Cert', x509.Certificate)):
+        problems.append('signer certificate not in its VRI')
+    covered = any(c.issuer == signer.issuer for c in load('/CRL', crl.CertificateList))
+    covered = covered or any(
+        r['cert_id']['serial_number'].native == signer.serial_number
+        for o in load('/OCSP', ocsp.OCSPResponse)
+        for r in o.basic_ocsp_response['tbs_response_data']['responses'])
+    if not covered:
+        problems.append('no CRL of the issuer or OCSP response for the signer in its VRI')
+    return problems
 
 
 def oracle(directory):
@@ -115,6 +144,10 @@ def oracle(directory):
             if not timestamp_ok(status):
                 failures.append(filename + ': document timestamp failed')
         dss = reader.root.get('/DSS')
+        if required in ('LT', 'LTA') and dss_store is not None:
+            for signature in regular:
+                for problem in dss_problems(dss_store, signature):
+                    failures.append(filename + ': ' + str(signature.field_name) + ': ' + problem)
         if required in ('LT', 'LTA') and dss is None:
             failures.append(filename + ': missing actual DSS')
         if required != 'B' and not documents and not all(row['signature_timestamp'] for row in rows):
@@ -135,7 +168,8 @@ def oracle(directory):
                         failures.append(filename + ': ' + str(row['field']) +
                                         ': no CMS timestamp and no valid covering document timestamp/DSS')
                     lta.append({'field': row['field'], 'ades_lta_validation': 'not applicable (no CMS signature timestamp)',
-                                'document_timestamps_valid': bool(documents)})
+                                'document_timestamps_valid': bool(timestamps) and all(t['bottom_line'] for t in timestamps),
+                                'dss_covers_signer': not dss_problems(dss_store, signature)})
                     continue
                 result = asyncio.run(ades_lta_validation(
                     signature, spec, ValidationTimingInfo(NOW, NOW, True)))
@@ -149,11 +183,19 @@ def oracle(directory):
             'document_timestamps': timestamps, 'dss': dss is not None, 'archive': lta,
             'status_material': 'DSS only' if dss_store is not None else 'explicit host fixture'}
 
-    for filename in ('negative-dss.pdf', 'negative-doctimestamp.pdf'):
+    for filename in ('negative-dss.pdf', 'negative-doctimestamp.pdf', 'negative-old-signature.pdf'):
         rejected = False
         details = []
         try:
             reader = PdfFileReader(io.BytesIO((directory / filename).read_bytes()))
+            if filename == 'negative-old-signature.pdf':
+                # The OLD signature of a B-then-LTA file is judged on its own: it must fail.
+                old = [s for s in reader.embedded_signatures
+                       if s.sig_object.get('/Type') != '/DocTimeStamp'][0]
+                status = validate_pdf_signature(old, context(), context(), key_usage_settings=KU)
+                details.append({'field': old.field_name, 'intact': status.intact,
+                                'valid': status.valid, 'bottom_line': status.bottom_line})
+                rejected |= not status.bottom_line
             for signature in reader.embedded_signatures:
                 if signature.sig_object.get('/Type') == '/DocTimeStamp':
                     status = validate_pdf_timestamp(signature, context())
@@ -165,7 +207,7 @@ def oracle(directory):
             details.append({'error': type(exc).__name__, 'message': str(exc)})
         results['cases'][filename] = {'rejected': rejected, 'timestamps': details}
         if not rejected:
-            failures.append(filename + ': independent oracle accepted tampered document timestamp')
+            failures.append(filename + ': independent oracle accepted a tampered file')
     results['failures'] = failures
     destination = directory / 'P03-pyhanko-oracle.json'
     destination.write_text(json.dumps(results, indent=2), encoding='utf-8')
