@@ -276,7 +276,7 @@ fn item_rows(t: &Texts, family: Family, network: bool, item: &ItemView, rows: &m
             let mut text = t
                 .failed
                 .replace("{0}", &item.name)
-                .replace("{1}", failure_text(t, *code, network, item.applied));
+                .replace("{1}", failure_text(t, family, *code, network, item.applied));
             if family.uses_key() {
                 text.push_str(" (");
                 text.push_str(key_clause(t, item));
@@ -625,19 +625,26 @@ fn stamp_check_name(t: &Texts, check: StampCheck) -> &'static str {
     }
 }
 
-/// As [`code_text`], but a validation failure AFTER the key was applied (the certificate was
-/// checked before) can only be the time stamp's or the evidence's: it is worded as the service.
+/// As [`code_text`] for the two cases where `ValidationRequired` of a network-capable family is
+/// not a certificate failure. After the key was applied the certificate was checked already, so
+/// it is the time stamp or the evidence: a token that did not pass its checks, or no answer
+/// (it is NOT said to be «no answer»). An extension applies no key, and its only network need is
+/// the time stamp service: there it is the service. «did not answer» is kept for transport
+/// failures (`Io`).
 fn failure_text(
     t: &Texts,
+    family: Family,
     code: ErrorCode,
     network: bool,
     applied: oncl_pki::key::AppliedState,
 ) -> &'static str {
-    if network
-        && code == ErrorCode::ValidationRequired
-        && applied != oncl_pki::key::AppliedState::NotApplied
-    {
-        return t.e_network;
+    if network && code == ErrorCode::ValidationRequired {
+        if applied != oncl_pki::key::AppliedState::NotApplied {
+            return t.e_after_key;
+        }
+        if family == Family::Extend {
+            return t.e_network;
+        }
     }
     code_text(t, code, network)
 }
@@ -777,6 +784,7 @@ struct Texts {
     e_key: &'static str,
     e_io: &'static str,
     e_network: &'static str,
+    e_after_key: &'static str,
     e_invalid: &'static str,
     e_limit: &'static str,
     e_deadline: &'static str,
@@ -907,6 +915,7 @@ static RU: Texts = Texts {
     e_key: "ключ недоступен",
     e_io: "файл не удалось прочитать или записать",
     e_network: "служба не ответила: нет сети, адрес не разрешён или служба отказала",
+    e_after_key: "подпись не удалось завершить или проверить после применения ключа: служба времени ответила тем, что не прошло проверки, или не ответила",
     e_invalid: "файл не распознан или не подходит для этого действия",
     e_limit: "превышены допустимые пределы",
     e_deadline: "время операции истекло",
@@ -1027,6 +1036,7 @@ static KK: Texts = Texts {
     e_key: "кілт қолжетімсіз",
     e_io: "файлды оқу немесе жазу мүмкін болмады",
     e_network: "қызмет жауап бермеді: желі жоқ, мекенжайға рұқсат жоқ немесе қызмет бас тартты",
+    e_after_key: "кілт қолданылғаннан кейін қолтаңбаны аяқтау немесе тексеру мүмкін болмады: уақыт қызметі тексеруден өтпейтін жауап берді немесе жауап бермеді",
     e_invalid: "файл танылмады немесе бұл әрекетке жарамсыз",
     e_limit: "рұқсат етілген шектен асты",
     e_deadline: "операция уақыты аяқталды",
@@ -1147,6 +1157,7 @@ static EN: Texts = Texts {
     e_key: "the key is not available",
     e_io: "the file could not be read or written",
     e_network: "a service did not answer: no network, the address is not allowed, or the service refused",
+    e_after_key: "the signature could not be completed or checked after the key was applied: the time service answered with something that did not pass checks, or did not answer",
     e_invalid: "the file is not recognised or does not fit this action",
     e_limit: "over the permitted limits",
     e_deadline: "the operation timed out",

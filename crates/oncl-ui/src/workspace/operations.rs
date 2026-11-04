@@ -2548,19 +2548,19 @@ mod tests {
         for (locale, network, file, applied) in [
             (
                 oncl_flows::Locale::En,
-                "a service did not answer",
+                "did not pass checks",
                 "could not be read or written",
                 "the key was applied",
             ),
             (
                 oncl_flows::Locale::Ru,
-                "служба не ответила",
+                "не прошло проверки",
                 "не удалось прочитать",
                 "ключ был применён",
             ),
             (
                 oncl_flows::Locale::Kk,
-                "қызмет жауап бермеді",
+                "тексеруден өтпейтін",
                 "оқу немесе жазу",
                 "кілт қолданылды",
             ),
@@ -2570,7 +2570,25 @@ mod tests {
                 row.contains(network) && row.contains(applied),
                 "{locale:?}: {row}"
             );
+            // A token that arrived and failed its checks is not called «a service did not answer».
+            assert!(
+                !row.contains("a service did not answer"),
+                "{locale:?}: {row}"
+            );
+            assert!(!row.contains("служба не ответила") && !row.contains("қызмет жауап бермеді"));
             assert!(!row.contains(file), "{locale:?}: {row}");
+            // A transport failure (Io) of a network family keeps the «did not answer» wording.
+            let mut transport = view.clone();
+            transport.items[0].outcome = Outcome::Failed(ErrorCode::Io);
+            let said = crate::reports::render(locale, &transport).rows[0]
+                .text
+                .clone();
+            assert!(
+                said.contains("a service did not answer")
+                    || said.contains("служба не ответила")
+                    || said.contains("қызмет жауап бермеді"),
+                "{locale:?}: {said}"
+            );
             // The same Io failure of a pure-file family keeps the file wording.
             let mut local = view.clone();
             local.network = false;
@@ -2585,5 +2603,68 @@ mod tests {
         assert!(spec(SignFormat::Cades(Level::T)).uses_network());
         assert!(!spec(SignFormat::Cades(Level::B)).uses_network());
         assert!(!spec(SignFormat::Cms).uses_network());
+    }
+
+    /// C2: extending with a time stamp service that does not answer returns ValidationRequired
+    /// with no key use; it is worded as the service (not the certificate), has no key clause, and
+    /// the file is not written, in all three languages.
+    #[test]
+    fn an_extend_with_an_unreachable_time_service_is_worded_as_the_service() {
+        let w = world();
+        let text = write(&w, "doc.txt", b"the document");
+        signed(
+            "cades-b",
+            &w,
+            &spec(SignFormat::Cades(Level::B)),
+            std::slice::from_ref(&text),
+        );
+        let (engine, _) = engine_without_tsa(&w);
+        let view = run_tool(
+            &engine,
+            &ToolSpec::Extend(ExtendFormat::Cms(Level::T), Evidence::default()),
+            &[Document {
+                path: w.dir.path().join("doc.txt.p7s"),
+                second: Some(text),
+            }],
+            &Destination::Beside,
+            NOW,
+            &control(),
+        )
+        .unwrap();
+        assert!(view.network);
+        assert!(
+            matches!(
+                view.items[0].outcome,
+                Outcome::Failed(ErrorCode::ValidationRequired)
+            ),
+            "{view:?}"
+        );
+        assert_eq!(view.items[0].applied, AppliedState::NotApplied);
+        for (locale, said, certificate) in [
+            (
+                oncl_flows::Locale::En,
+                "a service did not answer",
+                "failed its checks",
+            ),
+            (
+                oncl_flows::Locale::Ru,
+                "служба не ответила",
+                "не прошёл проверку",
+            ),
+            (
+                oncl_flows::Locale::Kk,
+                "қызмет жауап бермеді",
+                "тексеруден өтпеді",
+            ),
+        ] {
+            let row = crate::reports::render(locale, &view).rows[0].text.clone();
+            assert!(row.contains(said), "{locale:?}: {row}");
+            assert!(!row.contains(certificate), "{locale:?}: {row}");
+            assert!(
+                !row.contains("key") && !row.contains("ключ") && !row.contains("кілт"),
+                "{row}"
+            );
+        }
+        assert!(!w.dir.path().join("doc.txt.extended.p7s").exists());
     }
 }

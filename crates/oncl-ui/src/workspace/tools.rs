@@ -1409,11 +1409,19 @@ mod tests {
         std::fs::write(&text, b"stamp me").unwrap();
         select(&p, TIMESTAMP);
         add(&p, &text, None);
-        run_page(&p);
-        assert_eq!(tool(&p).get_report_tone(), 2, "a failure");
-        let rows = rows(&p);
-        assert!(rows[0].contains("a service did not answer"), "{rows:?}");
-        assert!(!rows[0].contains("read or written"), "{rows:?}");
-        assert!(!p.w.dir.path().join("doc.txt.tst").exists());
+        for (locale, said) in [
+            (oncl_flows::Locale::En, "a service did not answer"),
+            (oncl_flows::Locale::Ru, "служба не ответила"),
+            (oncl_flows::Locale::Kk, "қызмет жауап бермеді"),
+        ] {
+            p.ws.locale.set(locale);
+            tool(&p).invoke_clear_docs();
+            add(&p, &text, None);
+            run_page(&p);
+            assert_eq!(tool(&p).get_report_tone(), 2, "{locale:?}: a failure");
+            let rows = rows(&p);
+            assert!(rows[0].contains(said), "{locale:?}: {rows:?}");
+            assert!(!p.w.dir.path().join("doc.txt.tst").exists());
+        }
     }
 }
