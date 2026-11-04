@@ -100,6 +100,31 @@ pub struct Pki {
     pub rsa: KeyEntry,
     pub gost: KeyEntry,
 }
+/// A GOST-2015 trust root (the committed synthetic root) that issues every
+/// certificate directly: GOST and RSA leaves, a GOST OCSP responder and a GOST
+/// TSA. Only the issuing certificates are re-signed; every key is a committed
+/// synthetic fixture.
+pub fn pki_gost_root(origin: &str) -> Pki {
+    let root = fixture("root-gost2015.key");
+    let reissue = |template: &str, serial: u8, with_aia: bool| {
+        let mut entry = fixture(template);
+        let mut spec = TestCertSpec::from_cert(&entry.cert);
+        strip(&mut spec);
+        spec.serial = vec![0x72, 4, serial];
+        if with_aia {
+            spec.extensions.push(aia(&format!("{origin}/ocsp")));
+        }
+        entry.cert = issue_cert(&root, spec);
+        entry
+    };
+    Pki {
+        tsa: reissue("tsa-gost2015", 2, true),
+        responder: reissue("ocsp-gost2015", 3, false),
+        rsa: reissue("user-rsa-sign", 10, true),
+        gost: reissue("user-gost2015-sign", 11, true),
+        root,
+    }
+}
 pub fn pki(origin: &str) -> Pki {
     let mut root = fixture("user-rsa-sign");
     root.key = keygen::generate(KeySpec::RsaSha256(2048)).unwrap();
@@ -359,13 +384,25 @@ pub fn world() -> World {
 }
 /// `host` names the PKI origin in certificate AIA URLs (for DNS-pin tests).
 pub fn world_host(host: Option<&str>) -> World {
+    world_with(host, false)
+}
+/// Same loopback services, but the whole chain (certificates, OCSP responder,
+/// TSA) is rooted in a GOST-2015 key.
+pub fn world_gost() -> World {
+    world_with(None, true)
+}
+fn world_with(host: Option<&str>, gost_root: bool) -> World {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let origin = match host {
         Some(host) => format!("http://{host}:{}", address.port()),
         None => format!("http://{address}"),
     };
-    let pki = pki(&origin);
+    let pki = if gost_root {
+        pki_gost_root(&origin)
+    } else {
+        pki(&origin)
+    };
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root.cer");
     std::fs::write(&root, pki.root.cert.to_der().unwrap()).unwrap();
