@@ -320,9 +320,9 @@ fn responses() -> Value {
         "503":error("Capacity, audit or required host configuration unavailable; nothing was applied",ErrorCode::CapacityExceeded),
         "504":error("The original operation deadline expired",ErrorCode::DeadlineExceeded)})
 }
-/// The complete OpenAPI document served at `GET /v1/openapi.json`.
 /// Resource profile text shown in the `sign`/`extend` operation descriptions.
-const LT_PROFILE: &str = "cades_lt/lta, pades_lt/lta (sign and extend) and xades_lt/lta (extend) require `evidence` with at least one `ocsp` or `crl` part (400 before any key/secret is read otherwise). xades_lt/lta are produced by signing xades_t and then a keyless extend (the SDK XML sign request carries no status material). pades_lt/lta need the PDF update plan's memory (oncl_pdf::budget::plan_memory plus a fixed host margin) available in the operation scope (413 MemoryLimit before any key use otherwise). xades_t/xades_legacy_t need a host TSA policy OID (503 MissingConfiguration).";
+const LT_PROFILE: &str = "cades_lt/lta, pades_lt/lta (sign and extend) and xades_lt/lta (extend) require `evidence` with at least one `ocsp` or `crl` part (400 before any key/secret is read otherwise). xades_lt/lta are produced by signing xades_t and then a keyless extend (the SDK XML sign request carries no status material). pades_lt/lta need the PDF update plan's memory and metadata (oncl_pdf::budget::plan_memory/plan_metadata from the document's existing signatures, the evidence sizes and the trust set, plus named host reservations; about 380 MiB at default limits with small evidence) available in the operation scope: 413 MemoryLimit/MetadataLimit before any audit BEGIN otherwise. Empirically sufficient for the tested fixtures and evidence shapes, not a proof for every PDF. xades_t/xades_legacy_t need a host TSA policy OID (503 MissingConfiguration).";
+/// The complete OpenAPI document served at `GET /v1/openapi.json`.
 pub fn document() -> Value {
     json!({
         "openapi":"3.1.0",

@@ -204,7 +204,8 @@ optional `body_id`), `xml_legacy` (Kalkan wire layout; `element`/`xpath_parent` 
 `signature_method`/`digest_method` URIs, which must fit the key; the Kalkan default
 follows the certificate's *signature* algorithm) and `xades_legacy_b`. `verify` accepts
 `wsse`. Unsupported field/profile combinations are refused from metadata alone (400)
-before any key, secret or document is touched. `xades_legacy_t` is not available.
+before any key, secret or document is touched. `xades_legacy_t` signs with a host TSA
+(policy OID required, see below).
 
 `plugin` calls an operator-installed plugin operation through `Engine::plugin_call`
 with the original admitted context. Installation is not authority: each
@@ -252,8 +253,8 @@ consume the bounded binding table.
 (at most 64 public DER parts of up to 1 MiB each). LT/LTA levels need caller-acquired
 OCSP/CRL material (`PAdES extension requires acquired status material` is a typed
 `InvalidRequest` failure otherwise); evidence is never a trust anchor. PAdES-LT/LTA
-and large evidence need more than the default 256 MiB per-operation memory budget on
-this build (a `MemoryLimit` after key use is reported as `Applied`).
+and large evidence need more than the default per-operation memory and metadata budgets;
+that need is refused before the audit BEGIN (see "Resource and material profiles").
 
 Rights are checked in this order: token action, then (before any secret byte is
 reserved or read) the per-key right, the global/token inline right and the
@@ -278,27 +279,43 @@ progress traffic.
 - `cades_lt/lta` and `pades_lt/lta` (sign and `extend`) and `xades_lt/lta` (extend) need
   caller-acquired status material: `evidence` with at least one `ocsp` or `crl` part,
   otherwise 400 before any secret, key or document is touched.
-- XAdES LT/LTA are produced as **sign `xades_t`, then keyless `extend` to `xades_lt`, then
-  `xades_lta`** (the SDK XML sign request carries no status material, so there is no
-  `xades_lt/lta` sign profile). The chain is exercised over HTTP with the lxml oracle;
+- XAdES LT/LTA are available only as **sign `xades_t`, then keyless `extend` to `xades_lt`,
+  then `xades_lta`**: there is no `xades_lt/lta` sign profile (the SDK XML sign request
+  carries no status material). The chain is exercised over HTTP with the lxml oracle;
   extension never uses a key.
-- `pades_lt/lta` need the update plan's memory. The need is computed by
-  `oncl_pdf::budget::plan_memory` (the same functions the PDF reader, update plan and
-  signer reserve with, plus a fixed host working margin) and probed against the request's
-  ORIGINAL scope after secret intake; if it does not fit: 413 `MemoryLimit`,
-  `NotApplied`, before the audit BEGIN. At the default 1 MiB object limit this is about
-  330 MiB, so the default 256 MiB `memory_per_operation` refuses PAdES LT/LTA. A sweep
-  over memory profiles shows requests are either refused up front or complete; none
-  writes a BEGIN and then fails for memory. Shared-budget exhaustion by other requests at
-  runtime can still fail after use and is then reported `Applied`.
+- `pades_lt/lta` need the update plan's memory and metadata. The need is computed from
+  `oncl_pdf::budget::plan_memory` / `plan_metadata` (the reservation formulas the PDF
+  reader, update plan, signer and verify view use) and from inputs known before the key
+  opens: the PDF's existing signature contents, the request's evidence part sizes and the
+  operator trust-set size, plus named host reservations (4 I/O chunk buffers, 64 KiB
+  metadata, one evidence copy). It is probed against the request's ORIGINAL scope after
+  the body is taken; if it does not fit: 413 `MemoryLimit` or `MetadataLimit`,
+  `NotApplied`, before the audit BEGIN. At the default limits and the small test evidence
+  the threshold is about 380 MiB, so the default 256 MiB `memory_per_operation` refuses
+  PAdES LT/LTA; several MiB of CRL evidence needs on the order of 600 MiB and 72 MiB of
+  metadata. This is **empirically sufficient for the tested fixtures and evidence shapes**
+  (sweeps with 1 MiB steps near the transitions never produced a BEGIN followed by a
+  resource failure); it is not a proof for every PDF or evidence shape. Shared-budget
+  exhaustion by other requests at runtime, or an input shape outside the tested ones, can
+  still fail after use; such a failure is reported with its real `Applied`/`Unknown` state.
+  A PDF the PDF layer cannot read (malformed, or a non-PAdES signature SubFilter) is a
+  400 `InvalidRequest` before the BEGIN; a document that would exceed the signature-count
+  limit with the new signature is 413 `InputLimit`; deadline, cancellation and capacity
+  keep their own typed codes in the preflight.
+- Signing PAdES B/T/LT/LTA onto a PDF that already carries valid signatures is supported
+  (old revisions stay byte-identical; the new signature must itself reach the requested
+  level; LT/LTA also elevate the old signers, so the evidence must validate them too). A
+  document with an already-invalid signature is refused 400 before any key use.
 - `xades_t` / `xades_legacy_t` need a host TSA with a policy OID (`[pki.tsa] policy`),
   because the SDK binds the TSA policy for XAdES T/LT/LTA; without it: 503
   `MissingConfiguration`, `NotApplied`, no BEGIN. CAdES/PAdES T accept a TSA without
   policy.
 
-Authorization is re-run after the whole body has been taken and immediately before
-private use: a token revoked, a key right removed or a policy generation changed during
-a long upload gets 403 without BEGIN or key use.
+Authorization is re-run as a pre-execution check after the whole body has been taken,
+before the worker starts private use: a token revoked, a key right removed or a policy
+generation changed during a long upload gets 403 without BEGIN or key use. A change made
+after that check (while the operation is already running) is not observed: the residual
+window is the execution itself, which the audit BEGIN/FINAL records.
 
 ## Plugin configuration reference
 
