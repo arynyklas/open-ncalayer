@@ -48,3 +48,8 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Tests only: a ConPTY pseudoconsole is the real terminal of the no-echo process tests
+# (same crate and version as the runtime dependency above).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }

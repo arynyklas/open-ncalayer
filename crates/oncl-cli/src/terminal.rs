@@ -29,6 +29,11 @@ fn pop(bytes: &mut [u8; MAX], len: &mut usize) {
     bytes[start..*len].zeroize();
     *len = start;
 }
+/// `ERROR_OPERATION_ABORTED`: what `ReadConsoleW` reports when a control event
+/// interrupts it.
+fn is_console_abort(error: &io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(995)
+}
 pub fn read_bounded(
     reader: &mut impl Read,
     ctx: &mut OperationContext,
@@ -47,6 +52,10 @@ pub fn read_bounded(
         ctx.resources().checkpoint()?;
         let count = match read {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // Ctrl-C/Ctrl-Break aborts a console read before the handler thread
+            // is guaranteed to have latched the control; the abort itself is the
+            // cancellation, not an I/O failure.
+            Err(error) if is_console_abort(&error) => return Err(ProcessingError::Cancelled.into()),
             result => result.map_err(ProcessingError::from)?,
         };
         if count == 0 {
@@ -185,10 +194,10 @@ mod platform {
                 return Err(io::Error::last_os_error());
             }
             if count != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal ended",
-                ));
+                // Ctrl-C/Ctrl-Break with processed input completes the read with
+                // zero units (observed on a ConPTY): report it as the console
+                // abort it is, never as a terminal I/O failure.
+                return Err(io::Error::from_raw_os_error(995));
             }
             Ok(unit[0])
         }

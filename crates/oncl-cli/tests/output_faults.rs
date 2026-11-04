@@ -92,7 +92,7 @@ fn fragmented_slow_stdout_reads_deliver_every_byte_exactly() {
             break;
         }
         received.extend_from_slice(&buffer[..n]);
-        if turn % 97 == 0 {
+        if turn.is_multiple_of(97) {
             std::thread::sleep(Duration::from_millis(3));
         }
     }
