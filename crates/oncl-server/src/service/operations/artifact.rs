@@ -140,6 +140,14 @@ impl ArtifactWriter {
         context: &mut OperationContext,
     ) -> Result<Self, ProcessingError> {
         owner.check_context(context)?;
+        Self::open(store, owner)
+    }
+    /// For a copy made while the original context is lent to the SDK (batch output
+    /// delivery): ownership is still proven by the root's own operation identity.
+    pub(super) fn open(
+        store: Arc<ArtifactStore>,
+        owner: Arc<OperationOutput>,
+    ) -> Result<Self, ProcessingError> {
         owner.delivery().checkpoint()?;
         let scope = owner.scope().shared_view();
         let metadata = scope.reserve_metadata(std::mem::size_of::<ArtifactState>() as u64 + 256)?;

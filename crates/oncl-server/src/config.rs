@@ -80,10 +80,13 @@ pub enum Permission {
     Inspect,
     Stamp,
     VerifyStamp,
+    /// Right to submit `POST /v1/batch`; not an SDK action. Each item still needs its
+    /// own action/key permission.
+    Batch,
 }
 impl Permission {
-    fn action(self) -> Action {
-        match self {
+    fn action(self) -> Option<Action> {
+        Some(match self {
             Self::Hash => Action::Hash,
             Self::Sign => Action::Sign,
             Self::SignDigest => Action::SignDigest,
@@ -93,7 +96,8 @@ impl Permission {
             Self::Inspect => Action::Inspect,
             Self::Stamp => Action::Stamp,
             Self::VerifyStamp => Action::VerifyStamp,
-        }
+            Self::Batch => return None,
+        })
     }
 }
 #[derive(Clone, Deserialize)]
@@ -115,9 +119,10 @@ impl TokenConfig {
         Ok(TokenRecord::new(
             &self.id,
             TokenVerifier::parse(&self.verifier)?,
-            self.actions.iter().map(|p| p.action()).collect(),
+            self.actions.iter().filter_map(|p| p.action()).collect(),
             self.keys.clone(),
         )?
+        .with_batch(self.actions.iter().any(|p| matches!(p, Permission::Batch)))
         .with_inline_pkcs12(self.inline_pkcs12)
         .with_metadata_aliases(self.metadata_aliases.clone()))
     }

@@ -431,6 +431,20 @@ impl Running {
         content_type: &str,
         body: Vec<u8>,
     ) -> (u16, String, Vec<u8>) {
+        self.post_path_as(token, "/v1/operations", content_type, body)
+            .await
+    }
+    pub async fn post_batch(&self, content_type: &str, body: Vec<u8>) -> (u16, String, Vec<u8>) {
+        self.post_path_as(self.token.as_str(), "/v1/batch", content_type, body)
+            .await
+    }
+    pub async fn post_path_as(
+        &self,
+        token: &str,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (u16, String, Vec<u8>) {
         use http_body_util::{BodyExt, Full};
         let stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
         let (mut sender, connection) =
@@ -442,7 +456,7 @@ impl Running {
         });
         let request = hyper::Request::builder()
             .method("POST")
-            .uri("/v1/operations")
+            .uri(path)
             .header("host", self.address.to_string())
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", content_type)

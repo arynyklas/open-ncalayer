@@ -22,6 +22,8 @@ pub trait HashHost: Send + Sync + 'static {
     fn hash(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
     fn health(&self, metadata: RequestMetadata) -> ResponseFuture;
     fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
+    /// Closed batch with explicit host approval (`POST /v1/batch`).
+    fn batch(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
     /// The static contract description; authenticated like health.
     fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture;
 }
@@ -29,6 +31,7 @@ pub fn router(host: Arc<dyn HashHost>) -> Router {
     Router::new()
         .route("/v1/hash", post(hash))
         .route("/v1/operations", post(operations))
+        .route("/v1/batch", post(batch))
         .route("/health", on(MethodFilter::GET, health))
         .route("/v1/openapi.json", on(MethodFilter::GET, openapi))
         .fallback(not_found)
@@ -57,6 +60,7 @@ async fn target_boundary(request: Request<Body>, next: Next) -> Response {
     let expected = match request.uri().path() {
         "/v1/hash" => Some((Method::POST, "POST")),
         "/v1/operations" => Some((Method::POST, "POST")),
+        "/v1/batch" => Some((Method::POST, "POST")),
         "/health" | "/v1/openapi.json" => Some((Method::GET, "GET")),
         _ => None,
     };
@@ -130,6 +134,23 @@ async fn operations(
     let content_length = metadata(peer, &request, "operations")?;
     let (parts, body) = request.into_parts();
     host.operations(
+        RequestMetadata {
+            peer,
+            headers: parts.headers,
+            content_length,
+        },
+        body,
+    )
+    .await
+}
+async fn batch(
+    State(host): State<Arc<dyn HashHost>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let content_length = metadata(peer, &request, "batch")?;
+    let (parts, body) = request.into_parts();
+    host.batch(
         RequestMetadata {
             peer,
             headers: parts.headers,

@@ -100,6 +100,7 @@ pub struct TokenRecord {
     label: AuditLabel,
     inline_pkcs12: bool,
     metadata_aliases: Vec<String>,
+    batch: bool,
 }
 impl TokenRecord {
     pub fn new(
@@ -127,7 +128,14 @@ impl TokenRecord {
             label: AuditLabel::new(hash.as_ref()[..16].try_into().expect("digest length")),
             inline_pkcs12: false,
             metadata_aliases: Vec::new(),
+            batch: false,
         })
+    }
+    /// The separate right to submit a closed batch (`POST /v1/batch`); every item
+    /// still needs its own action/key right.
+    pub fn with_batch(mut self, allowed: bool) -> Self {
+        self.batch = allowed;
+        self
     }
     pub fn with_metadata_aliases(mut self, aliases: Vec<String>) -> Self {
         self.metadata_aliases = aliases;
@@ -274,6 +282,21 @@ impl AccessPolicy {
             || principal.generation != state.generation
             || !state.records.contains_key(&principal.id)
         {
+            return Err(denied());
+        }
+        Ok(())
+    }
+    /// The separate batch right of the live, current-generation principal. It never
+    /// replaces the per-item action/key rights, which are checked for every item.
+    pub fn authorize_batch(&self, principal: &Principal) -> io::Result<()> {
+        let state = self.state.read().map_err(|_| denied())?;
+        if !Arc::ptr_eq(&principal.owner, &self.identity)
+            || principal.generation != state.generation
+        {
+            return Err(denied());
+        }
+        let record = state.records.get(&principal.id).ok_or_else(denied)?;
+        if !record.batch {
             return Err(denied());
         }
         Ok(())

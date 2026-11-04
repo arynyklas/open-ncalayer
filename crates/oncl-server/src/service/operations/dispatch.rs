@@ -1,3 +1,5 @@
+pub(super) mod requests;
+pub(super) mod results;
 use super::*;
 use crate::auth::{AccessPolicy, Principal};
 use oncl_api::dto::{
@@ -158,6 +160,32 @@ pub(super) fn secret_kinds(metadata: &OperationMetadata) -> HashMap<&str, Secret
         .iter()
         .flat_map(|item| secret_refs(&item.operation))
         .collect()
+}
+/// The one rights function of both public routes. A batch additionally needs the
+/// token's separate batch right and carries no plugin item (the SDK closed batch has
+/// no plugin operation); every item still passes the per-item rights of `precheck`
+/// for ALL items before any document or secret byte is read.
+pub(super) fn route_precheck(
+    route: super::Route,
+    metadata: &OperationMetadata,
+    policy: &AccessPolicy,
+    principal: &Principal,
+    inline_enabled: bool,
+    host: &super::HostPolicy,
+) -> Result<(), ApiError> {
+    if route == super::Route::Batch {
+        policy
+            .authorize_batch(principal)
+            .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+        if metadata
+            .items
+            .iter()
+            .any(|item| matches!(item.operation, Operation::Plugin { .. }))
+        {
+            return Err(invalid_request());
+        }
+    }
+    precheck(metadata, policy, principal, inline_enabled, host)
 }
 /// Rights that do not depend on received secret bytes. Runs right after the
 /// bounded metadata parse and before any secret byte is reserved or read.
@@ -379,7 +407,7 @@ pub(super) fn evidence_limits(limits: &oncl_pki::resource::ResourceLimits) -> Ev
         max_coverage_bytes: limits.input_bytes,
     }
 }
-fn verify_request(
+pub(super) fn verify_request(
     profile: VerifyProfile,
     soap: Option<SoapKind>,
     limits: EvidenceLimits,
@@ -564,21 +592,21 @@ fn ades_level(kind: SignKind) -> Option<AdesLevel> {
     }
 }
 /// Caller-acquired public status/chain evidence. It is never a trust anchor.
-struct Evidence {
-    certificates: Vec<oncl_pki::cert::Certificate>,
+pub(super) struct Evidence {
+    pub(super) certificates: Vec<oncl_pki::cert::Certificate>,
     ocsp: Vec<Vec<u8>>,
     crls: Vec<Vec<u8>>,
     _reservations: Vec<ResourceReservation>,
 }
 impl Evidence {
-    fn slices(&self) -> (Vec<&[u8]>, Vec<&[u8]>) {
+    pub(super) fn slices(&self) -> (Vec<&[u8]>, Vec<&[u8]>) {
         (
             self.ocsp.iter().map(Vec::as_slice).collect(),
             self.crls.iter().map(Vec::as_slice).collect(),
         )
     }
 }
-fn load_evidence(
+pub(super) fn load_evidence(
     env: &mut Env<'_>,
     refs: &[oncl_api::dto::EvidenceRef],
     ctx: &mut OperationContext,
@@ -829,7 +857,7 @@ fn extend_level(kind: ExtendKind) -> (AdesLevel, Format) {
 }
 /// The sign/extend result is always a new SDK-staged artifact; the engine
 /// charges its output once and a failed operation poisons it.
-fn staged_output(
+pub(super) fn staged_output(
     env: &Env<'_>,
     ctx: &mut OperationContext,
 ) -> Result<oncl_pki::io::StagedArtifact, OperationError> {
@@ -838,7 +866,7 @@ fn staged_output(
         .stage(ctx.resources())
         .map_err(Into::into)
 }
-fn key_requests<'a>(
+pub(super) fn key_requests<'a>(
     keys: &[KeyRef],
     selectors: &'a [KeySelector],
     secrets: &'a intake::Secrets,
@@ -860,7 +888,7 @@ fn key_requests<'a>(
     Ok(requests)
 }
 /// Bounded in-memory copy of a public document (JOSE APIs borrow slices).
-fn read_bytes(
+pub(super) fn read_bytes(
     document: &mut intake::Document,
     ctx: &mut OperationContext,
     maximum: usize,
@@ -887,7 +915,10 @@ fn read_bytes(
     }
     Ok((bytes, reservation))
 }
-fn jose_profile(format: oncl_api::dto::JwsFormat, detached: bool) -> oncl_core::jose::JoseProfile {
+pub(super) fn jose_profile(
+    format: oncl_api::dto::JwsFormat,
+    detached: bool,
+) -> oncl_core::jose::JoseProfile {
     use oncl_core::jose::JwsSerialization as S;
     oncl_core::jose::JoseProfile::new(
         match format {
@@ -910,7 +941,7 @@ fn jws_signers(report: &oncl_core::jose::JwsVerificationReport) -> Vec<JwsSigner
         })
         .collect()
 }
-fn certificate(
+pub(super) fn certificate(
     env: &mut Env<'_>,
     name: Option<String>,
     ctx: &mut OperationContext,
@@ -976,16 +1007,9 @@ pub(super) fn run(
             let mut reader = document.reader(ctx.resources())?;
             let report = env.engine.hash(algorithm(hash), reader.source(), ctx)?;
             reader.finish()?;
-            let projection = ctx.resources().reserve_metadata(512)?;
-            Ok((
-                OperationResult::Hash {
-                    algorithm: hash,
-                    digest: crate::auth::encode(report.digest.as_bytes()),
-                    bytes_in,
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::hash(hash, &report, bytes_in);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::Verify {
             profile,
@@ -1011,29 +1035,9 @@ pub(super) fn run(
             if let Some(reader) = &mut detached_reader {
                 reader.finish()?;
             }
-            // The host owns this actual scoped report until its bounded wire
-            // projection has been serialized under the same context reservation.
-            let projection = ctx.resources().reserve_metadata(
-                (report.signers.len() as u64)
-                    .checked_mul(8192)
-                    .and_then(|n| n.checked_add(512))
-                    .ok_or(ProcessingError::MetadataLimit)?,
-            )?;
-            Ok((
-                OperationResult::Verification {
-                    profile,
-                    verdict: verdict(report.verdict),
-                    policy: match report.policy {
-                        ValidationPolicy::StrictOnline => "StrictOnline",
-                        ValidationPolicy::OfflineReport => "OfflineReport",
-                        ValidationPolicy::NcalayerCompatibility => "NcalayerCompatibility",
-                    },
-                    checked_at_unix: report.checked_at.unix_timestamp(),
-                    signers: report.signers.iter().map(signer).collect(),
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::verification(profile, &report)?;
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::Extract { input } => {
             let output = output.ok_or(OperationError::MissingTemporaryStore)?;
@@ -1047,15 +1051,9 @@ pub(super) fn run(
             let report = env.engine.extract(reader.source(), &mut writer, ctx)?;
             reader.finish()?;
             let artifact = writer.finish(report.bytes_written)?;
-            let projection = ctx.resources().reserve_metadata(512)?;
-            Ok((
-                OperationResult::Extraction {
-                    artifact: Some(output.id),
-                    bytes_written: report.bytes_written,
-                },
-                projection,
-                Some(artifact),
-            ))
+            let (result, bytes) = results::extraction(Some(output.id), &report);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, Some(artifact)))
         }
         Operation::Sign {
             profile,
@@ -1090,7 +1088,7 @@ pub(super) fn run(
                         .transpose()?,
                 });
             }
-            let mut requests: Vec<KeyRequest<'_>> = selectors
+            let requests: Vec<KeyRequest<'_>> = selectors
                 .iter()
                 .zip(passwords)
                 .map(|(selector, password)| KeyRequest::new(selector, password))
@@ -1111,118 +1109,28 @@ pub(super) fn run(
                 .as_mut()
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
-            let level = ades_level(profile);
-            let request = if matches!(profile, SignKind::Wsse) {
-                if requests.len() != 1 {
-                    return Err(ProcessingError::InvalidInput("WSSE signing takes one key").into());
-                }
-                let key = requests.remove(0);
-                let mut wsse = oncl_xml::wsse::SourceWsseSignProfile::default();
-                wsse.verification.soap = soap_version(soap);
-                if let Some(id) = body_id {
-                    wsse.body_id = id;
-                }
-                oncl_core::SignRequest::wsse(key, wsse)
-            } else if matches!(profile, SignKind::XmlLegacy) {
-                if requests.len() != 1 {
-                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
-                }
-                let key = requests.remove(0);
-                let mut spec =
-                    oncl_xml::XmlSignSpec::kalkan(element.as_deref(), xpath_parent.as_deref());
-                spec.signature_method = signature_method.as_deref();
-                spec.digest_method = digest_method.as_deref();
-                oncl_core::SignRequest::xml_legacy(key, spec)
-            } else if matches!(profile, SignKind::XadesLegacyB | SignKind::XadesLegacyT) {
-                if requests.len() != 1 {
-                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
-                }
-                let key = requests.remove(0);
-                let timestamped = matches!(profile, SignKind::XadesLegacyT);
-                let spec = oncl_xml::xades::XadesSpec {
-                    level: if timestamped {
-                        oncl_xml::xades::XadesLevel::T
-                    } else {
-                        oncl_xml::xades::XadesLevel::B
-                    },
-                    tsa: if timestamped {
-                        env.host.tsa.clone()
-                    } else {
-                        None
-                    },
-                    chain: evidence.certificates.clone(),
-                    signature_method: signature_method.as_deref(),
-                    digest_method: digest_method.as_deref(),
-                };
-                oncl_core::SignRequest::xades_legacy(key, spec)
-            } else if is_xml(profile) {
-                if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
-                    return Err(
-                        ProcessingError::InvalidInput("XML signing is enveloped create").into(),
-                    );
-                }
-                if requests.len() != 1 {
-                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
-                }
-                let key = requests.remove(0);
-                let xml = oncl_xml::XmlSignProfile {
-                    target: target.as_deref(),
-                    parent: parent.as_deref(),
-                    signature_id: signature_id.as_deref(),
-                    ..oncl_xml::XmlSignProfile::default()
-                };
-                match level {
-                    None => oncl_core::SignRequest::xml(key, xml),
-                    Some(level) => oncl_core::SignRequest::xades(key, xml, level),
-                }
-            } else if is_pdf(profile) {
-                if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
-                    return Err(ProcessingError::InvalidInput("PDF signing is incremental").into());
-                }
-                if requests.len() != 1 {
-                    return Err(ProcessingError::InvalidInput("PDF signing takes one key").into());
-                }
-                let key = requests.remove(0);
-                let pdf = oncl_pdf::PdfSignProfile::default();
-                match level {
-                    None => oncl_core::SignRequest::pdf(key, pdf),
-                    Some(level) => oncl_core::SignRequest::pades(key, pdf, level, material, limits),
-                }
-            } else {
-                let detached_source = detached_reader.as_mut().map(intake::DocumentReader::source);
-                match (level, mode) {
-                    (None, SignWriteMode::Create) => {
-                        if detached_source.is_some() {
-                            return Err(ProcessingError::InvalidInput(
-                                "create takes no detached input",
-                            )
-                            .into());
-                        }
-                        oncl_core::SignRequest::cms_create(requests, attached)
-                    }
-                    (None, SignWriteMode::Add) => {
-                        oncl_core::SignRequest::cms_add(requests, detached_source)
-                    }
-                    (Some(level), SignWriteMode::Create) => {
-                        if detached_source.is_some() {
-                            return Err(ProcessingError::InvalidInput(
-                                "create takes no detached input",
-                            )
-                            .into());
-                        }
-                        oncl_core::SignRequest::cades_create(
-                            requests, attached, level, material, limits,
-                        )
-                    }
-                    (Some(level), SignWriteMode::Add) => oncl_core::SignRequest::cades_add(
-                        requests,
-                        detached_source,
-                        level,
-                        material,
-                        limits,
-                    ),
-                }
+            let spec = requests::SignSpec {
+                profile,
+                mode,
+                attached,
+                target: target.as_deref(),
+                parent: parent.as_deref(),
+                signature_id: signature_id.as_deref(),
+                soap,
+                body_id: body_id.as_deref(),
+                element: element.as_deref(),
+                xpath_parent: xpath_parent.as_deref(),
+                signature_method: signature_method.as_deref(),
+                digest_method: digest_method.as_deref(),
             };
+            let request = requests::sign_request(
+                &spec,
+                requests,
+                detached_reader.as_mut().map(intake::DocumentReader::source),
+                material,
+                limits,
+                env.host.tsa.as_ref(),
+            )?;
             let report = env
                 .engine
                 .sign_staged(request, reader.source(), &mut staged, ctx)?;
@@ -1232,30 +1140,14 @@ pub(super) fn run(
             if let Some(reader) = &mut detached_reader {
                 after_use(state, reader.finish())?;
             }
-            let signers: Vec<_> = report.signer_states().map(applied).collect();
-            let projection = after_use(
-                state,
-                ctx.resources().reserve_metadata(
-                    (signers.len() as u64 * 16)
-                        .checked_add(512)
-                        .ok_or(ProcessingError::MetadataLimit)?,
-                ),
-            )?;
+            let (result, bytes) =
+                after_use(state, results::signing(profile, Some(sink.id), &report))?;
+            let projection = after_use(state, ctx.resources().reserve_metadata(bytes))?;
             let artifact = after_use(
                 state,
                 super::artifact::FinishedArtifact::from_staged(sink.owner, staged),
             )?;
-            Ok((
-                OperationResult::Signing {
-                    profile,
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in,
-                    bytes_out: report.bytes_out,
-                    signers,
-                },
-                projection,
-                Some(artifact),
-            ))
+            Ok((result, projection, Some(artifact)))
         }
         Operation::Extend {
             profile,
@@ -1264,7 +1156,6 @@ pub(super) fn run(
             evidence,
         } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
-            let (level, format) = extend_level(profile);
             let limits = evidence_limits(ctx.resources().limits());
             let evidence = load_evidence(env, &evidence, ctx)?;
             let (ocsp, crls) = evidence.slices();
@@ -1276,23 +1167,16 @@ pub(super) fn run(
                 .as_mut()
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
-            let mut request = match format {
-                Format::Pdf | Format::Xml if detached_reader.is_some() => {
-                    return Err(ProcessingError::InvalidInput("no detached input").into());
-                }
-                Format::Pdf => oncl_core::ExtendRequest::pdf(level, oncl_pdf::PdfLimits::default()),
-                Format::Xml => oncl_core::ExtendRequest::xml(level),
-                Format::Cms => oncl_core::ExtendRequest::cms(level),
-            }
-            .with_evidence_limits(limits)
-            .with_material(ValidationMaterial {
-                certificates: &evidence.certificates,
-                ocsp: &ocsp,
-                crls: &crls,
-            });
-            if let Some(reader) = &mut detached_reader {
-                request = request.with_detached(reader.source());
-            }
+            let request = requests::extend_request(
+                profile,
+                detached_reader.as_mut().map(intake::DocumentReader::source),
+                ValidationMaterial {
+                    certificates: &evidence.certificates,
+                    ocsp: &ocsp,
+                    crls: &crls,
+                },
+                limits,
+            )?;
             let report = env
                 .engine
                 .extend_staged(&request, reader.source(), &mut staged, ctx)?;
@@ -1301,27 +1185,10 @@ pub(super) fn run(
             if let Some(reader) = &mut detached_reader {
                 reader.finish()?;
             }
-            let verdicts: Vec<&'static str> = report
-                .validation_reports()
-                .map(|reports| reports.iter().map(|r| verdict(r.verdict)).collect())
-                .unwrap_or_default();
-            let projection = ctx.resources().reserve_metadata(
-                (verdicts.len() as u64 * 16)
-                    .checked_add(512)
-                    .ok_or(ProcessingError::MetadataLimit)?,
-            )?;
+            let (result, bytes) = results::extension(profile, Some(sink.id), &report)?;
+            let projection = ctx.resources().reserve_metadata(bytes)?;
             let artifact = super::artifact::FinishedArtifact::from_staged(sink.owner, staged)?;
-            Ok((
-                OperationResult::Extension {
-                    profile,
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in,
-                    bytes_out: report.bytes_out,
-                    verdicts,
-                },
-                projection,
-                Some(artifact),
-            ))
+            Ok((result, projection, Some(artifact)))
         }
         Operation::Inspect { target } => {
             let request_label;
@@ -1371,44 +1238,9 @@ pub(super) fn run(
                     )?
                 }
             };
-            let entries: Vec<InspectedEntry> = report
-                .entries()
-                .iter()
-                .map(|entry| InspectedEntry {
-                    alias: entry.alias().map(str::to_owned),
-                    subject_cn: entry.subject_cn().map(str::to_owned),
-                    serial_hex: entry.serial_hex().map(str::to_owned),
-                    sha256: entry
-                        .fingerprint()
-                        .map(|value| crate::auth::encode(value.as_bytes())),
-                    signature_algorithm_oid: entry.signature_algorithm_oid().map(str::to_owned),
-                    public_key_algorithm_oid: entry.public_key_algorithm_oid().map(str::to_owned),
-                    not_before_unix: entry.not_before().map(|t| t.unix_timestamp()),
-                    not_after_unix: entry.not_after().map(|t| t.unix_timestamp()),
-                })
-                .collect();
-            let cms = report.cms().map(|facts| InspectedCms {
-                detached: facts.detached(),
-                content_len: facts.content_len(),
-                signer_count: facts.signer_count(),
-            });
-            let projection = ctx.resources().reserve_metadata(
-                (entries.len() as u64)
-                    .checked_mul(1024)
-                    .and_then(|n| n.checked_add(512))
-                    .ok_or(ProcessingError::MetadataLimit)?,
-            )?;
-            Ok((
-                OperationResult::Inspection {
-                    target: request_label,
-                    bytes_in: report.bytes_in(),
-                    integrity: report.container_integrity().map(|i| format!("{i:?}")),
-                    entries,
-                    cms,
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::inspection(request_label, &report)?;
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::Stamp { input } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
@@ -1428,19 +1260,10 @@ pub(super) fn run(
                 ctx,
             )?;
             reader.finish()?;
-            let token_len = report.facts().token().len() as u64;
-            let artifact = writer.finish(token_len)?;
-            let projection = ctx.resources().reserve_metadata(1024)?;
-            Ok((
-                OperationResult::Stamping {
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in(),
-                    bytes_out: token_len,
-                    timestamp: timestamp_facts(&report),
-                },
-                projection,
-                Some(artifact),
-            ))
+            let artifact = writer.finish(report.facts().token().len() as u64)?;
+            let (result, bytes) = results::stamping(Some(sink.id), &report);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, Some(artifact)))
         }
         Operation::VerifyStamp {
             token,
@@ -1472,15 +1295,9 @@ pub(super) fn run(
             if let Some(reader) = &mut data_reader {
                 reader.finish()?;
             }
-            let projection = ctx.resources().reserve_metadata(1024)?;
-            Ok((
-                OperationResult::StampVerification {
-                    bytes_in: report.bytes_in(),
-                    timestamp: timestamp_facts(&report),
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::stamp_verification(&report);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::JwsSign {
             serialization,
@@ -1507,23 +1324,9 @@ pub(super) fn run(
                 ctx,
             )?;
             let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
-            let signers = vec![applied(report.applied); report.signer_count];
-            let projection = after_use(
-                report.applied,
-                ctx.resources()
-                    .reserve_metadata(512 + signers.len() as u64 * 16),
-            )?;
-            Ok((
-                OperationResult::Jws {
-                    serialization,
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in,
-                    bytes_out: report.bytes_out,
-                    signers,
-                },
-                projection,
-                Some(artifact),
-            ))
+            let (result, bytes) = results::jose_written(serialization, Some(sink.id), &report);
+            let projection = after_use(report.applied, ctx.resources().reserve_metadata(bytes))?;
+            Ok((result, projection, Some(artifact)))
         }
         Operation::JwsAdd {
             serialization,
@@ -1566,23 +1369,9 @@ pub(super) fn run(
                 ctx,
             )?;
             let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
-            let signers = vec![applied(report.applied); report.signer_count];
-            let projection = after_use(
-                report.applied,
-                ctx.resources()
-                    .reserve_metadata(512 + signers.len() as u64 * 16),
-            )?;
-            Ok((
-                OperationResult::Jws {
-                    serialization,
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in,
-                    bytes_out: report.bytes_out,
-                    signers,
-                },
-                projection,
-                Some(artifact),
-            ))
+            let (result, bytes) = results::jose_written(serialization, Some(sink.id), &report);
+            let projection = after_use(report.applied, ctx.resources().reserve_metadata(bytes))?;
+            Ok((result, projection, Some(artifact)))
         }
         Operation::JwtEncode { input, key } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
@@ -1600,23 +1389,10 @@ pub(super) fn run(
                 .engine
                 .jwt_encode(requests.remove(0), &claims, &mut writer, ctx)?;
             let artifact = after_use(report.applied, writer.finish(report.bytes_out))?;
-            let signers = vec![applied(report.applied); report.signer_count];
-            let projection = after_use(
-                report.applied,
-                ctx.resources()
-                    .reserve_metadata(512 + signers.len() as u64 * 16),
-            )?;
-            Ok((
-                OperationResult::Jws {
-                    serialization: oncl_api::dto::JwsFormat::Compact,
-                    artifact: Some(sink.id),
-                    bytes_in: report.bytes_in,
-                    bytes_out: report.bytes_out,
-                    signers,
-                },
-                projection,
-                Some(artifact),
-            ))
+            let (result, bytes) =
+                results::jose_written(oncl_api::dto::JwsFormat::Compact, Some(sink.id), &report);
+            let projection = after_use(report.applied, ctx.resources().reserve_metadata(bytes))?;
+            Ok((result, projection, Some(artifact)))
         }
         Operation::JwsVerify {
             serialization,
@@ -1647,41 +1423,18 @@ pub(super) fn run(
                 payload.as_ref().map(|(b, _)| b.as_slice()),
                 ctx,
             )?;
-            let signers = jws_signers(&report);
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + signers.len() as u64 * 8192)?;
-            Ok((
-                OperationResult::JwsVerification {
-                    verdict: verdict(report.verdict()),
-                    policy: policy_name(report.policy()),
-                    checked_at_unix: report.checked_at().unix_timestamp(),
-                    signers,
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::jws_verification(&report);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::JwtDecode { input } => {
             let mut document = env.documents.take(&input)?;
             let (token, _token) =
                 read_bytes(&mut document, ctx, oncl_core::jose::MAX_CLAIMS_BYTES)?;
             let decoded = env.engine.jwt_decode_unverified(&token, ctx)?;
-            let claims = String::from_utf8_lossy(decoded.payload()).into_owned();
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + claims.len() as u64)?;
-            Ok((
-                OperationResult::JwtDecoded {
-                    verified: decoded.is_verified(),
-                    issuer: decoded.issuer().map(str::to_owned),
-                    audience: decoded.audience().map(str::to_owned).collect(),
-                    expiration_unix: decoded.expiration(),
-                    claims,
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::jwt_decoded(&decoded);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::JwtVerify {
             input,
@@ -1699,29 +1452,9 @@ pub(super) fn run(
             let report = env
                 .engine
                 .jwt_verify(certificate.as_ref(), &token, &policy, ctx)?;
-            let signers = jws_signers(report.jws());
-            let claims = String::from_utf8_lossy(report.jws().payload()).into_owned();
-            let projection = ctx
-                .resources()
-                .reserve_metadata(512 + claims.len() as u64 + signers.len() as u64 * 8192)?;
-            Ok((
-                OperationResult::JwtVerification {
-                    verdict: verdict(report.verdict()),
-                    signature_verdict: verdict(report.jws().verdict()),
-                    claims_verdict: verdict(report.claims().verdict()),
-                    claim_failures: report
-                        .claims()
-                        .failures()
-                        .iter()
-                        .map(|f| format!("{f:?}"))
-                        .collect(),
-                    checked_at_unix: report.claims().checked_at(),
-                    signers,
-                    claims,
-                },
-                projection,
-                None,
-            ))
+            let (result, bytes) = results::jwt_verification(&report);
+            let projection = ctx.resources().reserve_metadata(bytes)?;
+            Ok((result, projection, None))
         }
         Operation::Plugin {
             plugin,
@@ -1902,9 +1635,12 @@ mod tests {
                 .unwrap();
             let metadata: OperationMetadata = serde_json::from_str(r#"{"items":[{"id":"s","operation":{"kind":"sign","profile":"pades_lt","input":"d","evidence":[{"kind":"ocsp","input":"e"}],"keys":[{"source":"named","name":"k"}]}}],"parts":[{"name":"d","item_id":"s","role":"document"},{"name":"e","item_id":"s","role":"document"}]}"#).unwrap();
             let mut documents = intake::Documents::Text(
-                [("d".to_owned(), "%PDF".to_owned()), ("e".to_owned(), "ocsp".to_owned())]
-                    .into_iter()
-                    .collect(),
+                [
+                    ("d".to_owned(), "%PDF".to_owned()),
+                    ("e".to_owned(), "ocsp".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
             );
             let host = host_with_grant("tok");
             latch.0.store(state, std::sync::atomic::Ordering::SeqCst);

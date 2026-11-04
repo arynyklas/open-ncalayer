@@ -2,7 +2,7 @@ use super::*;
 use super::{
     artifact::{ArtifactStore, FinishedArtifact},
     ownership::{ContextGuard, OperationOutput},
-    progress::ProgressHub,
+    progress::{ProgressHub, Snapshot},
 };
 use axum::response::Response;
 use futures_util::stream;
@@ -16,7 +16,7 @@ pub(super) struct StreamRuntime {
     pub output_store: Arc<ArtifactStore>,
     pub delivery: ResponseDelivery,
     pub progress: Arc<ProgressHub>,
-    pub receiver: watch::Receiver<Progress>,
+    pub receiver: watch::Receiver<Snapshot>,
     pub failure: Arc<intake::Failure>,
 }
 pub(super) type Recheck = Box<dyn Fn(&OperationMetadata) -> Result<(), ApiError> + Send + Sync>;
@@ -30,18 +30,45 @@ pub(super) struct PrivateState {
     /// authorization after the body is fully taken, before any private use.
     pub recheck: Recheck,
 }
-struct StreamFinal {
-    event: Bytes,
-    artifacts: Vec<(String, FinishedArtifact)>,
+pub(super) struct StreamFinal {
+    pub(super) event: Bytes,
+    pub(super) artifacts: Vec<(String, FinishedArtifact)>,
 }
 type WorkFuture = Pin<Box<dyn Future<Output = Result<StreamFinal, ProcessingError>> + Send>>;
 
+/// Which terminal protocol the native work follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// `/v1/operations`: sequential items, a failed item withholds every artifact.
+    Operations,
+    /// `/v1/batch`: SDK closed batch; completed items keep their artifacts.
+    Batch,
+}
 pub(super) async fn response(
     runtime: StreamRuntime,
-    ctx: OperationContext,
+    mut ctx: OperationContext,
     prepared: intake::Prepared,
     private: PrivateState,
+    mode: Mode,
 ) -> Result<Response, ApiError> {
+    // Item IDs for per-item progress parts: bounded by the validated manifest and
+    // reserved under the original scope until the response body drops.
+    let ids: Option<(Arc<[Box<str>]>, ResourceReservation)> = if mode == Mode::Batch {
+        let ids: Arc<[Box<str>]> = prepared
+            .metadata
+            .items
+            .iter()
+            .map(|item| item.id.as_str().into())
+            .collect();
+        let bytes = ids.iter().map(|id| id.len() as u64 + 16).sum::<u64>() + 64;
+        let reservation = ctx
+            .resources()
+            .reserve_metadata(bytes)
+            .map_err(processing_error)?;
+        Some((ids, reservation))
+    } else {
+        None
+    };
     let deadline = runtime.delivery.deadline;
     let failure = runtime.failure.clone();
     let executor = runtime.executor.clone();
@@ -108,7 +135,6 @@ pub(super) async fn response(
                 let _ = native_ready.send(Err(api));
                 return Err(ProcessingError::InvalidInput("memory preflight refused"));
             }
-            let _ = native_ready.send(Ok(root.clone()));
             let secrets = prepared.secrets;
             let PrivateState {
                 selectors,
@@ -128,7 +154,33 @@ pub(super) async fn response(
                     host: &host,
                     caller: &caller,
                 };
-                execute(&root, &runtime.output_store, &mut guard, metadata, &mut env)
+                match mode {
+                    Mode::Operations => {
+                        let _ = native_ready.send(Ok(root.clone()));
+                        execute(&root, &runtime.output_store, &mut guard, metadata, &mut env)
+                    }
+                    Mode::Batch => {
+                        let mut slot = Some(native_ready);
+                        super::batch::execute(
+                            super::batch::Run {
+                                root: &root,
+                                store: &runtime.output_store,
+                                hub: &runtime.progress,
+                                recheck: &*private.recheck,
+                            },
+                            &mut guard,
+                            metadata,
+                            &mut env,
+                            // Sent exactly once, after host approval of the captured plan and
+                            // before the first item: the response status is decided here.
+                            &mut |outcome| {
+                                if let Some(sender) = slot.take() {
+                                    let _ = sender.send(outcome.map(|()| root.clone()));
+                                }
+                            },
+                        )
+                    }
+                }
             };
             // Secrets, selector copies and the audit binding end with native work.
             drop(secrets);
@@ -175,6 +227,7 @@ pub(super) async fn response(
         offset: 0,
         phase: Phase::Initial,
         handed_terminal: false,
+        ids,
     };
     let body = Body::from_stream(stream::unfold(state, |mut state| async move {
         match state.next().await {
@@ -275,7 +328,7 @@ enum Phase {
 struct StreamState {
     root: Arc<OperationOutput>,
     executor: BoundedExecutor,
-    receiver: watch::Receiver<Progress>,
+    receiver: watch::Receiver<Snapshot>,
     work: Option<WorkFuture>,
     boundary: String,
     pending: VecDeque<Bytes>,
@@ -284,6 +337,7 @@ struct StreamState {
     offset: u64,
     phase: Phase,
     handed_terminal: bool,
+    ids: Option<(Arc<[Box<str>]>, ResourceReservation)>,
 }
 impl StreamState {
     fn json_part(&mut self, name: &str, event: Bytes) -> Result<(), ProcessingError> {
@@ -300,8 +354,17 @@ impl StreamState {
         Ok(())
     }
     fn progress_part(&mut self) -> Result<(), ProcessingError> {
-        let progress = *self.receiver.borrow_and_update();
-        let event=self.root.json_event(&serde_json::json!({"type":"progress","operation_id":self.root.id().get(),"bytes_in":progress.bytes_in,"bytes_out":progress.bytes_out}))?;
+        let snapshot = *self.receiver.borrow_and_update();
+        let progress = snapshot.progress;
+        let mut value = serde_json::json!({"type":"progress","operation_id":self.root.id().get(),"bytes_in":progress.bytes_in,"bytes_out":progress.bytes_out});
+        if let (Some(items), Some((ids, _))) = (snapshot.items, &self.ids) {
+            let current = items.current.and_then(|index| {
+                ids.get(index as usize)
+                    .map(|id| serde_json::json!({"index":index,"item_id":&**id}))
+            });
+            value["items"] = serde_json::json!({"total":items.total,"finished":items.finished,"current":current});
+        }
+        let event = self.root.json_event(&value)?;
         self.json_part("progress", event)
     }
     async fn next(&mut self) -> Result<Option<Bytes>, ProcessingError> {

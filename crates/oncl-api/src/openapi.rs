@@ -4,8 +4,9 @@
 //! wire types. No example carries key material or a usable token.
 use crate::{
     dto::{
-        FinalStatus, HashAlgorithm, InspectedCms, InspectedEntry, ItemResult, JwsSignerFacts,
-        OperationMetadata, OperationResult, ResponseEvent, SignKind, SignerChecks, TimestampFacts,
+        BatchItemOutcome, BatchItemRecord, BatchStatus, BatchStop, BatchStopKind, FinalStatus,
+        HashAlgorithm, InspectedCms, InspectedEntry, ItemResult, JwsSignerFacts, OperationMetadata,
+        OperationResult, ResponseEvent, SignKind, SignerChecks, SourceIdentity, TimestampFacts,
         VerifyProfile,
     },
     error::{ApiError, AppliedState, ErrorCode},
@@ -24,6 +25,8 @@ const INSPECT_EXAMPLE: &str = r#"{"items":[{"id":"i1","operation":{"kind":"inspe
 const PLUGIN_EXAMPLE: &str = r#"{"items":[{"id":"p1","operation":{"kind":"plugin","plugin":"vendor.example","operation":"run","args":"{}","keys":[{"handle":1,"name":"operator-key"}]}}],"parts":[]}"#;
 const STAMP_EXAMPLE: &str = r#"{"items":[{"id":"t2","operation":{"kind":"stamp","input":"doc"}}],"parts":[{"name":"doc","item_id":"t2","role":"document"}]}"#;
 const VERIFY_STAMP_EXAMPLE: &str = r#"{"items":[{"id":"t3","operation":{"kind":"verify_stamp","token":"token","data":"doc","algorithm":"sha256","max_age_seconds":3600}}],"parts":[{"name":"token","item_id":"t3","role":"document"},{"name":"doc","item_id":"t3","role":"document"}]}"#;
+
+const BATCH_EXAMPLE: &str = r#"{"items":[{"id":"sign-1","operation":{"kind":"sign","profile":"cades_b","input":"doc-1","attached":false,"keys":[{"source":"named","name":"operator-key"}]}},{"id":"check-1","operation":{"kind":"verify","profile":"cades_b","input":"sig-1","detached":"doc-2"}},{"id":"hash-1","operation":{"kind":"hash","algorithm":"sha256","input":"doc-3"}}],"parts":[{"name":"doc-1","item_id":"sign-1","role":"document"},{"name":"sig-1","item_id":"check-1","role":"document"},{"name":"doc-2","item_id":"check-1","role":"document"},{"name":"doc-3","item_id":"hash-1","role":"document"}]}"#;
 
 fn parsed(example: &str) -> Value {
     // Fails the build of the document (and the contract test) if the example is
@@ -48,6 +51,50 @@ fn failed(error: ApiError) -> Value {
         error: Some(error),
     })
     .expect("serializable")
+}
+/// Terminal record of a batch that stopped on item 2 (quota): item 1's output stands.
+fn batch_event(status: BatchStatus, items: Vec<BatchItemRecord>, stop: Option<BatchStop>) -> Value {
+    let completed = items
+        .iter()
+        .filter(|i| matches!(i.outcome, BatchItemOutcome::Completed))
+        .count();
+    let attempted = items
+        .iter()
+        .filter(|i| !matches!(i.outcome, BatchItemOutcome::NotRun))
+        .count();
+    serde_json::to_value(ResponseEvent::BatchFinal {
+        operation_id: 9,
+        status,
+        attempted,
+        completed,
+        total: items.len(),
+        stop,
+        items,
+        error: None,
+    })
+    .expect("serializable")
+}
+fn batch_item(
+    id: &str,
+    index: usize,
+    outcome: BatchItemOutcome,
+    applied: AppliedState,
+    error: Option<ApiError>,
+    result: Option<OperationResult>,
+) -> BatchItemRecord {
+    BatchItemRecord {
+        item_id: id.into(),
+        index,
+        outcome,
+        applied,
+        verdict: result.as_ref().and_then(OperationResult::verdict),
+        error,
+        result,
+        sources: vec![SourceIdentity {
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            bytes: 3,
+        }],
+    }
 }
 fn checks() -> SignerChecks {
     SignerChecks {
@@ -192,7 +239,25 @@ fn schemas() -> Value {
         "JwsSignerFacts": object(&["algorithm","crypto","verdict","trust"], json!({"algorithm":{"type":"string"},"crypto":check(),"verdict":verdict(),"trust":ref_("SignerChecks")})),
         "InspectedEntry": object(&["alias","subject_cn","serial_hex","sha256","signature_algorithm_oid","public_key_algorithm_oid","not_before_unix","not_after_unix"], json!({"alias":{"type":["string","null"]},"subject_cn":{"type":["string","null"]},"serial_hex":{"type":["string","null"]},"sha256":{"type":["string","null"]},"signature_algorithm_oid":{"type":["string","null"]},"public_key_algorithm_oid":{"type":["string","null"]},"not_before_unix":{"type":["integer","null"]},"not_after_unix":{"type":["integer","null"]}})),
         "InspectedCms": object(&["detached","content_len","signer_count"], json!({"detached":{"type":"boolean"},"content_len":{"type":"integer"},"signer_count":{"type":"integer"}})),
-        "ProgressEvent": object(&["type","operation_id","bytes_in","bytes_out"], json!({"type":{"const":"progress"},"operation_id":{"type":"integer"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"}}))
+        "ProgressEvent": object(&["type","operation_id","bytes_in","bytes_out"], json!({"type":{"const":"progress"},"operation_id":{"type":"integer"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"},"items":object(&["total","finished","current"], json!({"total":{"type":"integer"},"finished":{"type":"integer"},"current":{"description":"Item being processed (batch only); null between items","oneOf":[{"type":"null"},object(&["index","item_id"], json!({"index":{"type":"integer"},"item_id":{"type":"string"}}))]}}))})),
+        "BatchFinalEvent": object(&["type","operation_id","status","attempted","completed","total","items"], json!({
+            "type":{"const":"batch_final"},
+            "operation_id":{"type":"integer"},
+            "status":{"enum":["completed","partial","failed"],"description":"Mandatory terminal record of /v1/batch. `completed`: every item completed. `partial`: some item failed or did not run; completed items and their artifacts stand (nothing is rolled back). `failed`: nothing could run (`error`)."},
+            "attempted":{"type":"integer"},"completed":{"type":"integer"},"total":{"type":"integer"},
+            "stop":ref_("BatchStop"),
+            "items":{"type":"array","items":ref_("BatchItemRecord"),"description":"One record per manifest item, in manifest order."},
+            "error":ref_("ApiError")})),
+        "BatchStop": object(&["kind","code","applied"], json!({"kind":{"enum":["control","item"],"description":"`control`: cancel/deadline/lost resource before the next item; `item`: a terminal item failure (quota, audit, deadline or cancel during the item). Later items are `not_run`; nothing is retried."},"code":ref_("ErrorCode"),"item_index":{"type":"integer"},"applied":ref_("AppliedState")})),
+        "BatchItemRecord": object(&["item_id","index","outcome","applied","sources"], json!({
+            "item_id":{"type":"string"},"index":{"type":"integer"},
+            "outcome":{"enum":["completed","failed","not_run"]},
+            "applied":ref_("AppliedState"),
+            "verdict":verdict(),
+            "error":ref_("ApiError"),
+            "result":ref_("OperationResult"),
+            "sources":{"type":"array","items":ref_("SourceIdentity"),"description":"SHA-256 and length of the exact source bytes captured for this item (the bytes actually processed)."}})),
+        "SourceIdentity": object(&["sha256","bytes"], json!({"sha256":{"type":"string"},"bytes":{"type":"integer"}}))
     })
 }
 fn request_body() -> Value {
@@ -215,6 +280,106 @@ fn request_body() -> Value {
         "application/json":{
             "schema":{"type":"object","required":["metadata","documents"],"properties":{"metadata":ref_("OperationMetadata"),"documents":{"type":"object","additionalProperties":{"type":"string"}}},"description":"Small public text documents only (<= 65536 bytes). `secret` parts are not accepted in JSON."},
             "example":{"metadata":parsed(HASH_EXAMPLE),"documents":{"doc":"abc"}}}}})
+}
+fn batch_responses() -> Value {
+    let signed = || OperationResult::Signing {
+        profile: SignKind::CadesB,
+        artifact: Some("artifact-0".into()),
+        bytes_in: 3,
+        bytes_out: 1812,
+        signers: vec![AppliedState::Applied],
+    };
+    let invalid = OperationResult::Verification {
+        profile: VerifyProfile::CadesB,
+        verdict: "Invalid",
+        policy: "StrictOnline",
+        checked_at_unix: 1_767_000_000,
+        signers: vec![checks()],
+    };
+    let hashed = OperationResult::Hash {
+        algorithm: HashAlgorithm::Sha256,
+        digest: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+        bytes_in: 3,
+    };
+    let mixed = batch_event(
+        BatchStatus::Completed,
+        vec![
+            batch_item(
+                "sign-1",
+                0,
+                BatchItemOutcome::Completed,
+                AppliedState::Applied,
+                None,
+                Some(signed()),
+            ),
+            batch_item(
+                "check-1",
+                1,
+                BatchItemOutcome::Completed,
+                AppliedState::NotApplied,
+                None,
+                Some(invalid),
+            ),
+            batch_item(
+                "hash-1",
+                2,
+                BatchItemOutcome::Completed,
+                AppliedState::NotApplied,
+                None,
+                Some(hashed),
+            ),
+        ],
+        None,
+    );
+    let stopped = batch_event(
+        BatchStatus::Partial,
+        vec![
+            batch_item(
+                "sign-1",
+                0,
+                BatchItemOutcome::Completed,
+                AppliedState::Applied,
+                None,
+                Some(signed()),
+            ),
+            batch_item(
+                "sign-2",
+                1,
+                BatchItemOutcome::Failed,
+                AppliedState::NotApplied,
+                Some(ApiError {
+                    code: ErrorCode::TempLimit,
+                    applied: AppliedState::NotApplied,
+                }),
+                None,
+            ),
+            batch_item(
+                "hash-1",
+                2,
+                BatchItemOutcome::NotRun,
+                AppliedState::NotApplied,
+                None,
+                None,
+            ),
+        ],
+        Some(BatchStop {
+            kind: BatchStopKind::Item,
+            code: ErrorCode::TempLimit,
+            item_index: Some(1),
+            applied: AppliedState::NotApplied,
+        }),
+    );
+    let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError{code:example,applied:AppliedState::NotApplied}}}});
+    json!({
+        "200":{"description":"Always `multipart/mixed`: coalesced `progress` parts (with per-item position), one `artifact` part per FINISHED output (opaque Content-ID named by that item's result), and a mandatory `batch_final` part last (multipart name `final`). A stream without a terminal record is an unknown outcome, never a success. If the original deadline expires or the client disconnects mid-batch the response is aborted without a terminal record (no byte may leave after the deadline); the durable audit journal holds the per-item facts.",
+            "content":{"multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last).","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("BatchFinalEvent")}},"examples":{"mixed":{"summary":"Sign, verify (Invalid is a completed item) and hash","value":mixed},"quota_stop":{"summary":"Item 2 hit a terminal quota: item 1's artifact stands, item 3 not run","value":stopped}}}}},
+        "400":error("Malformed or confused metadata, plugin item, unknown/duplicate/late/unused part, secret in JSON",ErrorCode::InvalidRequest),
+        "403":error("Token lacks the batch right, or any item's operation/key/inline right is not granted (the whole batch is refused before any document or secret is read), or the captured plan did not match the authorized composition",ErrorCode::PermissionDenied),
+        "408":error("The request was cancelled before the batch started",ErrorCode::Cancelled),
+        "413":error("Document, framing, memory, temp, metadata or output limit before the batch started",ErrorCode::InputLimit),
+        "422":error("Validation failure before the batch started",ErrorCode::ValidationFailed),
+        "503":error("Capacity, audit or required host configuration unavailable; nothing was applied",ErrorCode::CapacityExceeded),
+        "504":error("The original operation deadline expired before the batch started",ErrorCode::DeadlineExceeded)})
 }
 fn responses() -> Value {
     let hash = event(vec![item(
@@ -312,7 +477,7 @@ fn responses() -> Value {
                 "multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last). `progress` and `final` parts are application/json; `artifact` parts are application/octet-stream with a Content-ID.","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("FinalEvent")}},"examples":{"signed":{"summary":"Terminal record of a signing stream","value":signing},"stamp":{"value":stamp},"failed_before_use":{"value":failure},"failed_after_use":{"summary":"Key use is unknown after a post-use failure","value":after_use}}}}},
         "400":error("Malformed or confused metadata, unknown/duplicate/late/unused part, secret in JSON",ErrorCode::InvalidRequest),
         "403":error("Token, operation, key or inline right not granted",ErrorCode::PermissionDenied),
-        "404":error("Unknown path or operation route (no NCANode aliases, no batch/plugin/encryption routes)",ErrorCode::InvalidRequest),
+        "404":error("Unknown path or operation route (no NCANode aliases, no plugin/encryption routes)",ErrorCode::InvalidRequest),
         "408":error("The request was cancelled before completion",ErrorCode::Cancelled),
         "413":error("Document, framing, memory, temp, metadata or output limit",ErrorCode::InputLimit),
         "422":error("Validation or operation failure before any response header",ErrorCode::ValidationFailed),
@@ -332,7 +497,8 @@ pub fn document() -> Value {
             "/health":{"get":{"summary":"Service and audit health","responses":{"200":{"description":"healthy"},"503":{"description":"audit unavailable"}}}},
             "/v1/openapi.json":{"get":{"summary":"This document","responses":{"200":{"description":"OpenAPI document","content":{"application/json":{}}}}}},
             "/v1/hash":{"post":{"summary":"Raw streaming SHA-256","requestBody":{"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}},"responses":{"200":{"description":"digest","content":{"application/json":{"schema":object(&["operation_id","algorithm","digest","bytes_in"],json!({"operation_id":{"type":"integer"},"algorithm":{"const":"sha256"},"digest":{"type":"string"},"bytes_in":{"type":"integer"}}))}}}}}},
-            "/v1/operations":{"post":{"summary":"Typed operations","x-lt-profile":LT_PROFILE,"description":"One request carries 1..1024 items executed sequentially under one original deadline and resource budget. Every private use is bound to the authenticated actor and exact key and is durably audited before the key is applied.","requestBody":request_body(),"responses":responses()}}},
+            "/v1/operations":{"post":{"summary":"Typed operations","x-lt-profile":LT_PROFILE,"description":"One request carries 1..1024 items executed sequentially under one original deadline and resource budget. Every private use is bound to the authenticated actor and exact key and is durably audited before the key is applied.","requestBody":request_body(),"responses":responses()}},
+            "/v1/batch":{"post":{"summary":"Closed batch with explicit host approval","description":"1..1024 ordered items (same item DTOs and part roles as `/v1/operations`, except `plugin`, which is refused) captured as immutable sources, approved by the host for exactly that composition, then run sequentially under one original deadline and budget. Needs the token's `batch` right AND every item's own operation/key/inline right; all are decided before any document or secret byte is read. A failing item never erases completed items; after a terminal stop (quota, audit, deadline, cancel) later items are `not_run`. No retries, idempotency or rollback. Every private use is audited with its batch item ordinal.","requestBody":{"required":true,"content":{"multipart/form-data":{"schema":{"type":"object","description":"First part `metadata` (the OperationMetadata manifest), then secret parts, then document parts in `parts` order. The metadata carries no approval, grant or authority flag: unknown fields are rejected.","properties":{"metadata":ref_("OperationMetadata")}},"examples":{"mixed":{"summary":"Sign, verify and hash in one batch","value":parsed(BATCH_EXAMPLE)}}},"application/json":{"schema":{"type":"object","required":["metadata","documents"],"properties":{"metadata":ref_("OperationMetadata"),"documents":{"type":"object","additionalProperties":{"type":"string"}}},"description":"Small public text documents only (<= 65536 bytes). `secret` parts are not accepted in JSON."},"example":{"metadata":parsed(BATCH_EXAMPLE),"documents":{"doc-1":"abc","sig-1":"...","doc-2":"abc","doc-3":"abc"}}}}},"responses":batch_responses()}}},
         "components":{"securitySchemes":{"bearer":{"type":"http","scheme":"bearer"}},"schemas":schemas()}
     })
 }

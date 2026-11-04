@@ -415,8 +415,15 @@ pub(crate) fn api_applied(value: oncl_pki::key::AppliedState) -> oncl_api::error
 /// Stable terminal error + honest key-application state from the typed SDK
 /// error, never reconstructed from a message.
 pub(crate) fn operation_failure(error: &OperationError) -> ApiError {
+    ApiError {
+        code: api_code(error.code()),
+        applied: api_applied(error.applied_state()),
+    }
+}
+/// Stable wire code of a typed SDK error code.
+pub(crate) fn api_code(code: oncl_core::ErrorCode) -> ErrorCode {
     use oncl_core::ErrorCode as Core;
-    let code = match error.code() {
+    match code {
         Core::PermissionDenied => ErrorCode::PermissionDenied,
         Core::InteractionRequired => ErrorCode::InteractionRequired,
         Core::InvalidInput | Core::SecretRequired => ErrorCode::InvalidRequest,
@@ -438,10 +445,6 @@ pub(crate) fn operation_failure(error: &OperationError) -> ApiError {
         Core::KeyNotFound => ErrorCode::KeyNotFound,
         Core::AuditFailed => ErrorCode::AuditUnavailable,
         Core::ValidationRequired => ErrorCode::ValidationFailed,
-    };
-    ApiError {
-        code,
-        applied: api_applied(error.applied_state()),
     }
 }
 fn core_error(error: OperationError) -> ApiError {
@@ -569,7 +572,10 @@ impl HashHost for ServiceHost {
         })
     }
     fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
-        self.dispatch_operations(metadata, body)
+        self.dispatch_operations(metadata, body, operations::Route::Operations)
+    }
+    fn batch(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
+        self.dispatch_operations(metadata, body, operations::Route::Batch)
     }
     fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture {
         let result = self.principal(&metadata).map(|_| {

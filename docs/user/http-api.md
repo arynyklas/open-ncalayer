@@ -193,11 +193,12 @@ serialized by the real DTOs. Each token needs the matching action:
 | `stamp` | `stamp` | `multipart/mixed` token artifact |
 | `verify_stamp` | `verify_stamp` | JSON |
 
-Multiple items execute sequentially under one original deadline and budget. There
-are no encryption/decryption routes: the applicable GOST envelope backend is an
+Multiple items on `/v1/operations` execute sequentially under one original deadline
+and budget (independent items, one all-or-nothing terminal record). The closed SDK
+batch with explicit host approval and per-item records is `POST /v1/batch` (below).
+There are no encryption/decryption routes: the applicable GOST envelope backend is an
 external prerequisite and is not replaced by an RSA-only or generic Unsupported
-route. SDK closed-batch capture/approval (`run_batch`, which would add per-item
-audit ordinals) is not exposed yet; items here run sequentially without it.
+route.
 
 `sign` profiles also include `wsse` (SOAP Body signature, `soap` = `soap11`/`soap12`,
 optional `body_id`), `xml_legacy` (Kalkan wire layout; `element`/`xpath_parent` XPaths,
@@ -263,7 +264,7 @@ reserved or read) the per-key right, the global/token inline right and the
 the bounded container has been read. `hash` accepts only `document` roles.
 
 Statuses before response headers: 400 InvalidRequest, 403 PermissionDenied, 404
-unknown route (there are no batch, plugin, encryption or NCANode routes), 405 with
+unknown route (there are no plugin-route, encryption or NCANode routes; `/v1/batch` exists), 405 with
 `Allow`, 408 Cancelled, 413 resource limits, 422 ValidationFailed/OperationFailed,
 500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration, 504
 DeadlineExceeded. After headers only the terminal `final` record or a transport
@@ -355,13 +356,78 @@ partial success); prior items' `applied` values stay visible in `results`. Resou
 deadline and cancellation failures that never applied a key abort the transport as
 before. A stream without a `completed` final record is not a result.
 
+## Closed batch (`POST /v1/batch`)
+
+The request is the same metadata-first multipart (or JSON-small) envelope as
+`/v1/operations`: `items` (1..1024, unique IDs, manifest order is execution order) and
+`parts` (secret roles first, then documents). Every item kind of the table above is
+accepted **except `plugin`** (the SDK batch has no plugin operation; 400). The
+metadata carries no approval, grant or authority flag: unknown fields are rejected.
+
+Authority, all decided by the operator policy and never by the payload:
+
+1. **Before any document or secret byte is read**: the token needs the separate
+   `batch` right (`actions = [..., "batch"]`; it is not an SDK action and grants
+   nothing else) AND, for **every** item, that item's operation action, named-key
+   right, inline right or `metadata_aliases`. One ungranted item refuses the whole
+   batch (403, nothing runs, no key is opened, no secret is read).
+2. After the body is taken the same function is run again (revocation, policy
+   generation), then every source is captured as an immutable snapshot
+   (`Engine::capture_batch`; keys are resolved to a lease and certificate but **no
+   private key is applied**).
+3. The host approval (`BatchApproval`) is produced by the service only if the captured
+   plan equals, item by item, the composition the operator policy authorized: ids and
+   order, action, signing profile, the resolved key IDs and the captured source sizes.
+   A different plan (or an approval made for another plan) is refused with 403 before
+   any private use. The approval is single use and bound to the original operation.
+4. Execution (`run_batch_with_outputs`) uses the ORIGINAL admitted context; each
+   private use is audited with the batch item ordinal (`BEGIN`/`FINAL` per item).
+
+Response: always `multipart/mixed` (the status is decided at approval; refusals before
+that are typed JSON errors with `NotApplied`): coalesced `progress` parts that also
+report the batch position (`items`: `total`, `finished`, `current` `{index,item_id}`),
+one `artifact` part per **finished** output, and a mandatory last `final` part,
+`type = "batch_final"`:
+
+- `status`: `completed` (every item completed; an `Invalid` verification is a
+  completed item with `verdict = "Invalid"`), `partial` (some item failed or did not
+  run) or `failed` (nothing could run).
+- `items[]` in manifest order, each with `item_id`, `index`, `outcome` (`completed`,
+  `failed`, `not_run`), `applied` (`NotApplied`/`Applied`/`Unknown`), `verdict`,
+  `error {code, applied}` for failed items, `result` for completed items (same
+  result families as `/v1/operations`; `artifact` is the Content-ID of finished output
+  only) and `sources` (SHA-256 and length of the exact captured bytes).
+- A failing item never erases completed items' results, artifacts or `applied` facts.
+  Item-local failures (unreadable source, missing key) let later items run. After a
+  terminal stop (quota, audit failure, deadline or cancel during an item) the later
+  items are `not_run` and `stop` says why (`kind` `item`/`control`, `code`,
+  `item_index`). There are no retries, idempotency keys or rollback.
+- Output bytes are accounted once by the SDK staged output; the service copies each
+  finished staged output into its owned artifact store (temporary disk is briefly
+  held twice for that item) and the artifact keeps the original root, deadline and
+  scratch accounting until its last network slice is dropped.
+- Completed XML/PDF reports keep their bounded metadata reservation until the batch
+  ends (SDK ownership; `/v1/operations` releases it per item). A batch of several XML
+  or PDF signatures therefore needs a proportionally larger per-operation
+  `metadata_bytes` (measured: three plain XML signatures plus one XAdES-B fit in
+  96 MiB, one XML signature plus a second one does not fit in 64 MiB). When it is
+  exhausted the item fails with `MetadataLimit` and its honest Applied state, later
+  items are `not_run` and earlier artifacts stand.
+- The original deadline covers upload, queue, every item and delivery. If it expires
+  (or the client disconnects) mid-batch no byte may leave afterwards, so the response
+  is **aborted without a terminal record** (a missing final is an unknown outcome,
+  never success); the durable audit journal holds the per-item facts, and the native
+  worker keeps the original root until it returns. A deadline that expires while the
+  client is still uploading is a typed `504 DeadlineExceeded` (`NotApplied`) before
+  any header.
+
 ## Operator configuration (summary)
 
 `[pki]` adds `anchors`, `intermediates`, address-pinned `endpoints`, an optional
 `[pki.tsa]` (`url`, optional `policy`, `timeout_ms`, `skew_ms`) required for
 `*_t/lt/lta` signing and `stamp`, and `[pki.jwt]` (`expected_issuer`,
 `expected_audience`). Tokens gain the actions `extend`, `inspect`, `stamp`,
-`verify_stamp` and `metadata_aliases`. None of these are request fields. Private
+`verify_stamp`, `batch` and `metadata_aliases`. None of these are request fields. Private
 operations use strict validation: they need configured anchors and reachable
 revocation evidence, otherwise they fail before the key is applied.
 

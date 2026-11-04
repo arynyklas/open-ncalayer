@@ -2360,12 +2360,67 @@ async fn extract_and_hash_responses_match_the_schema_and_unimplemented_routes_st
     assert_eq!(status, 200); // schema-validated inside `operate`
     // Routes that are not implemented must not be advertised nor served.
     let document = oncl_api::openapi::document();
-    let paths: Vec<&String> = document["paths"].as_object().unwrap().keys().collect();
-    for path in paths {
-        for forbidden in ["batch", "plugin", "encrypt", "decrypt"] {
+    let mut paths: Vec<&str> = document["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "/health",
+            "/v1/batch",
+            "/v1/hash",
+            "/v1/openapi.json",
+            "/v1/operations"
+        ],
+        "the published routes are exactly the implemented ones"
+    );
+    for path in &paths {
+        for forbidden in ["plugin", "encrypt", "decrypt"] {
             assert!(!path.contains(forbidden), "{path}");
         }
     }
+    // The batch contract is the exact terminal record the service serializes.
+    let batch = &document["components"]["schemas"]["BatchFinalEvent"];
+    let mut required: Vec<&str> = batch["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort();
+    assert_eq!(
+        required,
+        [
+            "attempted",
+            "completed",
+            "items",
+            "operation_id",
+            "status",
+            "total",
+            "type"
+        ]
+    );
+    let mut item: Vec<&str> = document["components"]["schemas"]["BatchItemRecord"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    item.sort();
+    assert_eq!(
+        item,
+        [
+            "applied", "error", "index", "item_id", "outcome", "result", "sources", "verdict"
+        ]
+    );
+    assert_eq!(
+        document["components"]["schemas"]["BatchItemRecord"]["properties"]["outcome"]["enum"],
+        serde_json::json!(["completed", "failed", "not_run"])
+    );
     let mut kinds: Vec<String> = document["components"]["schemas"]["Operation"]["oneOf"]
         .as_array()
         .unwrap()
@@ -2443,13 +2498,7 @@ async fn extract_and_hash_responses_match_the_schema_and_unimplemented_routes_st
         !text.contains("\"kind\":{\"const\":\"encrypt\"")
             && !text.contains("\"const\":\"decrypt\"")
     );
-    for route in [
-        "/v1/batch",
-        "/v1/plugin",
-        "/v1/plugins",
-        "/v1/encrypt",
-        "/v1/decrypt",
-    ] {
+    for route in ["/v1/plugin", "/v1/plugins", "/v1/encrypt", "/v1/decrypt"] {
         let mut stream = tokio::net::TcpStream::connect(service.address)
             .await
             .unwrap();

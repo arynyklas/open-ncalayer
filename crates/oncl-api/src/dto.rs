@@ -334,6 +334,78 @@ pub enum ResponseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<crate::error::ApiError>,
     },
+    /// Mandatory terminal record of `POST /v1/batch` (multipart part `final`): one
+    /// entry per manifest item, in manifest order, whatever happened to it.
+    BatchFinal {
+        operation_id: u64,
+        status: BatchStatus,
+        attempted: usize,
+        completed: usize,
+        total: usize,
+        /// Why later items did not run (terminal stop), if any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop: Option<BatchStop>,
+        items: Vec<BatchItemRecord>,
+        /// Set only when no item could run at all (`status = failed`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<crate::error::ApiError>,
+    },
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchStatus {
+    /// Every item completed (a completed verification may still report Invalid).
+    Completed,
+    /// At least one item failed or did not run; completed items stand.
+    Partial,
+    /// The batch was refused or aborted before any item could run.
+    Failed,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchItemOutcome {
+    Completed,
+    Failed,
+    NotRun,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchStopKind {
+    /// Cancellation, deadline or a lost shared resource before the next item.
+    Control,
+    /// A terminal item failure (quota, audit, deadline/cancel during the item).
+    Item,
+}
+#[derive(Serialize)]
+pub struct BatchStop {
+    pub kind: BatchStopKind,
+    pub code: crate::error::ErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_index: Option<usize>,
+    pub applied: crate::error::AppliedState,
+}
+/// Exact captured bytes of one item source (SHA-256 of what was actually processed).
+#[derive(Serialize)]
+pub struct SourceIdentity {
+    pub sha256: String,
+    pub bytes: u64,
+}
+#[derive(Serialize)]
+pub struct BatchItemRecord {
+    pub item_id: String,
+    pub index: usize,
+    pub outcome: BatchItemOutcome,
+    pub applied: crate::error::AppliedState,
+    /// Verdict of a completed verification-type item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<&'static str>,
+    /// Typed failure of a `failed` item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::error::ApiError>,
+    /// Result of a `completed` item; `artifact` is present only for finished output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<OperationResult>,
+    pub sources: Vec<SourceIdentity>,
 }
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -498,6 +570,16 @@ pub struct JwsSignerFacts {
 }
 
 impl OperationResult {
+    /// Verdict of a verification-type result; `None` for every other family.
+    pub fn verdict(&self) -> Option<&'static str> {
+        match self {
+            Self::Verification { verdict, .. }
+            | Self::JwsVerification { verdict, .. }
+            | Self::JwtVerification { verdict, .. } => Some(verdict),
+            Self::StampVerification { timestamp, .. } => Some(timestamp.verdict),
+            _ => None,
+        }
+    }
     /// A failed terminal record withholds every artifact: no Content-ID of
     /// undelivered output may remain in the results.
     pub fn withhold_artifact(&mut self) {

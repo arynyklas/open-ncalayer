@@ -1,4 +1,5 @@
 pub(crate) mod artifact;
+mod batch;
 mod dispatch;
 pub(super) mod intake;
 mod ownership;
@@ -15,6 +16,14 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const JSON_BYTES: u64 = 65_536;
+/// Which public route a request entered through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Route {
+    /// `POST /v1/operations`: independent sequential items.
+    Operations,
+    /// `POST /v1/batch`: SDK closed batch with explicit host approval.
+    Batch,
+}
 /// Immutable operator policy shared by every operation (never client-supplied).
 pub(crate) struct HostPolicy {
     pub tsa: Option<oncl_pki::tsp::TsaSpec>,
@@ -153,6 +162,7 @@ impl ServiceHost {
         &self,
         metadata: RequestMetadata,
         body: Body,
+        route: Route,
     ) -> ResponseFuture {
         let deadline = Deadline::after(Duration::from_millis(self.config.operation_timeout_ms))
             .map_err(processing_error);
@@ -196,7 +206,16 @@ impl ServiceHost {
                 &mut admission,
                 deadline,
                 cancel.clone(),
-                &|m| dispatch::precheck(m, &policy, &principal, inline_enabled, &host_policy),
+                &|m| {
+                    dispatch::route_precheck(
+                        route,
+                        m,
+                        &policy,
+                        &principal,
+                        inline_enabled,
+                        &host_policy,
+                    )
+                },
             )
             .await?;
             // Recheck the actual Principal generation and each resolved operation
@@ -280,11 +299,13 @@ impl ServiceHost {
             } else {
                 None
             };
-            if prepared
-                .metadata
-                .items
-                .iter()
-                .any(|item| dispatch::has_output(&item.operation))
+            // A batch always answers with the mandatory per-item terminal record.
+            if route == Route::Batch
+                || prepared
+                    .metadata
+                    .items
+                    .iter()
+                    .any(|item| dispatch::has_output(&item.operation))
             {
                 let output_store = output_store
                     .ok_or_else(|| ApiError::not_applied(ErrorCode::MissingTemporaryStore))?;
@@ -320,9 +341,20 @@ impl ServiceHost {
                             let (policy, principal, host) =
                                 (policy.clone(), principal.clone(), host_policy.clone());
                             Box::new(move |m| {
-                                dispatch::precheck(m, &policy, &principal, inline_enabled, &host)
+                                dispatch::route_precheck(
+                                    route,
+                                    m,
+                                    &policy,
+                                    &principal,
+                                    inline_enabled,
+                                    &host,
+                                )
                             })
                         },
+                    },
+                    match route {
+                        Route::Operations => streaming::Mode::Operations,
+                        Route::Batch => streaming::Mode::Batch,
                     },
                 )
                 .await;

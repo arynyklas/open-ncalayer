@@ -55,7 +55,7 @@ inline_pkcs12 = false
 [[tokens]]
 id = "accounting-service"
 verifier = "<64 lowercase hexadecimal verifier characters>"
-actions = ["hash"]
+actions = ["hash"]   # also: "batch" is the separate right for POST /v1/batch
 keys = []
 ```
 
