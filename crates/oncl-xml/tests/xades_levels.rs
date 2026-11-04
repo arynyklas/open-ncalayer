@@ -1442,3 +1442,136 @@ fn bounded_spec_preflights_combined_host_and_request_material_without_encoding_c
         );
     }
 }
+
+#[test]
+fn wsse_embedding_retains_baseline_properties_and_every_carried_proof_check() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    for level in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt] {
+        let mut pki = Pki::new("user-rsa-sign");
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+        let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+        let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now,
+            anchors: &pki.anchors,
+            intermediates: &[],
+            http: &pki.http,
+        };
+        let network = NetworkPolicy::only_endpoints([
+            "http://tsa.synthetic.test",
+            "http://ocsp.synthetic.test",
+        ])
+        .unwrap();
+        let services = XadesServices {
+            validation: &context,
+            network: &network,
+            temporary: &store,
+            tsa: Some(&pki.tsa),
+            material: oncl_pki::cms::ades::ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits: None,
+            host_clock: None,
+        };
+        let source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/' xmlns:u='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd'><s:Header><w:Security xmlns:w='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd' u:Id='security'/></s:Header><s:Body u:Id='body'><request>protected</request></s:Body></s:Envelope>";
+        let spec = XadesSourceSpec {
+            xml: XmlSignProfile {
+                target: Some("body"),
+                parent: Some("security"),
+                signature_id: Some("sig"),
+                enveloped: false,
+                ..Default::default()
+            },
+            level,
+            signing_time: now,
+        };
+        let mut bytes = Vec::new();
+        let generated = oncl_xml::xades::sign_source(
+            Source::sequential(&mut Cursor::new(source), None),
+            &spec,
+            &mut pki.signer,
+            &services,
+            &mut bytes,
+            &mut scope,
+        )
+        .unwrap();
+        assert_eq!(generated.verification.validation.verdict, Verdict::Valid);
+        drop(generated);
+        let source = String::from_utf8(bytes).unwrap();
+        let parsed = roxmltree::Document::parse(&source).unwrap();
+        let info = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "KeyInfo")
+            .unwrap();
+        let certificate = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "X509Certificate")
+            .unwrap()
+            .text()
+            .unwrap();
+        let binding = format!(
+            "<ds:KeyInfo><w:SecurityTokenReference xmlns:w='{}'><w:KeyIdentifier EncodingType='{}' ValueType='{}'>{certificate}</w:KeyIdentifier></w:SecurityTokenReference></ds:KeyInfo>",
+            oncl_xml::wsse::WSSE_NS,
+            oncl_xml::wsse::BASE64_BINARY,
+            oncl_xml::wsse::X509_V3
+        );
+        let embedded = format!(
+            "{}{}{}",
+            &source[..info.range().start],
+            binding,
+            &source[info.range().end..]
+        );
+        let profile = oncl_xml::wsse::WsseVerifyProfile::default();
+        let checked = oncl_xml::wsse::verify_source(
+            Source::sequential(&mut Cursor::new(&embedded), None),
+            &profile,
+            &store,
+            &context,
+            &network,
+            &mut scope,
+        )
+        .unwrap();
+        assert_eq!(checked.xml.validation.verdict, Verdict::Valid);
+        assert_eq!(checked.xml.minimum_level(), Some(level));
+        assert!(checked.signers()[0].body_digest_matches());
+        drop(checked);
+        let wrong_baseline = embedded.replace(
+            "ObjectReference=\"#sig-Reference-0\"",
+            "ObjectReference=\"#body\"",
+        );
+        assert_ne!(wrong_baseline, embedded);
+        assert!(
+            oncl_xml::wsse::verify_source(
+                Source::sequential(&mut Cursor::new(wrong_baseline), None),
+                &profile,
+                &store,
+                &context,
+                &network,
+                &mut scope
+            )
+            .is_err()
+        );
+        if level > AdesLevel::B {
+            let damaged = embedded.replace(
+                "<xades:EncapsulatedTimeStamp>",
+                "<xades:EncapsulatedTimeStamp>AAAA",
+            );
+            assert_ne!(damaged, embedded);
+            let checked = oncl_xml::wsse::verify_source(
+                Source::sequential(&mut Cursor::new(damaged), None),
+                &profile,
+                &store,
+                &context,
+                &network,
+                &mut scope,
+            );
+            assert!(checked.is_err() || checked.unwrap().xml.validation.verdict != Verdict::Valid);
+        }
+    }
+}

@@ -313,6 +313,62 @@ impl Engine {
                 }
             }
             #[cfg(feature = "xml")]
+            crate::VerifyProfile::Wsse => {
+                if detached.is_some() {
+                    return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                        "WSSE does not accept detached input",
+                    )
+                    .into());
+                }
+                let requested = request.wsse.as_ref().ok_or(
+                    oncl_pki::resource::ProcessingError::InvalidInput("missing WSSE profile"),
+                )?;
+                let _profile_admission =
+                    requested.preflight(&ctx.scope).map_err(crate::xml::error)?;
+                let mut profile = requested.clone();
+                profile.xml.allowed_signature_algorithms = crate::xml::intersect_verification(
+                    profile.xml.allowed_signature_algorithms,
+                    ctx.policy.allowed_signature_algorithms,
+                );
+                profile.xml.evidence_limits = crate::xml::intersect_evidence_limits(
+                    self.cades.as_ref().map(|c| c.evidence_limits),
+                    profile.xml.evidence_limits,
+                );
+                match oncl_xml::wsse::verify_source_with_clock(
+                    input,
+                    &profile,
+                    self.temporary
+                        .as_ref()
+                        .ok_or(OperationError::MissingTemporaryStore)?,
+                    &ValidationContext {
+                        policy: ctx.policy.validation,
+                        now,
+                        anchors: &services.anchors,
+                        intermediates: &services.intermediates,
+                        http: &transport,
+                    },
+                    &services.network,
+                    services.clock.as_ref(),
+                    &mut ctx.scope,
+                ) {
+                    Ok(report) => {
+                        xml = Some(report.xml.facts);
+                        Ok(report.xml.validation)
+                    }
+                    Err(oncl_xml::XmlSourceError::Processing(error))
+                    | Err(oncl_xml::XmlSourceError::Evidence(
+                        oncl_pki::evidence::EvidenceError::Processing(error),
+                    )) => Err(error.into()),
+                    Err(oncl_xml::XmlSourceError::Evidence(
+                        oncl_pki::evidence::EvidenceError::Limit,
+                    )) => Err(oncl_pki::resource::ProcessingError::MetadataLimit.into()),
+                    Err(_) => Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                        "unsupported, denied or malformed WSSE signature",
+                    )
+                    .into()),
+                }
+            }
+            #[cfg(feature = "xml")]
             crate::VerifyProfile::Xml
             | crate::VerifyProfile::XmlKalkan
             | crate::VerifyProfile::Xades(_) => {

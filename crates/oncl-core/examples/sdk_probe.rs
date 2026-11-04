@@ -28,6 +28,9 @@ pub(crate) mod plugin_crypto;
 #[path = "sdk_probe/plugin.rs"]
 mod plugin_probe;
 #[cfg(feature = "xml")]
+#[path = "sdk_probe/wsse.rs"]
+mod wsse_probe;
+#[cfg(feature = "xml")]
 #[path = "sdk_probe/xml.rs"]
 mod xml_probe;
 #[cfg(feature = "xml")]
@@ -54,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "X01"
                 | "X03"
                 | "X04"
+                | "X05"
                 | "P01"
                 | "P02"
                 | "P03"
@@ -118,6 +122,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "C03" => cades_probe::run(std::path::Path::new(&out)),
+            "X05" => {
+                #[cfg(feature = "xml")]
+                {
+                    wsse_probe::run(std::path::Path::new(&out))
+                }
+                #[cfg(not(feature = "xml"))]
+                {
+                    Err("X05 probe requires the xml feature".into())
+                }
+            }
             "X04" => {
                 #[cfg(feature = "xml")]
                 {
@@ -181,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|X04|P01|P02|P03|J01|I01|B01|L01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|X04|X05|P01|P02|P03|J01|I01|B01|L01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

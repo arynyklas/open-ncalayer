@@ -42,6 +42,7 @@ pub(crate) struct Options<'a> {
 struct RenderOutput<'a> {
     sink: &'a mut dyn Write,
     projections: Option<&'a mut Vec<Region>>,
+    wsu_id: Option<(&'a str, &'a str)>,
 }
 pub(crate) fn run(
     source: &mut dyn CapturedInput,
@@ -65,6 +66,7 @@ pub(crate) fn run(
         RenderOutput {
             sink: &mut output,
             projections: None,
+            wsu_id: None,
         },
         scope,
         &mut work,
@@ -117,6 +119,7 @@ pub(crate) fn hash(
         RenderOutput {
             sink: &mut sink,
             projections: None,
+            wsu_id: None,
         },
         scope,
         work,
@@ -136,6 +139,26 @@ pub(crate) fn append(
     scope: &ResourceScope,
     work: &mut u64,
 ) -> Result<()> {
+    append_with_wsu_id(
+        source,
+        limits,
+        owner,
+        (options, None),
+        artifact,
+        scope,
+        work,
+    )
+}
+pub(crate) fn append_with_wsu_id(
+    source: &mut dyn CapturedInput,
+    limits: &XmlLimits,
+    owner: &Arc<()>,
+    options: (Options<'_>, Option<(&str, &str)>),
+    artifact: &mut oncl_pki::io::StagedArtifact,
+    scope: &ResourceScope,
+    work: &mut u64,
+) -> Result<()> {
+    let (options, wsu_id) = options;
     struct Sink<'a> {
         stage: &'a mut oncl_pki::io::StagedArtifact,
         error: Option<ProcessingError>,
@@ -164,6 +187,7 @@ pub(crate) fn append(
         RenderOutput {
             sink: &mut sink,
             projections: None,
+            wsu_id,
         },
         scope,
         work,
@@ -219,6 +243,7 @@ pub(crate) fn stage(
         RenderOutput {
             sink: &mut sink,
             projections: Some(&mut projections),
+            wsu_id: None,
         },
         scope,
         work,
@@ -354,6 +379,11 @@ impl Decoder {
         }
     }
 }
+#[derive(Clone)]
+enum AttributeValue {
+    Source(Region),
+    Literal(String),
+}
 fn render(
     source: &mut dyn CapturedInput,
     limits: &XmlLimits,
@@ -366,6 +396,7 @@ fn render(
     let RenderOutput {
         sink,
         mut projections,
+        wsu_id,
     } = output;
     let Options {
         target,
@@ -382,7 +413,7 @@ fn render(
     drop(source.reader(&[], scope)?);
     let _memory = scope.reserve_memory(2 * IO_CHUNK_BYTES as u64)?;
     let _metadata = scope.reserve_metadata(512 * 1024)?;
-    let mut out = CanonicalWriter::<Region>::new(
+    let mut out = CanonicalWriter::<AttributeValue>::new(
         sink,
         method,
         profile,
@@ -402,13 +433,13 @@ fn render(
                 }) && !excluded.iter().any(|r| {
                     event.region.offset >= r.offset && event.region.offset < r.offset + r.len
                 });
-                let namespaces = event.take_namespaces();
+                let mut namespaces = event.take_namespaces();
                 let name = event
                     .name
                     .take()
                     .ok_or(ProcessingError::InvalidInput("element"))?
                     .qname;
-                let attrs = std::mem::take(&mut event.attributes)
+                let mut attrs: Vec<_> = std::mem::take(&mut event.attributes)
                     .into_iter()
                     .map(|a| {
                         let (namespace, local, qname) = a.name.into_parts();
@@ -416,13 +447,34 @@ fn render(
                             namespace: namespace.unwrap_or_default(),
                             local,
                             qname,
-                            value: a.value,
+                            value: AttributeValue::Source(a.value),
                         }
                     })
                     .collect();
-                out.start(name, namespaces, attrs, selected, |r, out| {
-                    decoder.write(reader.file, *r, out, true, true, true)
-                })?;
+                if let Some((prefix, id)) = wsu_id
+                    && target.is_some_and(|r| event.region.offset == r.offset)
+                {
+                    namespaces.retain(|(p, _)| p != prefix);
+                    namespaces.push((prefix.to_owned(), crate::wsse::WSU_NS.to_owned()));
+                    attrs.push(Attribute {
+                        namespace: crate::wsse::WSU_NS.to_owned(),
+                        local: "Id".to_owned(),
+                        qname: format!("{prefix}:Id"),
+                        value: AttributeValue::Literal(id.to_owned()),
+                    });
+                }
+                out.start(
+                    name,
+                    namespaces,
+                    attrs,
+                    selected,
+                    |value, out| match value {
+                        AttributeValue::Source(r) => {
+                            decoder.write(reader.file, *r, out, true, true, true)
+                        }
+                        AttributeValue::Literal(value) => out.escaped(value.as_bytes(), true),
+                    },
+                )?;
             }
             XmlEventKind::End => {
                 out.end()?;

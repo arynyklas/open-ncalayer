@@ -593,6 +593,24 @@ impl XmlDocument {
             work,
         )
     }
+    pub(crate) fn canonical_append_wsu_id(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        artifact: &mut StagedArtifact,
+        scope: &ResourceScope,
+        work: &mut u64,
+        id: Option<(&str, &str)>,
+    ) -> Result<()> {
+        crate::canonical_stream::append_with_wsu_id(
+            self.source.readable(),
+            &self.limits,
+            &self.owner,
+            (options, id),
+            artifact,
+            scope,
+            work,
+        )
+    }
     pub(crate) fn check_scope(&mut self, scope: &ResourceScope) -> Result<()> {
         drop(self.source.reader(&[], scope)?);
         Ok(())
