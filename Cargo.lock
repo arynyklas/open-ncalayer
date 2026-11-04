@@ -4160,6 +4160,7 @@ dependencies = [
  "oncl-pki",
  "oncl-plugin",
  "oncl-testkit",
+ "oncl-token",
  "oncl-xml",
  "serde",
  "serde_json",

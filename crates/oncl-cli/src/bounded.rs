@@ -5,6 +5,15 @@ use oncl_pki::{
     resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation},
 };
 use std::io::{self, Read};
+
+/// Metadata bytes charged per encoded byte of a host-supplied certificate, before
+/// it is parsed. Measured retained heap of `oncl_pki::cert::parse` over the 11
+/// real NCA production, 10 real NCA test and 5 synthetic certificates is at most
+/// 4.9x the DER length (tests/config_budget.rs asserts < 8x). The charge is
+/// deliberately wider than that so an adversarial certificate of many tiny
+/// elements, which expands more per byte, still cannot exceed the admitted
+/// budget; it still admits 1024 real roots under the default 64 MiB metadata.
+pub const CERTIFICATE_METADATA_FACTOR: u64 = 16;
 pub struct Bytes {
     bytes: Vec<u8>,
     _memory: ResourceReservation,

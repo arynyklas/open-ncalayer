@@ -170,3 +170,111 @@ fn jose_binary_report_conflict_and_nested_algorithm_fail_before_key_io() {
     assert_eq!(none.status.code(), Some(1));
     assert!(none.stdout.is_empty());
 }
+
+fn unsecured(payload: &[u8]) -> Vec<u8> {
+    let fixture = oncl_testkit::synthetic("user-rsa-sign");
+    let entry = oncl_pki::pkcs12::load(&oncl_testkit::read(fixture.path), &fixture.password)
+        .unwrap()
+        .remove(0);
+    let header = serde_json::json!({"alg":"none","typ":"JWT","x5c":[STANDARD.encode(entry.cert.to_der().unwrap())]});
+    format!(
+        "{}.{}.",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap()),
+        URL_SAFE_NO_PAD.encode(payload)
+    )
+    .into_bytes()
+}
+fn verify_args<'a>(root: &'a str, intermediate: &'a str, as_of: &'a str) -> Vec<&'a str> {
+    vec![
+        "jwt",
+        "verify",
+        "--input",
+        "-",
+        "--root",
+        root,
+        "--intermediate",
+        intermediate,
+        "--issuer",
+        "operator-issuer",
+        "--audience",
+        "operator-audience",
+        "--as-of",
+        as_of,
+        "--offline",
+        "--json",
+    ]
+}
+#[test]
+fn alg_none_is_rejected_even_with_complete_trust_and_valid_claims() {
+    let temp = tempfile::tempdir().unwrap();
+    let (root, intermediate) = trust(&temp);
+    let (root, intermediate) = (root.to_str().unwrap(), intermediate.to_str().unwrap());
+    let claims = br#"{"iss":"operator-issuer","aud":["operator-audience"],"exp":1793624400,"nbf":1793620800}"#;
+    let args = verify_args(root, intermediate, "1793622000");
+    // Control: the identical trust, clock, claims policy and certificate in x5c,
+    // signed RS256, passes cryptographically and for claims. Only the algorithm
+    // header differs below.
+    let control = run(&args, &compact(claims, true));
+    assert_eq!(control.status.code(), Some(3), "{control:?}");
+    let report: serde_json::Value = serde_json::from_slice(&control.stdout).unwrap();
+    assert_eq!(report["jws"]["signers"][0]["crypto"], "Passed");
+    assert_eq!(report["claims"]["verdict"], "Valid");
+    let none = run(&args, &unsecured(claims));
+    assert_eq!(none.status.code(), Some(1), "{none:?}");
+    assert!(none.stdout.is_empty());
+    assert!(
+        !String::from_utf8_lossy(&none.stderr).contains("MissingTrust"),
+        "{none:?}"
+    );
+}
+#[test]
+fn jwt_claims_leeway_and_exact_issuer_audience_match_through_the_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let (root, intermediate) = trust(&temp);
+    let (root, intermediate) = (root.to_str().unwrap(), intermediate.to_str().unwrap());
+    let claims = br#"{"iss":"operator-issuer","aud":["operator-audience"],"exp":1793624400,"nbf":1793620800}"#;
+    let wire = compact(claims, true);
+    let claim = |extra: &[&str], as_of: &str, wire: &[u8]| {
+        let mut args = verify_args(root, intermediate, as_of);
+        args.extend(extra);
+        let result = run(&args, wire);
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        (
+            result.status.code(),
+            report["claims"]["verdict"].as_str().unwrap().to_owned(),
+        )
+    };
+    // Inside [nbf, exp): Valid claims; the offline revocation unavailability
+    // keeps the overall verdict Indeterminate (3), never a green math-only claim.
+    assert_eq!(claim(&[], "1793622000", &wire), (Some(3), "Valid".into()));
+    // Past exp by 30 s: Invalid without leeway, accepted with a 60 s leeway.
+    assert_eq!(claim(&[], "1793624430", &wire), (Some(2), "Invalid".into()));
+    assert_eq!(
+        claim(&["--leeway-seconds", "60"], "1793624430", &wire),
+        (Some(3), "Valid".into())
+    );
+    // Leeway is bounded by its own size: 10 s does not cover 30 s.
+    assert_eq!(
+        claim(&["--leeway-seconds", "10"], "1793624430", &wire),
+        (Some(2), "Invalid".into())
+    );
+    // Before nbf by 30 s: Invalid, then accepted with leeway.
+    assert_eq!(claim(&[], "1793620770", &wire), (Some(2), "Invalid".into()));
+    assert_eq!(
+        claim(&["--leeway-seconds", "60"], "1793620770", &wire),
+        (Some(3), "Valid".into())
+    );
+    // Exact issuer and audience only: a prefix or other value is Invalid.
+    let other_issuer =
+        br#"{"iss":"operator-issuer-2","aud":["operator-audience"],"exp":1793624400,"nbf":1793620800}"#;
+    assert_eq!(
+        claim(&[], "1793622000", &compact(other_issuer, true)),
+        (Some(2), "Invalid".into())
+    );
+    let other_audience =
+        br#"{"iss":"operator-issuer","aud":["operator-audience-2"],"exp":1793624400,"nbf":1793620800}"#;
+    assert_eq!(
+        claim(&[], "1793622000", &compact(other_audience, true)),
+        (Some(2), "Invalid".into())
+    );
+}

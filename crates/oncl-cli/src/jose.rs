@@ -39,7 +39,7 @@ fn certificate(
         let encoded = bounded::read(input.source(), 8192, ctx)?;
         let memory = ctx.resources().reserve_metadata(
             (encoded.as_bytes().len() as u64)
-                .checked_mul(16)
+                .checked_mul(crate::bounded::CERTIFICATE_METADATA_FACTOR)
                 .ok_or(ProcessingError::MetadataLimit)?,
         )?;
         let certificate = oncl_pki::cert::parse(encoded.as_bytes())

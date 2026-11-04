@@ -77,7 +77,7 @@ fn validation(
     ),
     OperationError,
 > {
-    // Every duplicate is charged: encoded bytes directly, and a conservative 16x
+    // Every duplicate is charged: encoded bytes directly, and a conservative CERTIFICATE_METADATA_FACTOR
     // parse/retained certificate metadata estimate, before the file is read.
     let mut reservation = budget.reserve_configuration(0, 0)?;
     let mut encoded_total = 0u64;
@@ -100,7 +100,7 @@ fn validation(
             reservation.grow(
                 length,
                 length
-                    .checked_mul(16)
+                    .checked_mul(crate::bounded::CERTIFICATE_METADATA_FACTOR)
                     .ok_or(ProcessingError::MetadataLimit)?,
             )?;
             *encoded_total = next;

@@ -341,3 +341,89 @@ fn unsupported_or_misplaced_wsse_options_fail_before_any_io() {
         assert!(result.stdout.is_empty());
     }
 }
+
+#[test]
+fn jws_add_appends_a_second_strict_signature_and_both_verify_valid() {
+    let w = world();
+    let payload = w.dir.path().join("payload");
+    std::fs::write(&payload, b"two signers").unwrap();
+    let first = w.dir.path().join("first.jws");
+    let mut create = vec![
+        "jws",
+        "sign",
+        "--serialization",
+        "general",
+        "--input",
+        path(&payload),
+        "--output",
+        path(&first),
+    ];
+    create.extend(private(&w, &w.rsa_key));
+    create.extend(trust(&w));
+    assert_eq!(run(&create, b"").status.code(), Some(0));
+    let second = w.dir.path().join("second.jws");
+    let mut add = vec![
+        "jws",
+        "sign",
+        "--serialization",
+        "general",
+        "--add",
+        "--input",
+        path(&first),
+        "--output",
+        path(&second),
+    ];
+    add.extend(private(&w, &w.rsa_key));
+    add.extend(trust(&w));
+    let added = run(&add, b"");
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let mut verify = vec![
+        "jws",
+        "verify",
+        "--serialization",
+        "general",
+        "--input",
+        path(&second),
+        "--json",
+    ];
+    verify.extend(trust(&w));
+    let result = run(&verify, b"");
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["signers"].as_array().unwrap().len(), 2);
+    // Independent structural oracle: two protected headers, each RS256 signature
+    // verified over its own signing input with the leaf public key.
+    let wire: serde_json::Value = serde_json::from_slice(&std::fs::read(&second).unwrap()).unwrap();
+    let signatures = wire["signatures"].as_array().unwrap();
+    assert_eq!(signatures.len(), 2);
+    use base64::Engine as _;
+    let public = w.pki.rsa.key.public_key();
+    for signature in signatures {
+        let signing_input = format!(
+            "{}.{}",
+            signature["protected"].as_str().unwrap(),
+            wire["payload"].as_str().unwrap()
+        );
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(signature["signature"].as_str().unwrap())
+            .unwrap();
+        public
+            .verify(
+                oncl_pki::key::SigAlg::RsaSha256,
+                signing_input.as_bytes(),
+                &bytes,
+            )
+            .unwrap();
+    }
+    // Adding to a missing/garbled JWS fails closed with no output.
+    let garbled = w.dir.path().join("garbled.jws");
+    std::fs::write(&garbled, b"{}").unwrap();
+    let rejected = w.dir.path().join("rejected.jws");
+    let mut bad = add.clone();
+    let at = bad.iter().position(|a| *a == path(&first)).unwrap();
+    bad[at] = path(&garbled);
+    let at = bad.iter().position(|a| *a == path(&second)).unwrap();
+    bad[at] = path(&rejected);
+    assert_eq!(run(&bad, b"").status.code(), Some(1));
+    assert!(!rejected.exists());
+}

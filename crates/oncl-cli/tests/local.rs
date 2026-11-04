@@ -2,7 +2,14 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 fn run(args: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
+    run_in(None, args, input)
+}
+fn run_in(dir: Option<&std::path::Path>, args: &[&str], input: &[u8]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_oncl"));
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(args)
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
@@ -443,4 +450,128 @@ fn excessive_configuration_item_count_precedes_provider_and_file_io() {
         "{result:?}"
     );
     assert!(result.stdout.is_empty());
+}
+
+fn limit_error(result: &Output) -> bool {
+    String::from_utf8_lossy(&result.stderr).contains("ConfigurationLimit")
+}
+#[test]
+fn intermediates_count_toward_the_same_1024_certificate_cap() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("r.cer"),
+        oncl_testkit::synthetic_cert("root-rsa"),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("i.cer"),
+        oncl_testkit::synthetic_cert("inter-gost2015"),
+    )
+    .unwrap();
+    let encoded = cms_fixture(true);
+    let attempt = |roots: usize, intermediates: usize| {
+        let mut args = vec!["verify", "--profile", "cms", "--input", "-", "--offline"];
+        for _ in 0..roots {
+            args.extend(["--root", "r.cer"]);
+        }
+        for _ in 0..intermediates {
+            args.extend(["--intermediate", "i.cer"]);
+        }
+        run_in(Some(temp.path()), &args, &encoded)
+    };
+    // 600 + 424 = 1024 is admitted and verifies offline (Indeterminate, 3);
+    // one more intermediate crosses the cap before any file or document I/O.
+    let exact = attempt(600, 424);
+    assert_eq!(exact.status.code(), Some(3), "{exact:?}");
+    assert!(!limit_error(&exact));
+    let over = attempt(600, 425);
+    assert_eq!(over.status.code(), Some(1), "{over:?}");
+    assert!(limit_error(&over), "{over:?}");
+    assert!(over.stdout.is_empty());
+    // Intermediates alone are counted too, not just roots.
+    let alone = attempt(0, 1025);
+    assert!(limit_error(&alone), "{alone:?}");
+}
+#[test]
+fn endpoint_and_pin_caps_are_64_and_checked_before_any_io() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("r.cer"),
+        oncl_testkit::synthetic_cert("root-rsa"),
+    )
+    .unwrap();
+    let encoded = cms_fixture(true);
+    let endpoints: Vec<String> = (0..65)
+        .map(|n| format!("http://127.0.0.1:{}", 20_000 + n))
+        .collect();
+    let pins: Vec<String> = (0..65)
+        .map(|n| format!("http://host{n}.invalid:{0}=127.0.0.1:{0}", 21_000 + n))
+        .collect();
+    let attempt = |flag: &str, values: &[String]| {
+        let mut args = vec![
+            "verify",
+            "--profile",
+            "cms",
+            "--input",
+            "-",
+            "--offline",
+            "--root",
+            "r.cer",
+        ];
+        for value in values {
+            args.extend([flag, value.as_str()]);
+        }
+        run_in(Some(temp.path()), &args, &encoded)
+    };
+    for (flag, all) in [("--pki-endpoint", &endpoints), ("--pki-pin", &pins)] {
+        let exact = attempt(flag, &all[..64]);
+        assert_eq!(exact.status.code(), Some(3), "{flag}: {exact:?}");
+        let over = attempt(flag, &all[..65]);
+        assert_eq!(over.status.code(), Some(1), "{flag}: {over:?}");
+        assert!(limit_error(&over), "{flag}: {over:?}");
+        assert!(over.stdout.is_empty());
+    }
+}
+#[test]
+fn a_realistic_large_trust_store_fits_the_default_limits() {
+    // Real NCA production and test roots plus the synthetic roots, each file
+    // repeated: every occurrence is charged (encoded + 16x metadata), so 1008
+    // roots (the 1024 cap minus headroom) is a harsher load than any real store.
+    let root = oncl_testkit::workspace_root();
+    let temp = tempfile::tempdir().unwrap();
+    let mut names = Vec::new();
+    for dir in [
+        "fixtures/nca/prod",
+        "fixtures/nca/test",
+        "fixtures/synthetic",
+    ] {
+        for entry in std::fs::read_dir(root.join(dir)).unwrap() {
+            let path = entry.unwrap().path();
+            if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("der" | "cer")
+            ) {
+                let name = format!("c{}.cer", names.len());
+                std::fs::copy(&path, temp.path().join(&name)).unwrap();
+                names.push(name);
+            }
+        }
+    }
+    assert_eq!(names.len(), 21);
+    let encoded = cms_fixture(true);
+    for repeats in [20, 48] {
+        let mut args = vec!["verify", "--profile", "cms", "--input", "-", "--offline"];
+        for _ in 0..repeats {
+            for name in &names {
+                args.extend(["--root", name.as_str()]);
+            }
+        }
+        let result = run_in(Some(temp.path()), &args, &encoded);
+        assert_eq!(
+            result.status.code(),
+            Some(3),
+            "{} roots: {result:?}",
+            repeats * names.len()
+        );
+    }
 }
