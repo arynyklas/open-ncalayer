@@ -10,6 +10,7 @@ mod keysrc;
 mod legacy;
 mod local;
 mod output;
+mod pem;
 mod plugin;
 mod public;
 mod reports;

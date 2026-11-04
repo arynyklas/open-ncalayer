@@ -4644,6 +4644,7 @@ version = "0.1.0-alpha.6"
 dependencies = [
  "base64",
  "clap",
+ "der 0.8.2",
  "futures-util",
  "getrandom 0.4.3",
  "httparse",
@@ -4651,6 +4652,7 @@ dependencies = [
  "minisign",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
+ "oncl-core",
  "oncl-desktop",
  "oncl-flows",
  "oncl-ipc",
@@ -4679,6 +4681,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "velopack",
+ "x509-cert",
  "zeroize",
  "zip",
 ]

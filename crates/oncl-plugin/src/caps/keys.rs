@@ -4,6 +4,21 @@
 //! the storage dialog offers the tokens plugged in, and `keys_open` opens a token in a
 //! reader with the PIN the plugin passes, once the user allows it
 //! ([`PagePins`](oncl_flows::PagePins)).
+//!
+//! # Authority model of the desktop host
+//!
+//! A key handle exists only after the USER chose or opened that key through the host's own
+//! dialogs (storage/key/password dialogs, the page-path confirmation, the token PIN
+//! consent): the interactive dialog IS the consent, so a plugin can sign only with a key
+//! the user handed to this session, and no signing import has any other way to obtain one
+//! (an unknown handle is `Invalid`, nothing is signed). This is deliberately a different
+//! authority model from the headless/service one (explicit grants, `AuthorizedSigner`,
+//! durable audit before private use) of `oncl-core`, which `oncl-plugin` cannot depend on.
+//! Every signing adapter below still ends in the one shared builder: `cms::build` (through
+//! the `DigestSigner` of the unlocked entry), `oncl_xml`'s bounded XML plan, and — for
+//! XAdES — the historical NCALayer wire shape `xades::sign`, which differs from Core's
+//! baseline shape in exactly the ways `oncl-core/tests/batch.rs`
+//! (`guarded_xades_legacy_b_and_the_desktop_wire_shape_differ_exactly_as_documented`) pins.
 
 use super::{
     ConsentKind, DialogTurn, MAX_DIALOG_TEXT, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto,

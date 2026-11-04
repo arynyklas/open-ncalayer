@@ -15,8 +15,8 @@ use oncl_pdk::abi::{
     HostResult, IssuerSel, KeyUsageBit, MAX_PKI_TIMEOUT_MS, MAX_TSP_RETRIES, NetFailure, NetKind,
     NetStage, Nonce, OcspArgs, OcspOutcome, PathArgs, PathOutcome, PathTime, PkiMethod, PkiUrl,
     Problem, Revocation, SignerReport, SignerSel, StampArgs, StampMode, StampOutcome, TokenForm,
-    TsaChoice, TspOutcome, TspReport, TspRequestArgs, VerifyArgs, VerifyAt, VerifyReport,
-    XmlSigReport, XmlVerifyArgs,
+    TsaChoice, TspOutcome, TspReport, TspRequestArgs, VerifyArgs, VerifyReport, XmlSigReport,
+    XmlVerifyArgs,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::crl::CrlError;
@@ -25,7 +25,14 @@ use oncl_pki::info::{self, KeyUsageBits, cert_info, kcert_types};
 use oncl_pki::key::{self, SigAlg};
 use oncl_pki::ocsp::{self, CertStatus, OcspError};
 use oncl_pki::pkix::{self, CaSet, PathError};
+use oncl_pki::resource::{
+    OperationControl, ProcessingError, Progress, ResourceLimits, SharedBudget,
+};
 use oncl_pki::tsp::{self, TsaProfile, TsaSpec};
+use oncl_pki::validation::{
+    self, CheckStatus, SignerValidation, TimeBasis, ValidationContext, ValidationPolicy,
+    ValidationReason,
+};
 use oncl_pki::{cms, crl, oid};
 use oncl_xml as xmldsig;
 use std::sync::Arc;
@@ -725,34 +732,53 @@ fn problem_abi(problem: cms::Problem) -> Problem {
         cms::Problem::BadSignature => Problem::BadSignature,
         cms::Problem::DigestMismatch => Problem::DigestMismatch,
         cms::Problem::EssCertIdMismatch => Problem::EssCertIdMismatch,
-        cms::Problem::Expired => Problem::Expired,
-        cms::Problem::NotYetValid => Problem::NotYetValid,
-        cms::Problem::UnknownCa => Problem::UnknownCa,
-        cms::Problem::PathInvalid => Problem::PathInvalid,
-        cms::Problem::Revoked { at, reason } => Problem::Revoked {
-            at_ms: unix_ms(at),
-            reason,
-        },
-        cms::Problem::StatusUnknown => Problem::StatusUnknown,
-        cms::Problem::ResponderUnverified => Problem::ResponderUnverified,
-        cms::Problem::OcspStale => Problem::OcspStale,
-        cms::Problem::CrlInvalid => Problem::CrlInvalid,
         cms::Problem::TspInvalid => Problem::TspInvalid,
         cms::Problem::TspImprintMismatch => Problem::TspImprintMismatch,
-        cms::Problem::Net(failure) => Problem::Net(net_failure(
-            match failure.stage {
-                cms::NetStage::Ocsp => NetStage::Ocsp,
-                cms::NetStage::Crl => NetStage::Crl,
-            },
-            &failure.url,
-            failure.kind,
-            failure.detail,
-        )),
     }
 }
 
-/// `cms_verify`: a report on the signers of a CMS; the revocation sources its certificates
-/// name are asked only on the PKI hosts.
+struct Unattended;
+impl OperationControl for Unattended {
+    fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+        Ok(())
+    }
+}
+
+/// `cms_verify`: a report on the signers of a CMS.
+///
+/// There is ONE validation engine, `oncl_pki::validation::validate_cms` (F03/F04); this is
+/// its legacy-ABI profile, never a second validator. The signers' own facts (certificate,
+/// signingTime, signature, ESS, time-stamp token) come from `cms::report`, the decisions
+/// (validity, path, revocation, time-stamp trust) from the shared validator, and
+/// [`apply_validation`] projects them onto the documented `VerifyReport` shape. The knobs
+/// of the ABI select the validation profile:
+///
+/// | `revocation` | validator policy | revocation check |
+/// |---|---|---|
+/// | `None` | `OfflineReport` | always `Skipped` |
+/// | `EmbeddedOcsp` | `OfflineReport` (evidence the CMS carries) | as validated |
+/// | `LiveOcsp`, `LiveOcspThenCrl` | `NcalayerCompatibility` (explicit legacy profile; OCSP, then the CRL) | as validated |
+///
+/// `chain: Some([])` validates with no trust anchors and reports the path and revocation as
+/// `Skipped`; `chain: Some(certs)` makes those certificates the anchors; `None` the host's
+/// CA set. The revocation sources are asked only on the PKI hosts (`PkiHttp`).
+///
+/// Differences from the pre-cutover engine (the shared validator is stricter or coarser):
+/// - `at` is not a knob any more: a signer is judged at the genTime of its anchored
+///   time-stamp, otherwise now, never at its own claimed signingTime (in the
+///   `NcalayerCompatibility` profile of the `Live*` modes the time-stamp fixes the time even
+///   when its TSA's status cannot be obtained — the original never asked);
+/// - `LiveOcsp` also falls back to the CRL;
+/// - in the `Live*` modes an unobtainable status is `Problem::Net` (stage OCSP, the
+///   responder's host, kind `Other`, no transport detail), as before for a responder that
+///   could not be asked; in the offline modes it is `StatusUnknown`; an OCSP answer
+///   "unknown" is not told apart from no answer;
+/// - a revocation carries no CRLReason; a path failure is `PathInvalid` (no `UnknownCa`
+///   split);
+/// - the legacy ABI never judged the time-stamp authority's own revocation, so a token that
+///   verifies stays `Ok` while the validator only cannot prove the TSA's status
+///   (`timestamp_unproven_ok` of [`LegacyRules`]); a token that covers another signature, or
+///   a revoked/untrusted TSA, fails.
 pub(crate) fn cms_verify(state: &dyn CryptoHost, args: VerifyArgs) -> HostResult<VerifyReport> {
     let custom = match &args.chain {
         Some(list) if !list.is_empty() => Some(CaSet::new(
@@ -762,10 +788,12 @@ pub(crate) fn cms_verify(state: &dyn CryptoHost, args: VerifyArgs) -> HostResult
         )),
         _ => None,
     };
-    let trust = custom.as_ref().unwrap_or(state.cas());
-    let chain = match &args.chain {
-        Some(list) if list.is_empty() => cms::ChainPolicy::Skip,
-        _ => cms::ChainPolicy::Through(trust),
+    let no_path = matches!(&args.chain, Some(list) if list.is_empty());
+    let empty = CaSet::new(Vec::new());
+    let anchors = if no_path {
+        &empty
+    } else {
+        custom.as_ref().unwrap_or(state.cas())
     };
     let mut require_key_usage = KeyUsageBits::default();
     for bit in &args.require_key_usage {
@@ -776,35 +804,63 @@ pub(crate) fn cms_verify(state: &dyn CryptoHost, args: VerifyArgs) -> HostResult
             KeyUsageBit::KeyAgreement => require_key_usage.key_agreement = true,
         }
     }
-    let spec = cms::ReportSpec {
-        at: match args.at {
-            VerifyAt::Now => cms::VerifyAt::Now,
-            VerifyAt::SigningTime => cms::VerifyAt::SigningTime,
-            VerifyAt::TspTime => cms::VerifyAt::TspTime,
-        },
-        chain,
-        trust,
-        revocation: match args.revocation {
-            Revocation::None => cms::Revocation::None,
-            Revocation::EmbeddedOcsp => cms::Revocation::EmbeddedOcsp,
-            Revocation::LiveOcsp => cms::Revocation::LiveOcsp,
-            Revocation::LiveOcspThenCrl => cms::Revocation::LiveOcspThenCrl,
-        },
-        first_signer_only: args.first_signer_only,
-        require_key_usage,
-    };
-    let now = state.now();
-    let report = cms::report(
+    let data = args.data.as_deref().map(Vec::as_slice);
+    let facts = cms::report(
         &args.cms,
-        args.data.as_deref().map(Vec::as_slice),
-        &spec,
-        &PkiHttp::of(state),
-        now,
+        data,
+        &cms::ReportSpec {
+            first_signer_only: false,
+            require_key_usage,
+        },
     )
     .map_err(|e| invalid(e.to_string()))?;
-    Ok(project_report(report))
+    let mut projected = project_report(facts);
+    let policy = match args.revocation {
+        Revocation::None | Revocation::EmbeddedOcsp => ValidationPolicy::OfflineReport,
+        Revocation::LiveOcsp | Revocation::LiveOcspThenCrl => {
+            ValidationPolicy::NcalayerCompatibility
+        }
+    };
+    let limits = ResourceLimits::default();
+    let scope = Arc::new(SharedBudget::new(limits.clone()).map_err(|e| invalid(e.to_string()))?)
+        .begin(limits, Arc::new(Unattended))
+        .map_err(|e| invalid(e.to_string()))?;
+    let http = PkiHttp::of(state);
+    let validated = validation::validate_cms(
+        &args.cms,
+        data,
+        &ValidationContext {
+            policy,
+            now: state.now(),
+            anchors,
+            intermediates: &[],
+            http: &http,
+        },
+        &scope,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let rules = LegacyRules {
+        timestamp_unproven_ok: true,
+        unreachable_status_is_net: policy == ValidationPolicy::NcalayerCompatibility,
+    };
+    apply_validation(&mut projected, &validated.signers, rules);
+    for signer in &mut projected.signers {
+        if no_path {
+            signer.path = Check::Skipped;
+            signer.revocation = Check::Skipped;
+        }
+        if args.revocation == Revocation::None {
+            signer.revocation = Check::Skipped;
+        }
+    }
+    if args.first_signer_only {
+        projected.signers.truncate(1);
+    }
+    Ok(projected)
 }
 
+/// The signers' facts in the ABI shape; the decisions are filled in by
+/// [`apply_validation`] (until then validity, path and revocation are `Skipped`).
 pub(crate) fn project_report(report: cms::Report) -> VerifyReport {
     VerifyReport {
         content: report.content.map(Bytes::from),
@@ -816,9 +872,9 @@ pub(crate) fn project_report(report: cms::Report) -> VerifyReport {
                 signing_time_ms: signer.signing_time.map(unix_ms),
                 signature: check_abi(signer.signature),
                 ess_cert_id: check_abi(signer.ess_cert_id),
-                validity: check_abi(signer.validity),
-                path: check_abi(signer.path),
-                revocation: check_abi(signer.revocation),
+                validity: Check::Skipped,
+                path: Check::Skipped,
+                revocation: Check::Skipped,
                 tsp: signer.tsp.map(|tsp| TspReport {
                     gen_time_ms: tsp.gen_time.map(unix_ms),
                     check: check_abi(tsp.check),
@@ -829,8 +885,120 @@ pub(crate) fn project_report(report: cms::Report) -> VerifyReport {
     }
 }
 
+/// How a legacy host reads what the shared validator could not prove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegacyRules {
+    /// A time-stamp token that verifies stays `Ok` while its TSA's status is unprovable.
+    pub timestamp_unproven_ok: bool,
+    /// An unobtainable revocation status is `Problem::Net` ("could not be asked") and not
+    /// `StatusUnknown` ("answered unknown").
+    pub unreachable_status_is_net: bool,
+}
+impl LegacyRules {
+    /// Core's headless host: nothing unproven is read as fine.
+    pub const STRICT: Self = Self {
+        timestamp_unproven_ok: false,
+        unreachable_status_is_net: false,
+    };
+}
+
+/// Writes the decisions of the shared validator onto the ABI report of the same CMS (the
+/// signers in the same order): the ONE projection of `validate_cms` results onto the
+/// legacy `VerifyReport`, used by the desktop host (with its [`LegacyRules`]) and by Core's
+/// headless host ([`LegacyRules::STRICT`]).
+pub fn apply_validation(
+    projected: &mut VerifyReport,
+    validated: &[SignerValidation],
+    rules: LegacyRules,
+) {
+    fn checked(status: CheckStatus, detail: &Check, fallback: Problem) -> Check {
+        match status {
+            CheckStatus::Passed => Check::Ok,
+            CheckStatus::NotApplicable => Check::Skipped,
+            CheckStatus::Failed => match detail {
+                Check::Fail(_) => detail.clone(),
+                _ => Check::Fail(fallback),
+            },
+            CheckStatus::Unavailable => Check::Fail(Problem::StatusUnknown),
+        }
+    }
+    for (target, source) in projected.signers.iter_mut().zip(validated) {
+        // A signer the facts already reject (no certificate with the required usage, bad
+        // digest…) stays rejected; the validator can only add failures.
+        if !matches!(target.signature, Check::Fail(_)) {
+            target.signature = checked(source.signature, &target.signature, Problem::BadSignature);
+        }
+        target.path = checked(source.chain, &target.path, Problem::PathInvalid);
+        let at = match source.time_basis {
+            TimeBasis::Current(t)
+            | TimeBasis::VerifiedTimestamp(t)
+            | TimeBasis::ClaimedSigningTime(t) => t,
+        };
+        let not_yet = target
+            .certificate
+            .as_deref()
+            .and_then(|der| parse(der).ok())
+            .is_some_and(|cert| at < cert_info(&cert).not_before);
+        target.validity = checked(
+            source.validity,
+            &target.validity,
+            if not_yet {
+                Problem::NotYetValid
+            } else {
+                Problem::Expired
+            },
+        );
+        let revoked_at = source.reasons.iter().find_map(|reason| match reason {
+            ValidationReason::Revoked { at } => Some(*at),
+            _ => None,
+        });
+        target.revocation =
+            if rules.unreachable_status_is_net && source.revocation == CheckStatus::Unavailable {
+                // "The responder could not be asked": the legacy plugins pass such a signer.
+                let url = target
+                    .certificate
+                    .as_deref()
+                    .and_then(|der| parse(der).ok())
+                    .and_then(|cert| ocsp::ocsp_url(&cert))
+                    .unwrap_or_default();
+                Check::Fail(Problem::Net(net_failure(
+                    NetStage::Ocsp,
+                    &url,
+                    http::NetKind::Other,
+                    "revocation status unavailable".to_owned(),
+                )))
+            } else {
+                checked(
+                    source.revocation,
+                    &target.revocation,
+                    revoked_at.map_or(Problem::StatusUnknown, |at| Problem::Revoked {
+                        at_ms: unix_ms(at),
+                        reason: None,
+                    }),
+                )
+            };
+        if source.key_usage == CheckStatus::Failed {
+            target.path = Check::Fail(Problem::PathInvalid);
+        }
+        if let Some(tsp) = &mut target.tsp {
+            // The legacy ABI never judged the TSA's own revocation: with
+            // `timestamp_unproven_ok` a token that verifies stays verified while the shared
+            // validator merely cannot prove the TSA's status; a failure (the token covers
+            // another signature, a revoked or untrusted TSA) still fails.
+            if !(rules.timestamp_unproven_ok && source.timestamp == CheckStatus::Unavailable) {
+                tsp.check = checked(source.timestamp, &tsp.check, Problem::TspInvalid);
+            }
+        }
+    }
+}
+
 /// `xml_verify`: every signature of the document, in document order, each verified with
 /// the certificate of its own `KeyInfo`.
+///
+/// This is a legacy-profile adapter, not a trust decision: the documented ABI result is
+/// "does each signature verify with its own `KeyInfo` certificate" (NCANode's appended-
+/// signature semantics, `oncl_xml::verify_each`); chains, revocation and time belong to the
+/// shared validator (`oncl_xml::verify_source`, Core's `VerifyRequest::xml_kalkan()`).
 pub(crate) fn xml_verify(args: XmlVerifyArgs) -> HostResult<Vec<XmlSigReport>> {
     let checks = xmldsig::verify_each(&args.xml).map_err(|e| invalid(e.to_string()))?;
     Ok(checks
@@ -873,5 +1041,123 @@ mod tests {
         ] {
             assert!(check_pki_url_in(&nca_pki_hosts(), url).is_err(), "{url}");
         }
+    }
+
+    fn validated(
+        validity: CheckStatus,
+        revocation: CheckStatus,
+        timestamp: CheckStatus,
+        at: OffsetDateTime,
+    ) -> SignerValidation {
+        SignerValidation {
+            signature: CheckStatus::Passed,
+            chain: CheckStatus::Passed,
+            validity,
+            revocation,
+            timestamp,
+            key_usage: CheckStatus::Passed,
+            claimed_signing_time: None,
+            time_basis: TimeBasis::Current(at),
+            proof_time: None,
+            ades_level: None,
+            reasons: Vec::new(),
+        }
+    }
+
+    fn facts() -> VerifyReport {
+        let key = oncl_testkit::synthetic("user-gost2015-sign");
+        let entry = oncl_pki::pkcs12::load(&oncl_testkit::read(&key.path), &key.password)
+            .unwrap()
+            .remove(0);
+        VerifyReport {
+            content: None,
+            signers: vec![SignerReport {
+                certificate: Some(der_of(&entry.cert)),
+                signing_time_ms: None,
+                signature: Check::Ok,
+                ess_cert_id: Check::Skipped,
+                validity: Check::Skipped,
+                path: Check::Skipped,
+                revocation: Check::Skipped,
+                tsp: Some(TspReport {
+                    gen_time_ms: Some(1),
+                    check: Check::Ok,
+                    tsa_cert: None,
+                }),
+            }],
+        }
+    }
+
+    /// The projection of the shared validator's result onto the legacy report.
+    #[test]
+    fn apply_validation_projects_validity_net_and_unproven_timestamps() {
+        let legacy = LegacyRules {
+            timestamp_unproven_ok: true,
+            unreachable_status_is_net: true,
+        };
+        let long_ago = OffsetDateTime::UNIX_EPOCH;
+        let now = OffsetDateTime::now_utc();
+        let run = |rules, validity, at, revocation, timestamp| {
+            let mut report = facts();
+            apply_validation(
+                &mut report,
+                &[validated(validity, revocation, timestamp, at)],
+                rules,
+            );
+            report.signers.remove(0)
+        };
+        // Failed validity: before notBefore is `not_yet_valid`, after notAfter `expired`.
+        let signer = run(
+            legacy,
+            CheckStatus::Failed,
+            long_ago,
+            CheckStatus::Passed,
+            CheckStatus::Passed,
+        );
+        assert_eq!(signer.validity, Check::Fail(Problem::NotYetValid));
+        let signer = run(
+            legacy,
+            CheckStatus::Failed,
+            now + time::Duration::days(365 * 200),
+            CheckStatus::Passed,
+            CheckStatus::Passed,
+        );
+        assert_eq!(signer.validity, Check::Fail(Problem::Expired));
+        // An unobtainable status: `net` (ocsp stage) for the live modes, `status_unknown`
+        // otherwise; an unproven TSA keeps a verifying token `ok` only for the legacy rules.
+        let signer = run(
+            legacy,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Unavailable,
+            CheckStatus::Unavailable,
+        );
+        assert!(
+            matches!(&signer.revocation, Check::Fail(Problem::Net(f)) if f.stage == NetStage::Ocsp),
+            "{:?}",
+            signer.revocation
+        );
+        assert_eq!(signer.tsp.unwrap().check, Check::Ok);
+        let signer = run(
+            LegacyRules::STRICT,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Unavailable,
+            CheckStatus::Unavailable,
+        );
+        assert_eq!(signer.revocation, Check::Fail(Problem::StatusUnknown));
+        assert_eq!(
+            signer.tsp.unwrap().check,
+            Check::Fail(Problem::StatusUnknown)
+        );
+        // A failed token fails under the legacy rules too.
+        let signer = run(
+            legacy,
+            CheckStatus::Passed,
+            now,
+            CheckStatus::Passed,
+            CheckStatus::Failed,
+        );
+        assert_eq!(signer.tsp.unwrap().check, Check::Fail(Problem::TspInvalid));
     }
 }

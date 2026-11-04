@@ -17,8 +17,7 @@
 //! - A CRL is parsed as DER. A BER one is normalized to DER first ([`ber::to_der`]) only
 //!   up to [`MAX_BER_CRL_LEN`]: normalization builds a tree of every element of the still
 //!   unauthenticated body, so a bigger body that is not DER is [`CrlError::Malformed`].
-//! - Downloads go through [`CrlCache`]: `<dir>/<hex sha256(url)>.crl`, used without a
-//!   request while it is a valid CRL with `now < nextUpdate`, written atomically.
+//! - Downloads are not cached on disk: [`fetch_for`] asks the distribution points in order.
 //! - Every failure is a [`CrlError`], never a [`CrlStatus`]: callers decide what an
 //!   unchecked certificate means.
 
@@ -31,7 +30,6 @@ pub use mock::MockCrl;
 use crate::asn1util::{Enumerated, unsigned};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
-use crate::fsutil::{Access, write_atomically};
 use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, NetKind};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
@@ -39,13 +37,8 @@ use crate::pkix::time_of;
 use der::asn1::{BitStringRef, IntRef, ObjectIdentifier};
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Reader, SliceReader};
-use sha2::{Digest, Sha256};
 use spki::AlgorithmIdentifierRef;
 use std::borrow::Cow;
-use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::io::Read;
-use std::path::PathBuf;
 use std::time::Duration;
 use time::OffsetDateTime;
 use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
@@ -366,139 +359,6 @@ pub fn lookup(crl: &CertificateList, serial: &[u8]) -> CrlStatus {
     }
 }
 
-/// CRLs downloaded before, on disk: `<dir>/<hex sha256(url)>.crl`, the body as received.
-///
-/// A file that is not a valid, current CRL of the issuer is ignored (and replaced by the
-/// next successful download); failing to write one does not fail the download.
-#[derive(Clone, Debug)]
-pub struct CrlCache {
-    dir: PathBuf,
-}
-
-impl CrlCache {
-    /// A cache in `dir` (normally `<data_dir>/crl`), created on the first write.
-    pub fn new(dir: impl Into<PathBuf>) -> CrlCache {
-        CrlCache { dir: dir.into() }
-    }
-
-    /// The CRL at `url` of `issuer`, valid at `now`: the cached one while it has a
-    /// nextUpdate after `now`, otherwise downloaded through `http` within [`TIMEOUT`] and
-    /// [`MAX_CRL_LEN`], checked and, if it has a nextUpdate, cached.
-    ///
-    /// # Errors
-    ///
-    /// [`CrlError::Http`] or [`CrlError::HttpStatus`] if the download fails, the errors of
-    /// [`verify_crl`] if the downloaded CRL is not valid.
-    pub fn fetch(
-        &self,
-        url: &str,
-        issuer: &Certificate,
-        http: &dyn HttpTransport,
-        now: OffsetDateTime,
-    ) -> Result<CertificateList, CrlError> {
-        match self.cached(url, issuer, now) {
-            Some(crl) => Ok(crl),
-            None => self.download(url, issuer, http, now),
-        }
-    }
-
-    /// The cached CRL of `url` if it is a valid CRL of `issuer` with a nextUpdate after
-    /// `now`; no request is made.
-    pub fn cached(
-        &self,
-        url: &str,
-        issuer: &Certificate,
-        now: OffsetDateTime,
-    ) -> Option<CertificateList> {
-        let mut der = Vec::new();
-        File::open(self.path(url))
-            .ok()?
-            .take(MAX_CRL_LEN + 1)
-            .read_to_end(&mut der)
-            .ok()?;
-        if u64::try_from(der.len()).ok()? > MAX_CRL_LEN {
-            return None;
-        }
-        let crl = verify_crl(&der, issuer, now).ok()?;
-        crl.tbs_cert_list.next_update.is_some().then_some(crl)
-    }
-
-    /// Downloads, checks and (with a nextUpdate) caches the CRL at `url`.
-    fn download(
-        &self,
-        url: &str,
-        issuer: &Certificate,
-        http: &dyn HttpTransport,
-        now: OffsetDateTime,
-    ) -> Result<CertificateList, CrlError> {
-        let opts = GetOptions {
-            timeout: TIMEOUT,
-            connect_timeout: CONNECT_TIMEOUT,
-            max_len: MAX_CRL_LEN,
-            https_only: false,
-            redirects: true,
-        };
-        let reply = http.get_with(url, opts).map_err(CrlError::Http)?;
-        if reply.status != 200 {
-            return Err(CrlError::HttpStatus(reply.status));
-        }
-        let crl = verify_crl(&reply.body, issuer, now)?;
-        if crl.tbs_cert_list.next_update.is_some() {
-            // A cache that cannot be written only costs a download next time.
-            let _ = fs::create_dir_all(&self.dir)
-                .and_then(|()| write_atomically(&self.path(url), &reply.body, Access::Default));
-        }
-        Ok(crl)
-    }
-
-    fn path(&self, url: &str) -> PathBuf {
-        let mut name = String::with_capacity(68);
-        for b in Sha256::digest(url.as_bytes()) {
-            // Writing to a `String` cannot fail.
-            let _ = write!(name, "{b:02x}");
-        }
-        name.push_str(".crl");
-        self.dir.join(name)
-    }
-}
-
-/// Status of `cert` in the CRL of `issuer` valid at `now`: a cached CRL of any of its
-/// distribution point URLs, else the first URL whose download gives a valid CRL (through
-/// `cache` and `http`).
-///
-/// # Errors
-///
-/// [`CrlError::NoUrl`] without a URL, [`CrlError::IssuerMismatch`] if `issuer` did not
-/// issue `cert`; when no URL gives a valid CRL, the error of the last one.
-pub fn check(
-    cert: &Certificate,
-    issuer: &Certificate,
-    cache: &CrlCache,
-    http: &dyn HttpTransport,
-    now: OffsetDateTime,
-) -> Result<CrlStatus, CrlError> {
-    let urls = crl_urls(cert);
-    if urls.is_empty() {
-        return Err(CrlError::NoUrl);
-    }
-    let tbs = cert.tbs_certificate();
-    if tbs.issuer() != issuer.tbs_certificate().subject() {
-        return Err(CrlError::IssuerMismatch);
-    }
-    let serial = tbs.serial_number().as_bytes();
-    if let Some(crl) = urls.iter().find_map(|url| cache.cached(url, issuer, now)) {
-        return Ok(lookup(&crl, serial));
-    }
-    let mut last = CrlError::NoUrl;
-    for url in &urls {
-        match cache.download(url, issuer, http, now) {
-            Ok(crl) => return Ok(lookup(&crl, serial)),
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
-}
-
 /// The CRLs of `cert`'s distribution points as received, without the cache: the first
 /// complete CRL of `issuer` its CRLDistributionPoints give, then the first delta CRL its
 /// FreshestCRL gives (if it has one), each downloaded within `timeout`; and `cert`'s
@@ -633,7 +493,6 @@ const REMOVE_FROM_CRL: u8 = 8;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn http_schemes() {
@@ -643,16 +502,6 @@ mod tests {
         assert!(!is_http("http:/a"));
         assert!(!is_http("htt"));
         assert!(!is_http("ftp://ünïcode"));
-    }
-
-    #[test]
-    fn cache_file_name_is_the_url_hash() {
-        let cache = CrlCache::new("dir");
-        assert_eq!(
-            cache.path("http://crl.root.gov.kz/gost2015_2022.crl"),
-            Path::new("dir")
-                .join("f9ce723c2eadabfc7d0f66968bf0362b7602802b321d8f0b8565fcbab80ddceb.crl")
-        );
     }
 
     #[test]

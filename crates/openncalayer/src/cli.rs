@@ -1,5 +1,5 @@
-//! The command line: `run` (the default), `tls init|import|status`, `cms-verify`,
-//! `nm install|uninstall|status` and `integration install|uninstall|status`.
+//! The command line: `run` (the default), `tls init|import|status`, `nm install|uninstall|status`
+//! and `integration install|uninstall|status`.
 //!
 //! Messages for the user are in Russian, like the rest of the user-facing text.
 
@@ -15,7 +15,6 @@ use clap::{Parser, Subcommand};
 use oncl_desktop::original::EntryState;
 use oncl_flows::Locale;
 use oncl_ipc::IpcListener;
-use oncl_pki::pkix::CaSet;
 use oncl_plugin::BuiltinSource;
 use oncl_tls::{
     AUTO_RENEW_BEFORE, RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning,
@@ -26,12 +25,10 @@ use time::format_description::well_known::Rfc3339;
 use tracing::{error, info, warn};
 use zeroize::Zeroizing;
 
-use crate::cms_verify::{Online, Options, cms_verify_report_with, parse_certificates};
 use crate::lifecycle::{self, Choice, Event, Executables, Installation, Integration, Step};
 use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::paths::Paths;
 use crate::server::listen_port;
-use crate::settings::load_settings;
 
 /// Exit code: TLS is not set up yet.
 pub const EXIT_TLS_NOT_CONFIGURED: u8 = 2;
@@ -70,21 +67,6 @@ pub enum Command {
     Tls {
         #[command(subcommand)]
         command: TlsCommand,
-    },
-    #[command(about = "Проверить CMS-подпись (PEM или DER): подписи, цепочки, сроки, отзыв")]
-    CmsVerify {
-        #[arg(help = "Файл подписи (.p7s, .cms, PEM или DER)")]
-        file: PathBuf,
-        #[arg(long, help = "Подписанные данные для подписи без вложенных данных")]
-        content: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "FILE",
-            help = "Сертификаты CA (PEM, можно несколько в файле, или DER) вместо встроенных сертификатов НУЦ; можно указать несколько раз"
-        )]
-        chain: Vec<PathBuf>,
-        #[arg(long, help = "Не проверять отзыв: без запросов OCSP и CRL")]
-        offline: bool,
     },
     #[command(about = "Хост native messaging для расширения браузера")]
     Nm {
@@ -1247,73 +1229,6 @@ fn integration_ok(record: &io::Result<Option<lifecycle::Record>>, relay: &Report
     record_ok && (relay.is_healthy() || !lifecycle::relay_registered(relay))
 }
 
-/// `cms-verify <file> [--content <file>] [--chain <file>]... [--offline]`: prints
-/// [`cms_verify_report_with`] against the CA certificates of the `chain` files (each PEM,
-/// every `CERTIFICATE` block, or DER) or, without any, the embedded NCA set; unless
-/// `offline`, over the network ([`crate::daemon_transport`] through the proxy of `settings.json`) with
-/// the CRL cache in `<data_dir>/crl`.
-/// Exit code 0 when the report ends with `OK`, otherwise 1.
-pub fn cms_verify(
-    file: &Path,
-    content: Option<&Path>,
-    chain: &[PathBuf],
-    offline: bool,
-) -> ExitCode {
-    let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
-    let inputs = read(file).and_then(|cms| {
-        let content = content.map(read).transpose()?;
-        let cas = if chain.is_empty() {
-            CaSet::nca_production()
-        } else {
-            let mut certs = Vec::new();
-            for path in chain {
-                let bytes = read(path)?;
-                certs.extend(
-                    parse_certificates(&bytes).map_err(|e| format!("{}: {e}", path.display()))?,
-                );
-            }
-            CaSet::new(certs)
-        };
-        Ok((cms, content, cas))
-    });
-    let (cms, content, cas) = match inputs {
-        Ok(inputs) => inputs,
-        Err(e) => {
-            println!("FAIL: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let http;
-    let online = if offline {
-        None
-    } else {
-        let paths = match data_paths() {
-            Ok(paths) => paths,
-            Err(code) => return code,
-        };
-        http = crate::daemon_transport(load_settings(&paths.settings()).proxy);
-        Some(Online {
-            http: &http,
-            crl_dir: paths.crl(),
-        })
-    };
-    let opts = Options {
-        cas,
-        online,
-        // Whole seconds: the report prints it as the validation time.
-        now: OffsetDateTime::now_utc()
-            .replace_nanosecond(0)
-            .expect("0 is a valid nanosecond"),
-    };
-    let (report, ok) = cms_verify_report_with(&cms, content.as_deref(), &opts);
-    print!("{report}");
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1556,28 +1471,11 @@ mod tests {
                 command: TlsCommand::Init { force: true }
             })
         ));
-        let cli =
-            Cli::try_parse_from(["openncalayer", "cms-verify", "a.p7s", "--content", "a"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::CmsVerify { ref chain, offline: false, .. }) if chain.is_empty()
-        ));
-        let cli = Cli::try_parse_from([
-            "openncalayer",
-            "cms-verify",
-            "a.p7s",
-            "--chain",
-            "ca.der",
-            "--chain",
-            "root.pem",
-            "--offline",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::CmsVerify { ref chain, offline: true, content: None, .. })
-                if chain == &[PathBuf::from("ca.der"), PathBuf::from("root.pem")]
-        ));
+        // The whole-buffer CMS checker is `oncl verify --profile cms` now.
+        assert!(
+            Cli::try_parse_from(["openncalayer", "cms-verify", "a.p7s", "--content", "a"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["openncalayer", "cms-verify", "a.p7s", "--offline"]).is_err());
         let cli = Cli::try_parse_from(["openncalayer", "run"]).unwrap();
         assert!(matches!(
             cli.command,

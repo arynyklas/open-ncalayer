@@ -173,12 +173,6 @@ fn main() -> ExitCode {
             no_tray,
         } => run(allow_no_wss, !no_tray),
         Command::Tls { command } => cli::tls(command),
-        Command::CmsVerify {
-            file,
-            content,
-            chain,
-            offline,
-        } => cli::cms_verify(&file, content.as_deref(), &chain, offline),
         Command::Nm { command } => cli::nm(command),
         Command::Builtins => cli::builtins(),
         Command::Integration { command } => cli::integration(command),

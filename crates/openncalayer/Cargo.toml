@@ -58,6 +58,11 @@ velopack.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# The SDK's CMS validation, which replaced the daemon's own checker, in the end-to-end tests.
+oncl-core.workspace = true
+# An AuthorityInfoAccess extension for the loopback PKI of the Core validation tests.
+der.workspace = true
+x509-cert.workspace = true
 oncl-xml.workspace = true
 # `testing`: `ScriptedPrompter`, `MemoryRecentPath`, `tsp::MockTsa`, `ocsp::MockOcsp`,
 # `crl::MockCrl` and `http::RouteTransport`.

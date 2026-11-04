@@ -4,12 +4,11 @@
 //! registration of its native messaging host, what installing, updating and uninstalling
 //! change on the user's desktop, its data directory and settings, what its settings window
 //! and TLS wizard work with, the certificate's renewal and what the tray tells the user, its
-//! self-update, logging, signature checking (`cms-verify`) and the command line.
+//! self-update, logging and the command line.
 
 mod bridge;
 pub mod builtins;
 pub mod cli;
-pub mod cms_verify;
 pub mod desktop;
 mod http;
 pub mod lifecycle;

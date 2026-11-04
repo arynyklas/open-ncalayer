@@ -370,13 +370,30 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             profile,
             input,
             detached,
+            pem,
             wsse,
         } => {
             let mut source = Input::open(input)?;
             let mut detached = detached.as_deref().map(Input::open).transpose()?;
+            let mut decoded: std::io::Cursor<Vec<u8>>;
+            let _held;
+            let primary = if *pem {
+                // Explicit, bounded, decoded before parsing; the DER is charged like any
+                // other retained input.
+                let text =
+                    crate::bounded::read(source.source(), crate::pem::MAX_PEM_BYTES, &mut ctx)?;
+                let der = crate::pem::decode_cms(text.as_bytes())?;
+                drop(text);
+                _held = ctx.resources().reserve_memory(der.len() as u64)?;
+                let length = der.len() as u64;
+                decoded = std::io::Cursor::new(der);
+                Source::sequential(&mut decoded, Some(length))
+            } else {
+                source.source()
+            };
             let result = engine.verify(
                 &profile.sdk(wsse),
-                source.source(),
+                primary,
                 detached.as_mut().map(Input::source),
                 &mut ctx,
             )?;

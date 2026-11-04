@@ -28,10 +28,7 @@ use asn1::{ContentInfo, IssuerAndSerialNumber, SignedData, SignerInfo};
 use der::{Decode, Tag, Tagged};
 use x509_cert::Certificate;
 
-pub use report::{
-    ChainPolicy, Check, NetFailure, NetStage, Problem, Report, ReportSpec, Revocation,
-    SignerReport, TspReport, VerifyAt, report, visit_signers,
-};
+pub use report::{Check, Problem, Report, ReportSpec, SignerReport, TspReport, report};
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
 pub use sign::{
