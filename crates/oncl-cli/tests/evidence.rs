@@ -391,3 +391,176 @@ fn keyless_extend_b_to_t_to_lt_to_lta_with_no_key_provider_and_tampered_evidence
     std::fs::write(&altered, b"extend mf").unwrap();
     assert_eq!(level_of(&w, "cades-lta", &current, &altered).0, Some(2));
 }
+fn pdf_fixture() -> PathBuf {
+    oncl_testkit::workspace_root().join("crates/oncl-pdf/tests/fixtures/external-multipage.pdf")
+}
+fn pyhanko(w: &World, pdf: &Path) -> (bool, serde_json::Value, String) {
+    let python = "org-87/open-ncalayer/.worktrees/feat-platform-pdf/target/p03-oracle-env/Scripts/python.exe";
+    assert!(
+        Path::new(python).exists(),
+        "the pyHanko oracle environment is required"
+    );
+    let script = w.dir.path().join("pyhanko_oracle.py");
+    std::fs::write(&script, include_str!("support/pyhanko_oracle.py")).unwrap();
+    let out = Command::new(python)
+        .args([path(&script), path(pdf), path(&w.root), "1793620920"])
+        .output()
+        .unwrap();
+    let json = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    eprintln!("PYHANKO {}", String::from_utf8_lossy(&out.stdout).trim());
+    (out.status.success(), json, err)
+}
+fn cli_pdf_level(w: &World, level: &str, pdf: &Path) -> (Option<i32>, serde_json::Value) {
+    let mut v = vec!["verify", "--profile", level, "--input", path(pdf), "--json"];
+    v.extend(trust(w));
+    let result = run(&v, b"");
+    (
+        result.status.code(),
+        serde_json::from_slice(&result.stdout).unwrap_or(serde_json::Value::Null),
+    )
+}
+fn tampered_copy(w: &World, pdf: &Path, name: &str) -> PathBuf {
+    let mut bytes = std::fs::read(pdf).unwrap();
+    bytes[300] ^= 0x01; // inside the original, signed revision
+    let out = w.dir.path().join(name);
+    std::fs::write(&out, bytes).unwrap();
+    out
+}
+#[test]
+fn pades_lt_and_lta_sign_and_keyless_extend_verify_with_pyhanko_dss_and_doctimestamp() {
+    let w = world();
+    let tsa = format!("{}/tsa", w.origin);
+    let m = material(&w);
+    let pdf = pdf_fixture();
+    let check = |file: &Path, label: &str, doc_timestamps: u64| {
+        let (ok, json, err) = pyhanko(&w, file);
+        assert!(ok, "{label}: pyHanko rejected: {json} {err}");
+        assert_eq!(json["signatures"], 1, "{label}");
+        assert_eq!(json["doc_timestamps"], doc_timestamps, "{label}");
+        // Validation material is in the DSS (the oracle validates from it alone, with
+        // revocation required and fetching disabled).
+        assert!(
+            json["dss"]["certs"].as_u64().unwrap() >= 2,
+            "{label}: {json}"
+        );
+        assert!(
+            json["dss"]["ocsps"].as_u64().unwrap() >= 1,
+            "{label}: {json}"
+        );
+        for item in json["results"].as_array().unwrap() {
+            assert_eq!(item["bottom_line"], true, "{label}: {json}");
+        }
+    };
+    for (profile, level, timestamps) in [("pades-lt", "Lt", 0u64), ("pades-lta", "Lta", 1)] {
+        let out = w.dir.path().join(format!("{profile}.pdf"));
+        let mut args = vec![
+            "sign",
+            "--profile",
+            profile,
+            "--input",
+            path(&pdf),
+            "--output",
+            path(&out),
+            "--key",
+            path(&w.rsa_key),
+            "--secret-file",
+            path(&w.secret),
+            "--authorize",
+        ];
+        args.extend(tsa_args(&tsa));
+        args.extend(m.args());
+        args.extend(trust(&w));
+        let signed = run(&args, b"");
+        assert_eq!(signed.status.code(), Some(0), "{profile}: {signed:?}");
+        let (code, report) = cli_pdf_level(&w, profile, &out);
+        assert_eq!(code, Some(0), "{profile}: {report}");
+        assert_eq!(report["ades_level"], level);
+        check(&out, profile, timestamps);
+        // Tamper negative: CLI Invalid (2), pyHanko no longer intact.
+        let bad = tampered_copy(&w, &out, &format!("{profile}-tampered.pdf"));
+        assert_eq!(cli_pdf_level(&w, profile, &bad).0, Some(2), "{profile}");
+        let (ok, json, _) = pyhanko(&w, &bad);
+        assert!(!ok, "{profile}: pyHanko accepted a tampered PDF: {json}");
+    }
+    // Keyless extend PAdES-T -> LT -> LTA with no key provider.
+    let t = w.dir.path().join("t.pdf");
+    let mut sign = vec![
+        "sign",
+        "--profile",
+        "pades-t",
+        "--input",
+        path(&pdf),
+        "--output",
+        path(&t),
+        "--key",
+        path(&w.rsa_key),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+    ];
+    sign.extend(tsa_args(&tsa));
+    sign.extend(trust(&w));
+    assert_eq!(run(&sign, b"").status.code(), Some(0));
+    let mut current = t;
+    for (level, profile, label, timestamps) in [
+        ("lt", "pades-lt", "Lt", 0u64),
+        ("lta", "pades-lta", "Lta", 1),
+    ] {
+        let next = w.dir.path().join(format!("extended-{level}.pdf"));
+        let mut ext = vec![
+            "extend",
+            "--profile",
+            "pdf",
+            "--level",
+            level,
+            "--input",
+            path(&current),
+            "--output",
+            path(&next),
+        ];
+        ext.extend(tsa_args(&tsa));
+        ext.extend(m.args());
+        ext.extend(trust(&w));
+        let result = run(&ext, b"");
+        assert_eq!(result.status.code(), Some(0), "{level}: {result:?}");
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("private_use"));
+        let (code, report) = cli_pdf_level(&w, profile, &next);
+        assert_eq!(code, Some(0), "{level}: {report}");
+        assert_eq!(report["ades_level"], label);
+        check(&next, &format!("extend-{level}"), timestamps);
+        current = next;
+    }
+    // Tampered evidence is refused by `extend` with no output.
+    let mut bad = std::fs::read(&m.files[2]).unwrap();
+    let at = bad.len() / 2;
+    bad[at] ^= 0x55;
+    let bad_ocsp = w.dir.path().join("bad-pdf.ocsp");
+    std::fs::write(&bad_ocsp, bad).unwrap();
+    let out = w.dir.path().join("tampered-evidence.pdf");
+    let t = w.dir.path().join("t.pdf");
+    let mut ext = vec![
+        "extend",
+        "--profile",
+        "pdf",
+        "--level",
+        "lt",
+        "--input",
+        path(&t),
+        "--output",
+        path(&out),
+        "--evidence-certificate",
+        path(&m.files[0]),
+        "--evidence-certificate",
+        path(&m.files[1]),
+        "--evidence-ocsp",
+        path(&bad_ocsp),
+        "--evidence-ocsp",
+        path(&m.files[3]),
+    ];
+    ext.extend(tsa_args(&tsa));
+    ext.extend(trust(&w));
+    let refused = run(&ext, b"");
+    assert_ne!(refused.status.code(), Some(0), "{refused:?}");
+    assert!(!out.exists());
+}
