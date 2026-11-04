@@ -1232,7 +1232,7 @@ static RU: SignTexts = SignTexts {
     outputs: "Файлы результата будут записаны:\n{0}",
     waiting: "Документы зафиксированы. Ключ не применяется, пока вы не подтвердите.",
     signing: "Идёт подпись. Отмена остановит остальные документы, уже применённый ключ вернуть нельзя.",
-    cancel_slow: "Отмена запрошена, но подпись ещё не остановилась: она остановится на ближайшей проверке. Часть документов могла быть подписана, проверьте файлы результата.",
+    cancel_slow: "Отмена запрошена, но подпись ещё не остановилась: она остановится на ближайшей проверке. Часть документов могла быть подписана, проверьте файлы результата. Окно можно закрыть: подпись закончит работу в фоне, а применялся ли ключ — неизвестно.",
     cancelled_before: "Отменено до применения ключа. Ключ не применялся.",
     cancelled_applied_unknown: "Отменено. Часть документов могла быть подписана: проверьте файлы результата.",
     no_key_used: "Ключ не применялся.",
@@ -1286,7 +1286,7 @@ static KK: SignTexts = SignTexts {
     outputs: "Нәтиже файлдары жазылады:\n{0}",
     waiting: "Құжаттар бекітілді. Растағанша кілт қолданылмайды.",
     signing: "Қол қойылуда. Бас тарту қалған құжаттарды тоқтатады; қолданылған кілтті қайтаруға болмайды.",
-    cancel_slow: "Тоқтату сұралды, бірақ қол қою әлі тоқтамады: ол келесі тексеруде тоқтайды. Кейбір құжаттарға қол қойылған болуы мүмкін: нәтиже файлдарын тексеріңіз.",
+    cancel_slow: "Тоқтату сұралды, бірақ қол қою әлі тоқтамады: ол келесі тексеруде тоқтайды. Кейбір құжаттарға қол қойылған болуы мүмкін: нәтиже файлдарын тексеріңіз. Терезені жабуға болады: қол қою фонда аяқталады, ал кілттің қолданылғаны белгісіз.",
     cancelled_before: "Кілт қолданылмай тұрып тоқтатылды. Кілт қолданылмады.",
     cancelled_applied_unknown: "Тоқтатылды. Кейбір құжаттарға қол қойылған болуы мүмкін: нәтиже файлдарын тексеріңіз.",
     no_key_used: "Кілт қолданылмады.",
@@ -1340,7 +1340,7 @@ static EN: SignTexts = SignTexts {
     outputs: "The result files will be written to:\n{0}",
     waiting: "The documents are frozen. The key is not used until you confirm.",
     signing: "Signing. Cancel stops the remaining documents; a key already applied cannot be taken back.",
-    cancel_slow: "Cancel was requested but the signing has not stopped yet: it stops at its next checkpoint. Some documents may be signed: check the result files.",
+    cancel_slow: "Cancel was requested but the signing has not stopped yet: it stops at its next checkpoint. Some documents may be signed: check the result files. You can close the window anyway: the signing finishes in the background and whether the key was applied stays unknown.",
     cancelled_before: "Cancelled before the key was applied. No key was used.",
     cancelled_applied_unknown: "Cancelled. Some documents may be signed: check the result files.",
     no_key_used: "No key was used.",
@@ -1676,6 +1676,47 @@ mod tests {
             assert!(!ui(&p).get_busy(), "the page is not left disabled");
             assert_eq!(ui(&p).get_result(), text, "the shown outcome stays");
         }
+    }
+
+    /// A hung worker must not make the window unclosable: while the signing runs the window stays
+    /// and says why; after the cancel has run out its wait, the notice offers closing anyway,
+    /// the step is no longer Running, and closing abandons the signing with its stamp (logged
+    /// at error level, key use unknown) while the worker is left alone.
+    #[test]
+    fn a_hung_signing_does_not_make_the_window_unclosable_and_is_abandoned_with_its_stamp() {
+        use crate::workspace::{abandon_signing, closing_is_blocked_for};
+        let p = page();
+        p.ws.sign.borrow_mut().cancel_after = Duration::from_millis(30);
+        to_confirmation(&p);
+        arm(&p);
+        ui(&p).invoke_confirm();
+        assert_eq!(step(&p), Step::Running);
+        let held = crate::workspace::Held::take_mine();
+        // Running: closing is refused and says why.
+        assert!(closing_is_blocked_for(&p.ws));
+        assert!(p.ws.ui.get_status_text().contains("A signing is running"));
+        // The user cancels; the worker stays silent past the wait.
+        cancel(&p.ws);
+        assert!(
+            closing_is_blocked_for(&p.ws),
+            "still waiting for the worker"
+        );
+        std::thread::sleep(Duration::from_millis(60));
+        slint::platform::update_timers_and_animations();
+        assert_eq!(step(&p), Step::Result);
+        assert!(ui(&p).get_result().contains("close the window anyway"));
+        assert!(
+            !closing_is_blocked_for(&p.ws),
+            "now the window may be closed"
+        );
+        // Closing abandons the still-running signing, and says which one.
+        let running = p.ws.controller.borrow().running_stamp();
+        assert!(running.is_some());
+        assert_eq!(abandon_signing(&p.ws), running);
+        // The worker then finishes in the background; the closed window refuses its outcome.
+        p.ws.controller.borrow_mut().close();
+        drop(held);
+        assert!(p.ws.controller.borrow().running_stamp().is_none());
     }
 
     /// What the sign page's fields mean to the SDK: every format and level maps to its spec;

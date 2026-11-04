@@ -282,6 +282,11 @@ impl Controller {
         self.active.as_ref().map(|a| (a.job, &a.control))
     }
 
+    /// The stamp of the running operation, if any.
+    pub(crate) fn running_stamp(&self) -> Option<Stamp> {
+        self.life.running()
+    }
+
     /// Whether a word of `stamp` is for the running operation of this window.
     pub(crate) fn accepts(&self, stamp: Stamp) -> bool {
         self.life.accepts(stamp)

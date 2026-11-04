@@ -1347,27 +1347,71 @@ mod tests {
         }
     }
 
-    /// A big batch is capped: 200 rows and one that says how many are not shown, in every
-    /// language; the headline still counts every document.
+    /// A big batch is capped at 200 rows, but nothing is hidden from the verdict: the invalid and
+    /// not-fully-checked documents sit BEYOND row 200, the headline still counts them, the tone
+    /// is a failure, and the last row carries the exact number of rows not shown, in every
+    /// language.
     #[test]
-    fn a_big_report_is_capped_and_says_how_many_rows_are_not_shown() {
-        let items: Vec<ItemView> = (0..60)
+    fn a_big_report_is_capped_but_the_headline_and_tone_count_rows_beyond_the_cap() {
+        let mut items: Vec<ItemView> = (0..45)
             .map(|_| verified(Verdict::Valid, CheckStatus::Passed))
             .collect();
+        items.extend((0..3).map(|_| verified(Verdict::Invalid, CheckStatus::Failed)));
+        items.extend((0..2).map(|_| verified(Verdict::Indeterminate, CheckStatus::Unavailable)));
         let view = batch(items);
         for locale in LOCALES {
+            // What the whole report would have been, row by row.
+            let total: usize = view
+                .items
+                .iter()
+                .map(|i| render(locale, &batch(vec![i.clone()])).rows.len())
+                .sum();
+            assert!(
+                total > MAX_ROWS + 10,
+                "the failures are beyond the cap: {total}"
+            );
             let r = render(locale, &view);
             assert_eq!(r.rows.len(), MAX_ROWS + 1, "{locale:?}");
             let last = r.rows.last().unwrap();
             assert_eq!((last.depth, last.tone), (0, Tone::Neutral));
+            let digits: String = last.text.chars().filter(char::is_ascii_digit).collect();
+            assert_eq!(
+                digits,
+                (total - MAX_ROWS).to_string(),
+                "{locale:?}: {}",
+                last.text
+            );
+            // None of the 200 shown rows is an invalid or indeterminate document: only the headline
+            // and the tone know about them.
             assert!(
-                last.text.contains(&format!("{}", 60 * 6 - MAX_ROWS)) || last.text.contains('…')
+                r.rows[..MAX_ROWS]
+                    .iter()
+                    .all(|row| row.tone != Tone::Failure)
+            );
+            assert_eq!(
+                r.tone,
+                Tone::Failure,
+                "{locale:?}: an invalid one beyond the cap"
+            );
+            assert_eq!(
+                view.headline(),
+                Headline::AllCompleted {
+                    total: 50,
+                    invalid: 3,
+                    indeterminate: 2,
+                    unchecked: 0
+                }
             );
             assert!(
-                r.headline.contains("60"),
-                "the headline counts every document: {}",
+                r.headline.contains("50") && r.headline.contains('3'),
+                "{}",
                 r.headline
             );
+            assert!(!r.headline.contains(match locale {
+                Locale::En => "every signature is valid",
+                Locale::Ru => "все подписи действительны",
+                Locale::Kk => "барлық қолтаңбалар жарамды",
+            }));
         }
     }
 }

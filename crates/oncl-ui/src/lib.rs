@@ -51,7 +51,9 @@ pub use tray::{
 pub use windows::{
     DesktopWindow, DesktopWindows, any_window_open, open_window, set_desktop_windows,
 };
-pub use workspace::{DesktopEngineServices, JobControl, desktop_limits, open_workspace, progress};
+#[doc(hidden)]
+pub use workspace::progress;
+pub use workspace::{DesktopEngineServices, JobControl, desktop_limits, open_workspace};
 
 mod ui {
     slint::include_modules!();

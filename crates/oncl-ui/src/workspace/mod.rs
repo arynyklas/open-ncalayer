@@ -16,6 +16,7 @@ mod controller;
 mod evidence;
 mod jobs;
 mod operations;
+#[doc(hidden)]
 pub mod progress;
 mod sign;
 mod tools;
@@ -221,6 +222,7 @@ fn close() {
     let Some(open) = OPEN.take() else {
         return;
     };
+    abandon_signing(&open);
     open.controller.borrow_mut().close();
     if let Err(e) = open.ui.hide() {
         tracing::warn!(error = %e, "cannot hide the tools window");
@@ -571,18 +573,43 @@ fn describe(t: &Texts, update: Update) -> (f32, String) {
     }
 }
 
-/// A signing that the user confirmed is running: the window stays, and says why.
+/// A signing that the user confirmed is running (and no cancel has run out its wait): the window
+/// stays, and says why. After the cancel notice the step is Result, so the window may be closed
+/// («Close anyway»): see [`abandon_signing`].
 fn closing_is_blocked() -> bool {
-    current().is_some_and(|open| {
-        if sign::is_running(&open) {
-            open.ui.set_status_kind(4);
-            open.ui
-                .set_status_text(Texts::of(open.locale.get()).signing_running.into());
-            true
-        } else {
-            false
-        }
-    })
+    current().is_some_and(|open| closing_is_blocked_for(&open))
+}
+
+fn closing_is_blocked_for(open: &Rc<Workspace>) -> bool {
+    if sign::is_running(open) {
+        open.ui.set_status_kind(4);
+        open.ui
+            .set_status_text(Texts::of(open.locale.get()).signing_running.into());
+        true
+    } else {
+        false
+    }
+}
+
+/// The window is closed while a signing worker has not answered (a hung worker after the cancel
+/// notice): the key may have been applied, which is recorded as UNKNOWN in the log with the
+/// operation's stamp; the worker is left to finish in the background (it holds no UI handle:
+/// its words and its outcome are refused by the closed window's lifecycle and logged).
+/// Returns the stamp of the abandoned signing.
+fn abandon_signing(open: &Rc<Workspace>) -> Option<Stamp> {
+    let controller = open.controller.borrow();
+    let (job, _) = controller.running()?;
+    if job != Job::Sign {
+        return None;
+    }
+    let stamp = controller.running_stamp()?;
+    tracing::error!(
+        window = stamp.window,
+        generation = stamp.generation,
+        key_use = "unknown",
+        "the window was closed while a signing had not answered: whether the key was applied is unknown; the worker finishes in the background"
+    );
+    Some(stamp)
 }
 
 /// What an outcome says, for the log when it cannot be shown: for a signing, the key use of each
