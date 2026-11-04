@@ -227,6 +227,19 @@ What is **not** verified and not claimed:
 Commands: `cargo xtask sdk closure`, `cargo xtask sdk smoke [--keep]`,
 `cargo xtask sdk licenses [--check]`.
 
+**Guarded by `cargo test -p xtask --test sdk_delivery`** (no network, no build, only
+`cargo metadata`/`cargo tree`): the set of crates with `publish` enabled equals
+`xtask::sdk_delivery::CHAIN` and the chain is in dependency order; no feature closure of
+`oncl-core` contains Slint, winit, tokio, axum, hyper, velopack or any other forbidden crate;
+`THIRD-PARTY.txt` is current (a stale copy is detected); a closure crate missing from the
+registry map is an error naming it, never a silent omission.
+
+**Heavy gate, explicit invocation (for the release/CI owner; not wired into any workflow
+here):** from the workspace root on a host with the registry cache populated
+(`cargo fetch --locked`), `cargo run -p xtask -- sdk smoke` (exit 0 and a final
+`SDK-CONSUMER-OK` line; `--keep` leaves `target/sdk-smoke` for inspection). It needs `tar` on
+`PATH` (GNU or bsdtar) and builds in minutes (RSA key generation, `oncl-core` with `full`).
+
 ## 8. Licences and notices
 
 Every chain crate ships `LICENSE` (Apache-2.0) and `NOTICE`. `oncl-pki/roots/` embeds the NCA

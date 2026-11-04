@@ -27,8 +27,13 @@ oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 oncl-builtins-build = { path = "crates/oncl-builtins-build" }
 oncl-core = { path = "crates/oncl-core" }
 oncl-desktop = { path = "crates/oncl-desktop" }
-# The SDK's packaged dependency chain pins the exact workspace version: `cargo package` needs a
-# `version` next to each `path`, and it must be bumped together with `[workspace.package]`.
+# The SDK's packaged dependency chain (`xtask::sdk_delivery::CHAIN`, docs/dev/sdk.md section 7)
+# pins the exact workspace version: `cargo package` needs a `version` next to each `path`, and
+# it must be bumped together with `[workspace.package]`. These crates (and only these) set
+# `publish = true` in their manifests so that `cargo package` can verify the chain offline;
+# nothing uploads them: the modified `hmac`/`streebog` of `vendor/` are not on crates.io under
+# these names (crates.io's lack the `secret-input` feature), so a registry release is blocked
+# until that is decided. A test (`xtask/tests/sdk_delivery.rs`) keeps the set and its order.
 # The windows, key choice, page paths and page PINs the core gives modules and plugins.
 oncl-flows = { path = "crates/oncl-flows", version = "=0.1.0-alpha.7" }
 oncl-gost = { path = "crates/oncl-gost", version = "=0.1.0-alpha.7" }

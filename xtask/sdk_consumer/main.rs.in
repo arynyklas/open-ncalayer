@@ -13,7 +13,14 @@ use support::{AuditGuard, NeverCancelled, PASSWORD};
 const DOCUMENT: &[u8] = b"A document signed by an application that embeds the SDK from source packages.";
 
 fn main() {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let dir = std::env::temp_dir().join(format!("oncl-sdk-consumer-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let pki = support::open_or_create(&dir);
     let crl: Arc<dyn HttpTransport> = Arc::new(oncl_pki::http::RouteTransport::new(vec![(
         support::CRL_ORIGIN.to_owned(),
@@ -96,5 +103,4 @@ fn main() {
         signature.len(),
         refused.code()
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

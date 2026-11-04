@@ -338,16 +338,20 @@ pub fn smoke(root: &Path, keep: bool) -> anyhow::Result<()> {
 
     // 2. Unpack the tarballs.
     for name in CHAIN {
-        let archive = package_dir.join(format!("{name}-{version}.crate"));
+        // Unpacked from a copy named without a path.
+        // `tar` of either flavour: a bare file name relative to the working directory (a
+        // drive letter would read as `host:path` for GNU tar).
+        let local = format!("{name}-{version}.crate");
+        fs::copy(package_dir.join(&local), sources.join(&local))?;
         let status = Command::new("tar")
             .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&sources)
+            .arg(&local)
+            .current_dir(&sources)
             .status()
             .context("running tar")?;
+        fs::remove_file(sources.join(&local))?;
         if !status.success() {
-            bail!("tar failed on {}", archive.display());
+            bail!("tar failed on {local}");
         }
         let dir = sources.join(format!("{name}-{version}"));
         for forbidden in ["tests", "fixtures", "target"] {
@@ -380,10 +384,14 @@ pub fn smoke(root: &Path, keep: bool) -> anyhow::Result<()> {
          [workspace]\n\n[dependencies]\n\
          oncl-core = {{ path = \"{}\", default-features = false, features = [\"full\"] }}\n\
          oncl-pki = {{ path = \"{}\", features = [\"testing\"] }}\n\
-         rcgen = {{ version = \"0.14.10\", default-features = false, features = [\"ring\", \"pem\", \"crypto\", \"zeroize\"] }}\n\
-         getrandom = \"0.4.3\"\nder = \"0.8.2\"\ntime = \"0.3.55\"\n\n[patch.crates-io]",
+         rcgen = {{ version = \"={}\", default-features = false, features = [\"ring\", \"pem\", \"crypto\", \"zeroize\"] }}\n\
+         getrandom = \"={}\"\nder = \"={}\"\ntime = \"={}\"\n\n[patch.crates-io]",
         toml_path(&core),
-        toml_path(&pki)
+        toml_path(&pki),
+        locked_version(root, "rcgen")?,
+        locked_version(root, "getrandom")?,
+        locked_version(root, "der")?,
+        locked_version(root, "time")?
     )?;
     for name in CHAIN.iter().filter(|name| **name != "oncl-core") {
         writeln!(
@@ -534,11 +542,8 @@ pub fn licenses(root: &Path) -> anyhow::Result<String> {
         }
         wanted.extend(tree_crates(root, &extra)?);
     }
-    let mut packages = crate::licenses::registry_packages(root)?;
-    let crates = wanted
-        .into_iter()
-        .filter_map(|key| packages.remove(&key))
-        .collect::<Vec<_>>();
+    let packages = crate::licenses::registry_packages(root)?;
+    let crates = pick_packages(wanted, packages)?;
     let accepted = crate::licenses::accepted_licenses(root)?;
     let standard = crate::licenses::standard_texts(&root.join(crate::licenses::STANDARD_TEXTS))?;
     let rendered = crate::licenses::render(&crates, &accepted, &standard)?;
@@ -564,4 +569,120 @@ pub fn licenses(root: &Path) -> anyhow::Result<String> {
         CHAIN.join(", "),
         &rendered[start..]
     ))
+}
+
+/// The inventory's packages: every third-party crate of `wanted` must be in `packages` (the
+/// crates.io and `vendor/` packages of the lock file); `oncl-*` crates are ours and skipped.
+///
+/// # Errors
+///
+/// Names the crates that are in the closure but not in `packages`: an incomplete inventory
+/// must not pass.
+pub fn pick_packages(
+    wanted: BTreeSet<(String, String)>,
+    mut packages: std::collections::HashMap<(String, String), crate::licenses::Package>,
+) -> anyhow::Result<Vec<crate::licenses::Package>> {
+    let mut picked = Vec::new();
+    let mut missing = Vec::new();
+    for key in wanted {
+        match packages.remove(&key) {
+            Some(package) => picked.push(package),
+            None if key.0.starts_with("oncl-") => {}
+            None => missing.push(format!("{} {}", key.0, key.1)),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "closure crates missing from the registry/vendor packages: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(picked)
+}
+
+/// Whether `path` holds exactly `expected` (the `--check` comparison).
+#[must_use]
+pub fn inventory_is_current(path: &Path, expected: &str) -> bool {
+    fs::read(path).ok().as_deref() == Some(expected.as_bytes())
+}
+
+/// Problems with the publication chain, from `cargo metadata` of the real workspace: the set
+/// of crates with `publish` enabled must be exactly [`CHAIN`], and every crate must come after
+/// the chain crates it depends on (normal and build dependencies; dev-dependencies are dropped
+/// by `cargo package`).
+///
+/// # Errors
+///
+/// `cargo metadata` fails.
+pub fn chain_problems(root: &Path) -> anyhow::Result<Vec<String>> {
+    let metadata: Value = serde_json::from_str(&cargo(
+        root,
+        &[
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+            "--locked",
+        ],
+    )?)?;
+    let mut problems = Vec::new();
+    let mut publishable = BTreeSet::new();
+    let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for package in metadata["packages"].as_array().into_iter().flatten() {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        // `publish: null` means any registry; `[]` means none.
+        if package["publish"].as_array().is_none_or(|p| !p.is_empty()) {
+            publishable.insert(name.to_owned());
+        }
+        let normal = package["dependencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| d["kind"].as_str() != Some("dev"))
+            .filter_map(|d| d["name"].as_str().map(str::to_owned))
+            .collect();
+        deps.insert(name.to_owned(), normal);
+    }
+    let chain: BTreeSet<String> = CHAIN.iter().map(|c| (*c).to_owned()).collect();
+    for name in publishable.difference(&chain) {
+        problems.push(format!("{name} is publishable but not in CHAIN"));
+    }
+    for name in chain.difference(&publishable) {
+        problems.push(format!("{name} is in CHAIN but not publishable"));
+    }
+    for (index, name) in CHAIN.iter().enumerate() {
+        for dep in deps.get(*name).into_iter().flatten() {
+            if let Some(at) = CHAIN.iter().position(|c| c == dep)
+                && at >= index
+            {
+                problems.push(format!(
+                    "{name} depends on {dep}, which comes later in CHAIN"
+                ));
+            }
+        }
+    }
+    Ok(problems)
+}
+
+/// The highest locked version of `name` in the workspace's `Cargo.lock`.
+fn locked_version(root: &Path, name: &str) -> anyhow::Result<String> {
+    let text = fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
+    let lock: toml::Table = toml::from_str(&text).context("parsing Cargo.lock")?;
+    let key = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    lock.get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|p| p.get("name").and_then(toml::Value::as_str) == Some(name))
+        .filter_map(|p| p.get("version").and_then(toml::Value::as_str))
+        .max_by_key(|v| key(v))
+        .map(str::to_owned)
+        .with_context(|| format!("Cargo.lock has no package {name}"))
 }
