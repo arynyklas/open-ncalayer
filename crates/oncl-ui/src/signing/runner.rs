@@ -457,6 +457,8 @@ fn sign_inner(
         },
     );
     guard.revoke();
+    // Cancelled maps to JobError::Cancelled only before any key use; after key use a cancel
+    // ends in Done with the per-item applied state.
     let summary = summary.map_err(|e| JobError::from(operation_of(e)))?;
     let mut done = Vec::with_capacity(documents.len());
     for (i, result) in summary.results().iter().enumerate() {

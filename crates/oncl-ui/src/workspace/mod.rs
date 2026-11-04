@@ -379,7 +379,7 @@ type Delivery = Box<dyn FnOnce() + Send>;
 
 /// Deliveries by the thread they are for: tests run in parallel, each with its own page.
 #[cfg(test)]
-pub(crate) static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
+static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
@@ -397,6 +397,36 @@ pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push((target, Box::new(f)));
+}
+
+/// This thread's pending deliveries, held back; they go back to the queue when this is dropped,
+/// whichever way the test ends. Other pages' deliveries are never touched.
+#[cfg(test)]
+pub(crate) struct Held(Vec<(std::thread::ThreadId, Delivery)>);
+
+#[cfg(test)]
+impl Held {
+    pub(crate) fn take_mine() -> Held {
+        let me = std::thread::current().id();
+        let mut all = DELIVERIES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, rest) = std::mem::take(&mut *all)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(t, _)| *t == me);
+        *all = rest;
+        Held(mine)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        DELIVERIES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append(&mut self.0);
+    }
 }
 
 /// Runs what the workers delivered, on this thread, in order; how many ran.

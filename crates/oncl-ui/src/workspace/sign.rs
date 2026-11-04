@@ -726,6 +726,7 @@ fn finish(open: &Rc<Workspace>) {
     {
         let mut st = state(open);
         st.controller = manual();
+        st.slow_notice = false;
         st.documents.clear();
         st.frozen.clear();
         st.outputs.clear();
@@ -1415,14 +1416,20 @@ mod tests {
     /// replaces it with what the engine reports.
     #[test]
     fn a_cancel_of_a_running_signing_has_an_exit_even_if_the_worker_is_silent() {
-        for late in [
-            Outcome::NotApplied(JobError::Cancelled),
-            Outcome::Done(vec![Signed {
-                name: "a.txt".into(),
-                output: None,
-                error: Some(oncl_core::ErrorCode::Cancelled),
-                applied: AppliedState::NotApplied,
-            }]),
+        for (late, exact) in [
+            (
+                Outcome::NotApplied(JobError::Cancelled),
+                Some("Cancelled before the key was applied. No key was used."),
+            ),
+            (
+                Outcome::Done(vec![Signed {
+                    name: "a.txt".into(),
+                    output: None,
+                    error: Some(oncl_core::ErrorCode::Cancelled),
+                    applied: AppliedState::NotApplied,
+                }]),
+                None,
+            ),
         ] {
             let p = page();
             p.ws.sign.borrow_mut().cancel_after = Duration::from_millis(30);
@@ -1431,11 +1438,7 @@ mod tests {
             ui(&p).invoke_confirm();
             assert_eq!(step(&p), Step::Running);
             // Hold the worker's real answer back: a silent worker.
-            let held = std::mem::take(
-                &mut *crate::workspace::DELIVERIES
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            let held = crate::workspace::Held::take_mine();
             cancel(&p.ws);
             assert_eq!(step(&p), Step::Running, "waiting for the worker's outcome");
             std::thread::sleep(Duration::from_millis(60));
@@ -1449,16 +1452,13 @@ mod tests {
             settled(&p.ws, Ok(SignOutput::Signed(late)));
             let text = ui(&p).get_result();
             assert!(!text.contains("stops at its next checkpoint"), "{text}");
-            assert!(
-                text.contains("key") || text.contains("Not signed"),
-                "{text}"
-            );
+            match exact {
+                Some(exact) => assert_eq!(text, exact),
+                None => assert!(text.contains("Not signed: a.txt"), "{text}"),
+            }
             // The worker's own answer arrives at last: dropped as already shown, and the page is
             // not left disabled by the ended job.
-            crate::workspace::DELIVERIES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend(held);
+            drop(held);
             until("the real worker ends", || !p.ws.ui.get_busy());
             assert!(!ui(&p).get_busy(), "the page is not left disabled");
             assert_eq!(ui(&p).get_result(), text, "the shown outcome stays");
