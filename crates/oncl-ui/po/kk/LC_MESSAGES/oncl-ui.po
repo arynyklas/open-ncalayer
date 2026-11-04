@@ -428,8 +428,8 @@ msgstr "Қосу"
 msgid "Recent"
 msgstr "Соңғылар"
 
-msgid "Forget recent"
-msgstr "Соңғыларды ұмыту"
+msgid "Forget recent and favourites"
+msgstr "Соңғыларды және таңдаулыларды ұмыту"
 
 msgid "Continue"
 msgstr "Әрі қарай"
@@ -461,5 +461,8 @@ msgstr "Нәтиже"
 msgid "New signing"
 msgstr "Жаңа қол қою"
 
-msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
-msgstr "Қол қою: құжаттарға кілттер қоймасының файлымен қол қою; нені және қай сертификатпен қол қоятыныңызды көресіз, содан кейін растайсыз. Хеш: 10 ГиБ дейінгі файлдың хеші, бөлшектеп оқылады; уақыт шектеуі жоқ, «Бас тарту» түймесімен тоқтатуға болады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Хеш пен мәліметтер құпия кілтті қолданбайды."
+msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
+msgstr "Қол қою: құжаттарға кілттер қоймасының файлымен қол қою; нені және қай сертификатпен қол қоятыныңызды көресіз, содан кейін растайсыз. Хеш: 10 ГиБ дейінгі файлдың хеші, бөлшектеп оқылады; практикалық уақыт шектеуі жоқ (24 сағ), «Бас тарту» түймесімен тоқтатуға болады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Хеш пен мәліметтер құпия кілтті қолданбайды."
+
+msgid "Recent key stores"
+msgstr "Соңғы қоймалар"

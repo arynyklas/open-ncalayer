@@ -428,8 +428,8 @@ msgstr "Добавить"
 msgid "Recent"
 msgstr "Недавние"
 
-msgid "Forget recent"
-msgstr "Забыть недавние"
+msgid "Forget recent and favourites"
+msgstr "Забыть недавние и избранное"
 
 msgid "Continue"
 msgstr "Далее"
@@ -461,5 +461,8 @@ msgstr "Результат"
 msgid "New signing"
 msgstr "Новая подпись"
 
-msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
-msgstr "Подпись: подписать документы файлом хранилища ключей; вы видите, что именно подписывается и каким сертификатом, и затем подтверждаете. Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; ограничения по времени нет, остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Хеш и сведения не используют закрытый ключ."
+msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
+msgstr "Подпись: подписать документы файлом хранилища ключей; вы видите, что именно подписывается и каким сертификатом, и затем подтверждаете. Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; практического ограничения по времени нет (24 ч), остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Хеш и сведения не используют закрытый ключ."
+
+msgid "Recent key stores"
+msgstr "Недавние хранилища"

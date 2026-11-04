@@ -395,6 +395,7 @@ pub const RECENT_FILES: usize = 10;
 pub const FAVORITES: usize = 20;
 
 const RECENT_FILES_KEY: &str = "recentFiles";
+const RECENT_STORES_KEY: &str = "recentKeyStores";
 const FAVORITES_KEY: &str = "favoriteCertificates";
 
 /// What the signing window remembers for convenience: paths of recent documents and key
@@ -403,8 +404,11 @@ const FAVORITES_KEY: &str = "favoriteCertificates";
 /// checked again when used, the entry proves nothing about the file or the certificate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Remembered {
-    /// Most recent first.
+    /// Documents, most recent first.
     pub files: Vec<String>,
+    /// Key store files, most recent first (kept apart from documents: a key store is never a
+    /// document to sign).
+    pub key_stores: Vec<String>,
     /// `(sha256 hex of the certificate, label)`, in the order they were marked.
     pub favorites: Vec<(String, String)>,
 }
@@ -423,16 +427,20 @@ impl Remembered {
     }
 
     fn from_object(object: &Map<String, Value>) -> Remembered {
-        let files = object
-            .get(RECENT_FILES_KEY)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .take(RECENT_FILES)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let strings = |key: &str| -> Vec<String> {
+            object
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .take(RECENT_FILES)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let files = strings(RECENT_FILES_KEY);
+        let key_stores = strings(RECENT_STORES_KEY);
         let favorites = object
             .get(FAVORITES_KEY)
             .and_then(Value::as_array)
@@ -449,7 +457,11 @@ impl Remembered {
                     .collect()
             })
             .unwrap_or_default();
-        Remembered { files, favorites }
+        Remembered {
+            files,
+            key_stores,
+            favorites,
+        }
     }
 
     fn store(&self, object: &mut Map<String, Value>) {
@@ -459,6 +471,14 @@ impl Remembered {
             object.insert(
                 RECENT_FILES_KEY.to_owned(),
                 Value::Array(self.files.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if self.key_stores.is_empty() {
+            object.remove(RECENT_STORES_KEY);
+        } else {
+            object.insert(
+                RECENT_STORES_KEY.to_owned(),
+                Value::Array(self.key_stores.iter().cloned().map(Value::String).collect()),
             );
         }
         if self.favorites.is_empty() {
@@ -483,6 +503,13 @@ impl Remembered {
         self.files.retain(|f| f != file);
         self.files.insert(0, file.to_owned());
         self.files.truncate(RECENT_FILES);
+    }
+
+    /// Puts the key store `file` first, once, and keeps [`RECENT_FILES`].
+    pub fn remember_key_store(&mut self, file: &str) {
+        self.key_stores.retain(|f| f != file);
+        self.key_stores.insert(0, file.to_owned());
+        self.key_stores.truncate(RECENT_FILES);
     }
 
     /// Marks the certificate `sha256` (hex) with `label`, or unmarks it if it is marked;
@@ -536,20 +563,26 @@ mod remembered_tests {
         let f = d.path().join("settings.json");
         std::fs::write(&f, r#"{"recentPath":"k.p12","future":{"a":[1]}}"#).unwrap();
         let mut r = Remembered::load(&f).unwrap();
+        r.remember_key_store("k.p12");
         r.remember_file("a.pdf");
         r.remember_file("b.pdf");
         r.remember_file("a.pdf");
         assert_eq!(r.toggle_favorite(&"AB".repeat(32), "My key"), Some(true));
         r.save(&f).unwrap();
         let back = Remembered::load(&f).unwrap();
-        assert_eq!(back.files, ["a.pdf", "b.pdf"]);
+        assert_eq!(back.files, ["a.pdf", "b.pdf"], "documents only");
+        assert_eq!(back.key_stores, ["k.p12"], "key stores apart");
         assert!(back.is_favorite(&"ab".repeat(32)));
         let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
         assert_eq!(raw["recentPath"], "k.p12");
         assert_eq!(raw["future"]["a"][0], 1);
         Remembered::clear(&f).unwrap();
         let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
-        assert!(raw.get(RECENT_FILES_KEY).is_none() && raw.get(FAVORITES_KEY).is_none());
+        assert!(
+            raw.get(RECENT_FILES_KEY).is_none()
+                && raw.get(RECENT_STORES_KEY).is_none()
+                && raw.get(FAVORITES_KEY).is_none()
+        );
         assert_eq!(raw["recentPath"], "k.p12");
         assert_eq!(raw["future"]["a"][0], 1);
     }

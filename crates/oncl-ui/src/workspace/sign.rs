@@ -13,7 +13,9 @@ use oncl_core::ErrorCode;
 use oncl_desktop::Remembered;
 use oncl_flows::Locale;
 use oncl_pki::key::AppliedState;
-use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
+use slint::{
+    ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
+};
 use zeroize::Zeroizing;
 
 use super::controller::{Job, JobControl, JobError};
@@ -24,6 +26,10 @@ use crate::signing::controller::{
 use crate::signing::runner::{Decision, OpenError, Outcome, Signed, freeze, open_key_store, sign};
 use crate::ui::SigningState;
 
+/// The confirmation cannot be pressed for this long after it is shown.
+const ARM_AFTER: Duration = Duration::from_millis(600);
+/// An abandoned confirmation ends after this: the frozen copies go, nothing was agreed to.
+const IDLE_LIMIT: Duration = Duration::from_secs(300);
 /// Two clicks on the same certificate within this are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
@@ -37,6 +43,13 @@ pub(super) enum SignOutput {
 /// The page's state on the event loop.
 pub(super) struct State {
     controller: Controller,
+    /// The operation the running worker belongs to: its late answer for another is dropped.
+    pending_op: Option<u64>,
+    /// Where the confirmation was shown; arms the button after a quiet moment, and ends an
+    /// abandoned confirmation.
+    frozen_at: Option<Instant>,
+    outputs: Vec<PathBuf>,
+    tick: Timer,
     documents: Vec<(PathBuf, Item)>,
     /// The engine's frozen copy of the documents, once the worker has it.
     frozen: Vec<Item>,
@@ -50,6 +63,10 @@ impl State {
     pub(super) fn new(remembered: Remembered) -> State {
         State {
             controller: manual(),
+            pending_op: None,
+            frozen_at: None,
+            outputs: Vec::new(),
+            tick: Timer::default(),
             documents: Vec::new(),
             frozen: Vec::new(),
             decision: None,
@@ -69,6 +86,7 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_add_doc(|| with_open(add_doc));
     s.on_clear_docs(|| with_open(clear_docs));
     s.on_pick_recent(|| with_open(pick_recent));
+    s.on_pick_recent_store(|| with_open(pick_recent_store));
     s.on_browse_doc(|| with_open(|open| browse(open, true)));
     s.on_browse_store(|| with_open(|open| browse(open, false)));
     s.on_to_unlock(|| with_open(to_unlock));
@@ -107,8 +125,8 @@ fn full(sha: &[u8; 32]) -> String {
     sha.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn size_text(bytes: u64) -> String {
-    super::size(super::Texts::of(Locale::En), bytes)
+fn size_text(l: Locale, bytes: u64) -> String {
+    super::size(super::Texts::of(l), bytes)
 }
 
 /// Shows the controller's step with everything the step needs.
@@ -146,11 +164,9 @@ pub(super) fn render(open: &Rc<Workspace>) {
             )
             .into(),
     );
-    ui.set_docs(list(
-        st.documents
-            .iter()
-            .map(|(_, i)| format!("{} — {}", i.name, size_text(i.bytes))),
-    ));
+    ui.set_docs(list(st.documents.iter().map(|(_, i)| {
+        format!("{} — {}", i.name, size_text(open.locale.get(), i.bytes))
+    })));
     ui.set_recent(ModelRc::new(VecModel::from(
         st.remembered
             .files
@@ -176,11 +192,30 @@ pub(super) fn render(open: &Rc<Workspace>) {
         format!(
             "{} — {}, SHA-256 {}…",
             i.name,
-            size_text(i.bytes),
+            size_text(open.locale.get(), i.bytes),
             short(&i.sha256)
         )
     })));
-    ui.set_frozen_ready(c.frozen_ready());
+    ui.set_frozen_ready(c.armed());
+    ui.set_outputs(
+        t.outputs
+            .replace(
+                "{0}",
+                &st.outputs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .into(),
+    );
+    ui.set_recent_stores(ModelRc::new(VecModel::from(
+        st.remembered
+            .key_stores
+            .iter()
+            .map(|f| SharedString::from(f.as_str()))
+            .collect::<Vec<_>>(),
+    )));
     if let Some(cand) = c.chosen() {
         ui.set_cert_line(
             t.cert_line
@@ -206,7 +241,20 @@ fn error(open: &Rc<Workspace>, text: &str) {
     open.ui.global::<SigningState>().set_error(text.into());
 }
 
+/// A step is refused while a worker still runs, and the page says so.
+fn busy(open: &Rc<Workspace>) -> bool {
+    if open.ui.get_busy() {
+        error(open, locale(open).busy);
+        true
+    } else {
+        false
+    }
+}
+
 fn add_doc(open: &Rc<Workspace>) {
+    if busy(open) {
+        return;
+    }
     let t = locale(open);
     let ui = open.ui.global::<SigningState>();
     let path = super::typed_path(ui.get_doc_path());
@@ -232,6 +280,18 @@ fn pick_recent(open: &Rc<Workspace>) {
         // An entry proves nothing: the file is read again like any other.
         ui.set_doc_path(file.into());
         add_doc(open);
+    }
+}
+
+fn pick_recent_store(open: &Rc<Workspace>) {
+    let ui = open.ui.global::<SigningState>();
+    let Ok(i) = usize::try_from(ui.get_recent_store_index()) else {
+        return;
+    };
+    let file = open.sign.borrow().remembered.key_stores.get(i).cloned();
+    if let Some(file) = file {
+        // Only a path in the field: the file is read when the store is opened.
+        ui.set_store_path(file.into());
     }
 }
 
@@ -284,6 +344,17 @@ fn unlock(open: &Rc<Workspace>) {
     let ui = open.ui.global::<SigningState>();
     // Taken out of the page at once; Enter here opens the key store and agrees to nothing.
     let secret = Zeroizing::new(ui.get_password().to_string());
+    if secret.is_empty() {
+        // A repeated Enter finds the field already emptied: it must not replace the password
+        // that is being used.
+        if !open.ui.get_busy() {
+            error(open, locale(open).no_password);
+        }
+        return;
+    }
+    if busy(open) {
+        return;
+    }
     ui.set_password("".into());
     ui.set_error("".into());
     let (store, effect) = {
@@ -330,6 +401,9 @@ fn cert_clicked(open: &Rc<Workspace>, i: i32) {
 /// signed, the engine only freezes the documents for the user to see.
 fn cert_chosen(open: &Rc<Workspace>, i: i32) {
     let t = locale(open);
+    if busy(open) {
+        return;
+    }
     let Ok(index) = usize::try_from(i) else {
         return;
     };
@@ -368,11 +442,13 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
         return;
     };
     let (tx, rx) = channel::<Decision>();
+    let op = state(open).controller.id();
     state(open).decision = Some(tx);
     state(open).frozen.clear();
     render(open);
     start_sign(open, move |services, control| {
         let outcome = run_signing(
+            op,
             services,
             &PathBuf::from(store),
             &alias,
@@ -386,7 +462,9 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
 }
 
 /// The worker's side of the handshake: freeze, show, wait for the user.
+#[allow(clippy::too_many_arguments)]
 fn run_signing(
+    op: u64,
     services: &DesktopEngineServices,
     store: &std::path::Path,
     alias: &str,
@@ -404,10 +482,12 @@ fn run_signing(
         password,
         paths,
         control,
-        move |captured| {
-            let shown = captured.clone();
-            if slint::invoke_from_event_loop(move || with_open(|open| frozen_arrived(open, shown)))
-                .is_err()
+        move |frozen| {
+            let (shown, outputs) = (frozen.items.clone(), frozen.outputs.clone());
+            if slint::invoke_from_event_loop(move || {
+                with_open(|open| frozen_arrived(open, op, shown, outputs));
+            })
+            .is_err()
             {
                 return Decision::Abort;
             }
@@ -424,14 +504,17 @@ fn run_signing(
 
 /// The engine froze the documents: they are shown, and the action can be confirmed if they are
 /// the ones the user picked.
-fn frozen_arrived(open: &Rc<Workspace>, items: Vec<Item>) {
+fn frozen_arrived(open: &Rc<Workspace>, op: u64, items: Vec<Item>, outputs: Vec<PathBuf>) {
     let t = locale(open);
     let effect = {
         let mut st = state(open);
-        if st.controller.step() != Step::Confirm {
+        if st.controller.step() != Step::Confirm || st.controller.id() != op {
+            // The user left meanwhile: the waiting worker sees its channel closed.
             return;
         }
         st.frozen = items.clone();
+        st.outputs = outputs;
+        st.frozen_at = Some(Instant::now());
         st.controller.dispatch(Event::Frozen(&items))
     };
     if effect == Effect::Refused(Refusal::DocumentsChanged) {
@@ -452,8 +535,63 @@ fn frozen_arrived(open: &Rc<Workspace>, items: Vec<Item>) {
     }
     if effect == Effect::None {
         open.ui.set_status_text(t.waiting.into());
+        start_tick(open);
     }
     render(open);
+}
+
+/// Arms the confirmation after a quiet moment and ends it when abandoned.
+fn start_tick(open: &Rc<Workspace>) {
+    state(open)
+        .tick
+        .start(TimerMode::Repeated, Duration::from_millis(200), || {
+            with_open(tick);
+        });
+}
+
+fn tick(open: &Rc<Workspace>) {
+    let t = locale(open);
+    let (expired, armed_now) = {
+        let mut st = state(open);
+        let Some(at) = st.frozen_at else {
+            st.tick.stop();
+            return;
+        };
+        if st.controller.step() != Step::Confirm {
+            st.frozen_at = None;
+            st.tick.stop();
+            return;
+        }
+        let elapsed = at.elapsed();
+        let armed_now = elapsed >= ARM_AFTER && !st.controller.armed() && {
+            st.controller.dispatch(Event::Arm);
+            true
+        };
+        (elapsed >= IDLE_LIMIT, armed_now)
+    };
+    if expired {
+        leave_confirmation(open);
+        error(open, t.idle);
+        render(open);
+    } else if armed_now {
+        render(open);
+    }
+}
+
+/// Back from the confirmation, whichever way it was left: the worker that holds the frozen
+/// copies lets them go, nothing was agreed to.
+fn leave_confirmation(open: &Rc<Workspace>) {
+    let mut st = state(open);
+    if st.controller.step() == Step::Confirm {
+        st.controller.dispatch(Event::Back);
+    }
+    if let Some(tx) = st.decision.take() {
+        let _ = tx.send(Decision::Abort);
+    }
+    st.frozen.clear();
+    st.outputs.clear();
+    st.frozen_at = None;
+    st.tick.stop();
 }
 
 fn toggle_favorite(open: &Rc<Workspace>) {
@@ -508,15 +646,13 @@ fn confirm(open: &Rc<Workspace>) {
 
 fn back(open: &Rc<Workspace>) {
     {
-        let mut st = state(open);
+        let st = state(open);
         let was_confirm = st.controller.step() == Step::Confirm;
-        st.controller.dispatch(Event::Back);
+        drop(st);
         if was_confirm {
-            // Nothing was agreed to: the worker that froze the documents lets them go.
-            if let Some(tx) = st.decision.take() {
-                let _ = tx.send(Decision::Abort);
-            }
-            st.frozen.clear();
+            leave_confirmation(open);
+        } else {
+            state(open).controller.dispatch(Event::Back);
         }
     }
     open.ui.global::<SigningState>().set_error("".into());
@@ -525,13 +661,19 @@ fn back(open: &Rc<Workspace>) {
 
 /// Leaves the operation: nothing of it stays, and the next one unlocks again.
 fn cancel(open: &Rc<Workspace>) {
+    if open.sign.borrow().controller.step() == Step::Running {
+        // The key may be applied already: stay on the page until the worker says how far it
+        // got, and show that.
+        open.controller.borrow_mut().cancel();
+        open.ui
+            .set_status_text(super::Texts::of(open.locale.get()).cancelling.into());
+        return;
+    }
+    leave_confirmation(open);
     {
         let mut st = state(open);
         st.controller.dispatch(Event::Cancel);
-        if let Some(tx) = st.decision.take() {
-            let _ = tx.send(Decision::Abort);
-        }
-        st.frozen.clear();
+        st.pending_op = None;
     }
     open.controller.borrow_mut().cancel();
     finish(open);
@@ -545,6 +687,9 @@ fn finish(open: &Rc<Workspace>) {
         st.controller = manual();
         st.documents.clear();
         st.frozen.clear();
+        st.outputs.clear();
+        st.frozen_at = None;
+        st.tick.stop();
         st.decision = None;
     }
     let ui = open.ui.global::<SigningState>();
@@ -586,12 +731,22 @@ fn start_sign(
     + Send
     + 'static,
 ) {
+    let op = open.sign.borrow().controller.id();
+    open.sign.borrow_mut().pending_op = Some(op);
     start(open, Job::Sign, move |s, c| work(s, c).map(Output::Sign));
 }
 
 /// A worker of the page ended.
 pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>) {
     let t = locale(open);
+    {
+        let mut st = state(open);
+        let mine = st.pending_op.take();
+        if mine != Some(st.controller.id()) {
+            // The answer of an operation that was left: it changes nothing here.
+            return;
+        }
+    }
     let ui = open.ui.global::<SigningState>();
     match result {
         Ok(SignOutput::Frozen(path, item)) => {
@@ -626,11 +781,16 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
         }
         Ok(SignOutput::Signed(outcome)) => signed(open, outcome),
         Err(JobError::Cancelled) => {
-            // Back or a window of the page left the worker waiting: nothing to tell, unless
-            // the operation was running and the user cancelled it.
-            let running = open.sign.borrow().controller.step() == Step::Running;
-            if running {
-                end_with(open, t.cancelled_applied_unknown);
+            let step = open.sign.borrow().controller.step();
+            match step {
+                Step::Running => end_with(open, t.cancelled_applied_unknown),
+                // Escape cancelled the job under the confirmation: the page goes back with
+                // it, nothing is left to confirm.
+                Step::Confirm => {
+                    leave_confirmation(open);
+                    render(open);
+                }
+                _ => {}
             }
         }
         Err(e) => {
@@ -661,7 +821,7 @@ fn signed(open: &Rc<Workspace>, outcome: Outcome) {
                 for file in files.iter().rev() {
                     st.remembered.remember_file(file);
                 }
-                st.remembered.remember_file(&store);
+                st.remembered.remember_key_store(&store);
                 if let Err(e) = st.remembered.save(&open.services.settings_path) {
                     tracing::warn!(error = %e, "cannot save the recent files");
                 }
@@ -774,6 +934,11 @@ struct SignTexts {
     changed_no_key: &'static str,
     signing: &'static str,
     waiting: &'static str,
+    busy: &'static str,
+    idle: &'static str,
+    no_password: &'static str,
+    /// `{0}` the files.
+    outputs: &'static str,
     cancelled_before: &'static str,
     cancelled_applied_unknown: &'static str,
     no_key_used: &'static str,
@@ -830,6 +995,10 @@ static RU: SignTexts = SignTexts {
     wrong_password: "Хранилище не открылось: неверный пароль или это не хранилище ключей.",
     changed: "Документы изменились после выбора. Они показаны заново; согласие не действует, начните с хранилища ключей.",
     changed_no_key: "Документы изменились после выбора, подпись не выполнялась и ключ не применялся.",
+    busy: "Предыдущее действие ещё выполняется. Подождите.",
+    idle: "Подтверждение закрыто: оно простояло без действий. Ничего не подписано, ключ не применялся.",
+    no_password: "Введите пароль.",
+    outputs: "Файлы подписи будут записаны:\n{0}",
     waiting: "Документы зафиксированы. Ключ не применяется, пока вы не подтвердите.",
     signing: "Идёт подпись. Отмена остановит остальные документы, уже применённый ключ вернуть нельзя.",
     cancelled_before: "Отменено до применения ключа. Ключ не применялся.",
@@ -844,7 +1013,7 @@ static RU: SignTexts = SignTexts {
     code_denied: "действие не разрешено",
     code_validation: "сертификат не прошёл проверку (цепочка, срок или отзыв)",
     code_key: "ключ недоступен",
-    code_io: "ошибка чтения или записи",
+    code_io: "не удалось записать файл подписи: возможно, он уже появился (существующие файлы не заменяются)",
     code_other: "не удалось выполнить",
 };
 
@@ -878,6 +1047,10 @@ static KK: SignTexts = SignTexts {
     wrong_password: "Қойма ашылмады: құпиясөз қате немесе бұл кілттер қоймасы емес.",
     changed: "Таңдағаннан кейін құжаттар өзгерген. Олар қайта көрсетілді; келісім жарамсыз, кілттер қоймасынан бастаңыз.",
     changed_no_key: "Таңдағаннан кейін құжаттар өзгерген: қол қойылмады, кілт қолданылмады.",
+    busy: "Алдыңғы әрекет әлі орындалуда. Күте тұрыңыз.",
+    idle: "Растау әрекетсіз тұрғандықтан жабылды. Ештеңеге қол қойылмады, кілт қолданылмады.",
+    no_password: "Құпиясөзді енгізіңіз.",
+    outputs: "Қолтаңба файлдары жазылады:\n{0}",
     waiting: "Құжаттар бекітілді. Растағанша кілт қолданылмайды.",
     signing: "Қол қойылуда. Бас тарту қалған құжаттарды тоқтатады; қолданылған кілтті қайтаруға болмайды.",
     cancelled_before: "Кілт қолданылмай тұрып тоқтатылды. Кілт қолданылмады.",
@@ -892,7 +1065,7 @@ static KK: SignTexts = SignTexts {
     code_denied: "әрекетке рұқсат жоқ",
     code_validation: "сертификат тексеруден өтпеді (тізбек, мерзім немесе қайтарып алу)",
     code_key: "кілт қолжетімсіз",
-    code_io: "оқу немесе жазу қатесі",
+    code_io: "қолтаңба файлын жазу мүмкін болмады: ол пайда болған болуы мүмкін (бар файлдар ауыстырылмайды)",
     code_other: "орындау мүмкін болмады",
 };
 
@@ -926,6 +1099,10 @@ static EN: SignTexts = SignTexts {
     wrong_password: "The key store did not open: wrong password, or it is not a key store.",
     changed: "The documents changed after you picked them. They are shown again; nothing you agreed to stands, start from the key store.",
     changed_no_key: "The documents changed after you picked them: nothing was signed and no key was used.",
+    busy: "The previous action is still running. Please wait.",
+    idle: "The confirmation was closed after sitting idle. Nothing was signed and no key was used.",
+    no_password: "Enter the password.",
+    outputs: "The signature files will be written to:\n{0}",
     waiting: "The documents are frozen. The key is not used until you confirm.",
     signing: "Signing. Cancel stops the remaining documents; a key already applied cannot be taken back.",
     cancelled_before: "Cancelled before the key was applied. No key was used.",
@@ -940,6 +1117,6 @@ static EN: SignTexts = SignTexts {
     code_denied: "the action is not allowed",
     code_validation: "the certificate failed its checks (chain, validity or revocation)",
     code_key: "the key is not available",
-    code_io: "a read or write error",
+    code_io: "the signature file could not be written; it may have appeared meanwhile (existing files are never replaced)",
     code_other: "it could not be done",
 };

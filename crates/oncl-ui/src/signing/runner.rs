@@ -134,6 +134,7 @@ pub fn desktop_engine(
     let network = NetworkPolicy::only_endpoints(origins)
         .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
     std::fs::create_dir_all(spool).map_err(oncl_pki::resource::ProcessingError::from)?;
+    remove_stale_spool(spool);
     let store = TemporaryStore::new(spool)?;
     let services = EngineServices::hash_only(limits)
         .with_keys(Arc::new(KeySources::new()), guard.clone())
@@ -146,6 +147,28 @@ pub fn desktop_engine(
         ))
         .with_temporary_store(store);
     Ok((Engine::new(services)?, guard))
+}
+
+/// Frozen copies and staged outputs of a run that died stay in the spool this program owns:
+/// they are removed at start (no operation is running yet).
+fn remove_stale_spool(spool: &Path) {
+    let Ok(entries) = std::fs::read_dir(spool) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("oncl-") {
+            let path = entry.path();
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = removed {
+                tracing::warn!(error = %e, "cannot remove a stale spool entry");
+            }
+        }
+    }
 }
 
 fn sha256_of(bytes: &[u8]) -> [u8; 32] {
@@ -272,7 +295,7 @@ pub(crate) fn sign(
     password: &Zeroizing<String>,
     documents: &[PathBuf],
     control: &Arc<JobControl>,
-    frozen: impl FnOnce(Vec<Item>) -> Decision,
+    frozen: impl FnOnce(Frozen) -> Decision,
 ) -> Outcome {
     match sign_inner(
         engine, guard, key_store, alias, password, documents, control, frozen,
@@ -291,9 +314,13 @@ fn sign_inner(
     password: &Zeroizing<String>,
     documents: &[PathBuf],
     control: &Arc<JobControl>,
-    frozen: impl FnOnce(Vec<Item>) -> Decision,
+    frozen: impl FnOnce(Frozen) -> Decision,
 ) -> Result<Outcome, JobError> {
-    let selector = KeySelector::file(key_store, Some(alias.to_owned()))?;
+    // The key store is read once; listing's certificate is compared with this copy below, and
+    // the engine signs with this copy only, so a file swapped later is never used.
+    let bytes = read_key_store(key_store)?;
+    let selector = KeySelector::inline(bytes.to_vec(), Some(alias.to_owned()));
+    let entry_certificate = certificate_of(&bytes, password, alias)?;
     let key_id = selector.key_id();
     let grant = ExecutionGrant::new([Action::Sign]).with_keys([key_id.clone()]);
     let mut ctx = engine.begin(grant, OperationPolicy::strict_online(), control.clone())?;
@@ -318,7 +345,9 @@ fn sign_inner(
         ));
         let mut name = path.as_os_str().to_owned();
         name.push(".p7s");
-        destinations.push(PathBuf::from(name));
+        let destination = PathBuf::from(name);
+        preflight_destination(&destination, parent)?;
+        destinations.push(destination);
     }
     let ids: Vec<String> = (0..documents.len()).map(|i| format!("doc{i}")).collect();
     let mut items = Vec::with_capacity(documents.len());
@@ -360,13 +389,20 @@ fn sign_inner(
             sha256,
         });
     }
-    let approved = match frozen(captured.clone()) {
+    let approved = match frozen(Frozen {
+        items: captured.clone(),
+        outputs: destinations.clone(),
+    }) {
         Decision::Proceed(approved) => approved,
         Decision::Abort => return Err(JobError::Cancelled),
     };
     // The consent must be for exactly what was frozen, and for this key.
     if !approved.consent.covers(&captured) || approved.consent.alias() != alias {
         return Ok(Outcome::DocumentsChanged(captured));
+    }
+    // The certificate shown is the certificate of the bytes the engine will use.
+    if approved.consent.certificate() != &entry_certificate {
+        return Ok(Outcome::NotApplied(JobError::StoreChanged));
     }
     let approval = plan
         .authorize(&ctx)
@@ -406,6 +442,62 @@ fn sign_inner(
         });
     }
     Ok(Outcome::Done(done))
+}
+
+/// What the engine froze and where the signatures will go.
+pub(crate) struct Frozen {
+    pub(crate) items: Vec<Item>,
+    pub(crate) outputs: Vec<PathBuf>,
+}
+
+fn read_key_store(path: &Path) -> Result<Zeroizing<Vec<u8>>, JobError> {
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(JobError::NotRegular);
+    }
+    if meta.len() > oncl_pki::keystore::MAX_KEY_FILE {
+        return Err(JobError::Operation(ErrorCode::ContainerLimit));
+    }
+    Ok(Zeroizing::new(std::fs::read(path)?))
+}
+
+/// SHA-256 of the certificate stored under `alias` in the key store `bytes`, opened with
+/// `password`. The private key is dropped here.
+fn certificate_of(bytes: &[u8], password: &str, alias: &str) -> Result<[u8; 32], JobError> {
+    let entries = if oncl_pki::jks::is_jks(bytes) {
+        oncl_pki::jks::load(bytes, password)
+            .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?
+    } else {
+        oncl_pki::pkcs12::load(bytes, password)
+            .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.alias == alias)
+        .ok_or(JobError::StoreChanged)?;
+    let der = entry
+        .cert
+        .to_der()
+        .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?;
+    Ok(sha256_of(&der))
+}
+
+/// Before any key is used: the signature file must not exist, and the folder must be able to
+/// publish one without replacing anything (publication is an exclusive hard link).
+fn preflight_destination(destination: &Path, parent: &Path) -> Result<(), JobError> {
+    if std::fs::symlink_metadata(destination).is_ok() {
+        return Err(JobError::DestinationExists);
+    }
+    let id = std::process::id();
+    let a = parent.join(format!(".oncl-probe-{id}-a"));
+    let b = parent.join(format!(".oncl-probe-{id}-b"));
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+    std::fs::write(&a, b"")?;
+    let linked = std::fs::hard_link(&a, &b);
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+    linked.map_err(|_| JobError::NoLinks)
 }
 
 fn operation_of(e: oncl_core::batch::BatchError) -> OperationError {
@@ -472,6 +564,8 @@ mod tests {
     /// A synthetic root, an OCSP responder and a signing key under it, all made here.
     struct World {
         dir: tempfile::TempDir,
+        root_entry: KeyEntry,
+        leaf: KeyEntry,
         root: oncl_pki::cert::Certificate,
         ocsp: Arc<MockOcsp>,
         store: PathBuf,
@@ -518,6 +612,8 @@ mod tests {
         std::fs::write(&store, bytes).unwrap();
         World {
             dir,
+            root_entry: root.clone(),
+            leaf,
             root: root.cert,
             ocsp: Arc::new(MockOcsp::new(responder).with_now(now())),
             store,
@@ -581,6 +677,7 @@ mod tests {
             return Decision::Abort;
         }
         c.dispatch(Event::Frozen(captured));
+        c.dispatch(Event::Arm);
         match c.dispatch(Event::Confirm { frozen: captured }) {
             Effect::None => Decision::Proceed(Box::new(c.take_approved().unwrap())),
             Effect::Refused(_) | Effect::OpenKeyStore => Decision::Abort,
@@ -603,11 +700,11 @@ mod tests {
             &Zeroizing::new(PASSWORD.to_owned()),
             paths,
             &Arc::new(JobControl::default()),
-            |captured| {
+            |frozen| {
                 page(
                     w,
                     shown,
-                    &captured,
+                    &frozen.items,
                     confirm,
                     &AtomicUsize::new(guard.applications()),
                     &guard,
@@ -683,6 +780,149 @@ mod tests {
         assert_eq!(guard.applications(), 0);
     }
 
+    /// The same key under the same alias with another certificate, written over the key store.
+    fn swap_key_store(w: &World) {
+        let mut spec = TestCertSpec::from_cert(&w.leaf.cert);
+        spec.serial = vec![0x71, 4, 99];
+        let other = issue_cert(&w.root_entry, spec);
+        let bytes = pkcs12::write(
+            &[pkcs12::WriteEntry {
+                alias: w.leaf.alias.clone(),
+                pkcs8_der: w.leaf.key.to_pkcs8_der().unwrap().to_vec(),
+                cert_der: Some(other.to_der().unwrap()),
+            }],
+            &[],
+            PASSWORD,
+            &pkcs12::WriteOptions::default(),
+            &mut |b| b.fill(0x5a),
+        )
+        .unwrap();
+        std::fs::write(&w.store, bytes).unwrap();
+    }
+
+    fn confirmed(w: &World, shown: &[Item], frozen: &Frozen) -> Decision {
+        page(
+            w,
+            shown,
+            &frozen.items,
+            true,
+            &AtomicUsize::new(0),
+            &ConsentGuard::default(),
+        )
+    }
+
+    /// The certificate the user was shown is the certificate that signs: a key store replaced
+    /// between the listing and the signing is refused and no key is applied.
+    #[test]
+    fn a_swapped_key_store_is_refused_before_any_key_use() {
+        let w = world();
+        let paths = documents(&w, &["a.txt"]);
+        let (engine, guard) = engine(&w);
+        let before = shown(&engine, &paths);
+        let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
+        swap_key_store(&w);
+        let swapped = open_key_store(&w.store, PASSWORD, now()).unwrap();
+        assert_ne!(
+            candidates[0].sha256, swapped[0].sha256,
+            "the swap changed the certificate"
+        );
+        // The page confirms the certificate it listed before the swap.
+        let outcome = sign(
+            &engine,
+            &guard,
+            &w.store,
+            &candidates[0].alias,
+            &Zeroizing::new(PASSWORD.to_owned()),
+            &paths,
+            &Arc::new(JobControl::default()),
+            |frozen| {
+                let mut c = Controller::new("tools", ActionKind::Sign);
+                c.dispatch(Event::Documents(before.clone()));
+                c.dispatch(Event::KeyStore(w.store.display().to_string()));
+                c.dispatch(Event::PasswordSubmitted(Zeroizing::new(
+                    PASSWORD.to_owned(),
+                )));
+                c.dispatch(Event::Unlocked(candidates.clone()));
+                c.dispatch(Event::CertificateChosen(0));
+                c.dispatch(Event::Frozen(&frozen.items));
+                c.dispatch(Event::Arm);
+                c.dispatch(Event::Confirm {
+                    frozen: &frozen.items,
+                });
+                Decision::Proceed(Box::new(c.take_approved().unwrap()))
+            },
+        );
+        assert!(
+            matches!(outcome, Outcome::NotApplied(JobError::StoreChanged)),
+            "{outcome:?}"
+        );
+        assert_eq!(guard.applications(), 0);
+        assert!(!paths[0].with_extension("txt.p7s").exists());
+    }
+
+    /// An existing signature file is told before anything is frozen or asked: no key use.
+    #[test]
+    fn an_existing_signature_file_is_refused_before_any_key_use() {
+        let w = world();
+        let paths = documents(&w, &["a.txt", "b.txt"]);
+        std::fs::write(w.dir.path().join("b.txt.p7s"), b"mine").unwrap();
+        let (engine, _) = engine(&w);
+        let before = shown(&engine, &paths);
+        let (outcome, guard) = run(&w, &paths, &before, true);
+        assert!(
+            matches!(outcome, Outcome::NotApplied(JobError::DestinationExists)),
+            "{outcome:?}"
+        );
+        assert_eq!(guard.applications(), 0);
+        assert_eq!(
+            std::fs::read(w.dir.path().join("b.txt.p7s")).unwrap(),
+            b"mine"
+        );
+    }
+
+    /// The second destination appears after the preflight: the first document is signed and
+    /// published, the second is refused after its key use and says so, nothing is replaced.
+    #[test]
+    fn a_destination_that_appears_late_fails_one_item_honestly() {
+        let w = world();
+        let paths = documents(&w, &["a.txt", "b.txt"]);
+        let (engine, guard) = engine(&w);
+        let before = shown(&engine, &paths);
+        let candidates = open_key_store(&w.store, PASSWORD, now()).unwrap();
+        let late = w.dir.path().join("b.txt.p7s");
+        let outcome = sign(
+            &engine,
+            &guard,
+            &w.store,
+            &candidates[0].alias,
+            &Zeroizing::new(PASSWORD.to_owned()),
+            &paths,
+            &Arc::new(JobControl::default()),
+            |frozen| {
+                std::fs::write(&late, b"appeared").unwrap();
+                confirmed(&w, &before, &frozen)
+            },
+        );
+        let Outcome::Done(done) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(done[0].error, None);
+        assert!(done[0].output.is_some());
+        assert!(done[1].error.is_some(), "{:?}", done[1]);
+        assert!(done[1].output.is_none());
+        assert_eq!(
+            done[1].applied,
+            AppliedState::Applied,
+            "the key was used for it"
+        );
+        assert_eq!(guard.applications(), 2);
+        assert_eq!(
+            std::fs::read(&late).unwrap(),
+            b"appeared",
+            "nothing was replaced"
+        );
+    }
+
     /// A consent for other documents than the frozen ones is refused by the runner itself,
     /// whatever the page did.
     #[test]
@@ -702,7 +942,7 @@ mod tests {
             &Zeroizing::new(PASSWORD.to_owned()),
             &paths,
             &Arc::new(JobControl::default()),
-            |_captured| {
+            |_frozen| {
                 let mut c = Controller::new("tools", ActionKind::Sign);
                 c.dispatch(Event::Documents(other.clone()));
                 c.dispatch(Event::KeyStore(w.store.display().to_string()));
@@ -713,6 +953,7 @@ mod tests {
                 c.dispatch(Event::CertificateChosen(0));
                 // The page confirms what it showed, not what the engine froze.
                 c.dispatch(Event::Frozen(&other));
+                c.dispatch(Event::Arm);
                 c.dispatch(Event::Confirm { frozen: &other });
                 Decision::Proceed(Box::new(c.take_approved().unwrap()))
             },

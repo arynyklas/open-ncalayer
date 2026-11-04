@@ -31,6 +31,12 @@ pub(crate) enum JobError {
     Io(io::ErrorKind),
     /// The path is not a regular file (a pipe, a device): nothing is opened.
     NotRegular,
+    /// A signature file would replace an existing one: nothing is signed.
+    DestinationExists,
+    /// The folder of a document cannot publish a signature file (no hard links).
+    NoLinks,
+    /// The key store changed after the certificate was shown: no key is used.
+    StoreChanged,
     /// The SDK refused or failed it.
     Operation(ErrorCode),
     /// A field the action needs is empty.

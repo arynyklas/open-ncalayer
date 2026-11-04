@@ -289,6 +289,7 @@ fn start(
     let t = Texts::of(open.locale.get());
     ui.set_error_text("".into());
     ui.set_busy(true);
+    ui.global::<crate::ui::SigningState>().set_busy(true);
     ui.set_status_kind(1);
     ui.set_progress(-1.0);
     ui.set_status_text(
@@ -366,6 +367,7 @@ fn settle(id: u64, result: Result<Output, JobError>) {
     open.poll.stop();
     let ui = &open.ui;
     ui.set_busy(false);
+    ui.global::<crate::ui::SigningState>().set_busy(false);
     let t = Texts::of(open.locale.get());
     match settled {
         Settled::Done(_, Output::Hash(out, index)) => {
@@ -474,6 +476,10 @@ struct Texts {
     id_card: &'static str,
     busy_engine: &'static str,
     not_regular: &'static str,
+    dest_exists: &'static str,
+    no_such_key: &'static str,
+    no_links: &'static str,
+    store_changed: &'static str,
     units: [&'static str; 4],
     no_path: &'static str,
     no_password: &'static str,
@@ -539,6 +545,10 @@ static RU: Texts = Texts {
     id_card: "ID-карта РК",
     busy_engine: "Предыдущая операция ещё завершается. Повторите через несколько секунд.",
     not_regular: "Это не обычный файл (канал или устройство): его нельзя прочитать.",
+    no_such_key: "В хранилище нет ключа с таким именем.",
+    dest_exists: "Файл подписи (.p7s) рядом с документом уже есть: он не будет заменён. Переименуйте или уберите его; ключ не применялся.",
+    no_links: "В папке документа нельзя создать файл подписи надёжно (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Скопируйте документ на другой диск; ключ не применялся.",
+    store_changed: "Файл хранилища ключей изменился после показа сертификата. Откройте его заново; ключ не применялся.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Укажите путь к файлу.",
     no_password: "Введите пароль.",
@@ -593,6 +603,10 @@ static KK: Texts = Texts {
     id_card: "ҚР жеке куәлігі",
     busy_engine: "Алдыңғы операция әлі аяқталуда. Бірнеше секундтан кейін қайталаңыз.",
     not_regular: "Бұл қарапайым файл емес (арна немесе құрылғы): оны оқуға болмайды.",
+    no_such_key: "Қоймада мұндай атты кілт жоқ.",
+    dest_exists: "Құжаттың жанында қолтаңба файлы (.p7s) бар: ол ауыстырылмайды. Атын өзгертіңіз немесе алыңыз; кілт қолданылмады.",
+    no_links: "Құжат қалтасында қолтаңба файлын сенімді жасау мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Құжатты басқа дискіге көшіріңіз; кілт қолданылмады.",
+    store_changed: "Сертификат көрсетілгеннен кейін кілттер қоймасының файлы өзгерген. Оны қайта ашыңыз; кілт қолданылмады.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Файлға жолды көрсетіңіз.",
     no_password: "Құпиясөзді енгізіңіз.",
@@ -647,6 +661,10 @@ static EN: Texts = Texts {
     id_card: "KZ ID card",
     busy_engine: "The previous operation is still finishing. Try again in a few seconds.",
     not_regular: "This is not a regular file (a pipe or a device): it cannot be read.",
+    no_such_key: "The key store has no key with that name.",
+    dest_exists: "A signature file (.p7s) already exists next to the document and will not be replaced. Rename or remove it; no key was used.",
+    no_links: "The document's folder cannot publish a signature file safely (it needs hard links, which FAT, exFAT and some network shares lack). Copy the document to another drive; no key was used.",
+    store_changed: "The key store file changed after the certificate was shown. Open it again; no key was used.",
     units: ["B", "KiB", "MiB", "GiB"],
     no_path: "Enter the path to a file.",
     no_password: "Enter the password.",
@@ -707,6 +725,9 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
         JobError::Input(MissingField::Aliases) => t.no_aliases,
         JobError::Worker => t.worker,
         JobError::NotRegular => t.not_regular,
+        JobError::DestinationExists => t.dest_exists,
+        JobError::NoLinks => t.no_links,
+        JobError::StoreChanged => t.store_changed,
         JobError::Io(kind) => match kind {
             std::io::ErrorKind::NotFound => t.not_found,
             std::io::ErrorKind::PermissionDenied => t.access_denied,
@@ -716,6 +737,7 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
             ErrorCode::InvalidInput if inspect_kind == 2 => t.wrong_store,
             ErrorCode::InvalidInput => t.not_recognized,
             ErrorCode::SecretRequired => t.no_password,
+            ErrorCode::KeyNotFound => t.no_such_key,
             ErrorCode::PermissionDenied => t.denied,
             ErrorCode::DeadlineExceeded => t.deadline,
             ErrorCode::CapacityExceeded => t.busy_engine,

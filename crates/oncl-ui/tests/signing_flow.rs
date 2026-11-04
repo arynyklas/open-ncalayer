@@ -55,7 +55,11 @@ fn enter_and_doubleclick_do_not_sign() {
     );
     assert!(c.take_approved().is_none());
     assert_eq!(c.step(), Step::Unlock);
-    // A double-click on a certificate shows the confirmation.
+    // The store opened again: the list is there, a double-click shows the confirmation.
+    c.dispatch(Event::Unlocked(vec![
+        candidate("expired", 7, Some(Unsuitable::Expired)),
+        candidate("good", 8, None),
+    ]));
     assert_eq!(c.dispatch(Event::CertificateChosen(1)), Effect::None);
     assert_eq!(c.step(), Step::Confirm);
     assert!(c.take_approved().is_none(), "choosing is not confirming");
@@ -79,6 +83,14 @@ fn enter_and_doubleclick_do_not_sign() {
     );
     assert_eq!(c.dispatch(Event::Frozen(&frozen)), Effect::None);
     assert!(c.frozen_ready());
+    // A burst of clicks aimed at the list reaches the button the moment it appears: not yet.
+    assert_eq!(
+        c.dispatch(Event::Confirm { frozen: &frozen }),
+        Effect::Refused(Refusal::NotArmed)
+    );
+    assert!(c.take_approved().is_none() && !c.armed());
+    assert_eq!(c.dispatch(Event::Arm), Effect::None);
+    assert!(c.armed());
     assert_eq!(c.dispatch(Event::Confirm { frozen: &frozen }), Effect::None);
     let approved = c.take_approved().expect("explicit confirmation");
     assert_eq!(approved.consent.caller(), "https://site.example");
@@ -183,6 +195,7 @@ fn changed_file_invalidates_consent() {
     c.dispatch(Event::CertificateChosen(1));
     let shown = c.items().to_vec();
     c.dispatch(Event::Frozen(&shown));
+    c.dispatch(Event::Arm);
     let mut other = shown.clone();
     other[0].bytes += 1;
     assert_eq!(
@@ -201,6 +214,7 @@ fn no_unlock_between_operations() {
         c.dispatch(Event::CertificateChosen(1));
         let frozen = c.items().to_vec();
         c.dispatch(Event::Frozen(&frozen));
+        c.dispatch(Event::Arm);
         c.dispatch(Event::Confirm { frozen: &frozen });
         let approved = c.take_approved().unwrap();
         drop(approved);
@@ -250,4 +264,53 @@ fn the_steps_come_in_order() {
         Effect::Refused(Refusal::WrongStep)
     );
     assert!(c.take_approved().is_none());
+}
+
+/// A repeated Enter in the password field (the page sends the now empty field) neither replaces
+/// the password that is being used nor lets a certificate be chosen from a list not yet there.
+#[test]
+fn a_repeated_enter_keeps_the_pending_password() {
+    let mut c = Controller::new("https://site.example", ActionKind::Sign);
+    c.dispatch(Event::Documents(vec![doc("a", 1)]));
+    c.dispatch(Event::KeyStore("k.p12".into()));
+    assert_eq!(
+        c.dispatch(Event::PasswordSubmitted(password("first"))),
+        Effect::OpenKeyStore
+    );
+    assert_eq!(
+        c.dispatch(Event::PasswordSubmitted(password(""))),
+        Effect::Refused(Refusal::Busy)
+    );
+    assert_eq!(
+        c.unlock_secret().as_deref().map(String::as_str),
+        Some("first")
+    );
+    assert_eq!(
+        c.dispatch(Event::CertificateChosen(0)),
+        Effect::Refused(Refusal::Busy)
+    );
+    c.dispatch(Event::Unlocked(vec![candidate("k", 3, None)]));
+    assert_eq!(c.dispatch(Event::CertificateChosen(0)), Effect::None);
+}
+
+/// Every operation has its own identity, so a late answer of a left one is told apart.
+#[test]
+fn operations_have_distinct_identities() {
+    let a = Controller::new("x", ActionKind::Sign);
+    let b = Controller::new("x", ActionKind::Sign);
+    assert_ne!(a.id(), b.id());
+}
+
+/// Going back from the confirmation disarms it: showing it again needs a new quiet time.
+#[test]
+fn back_disarms_the_confirmation() {
+    let mut c = unlocked();
+    c.dispatch(Event::CertificateChosen(1));
+    let frozen = c.items().to_vec();
+    c.dispatch(Event::Frozen(&frozen));
+    c.dispatch(Event::Arm);
+    assert!(c.armed());
+    c.dispatch(Event::Back);
+    c.dispatch(Event::CertificateChosen(1));
+    assert!(!c.armed() && !c.frozen_ready());
 }

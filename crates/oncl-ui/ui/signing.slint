@@ -16,12 +16,16 @@ export global SigningState {
     in property <[StandardListViewItem]> docs;
     in property <[string]> recent;
     in-out property <int> recent-index: -1;
+    in property <[string]> recent-stores;
+    in-out property <int> recent-store-index: -1;
     in-out property <string> store-path;
     in-out property <string> password;
     in property <[StandardListViewItem]> certs;
     in-out property <int> cert-index: -1;
     in property <[StandardListViewItem]> frozen;
     in property <string> cert-line;
+    // Where the signature files will be written.
+    in property <string> outputs;
     in property <string> confirm-label;
     // The documents are frozen by the engine: until then the action cannot be confirmed.
     in property <bool> frozen-ready;
@@ -33,6 +37,7 @@ export global SigningState {
     callback add-doc();
     callback clear-docs();
     callback pick-recent();
+    callback pick-recent-store();
     callback browse-doc();
     callback browse-store();
     callback to-unlock();
@@ -134,7 +139,7 @@ export component SigningPage inherits VerticalLayout {
             }
 
             Button {
-                text: @tr("Forget recent");
+                text: @tr("Forget recent and favourites");
                 clicked => {
                     SigningState.clear-remembered();
                 }
@@ -170,6 +175,22 @@ export component SigningPage inherits VerticalLayout {
             }
         }
 
+        if SigningState.recent-stores.length > 0: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Recent key stores");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                horizontal-stretch: 1;
+                model: SigningState.recent-stores;
+                current-index <=> SigningState.recent-store-index;
+                selected => {
+                    SigningState.pick-recent-store();
+                }
+            }
+        }
         if SigningState.error != "": ErrorText {
             text: SigningState.error;
         }
@@ -289,6 +310,11 @@ export component SigningPage inherits VerticalLayout {
 
         Text {
             text: SigningState.cert-line;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: SigningState.outputs;
             wrap: word-wrap;
         }
 

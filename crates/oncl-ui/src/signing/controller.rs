@@ -118,6 +118,10 @@ pub enum Event<'a> {
     /// The engine froze the documents for this operation: what it holds, to be compared with
     /// what the user was shown. Different documents void everything so far.
     Frozen(&'a [Item]),
+    /// A short quiet time has passed since the confirmation was shown: only now can the
+    /// button that agrees be pressed, so that a burst of clicks aimed at the list cannot land
+    /// on it the moment it appears.
+    Arm,
     /// The button that names the action. `frozen` is what the engine holds now.
     Confirm {
         frozen: &'a [Item],
@@ -151,6 +155,10 @@ pub enum Refusal {
     DocumentsChanged,
     /// The engine has not frozen the documents yet: there is nothing to agree to.
     NotFrozen,
+    /// The confirmation was shown a moment ago: it cannot be pressed yet.
+    NotArmed,
+    /// The key store is being opened: a repeated Enter does not replace what is pending.
+    Busy,
 }
 
 /// One operation's state. A new request is a new `Controller`.
@@ -165,8 +173,13 @@ pub struct Controller {
     chosen: Option<usize>,
     unlock_failed: bool,
     frozen_ready: bool,
+    armed: bool,
+    unlock_pending: bool,
+    id: u64,
     approved: Option<Approved>,
 }
+
+static NEXT_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Controller {
     /// A request from `caller` (shown as given, from the host, never from a document) to
@@ -183,6 +196,9 @@ impl Controller {
             chosen: None,
             unlock_failed: false,
             frozen_ready: false,
+            armed: false,
+            unlock_pending: false,
+            id: NEXT_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             approved: None,
         }
     }
@@ -208,6 +224,15 @@ impl Controller {
     /// The engine's frozen copy is the one shown; the action can be confirmed.
     pub fn frozen_ready(&self) -> bool {
         self.frozen_ready
+    }
+    /// The confirmation may be pressed: frozen and quiet for a moment.
+    pub fn armed(&self) -> bool {
+        self.frozen_ready && self.armed
+    }
+    /// Unique per operation: a worker's late answer carries it, and an answer for another
+    /// operation is dropped.
+    pub fn id(&self) -> u64 {
+        self.id
     }
     pub fn unlock_failed(&self) -> bool {
         self.unlock_failed
@@ -240,22 +265,32 @@ impl Controller {
                 Effect::None
             }),
             Event::PasswordSubmitted(secret) => self.in_step(Step::Unlock, |c| {
+                if c.unlock_pending {
+                    // A repeated Enter while the store opens: the first password stays.
+                    return Effect::Refused(Refusal::Busy);
+                }
+                c.unlock_pending = true;
                 c.unlock_failed = false;
                 c.chosen = None;
                 c.secret = Some(secret);
                 Effect::OpenKeyStore
             }),
             Event::Unlocked(candidates) => self.in_step(Step::Unlock, |c| {
+                c.unlock_pending = false;
                 c.candidates = candidates;
                 Effect::None
             }),
             Event::UnlockFailed => self.in_step(Step::Unlock, |c| {
+                c.unlock_pending = false;
                 c.secret = None;
                 c.candidates.clear();
                 c.unlock_failed = true;
                 Effect::None
             }),
             Event::CertificateChosen(i) => self.in_step(Step::Unlock, |c| {
+                if c.unlock_pending {
+                    return Effect::Refused(Refusal::Busy);
+                }
                 let Some(candidate) = c.candidates.get(i) else {
                     return Effect::Refused(Refusal::NoSuchCertificate);
                 };
@@ -274,11 +309,18 @@ impl Controller {
                     c.void_consent(frozen)
                 }
             }),
+            Event::Arm => self.in_step(Step::Confirm, |c| {
+                if c.frozen_ready {
+                    c.armed = true;
+                }
+                Effect::None
+            }),
             Event::Confirm { frozen } => self.in_step(Step::Confirm, |c| c.confirm(frozen)),
             Event::Back => match self.step {
                 Step::Confirm => {
                     self.chosen = None;
                     self.frozen_ready = false;
+                    self.armed = false;
                     self.step = Step::Unlock;
                     Effect::None
                 }
@@ -312,6 +354,9 @@ impl Controller {
     fn confirm(&mut self, frozen: &[Item]) -> Effect {
         if !self.frozen_ready {
             return Effect::Refused(Refusal::NotFrozen);
+        }
+        if !self.armed {
+            return Effect::Refused(Refusal::NotArmed);
         }
         if !self.same_documents(frozen) {
             return self.void_consent(frozen);
@@ -355,6 +400,8 @@ impl Controller {
 
     fn forget_unlock(&mut self) {
         self.frozen_ready = false;
+        self.armed = false;
+        self.unlock_pending = false;
         self.secret = None;
         self.candidates.clear();
         self.chosen = None;

@@ -180,7 +180,12 @@ pub(crate) fn inspect(
                 control,
             )?;
             debug_assert_eq!(report.kind(), InspectionKind::Container);
-            Ok(certificates(&report))
+            let out = certificates(&report);
+            // A name the store does not hold is told, not shown as an empty list.
+            if matches!(&out, InspectOutput::Certificates { entries, .. } if entries.is_empty()) {
+                return Err(JobError::Operation(oncl_core::ErrorCode::KeyNotFound));
+            }
+            Ok(out)
         }
     }
 }
@@ -275,6 +280,7 @@ mod tests {
     use oncl_pki::resource::ResourceLimits;
 
     use super::*;
+    use oncl_core::ErrorCode;
 
     fn engine() -> Engine {
         Engine::new(EngineServices::hash_only(ResourceLimits::default())).unwrap()
@@ -376,7 +382,7 @@ mod tests {
         assert_eq!(integrity, Some(MetadataIntegrity::PasswordMacVerified));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].alias.as_deref(), Some("openssl-rsa"));
-        assert!(entries[0].subject_cn.is_some() || entries[0].serial.is_some());
+        assert!(entries[0].serial.as_deref().is_some_and(|s| !s.is_empty()));
     }
 
     #[test]
@@ -396,24 +402,23 @@ mod tests {
             ("jks/rsa.jks", "openncalayer-rsa"),
         ] {
             let result = key_store(file, "wrong password", alias);
-            assert!(
-                matches!(result, Err(JobError::Operation(_))),
-                "{file}: {result:?}"
+            assert_eq!(
+                result,
+                Err(JobError::Operation(ErrorCode::InvalidInput)),
+                "{file}"
             );
         }
     }
 
     #[test]
-    fn a_name_the_store_does_not_have_is_not_a_success_with_nothing() {
+    fn a_name_the_store_does_not_have_is_a_typed_refusal() {
         for (file, _) in [("openssl/rsa-modern.p12", ()), ("jks/rsa.jks", ())] {
             let result = key_store(file, "Qwerty12", "no-such-key");
-            match result {
-                Err(JobError::Operation(_)) => {}
-                Ok(InspectOutput::Certificates { entries, .. }) => {
-                    assert!(entries.is_empty(), "{file}: {entries:?}");
-                }
-                other => panic!("{file}: {other:?}"),
-            }
+            assert_eq!(
+                result,
+                Err(JobError::Operation(ErrorCode::KeyNotFound)),
+                "{file}"
+            );
         }
     }
 
