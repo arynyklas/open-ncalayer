@@ -4599,6 +4599,7 @@ dependencies = [
  "raw-window-handle",
  "rcgen",
  "rfd",
+ "serde_json",
  "slint",
  "slint-build",
  "tempfile",
