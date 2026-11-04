@@ -46,8 +46,6 @@ memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
-# Signing needs more than the 1 MiB product default (a CMS signature with its chain: 2 MiB):
-metadata_bytes = 67108864
 framing_bytes = 67108864
 # Optional, required for multipart public-document snapshots:
 # scratch_directory = "/private/oncl-scratch"
@@ -111,8 +109,11 @@ Errors contain a stable `code` and `applied`. This hash endpoint always reports
 `NotApplied` (no private key is used): bad authorization is HTTP 403, malformed
 requests HTTP 400, resource byte limits HTTP 413, exhausted admission/queue
 `CapacityExceeded` HTTP 503, and `DeadlineExceeded` HTTP 504. There is no hidden
-retry or durable document queue. No signing/encryption/admin endpoints are
-advertised by this service version.
+retry or durable document queue. The HTTP contract also has signing and extension
+routes (`POST /v1/operations`, `POST /v1/batch`; see [the HTTP contract](http-api.md)),
+which need the token's `sign`/`extend`/`batch` right and a named operator key. There
+are no encryption/decryption routes (they wait for the Kazakhstani GOST backend) and no
+admin endpoints.
 
 ## Explicit LAN exposure
 
@@ -173,15 +174,16 @@ secret = { directory = "/private/oncl-operator", name = "container.password" }
 # secret = { directory = "/private/oncl-operator", name = "card.pin" }
 ```
 
-These are actual SDK/provider bindings, not future HTTP signing routes. A host
-private-operation caller must hold the action and exact named-key ACL and bind
+These are the SDK/provider bindings behind the HTTP signing routes. A private-operation
+caller must hold the action and exact named-key ACL and bind
 its authenticated principal to the original operation before private use. The
 durable guard synchronizes BEGIN before the actual key call. A FINAL failure after
 private use remains Applied/Unknown and blocks further private work; output is not
 published as success. No allow-all guard or second audit journal is installed.
 Strict server policy remains strict. Public verification defaults to an empty
-trust set and denied PKI network, not a fabricated trusted verdict. Private HTTP
-routes are not advertised by these public operations.
+trust set and denied PKI network, not a fabricated trusted verdict. Private (signing)
+operations are separate routes with their own rights, never reachable through a public
+verification request.
 
 A newly created journal starts healthy. An existing journal requires an explicit
 operator `recover_audit = true` restart; recovery rejects complete corruption,
@@ -428,7 +430,6 @@ bind = "127.0.0.1:13579"
 audit_directory = "/var/lib/oncl-server/audit"
 recover_audit = true
 scratch_directory = "/var/lib/oncl-server/scratch"
-metadata_bytes = 67108864
 
 [[tokens]]
 id = "accounting"
@@ -442,7 +443,17 @@ Deliver `accounting.token` to that client over a channel you trust, into an owne
 
 The client stages what it downloads (OCSP, CRLs) in its working directory unless `--temporary-directory` says otherwise, and on Unix it refuses a directory that others can reach: run `oncl` from an owner-only directory when it verifies against online PKI.
 
-**Windows.** The private-file check requires files with a protected ACL holding exactly one inheritable entry for the owner. `oncl-server token-create` creates such a file, and so does any program using the same private-file API, but `icacls` and PowerShell `Set-Acl` cannot produce that ACL (measured: the server refuses the result; `Set-Acl` also needs a privilege an ordinary account lacks). There is therefore no command-line recipe for putting `server.toml`, a key container or a password file in place on Windows. The packaged Windows programs are smoke-tested with files created through that API. A Windows operator needs a provisioning subcommand that does the same for arbitrary files; this version does not have one, and none is simulated here.
+**Windows.** The private-file check requires files with a protected ACL holding exactly one inheritable entry for the owner; `icacls` and PowerShell `Set-Acl` cannot produce it (measured). Use the program itself, which creates such files through the same private-file API, never overwrites, and prints only the name and size:
+
+```bat
+oncl-server install-file --directory %ProgramData%\oncl-operator --name server.toml --input server.toml
+oncl-server install-file --directory %ProgramData%\oncl-operator --name corporate.p12 --input corporate.p12
+type corporate.password | oncl-server install-file --directory %ProgramData%\oncl-operator --name corporate.password
+oncl-server token-create --directory %ProgramData%\oncl-operator --name accounting.token
+oncl-server serve --config %ProgramData%\oncl-operator\server.toml --enable-api
+```
+
+`--directory` is created owner-only if absent or must already be private; `--name` is one plain file name (no path, drive, stream or reserved device name such as `NUL`); input is at most 16 MiB; nothing is created on any error. The same command works on Linux in place of `install -m 0600`. Delete the plain source files afterwards.
 
 ### TLS provisioning (LAN exposure)
 

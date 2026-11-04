@@ -48,9 +48,6 @@ memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
-# Signing needs more metadata room than the 1 MiB product default: a CMS signature with
-# its chain measured 2 MiB, XML and PDF signatures 64 MiB (docs/user/http-api.md).
-metadata_bytes = 67108864
 framing_bytes = 67108864
 inline_pkcs12 = false
 

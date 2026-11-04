@@ -15,6 +15,10 @@
 Description=OpenNCALayer standalone signing service (oncl-server)
 ConditionPathExists=/etc/oncl-server/server.toml
 After=network.target
+# A refusal at start (bad configuration, journal needing recovery) exits 1 like any failure:
+# stop retrying after 5 starts in 5 minutes instead of looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

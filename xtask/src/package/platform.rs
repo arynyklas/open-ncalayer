@@ -402,7 +402,7 @@ pub fn package(
         stage_product(root, product, flavor, bin, version, &stage)?;
         let archive = work.path().join(archive_name(product, version, flavor));
         pack(&stage, &name, &archive, flavor.os)?;
-        check_layout(&list(&archive, flavor.os)?, product, version, flavor)
+        check_entries(&entries(&archive, flavor.os)?, product, version, flavor)
             .with_context(|| format!("the archive {}", archive.display()))?;
         published.push(publish(
             &archive,
@@ -497,11 +497,28 @@ fn stage_product(
     } else {
         ""
     };
+    let windows_provisioning = if product == Product::Server && flavor.os == Os::Windows {
+        "## Windows: putting files in place\n\n\
+         The server only reads files that its own private-file API created (a protected ACL with\n\
+         one entry); `icacls` and `Set-Acl` cannot make them. Use the program:\n\n\
+         ```bat\n\
+         oncl-server install-file --directory %ProgramData%\\oncl-operator --name server.toml --input server.toml\n\
+         oncl-server install-file --directory %ProgramData%\\oncl-operator --name corporate.p12 --input corporate.p12\n\
+         oncl-server token-create --directory %ProgramData%\\oncl-operator --name accounting.token\n\
+         oncl-server serve --config %ProgramData%\\oncl-operator\\server.toml --enable-api\n\
+         ```\n\n\
+         Paths in `server.toml` are Windows paths (use `'%ProgramData%\\oncl-operator\\audit'` literal strings).\n\
+         Delete the plain source files afterwards. The Linux sections of the documentation\n\
+         (systemd, container) do not apply.\n\n"
+    } else {
+        ""
+    };
     let readme = template
         .replace("{{VERSION}}", &version.to_string())
         .replace("{{FLAVOR}}", flavor.name)
         .replace("{{EXE}}", &exe)
-        .replace("{{DEPLOY_ROWS}}", deploy_rows);
+        .replace("{{DEPLOY_ROWS}}", deploy_rows)
+        .replace("{{WINDOWS_PROVISIONING}}", windows_provisioning);
     fs::write(stage.join("README.md"), readme).context("writing README.md")?;
     if product == Product::Server {
         copy(
@@ -576,16 +593,150 @@ fn pack(stage: &Path, top: &str, archive: &Path, os: Os) -> anyhow::Result<()> {
             zip.finish()?.sync_all()?;
             Ok(())
         }
-        Os::Linux | Os::Macos => {
-            let parent = stage.parent().context("a stage directory without parent")?;
-            run(Command::new("tar")
-                .arg("-czf")
-                .arg(archive)
-                .arg("-C")
-                .arg(parent)
-                .arg(top))
+        Os::Linux | Os::Macos => write_tar_gz(stage, top, archive),
+    }
+}
+
+/// A deterministic `.tar.gz` of `stage` under `top/`: sorted names, mode 0755 for
+/// directories and programs and 0644 for other files whatever the staging file system says
+/// (a Windows bind mount reports 0777), owner root, time 0, no links, no extended headers.
+fn write_tar_gz(stage: &Path, top: &str, archive: &Path) -> anyhow::Result<()> {
+    let mut tar: Vec<u8> = Vec::new();
+    let files = walk(stage)?;
+    let mut directories = BTreeSet::from([String::new()]);
+    for file in &files {
+        let mut parts: Vec<&str> = file.split('/').collect();
+        parts.pop();
+        for end in 1..=parts.len() {
+            directories.insert(parts[..end].join("/"));
         }
     }
+    let mut entries: Vec<(String, bool)> = directories
+        .into_iter()
+        .map(|d| {
+            (
+                if d.is_empty() {
+                    format!("{top}/")
+                } else {
+                    format!("{top}/{d}/")
+                },
+                true,
+            )
+        })
+        .chain(files.iter().map(|f| (format!("{top}/{f}"), false)))
+        .collect();
+    entries.sort();
+    for (name, directory) in entries {
+        let relative = name
+            .strip_prefix(&format!("{top}/"))
+            .unwrap_or("")
+            .trim_end_matches('/');
+        let body = if directory {
+            Vec::new()
+        } else {
+            fs::read(stage.join(relative))?
+        };
+        let mode = if directory || is_program(relative) {
+            0o755
+        } else {
+            0o644
+        };
+        tar.extend(tar_header(&name, mode, body.len(), directory)?);
+        tar.extend(&body);
+        tar.extend(std::iter::repeat_n(0_u8, (512 - body.len() % 512) % 512));
+    }
+    tar.extend([0_u8; 1024]);
+    let file =
+        fs::File::create(archive).with_context(|| format!("creating {}", archive.display()))?;
+    let mut gz = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(file, flate2::Compression::best());
+    gz.write_all(&tar)?;
+    gz.finish()?.sync_all()?;
+    Ok(())
+}
+
+/// The programs of a package: the files shipped executable.
+fn is_program(relative: &str) -> bool {
+    matches!(relative, "oncl" | "oncl-server")
+}
+
+/// A ustar header (names up to 100 bytes).
+fn tar_header(name: &str, mode: u32, size: usize, directory: bool) -> anyhow::Result<[u8; 512]> {
+    ensure_name(name)?;
+    let mut header = [0_u8; 512];
+    let mut put =
+        |at: usize, text: &str| header[at..at + text.len()].copy_from_slice(text.as_bytes());
+    put(0, name);
+    put(100, &format!("{mode:07o}\0"));
+    put(108, "0000000\0");
+    put(116, "0000000\0");
+    put(124, &format!("{size:011o}\0"));
+    put(136, "00000000000\0");
+    put(148, "        ");
+    put(156, if directory { "5" } else { "0" });
+    put(257, "ustar\0");
+    put(263, "00");
+    let sum: u32 = header.iter().map(|b| u32::from(*b)).sum();
+    header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    Ok(header)
+}
+
+fn ensure_name(name: &str) -> anyhow::Result<()> {
+    if name.len() > 100 || !name.is_ascii() {
+        bail!("{name} does not fit a ustar header");
+    }
+    Ok(())
+}
+
+/// What an archive entry is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Directory,
+    Other,
+}
+
+/// One entry of an archive: name, permission bits (if the format has them) and kind.
+#[derive(Clone, Debug)]
+pub struct Entry {
+    pub name: String,
+    pub mode: Option<u32>,
+    pub kind: Kind,
+}
+
+/// The entries of a `.tar.gz`, read with our own parser (type flag and mode bytes).
+fn read_tar_gz(archive: &Path) -> anyhow::Result<Vec<Entry>> {
+    use std::io::Read as _;
+    let file = fs::File::open(archive).with_context(|| format!("opening {}", archive.display()))?;
+    let mut tar = Vec::new();
+    flate2::read::GzDecoder::new(file).read_to_end(&mut tar)?;
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while at + 512 <= tar.len() && tar[at..at + 512].iter().any(|b| *b != 0) {
+        let header = &tar[at..at + 512];
+        let text = |from: usize, to: usize| {
+            String::from_utf8_lossy(&header[from..to])
+                .trim_end_matches('\0')
+                .trim()
+                .to_owned()
+        };
+        let mut name = text(0, 100);
+        let prefix = text(345, 500);
+        if !prefix.is_empty() {
+            name = format!("{prefix}/{name}");
+        }
+        let mode = u32::from_str_radix(&text(100, 108), 8).ok();
+        let size = usize::from_str_radix(&text(124, 136), 8).context("a tar size")?;
+        let kind = match header[156] {
+            b'0' | 0 => Kind::File,
+            b'5' => Kind::Directory,
+            _ => Kind::Other,
+        };
+        entries.push(Entry { name, mode, kind });
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    Ok(entries)
 }
 
 /// The files an archive holds (directories are not listed).
@@ -721,6 +872,77 @@ pub fn check_layout(
     Ok(())
 }
 
+/// The entries of `archive` with modes and kinds.
+fn entries(archive: &Path, os: Os) -> anyhow::Result<Vec<Entry>> {
+    match os {
+        Os::Windows => {
+            let file = fs::File::open(archive)
+                .with_context(|| format!("opening {}", archive.display()))?;
+            let mut zip = ZipArchive::new(file)?;
+            let mut found = Vec::new();
+            for i in 0..zip.len() {
+                let entry = zip.by_index(i)?;
+                // Zip modes are not meaningful on Windows: only the entry kind is checked.
+                let _ = entry.unix_mode();
+                let kind = if entry.is_dir() {
+                    Kind::Directory
+                } else if entry.is_symlink() {
+                    Kind::Other
+                } else {
+                    Kind::File
+                };
+                found.push(Entry {
+                    name: entry.name()?.into_owned(),
+                    mode: None,
+                    kind,
+                });
+            }
+            Ok(found)
+        }
+        Os::Linux | Os::Macos => read_tar_gz(archive),
+    }
+}
+
+/// [`check_layout`] on the files, and: only regular files and directories (no symlink, hard
+/// link or device), no setuid/setgid/sticky bit, nothing group- or world-writable, programs
+/// 0755 and other files 0644 (where the format records modes).
+///
+/// # Errors
+///
+/// An entry is of another kind or has another mode, or the layout differs.
+pub fn check_entries(
+    entries: &[Entry],
+    product: Product,
+    version: &Version,
+    flavor: &Flavor,
+) -> anyhow::Result<()> {
+    let top = dir_name(product, version, flavor);
+    for entry in entries {
+        if entry.kind == Kind::Other {
+            bail!("{}: not a regular file or directory", entry.name);
+        }
+        let Some(mode) = entry.mode else { continue };
+        let relative = entry.name.strip_prefix(&format!("{top}/")).unwrap_or("");
+        let expected = if entry.kind == Kind::Directory
+            || is_program(relative)
+            || relative.ends_with(".exe")
+        {
+            0o755
+        } else {
+            0o644
+        };
+        if mode & 0o7022 != 0 || mode != expected {
+            bail!("{}: mode {mode:o}, expected {expected:o}", entry.name);
+        }
+    }
+    let names: Vec<String> = entries
+        .iter()
+        .filter(|e| e.kind == Kind::File)
+        .map(|e| e.name.clone())
+        .collect();
+    check_layout(&names, product, version, flavor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,6 +1032,46 @@ mod tests {
         let mut names = listed(Product::Cli, &flavor);
         names.push("elsewhere/oncl.exe".to_owned());
         assert!(check_layout(&names, Product::Cli, &version(), &flavor).is_err());
+    }
+
+    #[test]
+    fn a_tarball_has_fixed_modes_and_only_plain_entries() {
+        let flavor = flavor("linux-x64").unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let top = dir_name(Product::Server, &version(), &flavor);
+        let stage = temporary.path().join(&top);
+        for file in expected_files(Product::Server, &flavor) {
+            let path = stage.join(&file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let archive = temporary.path().join("a.tar.gz");
+        write_tar_gz(&stage, &top, &archive).unwrap();
+        let again = temporary.path().join("b.tar.gz");
+        write_tar_gz(&stage, &top, &again).unwrap();
+        assert_eq!(fs::read(&archive).unwrap(), fs::read(&again).unwrap());
+        let found = read_tar_gz(&archive).unwrap();
+        check_entries(&found, Product::Server, &version(), &flavor).unwrap();
+        let program = found
+            .iter()
+            .find(|e| e.name.ends_with("/oncl-server"))
+            .unwrap();
+        assert_eq!(program.mode, Some(0o755));
+        for bad in [Some(0o777), Some(0o4755), Some(0o664)] {
+            let mut changed = found.clone();
+            changed
+                .iter_mut()
+                .find(|e| e.name.ends_with("README.md"))
+                .unwrap()
+                .mode = bad;
+            assert!(check_entries(&changed, Product::Server, &version(), &flavor).is_err());
+        }
+        let mut link = found.clone();
+        link.iter_mut()
+            .find(|e| e.name.ends_with("NOTICE"))
+            .unwrap()
+            .kind = Kind::Other;
+        assert!(check_entries(&link, Product::Server, &version(), &flavor).is_err());
     }
 
     #[test]

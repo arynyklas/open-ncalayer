@@ -27,7 +27,7 @@ and enable the API on loopback (`oncl-server serve --config ... --enable-api`). 
 is `oncl --endpoint http://127.0.0.1:13579 --token-file client.token ...` from the `oncl`
 package. LAN exposure needs TLS or a trusted reverse proxy, configured explicitly.
 
-## Contents
+{{WINDOWS_PROVISIONING}}## Contents
 
 | File | What it is |
 |---|---|

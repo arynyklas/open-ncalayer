@@ -30,8 +30,12 @@ export PATH="$CARGO_HOME/bin:$PATH"
 cd /src
 # The licence texts of a package come from the cargo registry's unpacked sources.
 cargo fetch --locked
-cargo build --locked --release --target-dir "$cache/target" \
-    -p oncl-cli -p oncl-server -p xtask
+# The shipped programs alone, then xtask: one invocation would unify the features of xtask's
+# test-only dependencies (emulator, testing) into the shipped crates.
+cargo build --locked --release --target-dir "$cache/target" -p oncl-cli -p oncl-server
+cp "$cache/target/release/oncl" "$cache/target/release/oncl-server" /tmp/
+cargo build --locked --release --target-dir "$cache/target" -p xtask
+cp /tmp/oncl /tmp/oncl-server "$cache/target/release/"
 mkdir -p "$out"
 install -m 755 "$cache/target/release/oncl" "$cache/target/release/oncl-server" "$out/"
 
