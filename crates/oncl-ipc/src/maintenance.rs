@@ -34,6 +34,8 @@ const VERSION: u8 = 1;
 const MAX_MESSAGE: usize = 64 * 1024;
 /// How long the server waits after a failed accept before it takes the next client.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+/// Failed accepts are reported at most this often, with how many were not.
+const LOG_EVERY: Duration = Duration::from_secs(10);
 
 const OP_HOLD: u8 = 1;
 const OP_RELEASE: u8 = 2;
@@ -112,6 +114,7 @@ pub async fn serve_on<A: Accept, H: Host>(
     host: Arc<H>,
     max_lease: Duration,
 ) -> io::Result<()> {
+    let (mut suppressed, mut last_log) = (0u64, None::<Instant>);
     loop {
         match Accept::accept(&mut listener).await {
             Ok(stream) => {
@@ -119,7 +122,17 @@ pub async fn serve_on<A: Accept, H: Host>(
             }
             // A client that vanished while connecting must not end the endpoint for the
             // life of the program: back off and take the next one, as the relay's loop does.
-            Err(_) => tokio::time::sleep(ACCEPT_BACKOFF).await,
+            Err(e) => {
+                suppressed += 1;
+                if last_log.is_none_or(|at| at.elapsed() >= LOG_EVERY) {
+                    eprintln!(
+                        "openncalayer: management endpoint: accept failed ({e}); {suppressed} failure(s) since the last report"
+                    );
+                    suppressed = 0;
+                    last_log = Some(Instant::now());
+                }
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+            }
         }
     }
 }

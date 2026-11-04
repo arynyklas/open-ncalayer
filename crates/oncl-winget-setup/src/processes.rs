@@ -78,6 +78,34 @@ pub fn running_from(root: &Path) -> io::Result<Vec<Running>> {
     Ok(found)
 }
 
+/// Ends process `pid` if `wanted` accepts its image path. The process is opened once and the
+/// path is read and the process terminated on that same handle, so a recycled pid can never
+/// be ended by mistake. Whether it was ended.
+pub fn terminate_if(pid: u32, wanted: impl FnOnce(&Path) -> bool) -> bool {
+    use windows_sys::Win32::System::Threading::{PROCESS_TERMINATE, TerminateProcess};
+    // SAFETY: plain call; the handle is checked and closed below.
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            FALSE,
+            pid,
+        )
+    };
+    if process.is_null() {
+        return false;
+    }
+    let mut ended = false;
+    if let Some(image) = image_of_handle(process)
+        && wanted(&image)
+    {
+        // SAFETY: `process` is open with the terminate right.
+        ended = unsafe { TerminateProcess(process, 1) } != FALSE;
+    }
+    // SAFETY: `process` is open and not used again.
+    unsafe { CloseHandle(process) };
+    ended
+}
+
 /// The image path of process `pid`, if this user may ask for it.
 pub fn image_of(pid: u32) -> Option<PathBuf> {
     // SAFETY: plain call; the handle is checked and closed below.
@@ -85,12 +113,17 @@ pub fn image_of(pid: u32) -> Option<PathBuf> {
     if process.is_null() {
         return None;
     }
+    let image = image_of_handle(process);
+    // SAFETY: `process` is open and not used again.
+    unsafe { CloseHandle(process) };
+    image
+}
+
+fn image_of_handle(process: windows_sys::Win32::Foundation::HANDLE) -> Option<PathBuf> {
     let mut buffer = vec![0u16; 32_768];
     let mut len = u32::try_from(buffer.len()).expect("fits");
     // SAFETY: `process` is open with the query right; `buffer` has `len` units.
     let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len) };
-    // SAFETY: `process` is open and not used again.
-    unsafe { CloseHandle(process) };
     (ok != FALSE).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize])))
 }
 

@@ -66,3 +66,8 @@ $arp = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenNCALayer'
 | Операции окна «Инструменты» (подпись, хеш, сведения) | `Engine::with_activity`: lease привязан к `OperationLease` и живёт, пока последний владелец операции (контекст, нативный worker, ответ) не отпустит её |
 | Открытое окно (подтверждение, настройки, мастер TLS, плагины) | `DaemonHost::hold` спрашивает `window_open` уже после hold |
 | Штатный updater, второй установщик | тот же `hold` (исключительный) |
+
+## Границы `last_look` и запуск тестов
+
+- Процессы, которые нельзя открыть (другой сеанс, защищённые), `last_look` пропускает (fail open, тот же охват, что у принудительной остановки самого Setup); отказ даёт только сбой снимка списка процессов.
+- Для гейта V03: тесты не-Windows (`tests/maintenance/main.rs`) запускаются только вручную (WSL: `cargo +1.99.1 test -p oncl-winget-setup --test maintenance`); три `#[ignore]` e2e с настоящим демоном требуют предварительно собранный harness (`cargo build -p oncl-winget-setup --bin oncl-winget-harness`).

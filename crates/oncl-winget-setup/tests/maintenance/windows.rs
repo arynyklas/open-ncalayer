@@ -305,10 +305,6 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-        };
         let mut pids = self.children.clone();
         pids.extend(self.running().iter().map(|p| p.pid));
         // The fake Setup's copy lives in the work area, which is not under the root.
@@ -321,19 +317,11 @@ impl Drop for Fixture {
             }
         }
         for pid in pids {
-            // A recorded PID may belong to another program by now: only a process whose
-            // image is the harness or lies under this fixture's directory is ended.
-            if !is_ours(pid, self.dir.path()) {
-                continue;
-            }
-            // SAFETY: plain calls; the handle is checked and closed.
-            unsafe {
-                let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-                if !handle.is_null() {
-                    TerminateProcess(handle, 1);
-                    CloseHandle(handle);
-                }
-            }
+            // Opened once: the image is read and the process ended on the same handle, so a
+            // recycled pid never ends a program this test did not start.
+            oncl_winget_setup::processes::terminate_if(pid, |image| {
+                is_ours_image(image, self.dir.path())
+            });
         }
         // Let the images go before the directory does.
         std::thread::sleep(Duration::from_millis(200));
@@ -341,16 +329,14 @@ impl Drop for Fixture {
 }
 
 /// Whether process `pid` runs the harness or a program under `dir`: what this test started.
-fn is_ours(pid: u32, dir: &Path) -> bool {
+fn is_ours_image(image: &Path, dir: &Path) -> bool {
     let norm = |path: &Path| {
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
         let text = path.to_string_lossy().to_lowercase();
         text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
     };
-    oncl_winget_setup::processes::image_of(pid).is_some_and(|image| {
-        let image = norm(&image);
-        image.starts_with(&norm(dir)) || image == norm(Path::new(HARNESS))
-    })
+    let image = norm(image);
+    image.starts_with(&norm(dir)) || image == norm(Path::new(HARNESS))
 }
 
 fn nuspec(version: &str, arch: &str) -> String {
