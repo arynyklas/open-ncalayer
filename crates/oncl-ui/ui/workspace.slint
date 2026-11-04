@@ -11,7 +11,7 @@ component FieldLabel inherits Text {
 
 // The error of the page's last action, next to the fields it concerns.
 component PageError inherits Text {
-    color: #c62828;
+    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
     wrap: word-wrap;
 }
 
@@ -107,7 +107,7 @@ export component WorkspaceWindow inherits Window {
                             }
 
                             Text {
-                                text: @tr("Hash: the digest of a file of any size, read in pieces. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key.");
+                                text: @tr("Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key.");
                                 wrap: word-wrap;
                             }
 
@@ -149,6 +149,7 @@ export component WorkspaceWindow inherits Window {
                                     enabled: !root.busy;
                                     text <=> root.hash-path;
                                     placeholder-text: @tr("Path to the file");
+                                accessible-label: @tr("File");
                                     accepted => {
                                         root.start-hash();
                                     }
@@ -169,7 +170,7 @@ export component WorkspaceWindow inherits Window {
 
                             ComboBox {
                                 enabled: !root.busy;
-                                model: ["SHA-256", "ГОСТ Р 34.11-94", "ГОСТ Р 34.11-2012 (512)"];
+                                model: ["SHA-256", @tr("GOST R 34.11-94"), @tr("GOST R 34.11-2012 (512)")];
                                 current-index <=> root.hash-algorithm;
                             }
 
@@ -237,6 +238,7 @@ export component WorkspaceWindow inherits Window {
                                         enabled: !root.busy;
                                         text <=> root.inspect-path;
                                         placeholder-text: @tr("Path to the file");
+                                accessible-label: @tr("File");
                                         accepted => {
                                             root.start-inspect();
                                         }
@@ -331,7 +333,7 @@ export component WorkspaceWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                         text: root.status-text;
-                        color: root.status-kind == 3 ? #c62828 : root.status-kind == 4 ? #a15c00 : Palette.foreground;
+                        color: root.status-kind == 3 ? (Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828) : root.status-kind == 4 ? (Palette.color-scheme == ColorScheme.dark ? #ffb74d : #8a4b00) : Palette.foreground;
                     }
 
                     if root.busy: ProgressIndicator {

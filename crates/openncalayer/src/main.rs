@@ -285,7 +285,7 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
     };
     tracing::info!("{}", cli::token_state(&tokens));
     let workspace = match oncl_core::Engine::new(oncl_core::EngineServices::hash_only(
-        oncl_pki::resource::ResourceLimits::default(),
+        oncl_ui::desktop_limits(),
     )) {
         Ok(engine) => oncl_ui::DesktopEngineServices {
             engine: Arc::new(engine),

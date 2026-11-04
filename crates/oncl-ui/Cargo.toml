@@ -53,6 +53,7 @@ zbus.workspace = true
 slint-build.workspace = true
 
 [dev-dependencies]
+oncl-testkit.workspace = true
 # A fake mkcert CA in the TLS wizard's tests.
 rcgen.workspace = true
 tempfile.workspace = true

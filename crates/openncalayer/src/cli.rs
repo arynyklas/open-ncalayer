@@ -10,6 +10,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use oncl_desktop::original::EntryState;
@@ -184,6 +185,25 @@ pub enum IntegrationCommand {
     Status,
 }
 
+/// The `version` of a bridge greeting.
+fn running_version(hello: &[u8]) -> Option<String> {
+    let hello: serde_json::Value = serde_json::from_slice(hello).ok()?;
+    hello.get("version")?.as_str().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod greeting_tests {
+    use super::running_version;
+
+    #[test]
+    fn the_running_copys_version_is_read_from_its_greeting() {
+        let hello = br#"{"t":"hello","v":1,"version":"0.1.0","compat":"1.4"}"#;
+        assert_eq!(running_version(hello).as_deref(), Some("0.1.0"));
+        assert_eq!(running_version(b"not json"), None);
+        assert_eq!(running_version(br#"{"t":"hello"}"#), None);
+    }
+}
+
 /// Asks the running OpenNCALayer of this user and data directory to show the tools window, over
 /// the bridge's endpoint. `Ok(true)`: asked; `Ok(false)`: none is running. On failure the
 /// message is already printed and exit code 1 returned.
@@ -218,8 +238,23 @@ pub fn ask_running_for_tools() -> Result<bool, ExitCode> {
             }
         };
         // The running copy greets first; then it takes the request.
-        let asked = match read_frame(&mut stream).await {
-            Ok(Some(_)) => write_frame(&mut stream, br#"{"t":"workspace"}"#).await,
+        let greeting = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()));
+        let asked = match greeting {
+            Ok(Some(hello)) => match running_version(&hello) {
+                Some(version) if version == env!("CARGO_PKG_VERSION") => {
+                    write_frame(&mut stream, br#"{"t":"workspace"}"#).await
+                }
+                // An older copy would ignore the request and show nothing.
+                other => {
+                    eprintln!(
+                        "Запущена другая версия OpenNCALayer ({}): закройте её (значок в области уведомлений, «Выход») и повторите команду.",
+                        other.as_deref().unwrap_or("неизвестна")
+                    );
+                    return Err(ExitCode::FAILURE);
+                }
+            },
             Ok(None) => Err(io::ErrorKind::UnexpectedEof.into()),
             Err(e) => Err(e),
         };

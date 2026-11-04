@@ -49,7 +49,7 @@ pub(crate) fn hash_file(
     path: &Path,
     control: &Arc<JobControl>,
 ) -> Result<HashOutput, JobError> {
-    let mut file = File::open(path)?;
+    let mut file = open_regular(path)?;
     let len = file.metadata()?.len();
     control.set_total(len);
     hash(
@@ -58,6 +58,20 @@ pub(crate) fn hash_file(
         Source::seekable(&mut file, Some(len)),
         control,
     )
+}
+
+/// Opens `path` only if it is a regular file: a pipe, a device or a FIFO is refused before it is
+/// opened, so that no read can block where a cancel cannot reach it.
+fn open_regular(path: &Path) -> Result<File, JobError> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(JobError::NotRegular);
+    }
+    let file = File::open(path)?;
+    // The path may have been swapped between the two calls.
+    if !file.metadata()?.is_file() {
+        return Err(JobError::NotRegular);
+    }
+    Ok(file)
 }
 
 /// What to inspect.
@@ -178,7 +192,7 @@ fn run(
     path: &Path,
     control: &Arc<JobControl>,
 ) -> Result<oncl_core::InspectionReport, JobError> {
-    let mut file = File::open(path)?;
+    let mut file = open_regular(path)?;
     let len = file.metadata()?.len();
     control.set_total(len);
     let mut ctx = engine.begin(grant, OperationPolicy::strict_online(), control.clone())?;
@@ -324,6 +338,83 @@ mod tests {
             &Arc::new(JobControl::default()),
         );
         assert!(matches!(result, Err(JobError::Operation(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_directory_is_not_a_file_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = hash_file(
+            &engine(),
+            HashAlg::Sha256,
+            dir.path(),
+            &Arc::new(JobControl::default()),
+        );
+        assert_eq!(result, Err(JobError::NotRegular));
+    }
+
+    fn key_store(fixture: &str, password: &str, alias: &str) -> Result<InspectOutput, JobError> {
+        inspect(
+            &engine(),
+            &Tokens::disabled(),
+            Inspect::KeyStore {
+                path: oncl_testkit::fixture(fixture),
+                password: Zeroizing::new(password.to_owned()),
+                aliases: vec![alias.to_owned()],
+            },
+            &Arc::new(JobControl::default()),
+        )
+    }
+
+    /// The right password and name give the certificate and a verified MAC; no private
+    /// material is in the output type at all.
+    #[test]
+    fn a_pkcs12_store_opens_with_its_password_and_key_name() {
+        let out = key_store("openssl/rsa-modern.p12", "Qwerty12", "openssl-rsa").unwrap();
+        let InspectOutput::Certificates { integrity, entries } = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(integrity, Some(MetadataIntegrity::PasswordMacVerified));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias.as_deref(), Some("openssl-rsa"));
+        assert!(entries[0].subject_cn.is_some() || entries[0].serial.is_some());
+    }
+
+    #[test]
+    fn a_jks_store_opens_with_its_password_and_key_name() {
+        let out = key_store("jks/rsa.jks", "Qwerty12", "openncalayer-rsa").unwrap();
+        let InspectOutput::Certificates { entries, .. } = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias.as_deref(), Some("openncalayer-rsa"));
+    }
+
+    #[test]
+    fn a_wrong_password_is_refused_not_shown_as_an_empty_store() {
+        for (file, alias) in [
+            ("openssl/rsa-modern.p12", "openssl-rsa"),
+            ("jks/rsa.jks", "openncalayer-rsa"),
+        ] {
+            let result = key_store(file, "wrong password", alias);
+            assert!(
+                matches!(result, Err(JobError::Operation(_))),
+                "{file}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_the_store_does_not_have_is_not_a_success_with_nothing() {
+        for (file, _) in [("openssl/rsa-modern.p12", ()), ("jks/rsa.jks", ())] {
+            let result = key_store(file, "Qwerty12", "no-such-key");
+            match result {
+                Err(JobError::Operation(_)) => {}
+                Ok(InspectOutput::Certificates { entries, .. }) => {
+                    assert!(entries.is_empty(), "{file}: {entries:?}");
+                }
+                other => panic!("{file}: {other:?}"),
+            }
+        }
     }
 
     #[test]

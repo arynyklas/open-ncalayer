@@ -48,7 +48,7 @@ pub use tray::{
 pub use windows::{
     DesktopWindow, DesktopWindows, any_window_open, open_window, set_desktop_windows,
 };
-pub use workspace::{DesktopEngineServices, open_workspace};
+pub use workspace::{DesktopEngineServices, desktop_limits, open_workspace};
 
 mod ui {
     slint::include_modules!();

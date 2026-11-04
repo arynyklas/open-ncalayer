@@ -301,6 +301,7 @@ Design, the family table, the PIN, the emulator and the `ONCL_TOKEN_TRACE=1` tra
 `openncalayer run` shows the OpenNCALayer icon (`tray-icon` on Windows and macOS, a StatusNotifierItem over D-Bus on Linux). Its menu:
 - «Настройки…» (Settings…);
 - «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
+- «Инструменты…» (Tools…) — the tools window (the hash of a file, the public details of certificates);
 - «Плагины…» (Plugins…) — the plugin window (see [Plugins](#plugins));
 - «Журнал» (Log) — opens the `logs/` directory in the file manager;
 - «Проверить обновления» (Check for updates);

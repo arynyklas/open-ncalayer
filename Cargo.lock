@@ -4528,6 +4528,7 @@ dependencies = [
  "oncl-desktop",
  "oncl-flows",
  "oncl-pki",
+ "oncl-testkit",
  "oncl-tls",
  "oncl-token",
  "oncl-trust",

@@ -27,6 +27,8 @@ pub(crate) enum JobError {
     Cancelled,
     /// The input could not be opened or read.
     Io(io::ErrorKind),
+    /// The path is not a regular file (a pipe, a device): nothing is opened.
+    NotRegular,
     /// The SDK refused or failed it.
     Operation(ErrorCode),
     /// A field the action needs is empty.
@@ -245,6 +247,25 @@ mod tests {
             Some(Settled::Failed(Job::Inspect, JobError::Worker))
         );
         assert!(c.running().is_none());
+    }
+
+    /// The result of a window that was closed must not land in the operation of the window
+    /// opened next, whichever controller each has.
+    #[test]
+    fn a_late_result_of_a_closed_window_is_dropped_by_the_next_one() {
+        let mut old = Controller::default();
+        let late = old.begin(Job::Hash).unwrap();
+        old.cancel();
+        drop(old);
+        let mut new = Controller::default();
+        let current = new.begin(Job::Hash).unwrap();
+        assert_ne!(late.id, current.id);
+        assert_eq!(new.finish(late.id, Ok(1)), None);
+        assert!(new.running().is_some(), "the new window's action goes on");
+        assert_eq!(
+            new.finish(current.id, Ok(2)),
+            Some(Settled::Done(Job::Hash, 2))
+        );
     }
 
     #[test]

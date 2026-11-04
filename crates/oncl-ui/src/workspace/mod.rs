@@ -50,8 +50,8 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// What an action gives back to its page.
 enum Output {
-    /// The digest and the name of the algorithm.
-    Hash(HashOutput, &'static str),
+    /// The digest and the index of the algorithm in the page's list.
+    Hash(HashOutput, i32),
     Inspect(InspectOutput),
 }
 
@@ -63,6 +63,8 @@ struct Workspace {
     poll: Timer,
     /// The language the texts were composed in.
     locale: Cell<Locale>,
+    /// What the page was asked to inspect by the action that runs or ran last.
+    inspect_kind: Cell<i32>,
 }
 
 thread_local! {
@@ -125,6 +127,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
         controller: RefCell::new(Controller::default()),
         poll: Timer::default(),
         locale: Cell::new(locale),
+        inspect_kind: Cell::new(0),
     });
     OPEN.set(Some(workspace));
     if let Err(e) = ui.show() {
@@ -163,31 +166,56 @@ fn cancel(open: &Rc<Workspace>) {
     }
 }
 
-fn algorithm(index: i32) -> (HashAlg, &'static str) {
+fn algorithm(index: i32) -> HashAlg {
     match index {
-        1 => (HashAlg::Gost34311, "ГОСТ Р 34.11-94"),
-        2 => (HashAlg::Streebog512, "ГОСТ Р 34.11-2012 (512)"),
-        _ => (HashAlg::Sha256, "SHA-256"),
+        1 => HashAlg::Gost34311,
+        2 => HashAlg::Streebog512,
+        _ => HashAlg::Sha256,
     }
 }
 
+fn algorithm_name(t: &Texts, index: i32) -> &'static str {
+    match index {
+        1 => t.gost2004,
+        2 => t.gost2015,
+        _ => "SHA-256",
+    }
+}
+
+/// The limits of the manual tools: what the platform allows a document (10 GiB), and no
+/// short deadline, because a hash of a large file over a slow disk may take hours and the
+/// user stops it with Cancel. The tools' text says so.
+pub fn desktop_limits() -> oncl_pki::resource::ResourceLimits {
+    oncl_pki::resource::ResourceLimits {
+        operation_timeout: Duration::from_secs(24 * 60 * 60),
+        ..oncl_pki::resource::ResourceLimits::default()
+    }
+}
+
+/// A path as typed or pasted: Explorer's «Copy as path» wraps it in quotes.
+fn typed_path(text: slint::SharedString) -> String {
+    text.trim().trim_matches('"').trim().to_owned()
+}
+
 fn start_hash(open: &Rc<Workspace>) {
-    let path = open.ui.get_hash_path().trim().to_owned();
+    let path = typed_path(open.ui.get_hash_path());
     if path.is_empty() {
         return reject(open, 1, &JobError::Input(MissingField::Path));
     }
-    let (alg, name) = algorithm(open.ui.get_hash_algorithm());
+    let index = open.ui.get_hash_algorithm();
+    let alg = algorithm(index);
     open.ui.set_hash_digest("".into());
     open.ui.set_hash_summary("".into());
     start(open, Job::Hash, move |services, control| {
         let out = jobs::hash_file(&services.engine, alg, &PathBuf::from(path), control)?;
-        Ok(Output::Hash(out, name))
+        Ok(Output::Hash(out, index))
     });
 }
 
 fn start_inspect(open: &Rc<Workspace>) {
     let kind = open.ui.get_inspect_kind();
-    let path = open.ui.get_inspect_path().trim().to_owned();
+    open.inspect_kind.set(kind);
+    let path = typed_path(open.ui.get_inspect_path());
     // Taken out of the window at once; the worker owns it from here and zeroizes it.
     let password = Zeroizing::new(open.ui.get_inspect_password().to_string());
     let aliases = open.ui.get_inspect_aliases().to_string();
@@ -315,7 +343,8 @@ fn settle(id: u64, result: Result<Output, JobError>) {
     ui.set_busy(false);
     let t = Texts::of(open.locale.get());
     match settled {
-        Settled::Done(_, Output::Hash(out, name)) => {
+        Settled::Done(_, Output::Hash(out, index)) => {
+            let name = algorithm_name(t, index);
             ui.set_hash_summary(
                 t.hash_summary
                     .replace("{0}", &size(t, out.bytes))
@@ -354,11 +383,7 @@ fn done(ui: &WorkspaceWindow, text: &str) {
 
 /// An error next to the fields of `section`, and in the status line.
 fn reject(open: &Rc<Workspace>, section: i32, error: &JobError) {
-    let text = error_text(
-        Texts::of(open.locale.get()),
-        error,
-        open.ui.get_inspect_kind(),
-    );
+    let text = error_text(Texts::of(open.locale.get()), error, open.inspect_kind.get());
     open.ui.set_error_section(section);
     open.ui.set_error_text(text.into());
     open.ui.set_status_kind(3);
@@ -404,6 +429,12 @@ struct Texts {
     /// `{0}` human size, `{1}` bytes, `{2}` algorithm.
     hash_summary: &'static str,
     pick_title: &'static str,
+    gost2004: &'static str,
+    gost2015: &'static str,
+    alias: &'static str,
+    id_card: &'static str,
+    busy_engine: &'static str,
+    not_regular: &'static str,
     units: [&'static str; 4],
     no_path: &'static str,
     no_password: &'static str,
@@ -462,6 +493,12 @@ static RU: Texts = Texts {
     progress: "Прочитано {0} из {1}",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Выберите файл",
+    gost2004: "ГОСТ Р 34.11-94",
+    gost2015: "ГОСТ Р 34.11-2012 (512)",
+    alias: "Имя ключа",
+    id_card: "ID-карта РК",
+    busy_engine: "Предыдущая операция ещё завершается. Повторите через несколько секунд.",
+    not_regular: "Это не обычный файл (канал или устройство): его нельзя прочитать.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Укажите путь к файлу.",
     no_password: "Введите пароль.",
@@ -480,7 +517,7 @@ static RU: Texts = Texts {
     count: "Сертификатов",
     subject: "Субъект (CN)",
     serial: "Серийный номер",
-    valid: "Действителен",
+    valid: "Срок действия",
     signature_oid: "Алгоритм подписи (OID)",
     key_oid: "Алгоритм ключа (OID)",
     fingerprint: "Отпечаток SHA-256",
@@ -509,6 +546,12 @@ static KK: Texts = Texts {
     progress: "{1} ішінен {0} оқылды",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Файлды таңдаңыз",
+    gost2004: "ГОСТ Р 34.11-94",
+    gost2015: "ГОСТ Р 34.11-2012 (512)",
+    alias: "Кілт атауы",
+    id_card: "ҚР жеке куәлігі",
+    busy_engine: "Алдыңғы операция әлі аяқталуда. Бірнеше секундтан кейін қайталаңыз.",
+    not_regular: "Бұл қарапайым файл емес (арна немесе құрылғы): оны оқуға болмайды.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Файлға жолды көрсетіңіз.",
     no_password: "Құпиясөзді енгізіңіз.",
@@ -527,7 +570,7 @@ static KK: Texts = Texts {
     count: "Сертификаттар",
     subject: "Субъект (CN)",
     serial: "Сериялық нөмірі",
-    valid: "Жарамды",
+    valid: "Жарамдылық мерзімі",
     signature_oid: "Қолтаңба алгоритмі (OID)",
     key_oid: "Кілт алгоритмі (OID)",
     fingerprint: "SHA-256 саусақ ізі",
@@ -556,6 +599,12 @@ static EN: Texts = Texts {
     progress: "Read {0} of {1}",
     hash_summary: "{0} ({1} bytes), algorithm {2}",
     pick_title: "Choose a file",
+    gost2004: "GOST R 34.11-94",
+    gost2015: "GOST R 34.11-2012 (512)",
+    alias: "Key name",
+    id_card: "KZ ID card",
+    busy_engine: "The previous operation is still finishing. Try again in a few seconds.",
+    not_regular: "This is not a regular file (a pipe or a device): it cannot be read.",
     units: ["B", "KiB", "MiB", "GiB"],
     no_path: "Enter the path to a file.",
     no_password: "Enter the password.",
@@ -574,7 +623,7 @@ static EN: Texts = Texts {
     count: "Certificates",
     subject: "Subject (CN)",
     serial: "Serial number",
-    valid: "Valid",
+    valid: "Validity period",
     signature_oid: "Signature algorithm (OID)",
     key_oid: "Key algorithm (OID)",
     fingerprint: "SHA-256 fingerprint",
@@ -615,6 +664,7 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
         JobError::Input(MissingField::Password) => t.no_password,
         JobError::Input(MissingField::Aliases) => t.no_aliases,
         JobError::Worker => t.worker,
+        JobError::NotRegular => t.not_regular,
         JobError::Io(kind) => match kind {
             std::io::ErrorKind::NotFound => t.not_found,
             std::io::ErrorKind::PermissionDenied => t.access_denied,
@@ -626,8 +676,8 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
             ErrorCode::SecretRequired => t.no_password,
             ErrorCode::PermissionDenied => t.denied,
             ErrorCode::DeadlineExceeded => t.deadline,
-            ErrorCode::CapacityExceeded
-            | ErrorCode::InputLimit
+            ErrorCode::CapacityExceeded => t.busy_engine,
+            ErrorCode::InputLimit
             | ErrorCode::ContainerLimit
             | ErrorCode::FramingLimit
             | ErrorCode::OutputLimit
@@ -640,10 +690,10 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
     }
 }
 
-fn token_name(kind: TokenKind) -> &'static str {
+fn token_name(t: &Texts, kind: TokenKind) -> &'static str {
     match kind {
         TokenKind::Kaztoken => "Kaztoken",
-        TokenKind::KzIdCard => "ID-карта РК / KZ ID card",
+        TokenKind::KzIdCard => t.id_card,
         TokenKind::EToken72K => "eToken PRO 72K",
         TokenKind::EToken5110 => "eToken 5110",
         TokenKind::JaCarta => "JaCarta",
@@ -670,7 +720,7 @@ fn entry_lines(t: &Texts, e: &Entry, out: &mut String) {
         out.push('\n');
     };
     if let Some(alias) = &e.alias {
-        line("Alias", alias);
+        line(t.alias, alias);
     }
     if let Some(cn) = &e.subject_cn {
         line(t.subject, cn);
@@ -751,7 +801,7 @@ fn report(t: &Texts, out: &InspectOutput) -> String {
                 text.push_str(t.no_tokens);
             }
             for token in found {
-                text.push_str(token_name(token.kind));
+                text.push_str(token_name(t, token.kind));
                 text.push('\n');
                 text.push_str(&format!("{}: {}\n", t.reader, token.reader));
                 if let Some(tries) = token.pin_tries {

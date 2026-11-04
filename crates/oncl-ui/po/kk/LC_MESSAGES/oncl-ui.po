@@ -368,8 +368,8 @@ msgstr "Құралдар"
 msgid "This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one."
 msgstr "Бұл терезе сіздің сұрауыңыз бойынша ашылады: хабарландыру аймағының мәзірінен немесе «openncalayer tools» пәрмені арқылы. Қолтаңба сұрайтын сайттарға өз терезесі ашылады, бұл терезе ашылмайды."
 
-msgid "Hash: the digest of a file of any size, read in pieces. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key."
-msgstr "Хеш: кез келген өлшемді файлдың хеші, бөлшектеп оқылады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Екеуінде де құпия кілт қолданылмайды."
+msgid "Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key."
+msgstr "Хеш: 10 ГиБ дейінгі файлдың хеші, бөлшектеп оқылады; уақыт шектеуі жоқ, «Бас тарту» түймесімен тоқтатуға болады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Екеуінде де құпия кілт қолданылмайды."
 
 msgid "Hash a file"
 msgstr "Файл хеші"
@@ -412,3 +412,9 @@ msgstr "Мәліметтерді көрсету"
 
 msgid "Details"
 msgstr "Мәліметтер"
+
+msgid "GOST R 34.11-94"
+msgstr "ГОСТ Р 34.11-94"
+
+msgid "GOST R 34.11-2012 (512)"
+msgstr "ГОСТ Р 34.11-2012 (512)"
