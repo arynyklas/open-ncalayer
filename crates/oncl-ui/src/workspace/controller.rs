@@ -61,6 +61,8 @@ pub(crate) enum MissingField {
     Aliases,
     /// The folder the results are to be written to.
     Folder,
+    /// The certificates and the OCSP responses or CRLs the LT and LTA levels are built from.
+    Evidence,
 }
 
 impl From<OperationError> for JobError {

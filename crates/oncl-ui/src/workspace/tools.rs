@@ -93,6 +93,9 @@ pub(super) fn selected(open: &Rc<Workspace>, section: i32) {
     ui.set_opt2("".into());
     ui.set_flag1(false);
     ui.set_flag2(false);
+    ui.set_evidence_certificates("".into());
+    ui.set_evidence_ocsp("".into());
+    ui.set_evidence_crls("".into());
     clear_report(open);
     render(open);
 }
@@ -129,6 +132,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
     ui.set_show_opt2(false);
     ui.set_show_flag1(false);
     ui.set_show_flag2(false);
+    ui.set_show_evidence(false);
     ui.set_second_label(t.second_data.into());
     match tool {
         Tool::Verify => {
@@ -167,6 +171,9 @@ pub(super) fn render(open: &Rc<Workspace>) {
             ui.set_show_level(true);
             ui.set_show_second(format == 0);
             ui.set_show_destination(true);
+            // LT and LTA (levels 1 and 2 of the list) of CAdES and PAdES need the files their
+            // evidence is built from; XAdES fetches its own.
+            ui.set_show_evidence(matches!(format, 0 | 2) && level >= 1);
         }
         Tool::Extract => {
             ui.set_show_destination(true);
@@ -379,11 +386,21 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(ToolSpec, Destination), JobError
                 1 => Level::Lt,
                 _ => Level::Lta,
             };
-            ToolSpec::Extend(match format {
+            let extend = match format {
                 0 => ExtendFormat::Cms(target),
                 1 => ExtendFormat::Xml(target),
                 _ => ExtendFormat::Pdf(target),
-            })
+            };
+            let evidence = if extend.needs_material() {
+                super::Evidence::from_fields(
+                    &ui.get_evidence_certificates(),
+                    &ui.get_evidence_ocsp(),
+                    &ui.get_evidence_crls(),
+                )
+            } else {
+                super::Evidence::default()
+            };
+            ToolSpec::Extend(extend, evidence)
         }
         Tool::Extract => ToolSpec::Extract,
         Tool::Timestamp => {
@@ -417,7 +434,7 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(ToolSpec, Destination), JobError
     };
     let writes = matches!(
         spec,
-        ToolSpec::Extend(_) | ToolSpec::Extract | ToolSpec::Stamp(_)
+        ToolSpec::Extend(..) | ToolSpec::Extract | ToolSpec::Stamp(_)
     );
     let destination = if writes && ui.get_destination_index() == 1 {
         let folder = super::typed_path(ui.get_destination_path());

@@ -13,6 +13,7 @@
 //! once an action has started.
 
 mod controller;
+mod evidence;
 mod jobs;
 mod operations;
 pub mod progress;
@@ -21,12 +22,13 @@ mod tools;
 
 pub use self::controller::JobControl;
 pub(crate) use self::controller::JobError;
+pub(crate) use self::evidence::Evidence;
 pub(crate) use self::jobs::hash_file;
 pub(crate) use self::operations::{
-    Destination, Document, ExtendFormat, Level, PlannedOutput, SignFormat, SignInput, SignOptions,
-    SignSpec, StampOptions, ToolSpec, VerifyFormat, VerifyOptions, batch_operation_error,
-    evidence_limits, open_regular, plan_output, read_limited, run_tool, sign_operation, tsa_spec,
-    view_of_summary,
+    Destination, Document, ExtendFormat, Level, NCA_TSA_POLICY, PlannedOutput, SignFormat,
+    SignInput, SignOptions, SignSpec, StampOptions, ToolSpec, VerifyFormat, VerifyOptions,
+    batch_operation_error, evidence_limits, open_regular, plan_output, read_limited, run_tool,
+    sign_operation, tsa_spec, view_of_summary,
 };
 
 use std::cell::{Cell, RefCell};
@@ -708,6 +710,7 @@ struct Texts {
     no_password: &'static str,
     no_aliases: &'static str,
     no_folder: &'static str,
+    no_evidence: &'static str,
     duplicate_output: &'static str,
     not_found: &'static str,
     access_denied: &'static str,
@@ -783,6 +786,7 @@ static RU: Texts = Texts {
     no_password: "Введите пароль.",
     no_aliases: "Укажите имена ключей, которые показать.",
     no_folder: "Укажите папку для результатов.",
+    no_evidence: "Для уровней LT и LTA нужны данные проверки: сертификаты цепочки и хотя бы один ответ OCSP или список отзыва (CRL). Укажите файлы; ничего не выполнялось, ключ не применялся.",
     duplicate_output: "Два документа дали бы один и тот же файл результата. Уберите один из них или выберите другое назначение; ничего не выполнялось.",
     not_found: "Файл не найден.",
     access_denied: "Нет доступа к файлу.",
@@ -847,6 +851,7 @@ static KK: Texts = Texts {
     no_password: "Құпиясөзді енгізіңіз.",
     no_aliases: "Көрсетілетін кілт атауларын жазыңыз.",
     no_folder: "Нәтижелерге арналған қалтаны көрсетіңіз.",
+    no_evidence: "LT және LTA деңгейлеріне тексеру деректері қажет: тізбек сертификаттары және кемінде бір OCSP жауабы немесе күшін жою тізімі (CRL). Файлдарды көрсетіңіз; ештеңе орындалмады, кілт қолданылмады.",
     duplicate_output: "Екі құжат бір нәтиже файлын берер еді. Біреуін алыңыз немесе басқа тағайындауды таңдаңыз; ештеңе орындалмады.",
     not_found: "Файл табылмады.",
     access_denied: "Файлға қол жеткізу жоқ.",
@@ -911,6 +916,7 @@ static EN: Texts = Texts {
     no_password: "Enter the password.",
     no_aliases: "Enter the names of the keys to show.",
     no_folder: "Enter the folder for the results.",
+    no_evidence: "Levels LT and LTA need validation data: the certificates of the chain and at least one OCSP response or CRL. Name the files; nothing was done and no key was used.",
     duplicate_output: "Two documents would give the same result file. Remove one of them or choose another destination; nothing was done.",
     not_found: "The file was not found.",
     access_denied: "No access to the file.",
@@ -967,6 +973,7 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
         JobError::Input(MissingField::Password) => t.no_password,
         JobError::Input(MissingField::Aliases) => t.no_aliases,
         JobError::Input(MissingField::Folder) => t.no_folder,
+        JobError::Input(MissingField::Evidence) => t.no_evidence,
         JobError::DuplicateOutput => t.duplicate_output,
         JobError::Worker => t.worker,
         JobError::NotRegular => t.not_regular,

@@ -29,6 +29,12 @@ export global ToolState {
     in-out property <string> destination-path;
     in-out property <bool> show-advanced: false;
     in property <bool> has-advanced;
+    // Extending CAdES or PAdES to LT or LTA: the files the evidence is built from, each field a
+    // list of paths separated by «;».
+    in property <bool> show-evidence;
+    in-out property <string> evidence-certificates;
+    in-out property <string> evidence-ocsp;
+    in-out property <string> evidence-crls;
     in property <string> opt1-label;
     in property <bool> show-opt1;
     in-out property <string> opt1;
@@ -216,6 +222,38 @@ export component ToolPage inherits VerticalLayout {
         }
     }
 
+    if ToolState.show-evidence: VerticalLayout {
+        spacing: 4px;
+        Label {
+            text: @tr("Evidence: certificates of the chain (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-certificates;
+            accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
+        }
+
+        Label {
+            text: @tr("Evidence: OCSP responses (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-ocsp;
+            accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
+        }
+
+        Label {
+            text: @tr("Evidence: CRLs (files, separated by ;)");
+        }
+
+        LineEdit {
+            enabled: !root.busy;
+            text <=> ToolState.evidence-crls;
+            accessible-label: @tr("Evidence: CRLs (files, separated by ;)");
+        }
+    }
     if ToolState.has-advanced: CheckBox {
         text: @tr("Show the options that are rarely needed");
         checked <=> ToolState.show-advanced;

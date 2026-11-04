@@ -553,3 +553,12 @@ msgstr "Куда записываются результаты"
 
 msgid "XML (XMLDSig / XAdES)"
 msgstr "XML (XMLDSig / XAdES)"
+
+msgid "Evidence: CRLs (files, separated by ;)"
+msgstr "Данные проверки: списки отзыва CRL (файлы, через ;)"
+
+msgid "Evidence: OCSP responses (files, separated by ;)"
+msgstr "Данные проверки: ответы OCSP (файлы, через ;)"
+
+msgid "Evidence: certificates of the chain (files, separated by ;)"
+msgstr "Данные проверки: сертификаты цепочки (файлы, через ;)"

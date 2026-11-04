@@ -44,19 +44,20 @@ use oncl_pki::evidence::{AdesLevel, EvidenceLimits};
 use oncl_pki::http::{NonceSpec, PkiMethod};
 use oncl_pki::io::{Source, StagedArtifact, TemporaryStore};
 use oncl_pki::key::{AppliedState, HashAlg};
-use oncl_pki::tsp::TsaSpec;
+use oncl_pki::tsp::{TsaProfile, TsaSpec};
 use oncl_pki::validation::{SignerValidation, ValidationPolicy};
 use oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile};
 use oncl_xml::{XmlSignMode, XmlSignProfile};
 
 use super::controller::{JobControl, JobError, MissingField};
+use super::evidence::Evidence;
 use crate::reports::controller::{
     BatchView, Check, ClaimsView, Detail, Family, ItemView, Note, Outcome, SignerView, StampCheck,
     StampView, Stop, VerificationView, combine_verdicts,
 };
 
 /// The level of an AdES format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Level {
     B,
     T,
@@ -121,6 +122,8 @@ pub(crate) struct SignOptions {
     pub(crate) target: String,
     pub(crate) parent: String,
     pub(crate) signature_id: String,
+    /// CAdES and PAdES LT/LTA: the public material their evidence is built from.
+    pub(crate) evidence: Evidence,
 }
 
 /// What is made of each document: the whole of what the user agrees to besides the documents.
@@ -147,8 +150,22 @@ impl SignSpec {
         };
         let o = &self.options;
         format!(
-            "{name};attached={};add={};target={};parent={};id={}",
-            o.attached, o.add, o.target, o.parent, o.signature_id
+            "{name};attached={};add={};target={};parent={};id={};{}",
+            o.attached,
+            o.add,
+            o.target,
+            o.parent,
+            o.signature_id,
+            o.evidence.label()
+        )
+    }
+
+    /// Whether the format needs evidence material from the user: the LT and LTA levels of CAdES
+    /// and PAdES (XAdES fetches its own).
+    pub(crate) fn needs_material(&self) -> bool {
+        matches!(
+            self.format,
+            SignFormat::Cades(Level::Lt | Level::Lta) | SignFormat::Pades(Level::Lt | Level::Lta)
         )
     }
 
@@ -240,6 +257,17 @@ pub(crate) enum ExtendFormat {
     Pdf(Level),
 }
 
+impl ExtendFormat {
+    /// Whether extending to this level needs evidence material from the user: LT and LTA of
+    /// CAdES and PAdES (XAdES fetches its own).
+    pub(crate) fn needs_material(self) -> bool {
+        matches!(
+            self,
+            ExtendFormat::Cms(Level::Lt | Level::Lta) | ExtendFormat::Pdf(Level::Lt | Level::Lta)
+        )
+    }
+}
+
 /// The rarely needed choices of a timestamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StampOptions {
@@ -263,14 +291,11 @@ impl Default for StampOptions {
     }
 }
 
-/// The national authority's time stamp service.
-pub(crate) const NCA_TSA: &str = "http://tsp.pki.gov.kz";
-
 /// A tool that uses no private key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ToolSpec {
     Verify(VerifyFormat, VerifyOptions),
-    Extend(ExtendFormat),
+    Extend(ExtendFormat, Evidence),
     Extract,
     Stamp(StampOptions),
     StampCheck(StampOptions),
@@ -280,7 +305,7 @@ impl ToolSpec {
     pub(crate) fn family(&self) -> Family {
         match self {
             ToolSpec::Verify(..) => Family::Verify,
-            ToolSpec::Extend(_) => Family::Extend,
+            ToolSpec::Extend(..) => Family::Extend,
             ToolSpec::Extract => Family::Extract,
             ToolSpec::Stamp(_) => Family::Stamp,
             ToolSpec::StampCheck(_) => Family::StampCheck,
@@ -290,7 +315,7 @@ impl ToolSpec {
     fn action(&self) -> Action {
         match self {
             ToolSpec::Verify(..) => Action::Verify,
-            ToolSpec::Extend(_) => Action::Extend,
+            ToolSpec::Extend(..) => Action::Extend,
             ToolSpec::Extract => Action::Extract,
             ToolSpec::Stamp(_) => Action::Stamp,
             ToolSpec::StampCheck(_) => Action::VerifyStamp,
@@ -312,9 +337,9 @@ impl ToolSpec {
                 VerifyFormat::Jws => "JWS".to_owned(),
                 VerifyFormat::Jwt => "JWT".to_owned(),
             },
-            ToolSpec::Extend(ExtendFormat::Cms(l)) => format!("CAdES-{}", l.title()),
-            ToolSpec::Extend(ExtendFormat::Xml(l)) => format!("XAdES-{}", l.title()),
-            ToolSpec::Extend(ExtendFormat::Pdf(l)) => format!("PAdES-{}", l.title()),
+            ToolSpec::Extend(ExtendFormat::Cms(l), _) => format!("CAdES-{}", l.title()),
+            ToolSpec::Extend(ExtendFormat::Xml(l), _) => format!("XAdES-{}", l.title()),
+            ToolSpec::Extend(ExtendFormat::Pdf(l), _) => format!("PAdES-{}", l.title()),
             ToolSpec::Extract => "CMS".to_owned(),
             ToolSpec::Stamp(_) | ToolSpec::StampCheck(_) => "RFC 3161".to_owned(),
         }
@@ -323,9 +348,9 @@ impl ToolSpec {
     /// Whether the tool writes a file for each document, and under which name.
     fn output_name(&self, name: &str) -> Option<String> {
         match self {
-            ToolSpec::Extend(ExtendFormat::Cms(_)) => Some(inserted_any(name)),
-            ToolSpec::Extend(ExtendFormat::Xml(_)) => Some(inserted(name, ".extended", ".xml")),
-            ToolSpec::Extend(ExtendFormat::Pdf(_)) => Some(inserted(name, ".extended", ".pdf")),
+            ToolSpec::Extend(ExtendFormat::Cms(_), _) => Some(inserted_any(name)),
+            ToolSpec::Extend(ExtendFormat::Xml(_), _) => Some(inserted(name, ".extended", ".xml")),
+            ToolSpec::Extend(ExtendFormat::Pdf(_), _) => Some(inserted(name, ".extended", ".pdf")),
             ToolSpec::Extract => Some(extracted_name(name)),
             ToolSpec::Stamp(_) => Some(format!("{name}.tst")),
             ToolSpec::Verify(..) | ToolSpec::StampCheck(_) => None,
@@ -409,8 +434,15 @@ pub(crate) fn evidence_limits() -> EvidenceLimits {
     }
 }
 
-/// The TSA the desktop asks: no retries, a thirty second timeout, a random nonce, the token's
-/// signer must be a timestamp authority.
+/// The national authority's time stamp policy (`TSA_RSA`). The SDK requires the time stamp
+/// configuration of every level above B to name a policy (a token of any policy proves nothing
+/// of which service made it), so the signing configuration always carries one.
+pub(crate) const NCA_TSA_POLICY: &str = "1.2.398.3.3.2.6.2";
+
+/// The TSA the desktop asks. Without a URL it is the national authority's, asked as the
+/// authority's own clients do (its GET binding and its policy); with one, a plain POST. No
+/// retries, a thirty second timeout, a random nonce, the token's signer must be a timestamp
+/// authority. `policy` is the policy the token must carry (none: any, for a custom TSA).
 pub(crate) fn tsa_spec(
     url: &str,
     hash: HashAlg,
@@ -421,22 +453,30 @@ pub(crate) fn tsa_spec(
         .map(|p| p.trim().parse())
         .transpose()
         .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?;
-    Ok(TsaSpec {
-        url: if url.trim().is_empty() {
-            NCA_TSA.to_owned()
-        } else {
-            url.trim().to_owned()
-        },
-        method: PkiMethod::Post { content_type: None },
-        hash,
-        policy,
-        nonce: NonceSpec::Random(16),
-        cert_req: true,
-        retries: 0,
-        timeout: Duration::from_secs(30),
-        check_skew: Some(Duration::from_secs(300)),
-        require_tsa_eku: true,
-    })
+    let mut spec = if url.trim().is_empty() {
+        TsaSpec::from(TsaProfile::kalkan_default())
+    } else {
+        TsaSpec {
+            url: url.trim().to_owned(),
+            method: PkiMethod::Post { content_type: None },
+            hash,
+            policy: None,
+            nonce: NonceSpec::Random(16),
+            cert_req: true,
+            retries: 0,
+            timeout: Duration::from_secs(30),
+            check_skew: Some(Duration::from_secs(300)),
+            require_tsa_eku: true,
+        }
+    };
+    spec.hash = hash;
+    spec.nonce = NonceSpec::Random(16);
+    spec.timeout = Duration::from_secs(30);
+    spec.check_skew = Some(Duration::from_secs(300));
+    if policy.is_some() {
+        spec.policy = policy;
+    }
+    Ok(spec)
 }
 
 // ---- opening the documents and the places the results go -------------------------------------
@@ -537,12 +577,6 @@ pub(crate) fn plan_output(
 
 // ---- the requests ----------------------------------------------------------------------------
 
-const NO_MATERIAL: ValidationMaterial<'static> = ValidationMaterial {
-    certificates: &[],
-    ocsp: &[],
-    crls: &[],
-};
-
 fn non_empty(text: &str) -> Option<&str> {
     let text = text.trim();
     (!text.is_empty()).then_some(text)
@@ -560,6 +594,7 @@ pub(crate) fn sign_operation<'a>(
     key: KeyRequest<'a>,
     input: SignInput<'a>,
     output: BatchOutput<'a>,
+    material: ValidationMaterial<'a>,
 ) -> Result<BatchOperation<'a>, JobError> {
     let o = &spec.options;
     let xml_profile = || XmlSignProfile {
@@ -580,7 +615,7 @@ pub(crate) fn sign_operation<'a>(
             vec![key],
             o.attached,
             level.sdk(),
-            NO_MATERIAL,
+            material,
             evidence_limits(),
         ),
         SignFormat::Xml => SignRequest::xml(key, xml_profile()),
@@ -601,7 +636,7 @@ pub(crate) fn sign_operation<'a>(
             key,
             PdfSignProfile::default(),
             level.sdk(),
-            NO_MATERIAL,
+            material,
             evidence_limits(),
         ),
         SignFormat::Jws => {
@@ -676,6 +711,24 @@ pub(crate) fn run_tool(
     if documents.is_empty() {
         return Err(JobError::Input(MissingField::Path));
     }
+    // Evidence cannot be built from nothing: refused before any file is read.
+    let loaded = match spec {
+        ToolSpec::Extend(format, evidence) if format.needs_material() => {
+            evidence.require()?;
+            Some(evidence.load()?)
+        }
+        ToolSpec::Extend(_, evidence) if !evidence.is_empty() => Some(evidence.load()?),
+        _ => None,
+    };
+    let (ocsp, crls) = loaded.as_ref().map_or((Vec::new(), Vec::new()), |l| {
+        (l.ocsp_slices(), l.crl_slices())
+    });
+    let certificates = loaded.as_ref().map_or(&[][..], |l| &l.certificates[..]);
+    let material = ValidationMaterial {
+        certificates,
+        ocsp: &ocsp,
+        crls: &crls,
+    };
     let mut ctx = engine.begin(
         ExecutionGrant::new([spec.action()]),
         policy(spec),
@@ -742,7 +795,17 @@ pub(crate) fn run_tool(
             .as_mut()
             .and_then(|o| o.stage.take())
             .map(BatchOutput::OwnedStaged);
-        let operation = tool_operation(spec, opened, owned_output, policy_jwt.as_ref())?;
+        let operation = tool_operation(
+            spec,
+            opened,
+            owned_output,
+            policy_jwt.as_ref(),
+            ValidationMaterial {
+                certificates: material.certificates,
+                ocsp: material.ocsp,
+                crls: material.crls,
+            },
+        )?;
         items.push((index, BatchItem::new(id, operation)));
     }
     let mut position = Vec::new();
@@ -826,6 +889,7 @@ fn tool_operation<'a>(
     opened: &'a mut Opened,
     output: Option<BatchOutput<'a>>,
     jwt: Option<&'a JwtValidationPolicy>,
+    material: ValidationMaterial<'a>,
 ) -> Result<BatchOperation<'a>, JobError> {
     let Opened {
         file,
@@ -875,13 +939,14 @@ fn tool_operation<'a>(
                 }
             }
         },
-        ToolSpec::Extend(format) => {
+        ToolSpec::Extend(format, _) => {
             let request = match format {
                 ExtendFormat::Cms(l) => ExtendRequest::cms(l.sdk()),
                 ExtendFormat::Xml(l) => ExtendRequest::xml(l.sdk()),
                 ExtendFormat::Pdf(l) => ExtendRequest::pdf(l.sdk(), PdfLimits::default()),
             }
-            .with_evidence_limits(evidence_limits());
+            .with_evidence_limits(evidence_limits())
+            .with_material(material);
             let request = match second {
                 Some(detached) => request.with_detached(detached),
                 None => request,
@@ -1440,45 +1505,76 @@ mod tests {
         }
     }
 
-    /// The level that needs the time stamp service, T, of CAdES and PAdES is signed through the
-    /// engine's time service and verified at its level. XAdES T/LT/LTA and CAdES/PAdES LT/LTA
-    /// are NOT covered: the engine, in this synthetic world, refuses them (InvalidInput, for
-    /// CAdES-LT after the key was applied); see the Task 30 report, finding F1.
+    /// What each family needs to be signed at a level: the XML identities for XAdES, the
+    /// operator's evidence files for the LT and LTA levels of CAdES and PAdES.
+    fn level_spec(w: &World, format: SignFormat) -> SignSpec {
+        let mut options = SignOptions::default();
+        if matches!(format, SignFormat::Xades(_)) {
+            options = xml_ids();
+        }
+        if matches!(
+            format,
+            SignFormat::Cades(Level::Lt | Level::Lta) | SignFormat::Pades(Level::Lt | Level::Lta)
+        ) {
+            options.evidence = evidence_files(w);
+        }
+        SignSpec { format, options }
+    }
+
+    fn verified_at(view: &BatchView, level: Level, name: &str) {
+        assert_eq!(verdicts(view), vec![Verdict::Valid], "{name}: {view:?}");
+        let Outcome::Completed(Detail::Verified(v)) = &view.items[0].outcome else {
+            panic!("{name}: {view:?}");
+        };
+        assert_eq!(v.level, Some(level.sdk()), "{name}: verified at its level");
+    }
+
+    /// Every level above B of CAdES, XAdES and PAdES is signed through the engine under the
+    /// user's confirmation and verified back at exactly that level: the TSA configuration
+    /// carries the policy the SDK requires, XAdES fetches its own evidence, and CAdES/PAdES
+    /// LT/LTA are built from the operator's evidence files. (The cause of the earlier failures
+    /// was the UI's request: no TSA policy for XAdES, no evidence material for CAdES-LT.)
     #[test]
-    fn the_levels_with_a_time_stamp_sign_and_verify_at_their_level() {
+    fn every_level_above_b_signs_and_verifies_at_its_level() {
         let w = world();
         let text = write(&w, "doc.txt", b"the document");
+        let xml = write(&w, "doc.xml", XML);
         let pdf = pdf(&w);
-        {
-            let level = Level::T;
+        for level in [Level::T, Level::Lt, Level::Lta] {
             let cases = [
                 (
                     "cades",
                     SignFormat::Cades(level),
                     text.clone(),
-                    SignOptions::default(),
                     VerifyFormat::Cades(level),
                     true,
                     "doc.txt.p7s",
                 ),
                 (
+                    "xades",
+                    SignFormat::Xades(level),
+                    xml.clone(),
+                    VerifyFormat::Xades(level),
+                    false,
+                    "doc.signed.xml",
+                ),
+                (
                     "pades",
                     SignFormat::Pades(level),
                     pdf.clone(),
-                    SignOptions::default(),
                     VerifyFormat::Pades(level),
                     false,
                     "doc.signed.pdf",
                 ),
             ];
-            for (family, format, input, options, verify_format, detached, output_name) in cases {
+            for (family, format, input, verify_format, detached, output_name) in cases {
                 let name = format!("{family}-{}", level.name());
                 let expected = input.parent().unwrap().join(output_name);
                 let _ = std::fs::remove_file(&expected);
                 let (view, applications) = signed(
                     &name,
                     &w,
-                    &SignSpec { format, options },
+                    &level_spec(&w, format),
                     std::slice::from_ref(&input),
                 );
                 assert_eq!(applications, 1, "{name}");
@@ -1497,73 +1593,176 @@ mod tests {
                     &[document],
                 )
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-                assert_eq!(
-                    verdicts(&report),
-                    vec![Verdict::Valid],
-                    "{name}: {report:?}"
-                );
+                verified_at(&report, level, &name);
             }
         }
     }
 
-    /// A CAdES-B grows to T, LT and LTA through the extend tool, no key is applied, the
-    /// original file stays, and every step verifies at its level.
+    /// LT and LTA of CAdES and PAdES cannot be built from nothing, and the engine would only
+    /// say so after the key was applied: the runner refuses before anything is read or used,
+    /// with nothing written and the key not applied.
     #[test]
-    fn extend_takes_cades_b_to_t_lt_and_lta_without_a_key() {
+    fn lt_and_lta_without_evidence_are_refused_before_any_key_use() {
         let w = world();
         let text = write(&w, "doc.txt", b"the document");
-        let (_, applications) = signed(
-            "cades-b",
-            &w,
-            &spec(SignFormat::Cades(Level::B)),
-            std::slice::from_ref(&text),
-        );
-        assert_eq!(applications, 1);
-        let current = w.dir.path().join("doc.txt.p7s");
-        let original = std::fs::read(&current).unwrap();
-        {
-            let level = Level::T;
-            let report = verify(
-                &w,
-                &ToolSpec::Extend(ExtendFormat::Cms(level)),
-                &[Document {
-                    path: current.clone(),
-                    second: Some(text.clone()),
-                }],
-            )
-            .unwrap();
-            let item = &report.items[0];
+        let pdf = pdf(&w);
+        let partial = Evidence {
+            certificates: evidence_files(&w).certificates,
+            ..Evidence::default()
+        };
+        for (name, format, input) in [
+            ("cades-lt", SignFormat::Cades(Level::Lt), text.clone()),
+            ("cades-lta", SignFormat::Cades(Level::Lta), text.clone()),
+            ("pades-lt", SignFormat::Pades(Level::Lt), pdf.clone()),
+            ("pades-lta", SignFormat::Pades(Level::Lta), pdf.clone()),
+        ] {
+            for evidence in [Evidence::default(), partial.clone()] {
+                let (engine, guard) = engine(&w);
+                let sign_spec = SignSpec {
+                    format,
+                    options: SignOptions {
+                        evidence,
+                        ..SignOptions::default()
+                    },
+                };
+                let outcome = sign_confirmed(
+                    &engine,
+                    &guard,
+                    &w,
+                    std::slice::from_ref(&input),
+                    &sign_spec,
+                    &Destination::Beside,
+                );
+                assert!(
+                    matches!(
+                        &outcome,
+                        SignOutcome::NotApplied(JobError::Input(MissingField::Evidence))
+                    ),
+                    "{name}: {outcome:?}"
+                );
+                assert_eq!(guard.applications(), 0, "{name}: no key was used");
+            }
+            let output = spec(format).output_name(&input.file_name().unwrap().to_string_lossy());
             assert!(
-                matches!(item.outcome, Outcome::Completed(Detail::Written { .. })),
-                "{level:?}: {item:?}"
-            );
-            assert_eq!(
-                item.applied,
-                AppliedState::NotApplied,
-                "an extension applies no key"
-            );
-            let extended = item.output.clone().expect("the extended file");
-            assert_ne!(extended, current);
-            let checked = verify(
-                &w,
-                &ToolSpec::Verify(VerifyFormat::Cades(level), VerifyOptions::default()),
-                &[Document {
-                    path: extended.clone(),
-                    second: Some(text.clone()),
-                }],
-            )
-            .unwrap();
-            assert_eq!(
-                verdicts(&checked),
-                vec![Verdict::Valid],
-                "{level:?}: {checked:?}"
+                !input.parent().unwrap().join(output).exists(),
+                "{name}: nothing was written"
             );
         }
-        assert_eq!(
-            std::fs::read(w.dir.path().join("doc.txt.p7s")).unwrap(),
-            original,
-            "the original is untouched"
+    }
+
+    /// Extension walks CAdES, XAdES and PAdES from B to T, LT and LTA without a key: the
+    /// original stays, every step verifies at its level, and the CAdES/PAdES steps that need
+    /// evidence are refused without it before anything is read or written.
+    #[test]
+    fn extend_takes_every_family_from_b_to_lta_without_a_key() {
+        let w = world();
+        let text = write(&w, "doc.txt", b"the document");
+        let xml = write(&w, "doc.xml", XML);
+        let pdf = pdf(&w);
+        type Family = (
+            &'static str,
+            SignFormat,
+            PathBuf,
+            &'static str,
+            fn(Level) -> ExtendFormat,
+            fn(Level) -> VerifyFormat,
+            bool,
         );
+        let families: [Family; 3] = [
+            (
+                "cades",
+                SignFormat::Cades(Level::B),
+                text.clone(),
+                "doc.txt.p7s",
+                ExtendFormat::Cms,
+                VerifyFormat::Cades,
+                true,
+            ),
+            (
+                "xades",
+                SignFormat::Xades(Level::B),
+                xml.clone(),
+                "doc.signed.xml",
+                ExtendFormat::Xml,
+                VerifyFormat::Xades,
+                false,
+            ),
+            (
+                "pades",
+                SignFormat::Pades(Level::B),
+                pdf.clone(),
+                "doc.signed.pdf",
+                ExtendFormat::Pdf,
+                VerifyFormat::Pades,
+                false,
+            ),
+        ];
+        for (family, format, input, first_output, extend, verify_format, detached) in families {
+            let (_, applications) = signed(
+                family,
+                &w,
+                &level_spec(&w, format),
+                std::slice::from_ref(&input),
+            );
+            assert_eq!(applications, 1, "{family}");
+            let mut current = input.parent().unwrap().join(first_output);
+            let original = std::fs::read(&current).unwrap();
+            for level in [Level::T, Level::Lt, Level::Lta] {
+                let name = format!("{family}-{}", level.name());
+                let second = detached.then(|| input.clone());
+                let document = Document {
+                    path: current.clone(),
+                    second: second.clone(),
+                };
+                if extend(level).needs_material() {
+                    let refused = verify(
+                        &w,
+                        &ToolSpec::Extend(extend(level), Evidence::default()),
+                        std::slice::from_ref(&document),
+                    );
+                    assert_eq!(
+                        refused.err(),
+                        Some(JobError::Input(MissingField::Evidence)),
+                        "{name}"
+                    );
+                }
+                let evidence = if extend(level).needs_material() {
+                    evidence_files(&w)
+                } else {
+                    Evidence::default()
+                };
+                let report = verify(&w, &ToolSpec::Extend(extend(level), evidence), &[document])
+                    .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                let item = &report.items[0];
+                assert!(
+                    matches!(item.outcome, Outcome::Completed(Detail::Written { .. })),
+                    "{name}: {item:?}"
+                );
+                assert_eq!(
+                    item.applied,
+                    AppliedState::NotApplied,
+                    "{name}: an extension applies no key"
+                );
+                let extended = item.output.clone().expect("the extended file");
+                assert_ne!(extended, current, "{name}");
+                let checked = verify(
+                    &w,
+                    &ToolSpec::Verify(verify_format(level), VerifyOptions::default()),
+                    &[Document {
+                        path: extended.clone(),
+                        second,
+                    }],
+                )
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                verified_at(&checked, level, &name);
+                current = extended;
+            }
+            assert_eq!(
+                std::fs::read(input.parent().unwrap().join(first_output)).unwrap(),
+                original,
+                "{family}: the original is untouched"
+            );
+        }
     }
 
     /// Extraction gives the content of an attached CMS exactly, labels itself as not verified
@@ -1870,5 +2069,115 @@ mod tests {
             Err(JobError::DestinationExists)
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// F2, recorded: why the first synthetic world's mock TSA answered HTTP 400. The mock is
+    /// not restricted and the SDK signs GOST time stamps: the committed GOST fixture, and the
+    /// same key re-issued under a GOST root, are answered 200. Only a GOST key whose
+    /// certificate was issued by the RSA test root is refused, by the CMS signer
+    /// (`KeyError::UnsupportedAlgorithm`): the algorithm of the key and of its issuer must
+    /// agree, as in the CLI's own worlds (an RSA TSA key under the RSA root, a GOST one under
+    /// the GOST root).
+    #[test]
+    fn a_gost_time_stamp_is_signed_when_the_chain_agrees_and_refused_when_it_does_not() {
+        use oncl_pki::http::{GetOptions, HttpRequest, HttpTransport};
+        use oncl_pki::testing::{TestCertSpec, issue_cert};
+        use oncl_pki::tsp::{MockTsa, TsaProfile, request_der};
+        let ask = |tsa: oncl_pki::pkcs12::KeyEntry| {
+            let request = request_der(
+                &TsaProfile::kalkan_default(),
+                &[7u8; 32],
+                &[1, 2, 3, 4, 5, 6, 7, 8],
+            );
+            let reply = MockTsa::new(tsa)
+                .with_gen_time(now())
+                .send(&HttpRequest::post(
+                    "http://tsa.test/tsa",
+                    Some("application/timestamp-query"),
+                    &request,
+                    GetOptions::default(),
+                ))
+                .unwrap();
+            (
+                reply.status,
+                String::from_utf8_lossy(&reply.body).into_owned(),
+            )
+        };
+        let reissued = |issuer: &oncl_pki::pkcs12::KeyEntry| {
+            let mut tsa = fixture("tsa-gost2015");
+            let mut spec = TestCertSpec::from_cert(&tsa.cert);
+            strip(&mut spec);
+            spec.serial = vec![0x71, 4, 20];
+            tsa.cert = issue_cert(issuer, spec);
+            tsa
+        };
+        assert_eq!(
+            ask(fixture("tsa-gost2015")).0,
+            200,
+            "the committed GOST fixture"
+        );
+        assert_eq!(
+            ask(reissued(&fixture("root-gost2015.key"))).0,
+            200,
+            "under a GOST root"
+        );
+        let w = world();
+        let (status, body) = ask(reissued(&w.root_entry));
+        assert_eq!(status, 400, "under the RSA test root");
+        assert!(
+            body.contains("signature algorithm not supported for this key"),
+            "{body}"
+        );
+    }
+
+    /// SDK-level characterization, with no UI request builder: the engine applies the key and
+    /// only then finds that a CAdES-LT has no evidence material, and reports it as a failure
+    /// AFTER key use (`AppliedState::Applied`, "malformed CMS input"). The command line
+    /// documents this ("sufficiency is still checked by the SDK and reported truthfully if it
+    /// fails after key use") and refuses before any I/O itself; so does the workspace
+    /// (`Evidence::require`). If the SDK ever refuses earlier this test fails and the host
+    /// check can be revisited.
+    #[test]
+    fn the_sdk_applies_the_key_before_it_finds_lt_evidence_missing() {
+        use oncl_core::keys::KeySelector;
+        let w = world();
+        let (engine, guard) = engine(&w);
+        let alias = crate::signing::runner::open_key_store(&w.store, PASSWORD, now()).unwrap()[0]
+            .alias
+            .clone();
+        let selector = KeySelector::inline(std::fs::read(&w.store).unwrap(), Some(alias));
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign]).with_keys([selector.key_id()]),
+                OperationPolicy::strict_online(),
+                control(),
+            )
+            .unwrap();
+        guard.allow_for_tests(ctx.id().get(), selector.key_id(), Action::Sign, 1);
+        let request = SignRequest::cades_create(
+            vec![KeyRequest::new(&selector, Some(PASSWORD))],
+            false,
+            AdesLevel::Lt,
+            ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits(),
+        );
+        let mut input: &[u8] = b"the document";
+        let mut out = Vec::new();
+        let error = engine
+            .sign(
+                request,
+                Source::sequential(&mut input, Some(12)),
+                &mut out,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.applied_state(), AppliedState::Applied, "{error:?}");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(guard.applications(), 1, "the key was applied once");
+        assert!(out.is_empty(), "nothing was produced");
     }
 }

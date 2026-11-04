@@ -1033,6 +1033,15 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(SignSpec, Destination), JobError
         target: own(family == 1, ui.get_xml_target()),
         parent: own(family == 1, ui.get_xml_parent()),
         signature_id: own(family == 1, ui.get_signature_id()),
+        evidence: if matches!(family, 0 | 3) && level.is_some_and(|l| l >= Level::Lt) {
+            super::Evidence::from_fields(
+                &ui.get_evidence_certificates(),
+                &ui.get_evidence_ocsp(),
+                &ui.get_evidence_crls(),
+            )
+        } else {
+            super::Evidence::default()
+        },
     };
     let destination = if ui.get_destination_index() == 1 {
         let folder = super::typed_path(ui.get_destination_path());

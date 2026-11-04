@@ -18,6 +18,7 @@ use oncl_core::{
     Action, CadesConfiguration, Engine, EngineServices, ErrorCode, ExecutionGrant, OperationError,
     OperationPolicy, ValidationServices,
 };
+use oncl_pki::cms::ades::ValidationMaterial;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::info::cert_info;
 use oncl_pki::io::{Source, TemporaryStore};
@@ -84,6 +85,13 @@ impl ConsentGuard {
             action,
             uses_left: uses,
         });
+    }
+
+    /// Allows the engine to apply `key` `uses` times for `operation`, as the consented run does;
+    /// for tests that drive the SDK directly.
+    #[cfg(test)]
+    pub(crate) fn allow_for_tests(&self, operation: u64, key: KeyId, action: Action, uses: usize) {
+        self.allow(operation, key, action, uses);
     }
 
     /// How many times the engine was allowed to apply the key.
@@ -160,7 +168,7 @@ pub fn desktop_engine(
     let tsa = crate::workspace::tsa_spec(
         extra.tsa.as_deref().unwrap_or_default(),
         HashAlg::Sha256,
-        None,
+        Some(crate::workspace::NCA_TSA_POLICY),
     )
     .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("TSA"))?;
     let services = EngineServices::hash_only(limits)
@@ -371,6 +379,18 @@ fn sign_inner(
 ) -> Result<Outcome, JobError> {
     // The key store is read once; listing's certificate is compared with this copy below, and
     // the engine signs with this copy only, so a file swapped later is never used.
+    // LT and LTA of CAdES and PAdES cannot be built from nothing, and the engine would only say
+    // so after the key was applied: refused here, before anything is read or used.
+    let loaded = if spec.needs_material() {
+        spec.options.evidence.require()?;
+        Some(spec.options.evidence.load()?)
+    } else {
+        None
+    };
+    let (ocsp, crls) = loaded.as_ref().map_or((Vec::new(), Vec::new()), |l| {
+        (l.ocsp_slices(), l.crl_slices())
+    });
+    let certificates = loaded.as_ref().map_or(&[][..], |l| &l.certificates[..]);
     let bytes = read_key_store(key_store)?;
     let selector = KeySelector::inline(bytes.to_vec(), Some(alias.to_owned()));
     let key_id = selector.key_id();
@@ -434,6 +454,11 @@ fn sign_inner(
             KeyRequest::new(&selector, Some(password.as_str())),
             input,
             BatchOutput::OwnedStaged(stage),
+            ValidationMaterial {
+                certificates,
+                ocsp: &ocsp,
+                crls: &crls,
+            },
         )?;
         items.push(BatchItem::new(id, operation));
     }

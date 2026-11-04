@@ -553,3 +553,12 @@ msgstr "Нәтижелер қайда жазылады"
 
 msgid "XML (XMLDSig / XAdES)"
 msgstr "XML (XMLDSig / XAdES)"
+
+msgid "Evidence: CRLs (files, separated by ;)"
+msgstr "Тексеру деректері: күшін жою тізімдері CRL (файлдар, ; арқылы)"
+
+msgid "Evidence: OCSP responses (files, separated by ;)"
+msgstr "Тексеру деректері: OCSP жауаптары (файлдар, ; арқылы)"
+
+msgid "Evidence: certificates of the chain (files, separated by ;)"
+msgstr "Тексеру деректері: тізбек сертификаттары (файлдар, ; арқылы)"

@@ -73,6 +73,9 @@ pub(crate) struct World {
     pub(crate) root_entry: KeyEntry,
     pub(crate) leaf: KeyEntry,
     pub(crate) root: oncl_pki::cert::Certificate,
+    /// The time stamp service's certificate and the OCSP responder, for the evidence files.
+    pub(crate) tsa_cert: oncl_pki::cert::Certificate,
+    pub(crate) responder: KeyEntry,
     /// What the engine reaches: the responder at `/ocsp` and the time service at `/tsa`.
     pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) store: PathBuf,
@@ -125,7 +128,8 @@ pub(crate) fn world() -> World {
     .unwrap();
     let store = dir.path().join("key.p12");
     std::fs::write(&store, bytes).unwrap();
-    let ocsp = Arc::new(MockOcsp::new(responder).with_now(now()));
+    let ocsp = Arc::new(MockOcsp::new(responder.clone()).with_now(now()));
+    let tsa_cert = tsa.cert.clone();
     let tsa = Arc::new(MockTsa::new(tsa).with_gen_time(now()));
     let http: Arc<dyn HttpTransport> = Arc::new(RouteTransport::new(vec![
         (format!("{ORIGIN}/ocsp"), ocsp.clone()),
@@ -136,11 +140,52 @@ pub(crate) fn world() -> World {
         root_entry: root.clone(),
         leaf,
         root: root.cert,
+        tsa_cert,
+        responder,
         http,
         store,
     }
 }
 
+/// The OCSP response the world's responder gives for `cert`, as an operator would have saved it.
+pub(crate) fn ocsp_response_for(w: &World, cert: &oncl_pki::cert::Certificate) -> Vec<u8> {
+    use oncl_pki::http::{GetOptions, HttpRequest};
+    let responder =
+        MockOcsp::new(w.responder.clone()).with_now(now() + time::Duration::seconds(60));
+    let request = oncl_pki::ocsp::request_der(cert, &w.root);
+    responder
+        .send(&HttpRequest::post(
+            &format!("{ORIGIN}/ocsp"),
+            Some("application/ocsp-request"),
+            &request,
+            GetOptions::default(),
+        ))
+        .unwrap()
+        .body
+}
+
+/// The public validation material the LT and LTA levels of CAdES and PAdES are built from,
+/// written as files in the world's directory: the root and the time service's certificates,
+/// and OCSP responses for the signer and the time service.
+pub(crate) fn evidence_files(w: &World) -> crate::workspace::Evidence {
+    let dir = w.dir.path();
+    let write = |name: &str, bytes: Vec<u8>| {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    crate::workspace::Evidence {
+        certificates: vec![
+            write("evidence-root.der", w.root.to_der().unwrap()),
+            write("evidence-tsa.der", w.tsa_cert.to_der().unwrap()),
+        ],
+        ocsp: vec![
+            write("evidence-leaf.ocsp", ocsp_response_for(w, &w.leaf.cert)),
+            write("evidence-tsa.ocsp", ocsp_response_for(w, &w.tsa_cert)),
+        ],
+        crls: Vec::new(),
+    }
+}
 pub(crate) fn engine(w: &World) -> (Engine, Arc<ConsentGuard>) {
     desktop_engine(
         ResourceLimits::default(),

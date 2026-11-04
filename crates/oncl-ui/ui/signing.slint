@@ -54,6 +54,11 @@ export global SigningState {
     in-out property <string> xml-target;
     in-out property <string> xml-parent;
     in-out property <string> signature-id;
+    // LT and LTA of CAdES and PAdES: the files their evidence is built from, each field a list
+    // of paths separated by «;».
+    in-out property <string> evidence-certificates;
+    in-out property <string> evidence-ocsp;
+    in-out property <string> evidence-crls;
     // «Format … · options …» of the operation, shown at the confirmation.
     in property <string> profile-line;
     // The report of the result: how the batch ended, then each document, signer and check.
@@ -273,6 +278,35 @@ export component SigningPage inherits VerticalLayout {
                 }
             }
         }
+            if (SigningState.format-index == 0 || SigningState.format-index == 3) && SigningState.level-index >= 3: VerticalLayout {
+                spacing: 4px;
+                Label {
+                    text: @tr("Evidence: certificates of the chain (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-certificates;
+                    accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
+                }
+
+                Label {
+                    text: @tr("Evidence: OCSP responses (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-ocsp;
+                    accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
+                }
+
+                Label {
+                    text: @tr("Evidence: CRLs (files, separated by ;)");
+                }
+
+                LineEdit {
+                    text <=> SigningState.evidence-crls;
+                    accessible-label: @tr("Evidence: CRLs (files, separated by ;)");
+                }
+            }
 
         Label {
             text: @tr("Key store (PKCS#12, JKS)");
