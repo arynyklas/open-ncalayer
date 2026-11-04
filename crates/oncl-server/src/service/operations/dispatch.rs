@@ -229,6 +229,10 @@ fn verify_request(profile: VerifyProfile, limits: EvidenceLimits) -> oncl_core::
         Pdf => oncl_core::VerifyRequest::pdf(),
         Xml => oncl_core::VerifyRequest::xml(),
         XmlKalkan => oncl_core::VerifyRequest::xml_kalkan(),
+        XadesB => oncl_core::VerifyRequest::xades(AdesLevel::B),
+        XadesT => oncl_core::VerifyRequest::xades(AdesLevel::T),
+        XadesLt => oncl_core::VerifyRequest::xades(AdesLevel::Lt),
+        XadesLta => oncl_core::VerifyRequest::xades(AdesLevel::Lta),
         CadesB => oncl_core::VerifyRequest::cades(AdesLevel::B, limits),
         CadesT => oncl_core::VerifyRequest::cades(AdesLevel::T, limits),
         CadesLt => oncl_core::VerifyRequest::cades(AdesLevel::Lt, limits),
@@ -336,12 +340,22 @@ fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState 
 fn ades_level(kind: SignKind) -> Option<AdesLevel> {
     use SignKind::*;
     match kind {
-        Cms | Pdf => None,
-        CadesB | PadesB => Some(AdesLevel::B),
-        CadesT | PadesT => Some(AdesLevel::T),
-        CadesLt | PadesLt => Some(AdesLevel::Lt),
-        CadesLta | PadesLta => Some(AdesLevel::Lta),
+        Cms | Pdf | Xml => None,
+        CadesB | PadesB | XadesB => Some(AdesLevel::B),
+        CadesT | PadesT | XadesT => Some(AdesLevel::T),
+        CadesLt | PadesLt | XadesLt => Some(AdesLevel::Lt),
+        CadesLta | PadesLta | XadesLta => Some(AdesLevel::Lta),
     }
+}
+fn is_xml(kind: SignKind) -> bool {
+    matches!(
+        kind,
+        SignKind::Xml
+            | SignKind::XadesB
+            | SignKind::XadesT
+            | SignKind::XadesLt
+            | SignKind::XadesLta
+    )
 }
 fn is_pdf(kind: SignKind) -> bool {
     matches!(
@@ -569,6 +583,9 @@ pub(super) fn run(
             detached,
             mode,
             attached,
+            target,
+            parent,
+            signature_id,
             keys,
         } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
@@ -606,7 +623,27 @@ pub(super) fn run(
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
             let level = ades_level(profile);
-            let request = if is_pdf(profile) {
+            let request = if is_xml(profile) {
+                if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
+                    return Err(
+                        ProcessingError::InvalidInput("XML signing is enveloped create").into(),
+                    );
+                }
+                if requests.len() != 1 {
+                    return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
+                }
+                let key = requests.remove(0);
+                let xml = oncl_xml::XmlSignProfile {
+                    target: target.as_deref(),
+                    parent: parent.as_deref(),
+                    signature_id: signature_id.as_deref(),
+                    ..oncl_xml::XmlSignProfile::default()
+                };
+                match level {
+                    None => oncl_core::SignRequest::xml(key, xml),
+                    Some(level) => oncl_core::SignRequest::xades(key, xml, level),
+                }
+            } else if is_pdf(profile) {
                 if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
                     return Err(ProcessingError::InvalidInput("PDF signing is incremental").into());
                 }

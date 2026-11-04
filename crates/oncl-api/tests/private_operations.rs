@@ -3,6 +3,7 @@
 mod private_support;
 use oncl_server::{audit::RecordKind, config::Permission};
 use private_support::*;
+use std::sync::Arc;
 
 const PASSWORD: &str = "inline-secret-password-MARKER-7f3a";
 
@@ -1036,6 +1037,398 @@ async fn completed_signing_requests_do_not_consume_the_bounded_audit_binding_tab
             .filter(|r| r.kind == RecordKind::Final)
             .count(),
         6
+    );
+    service.stop().await;
+}
+
+fn raw_metadata(service: &Running, length: usize) -> oncl_api::server::RequestMetadata {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("host", service.address.to_string().parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", service.token.as_str())
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("content-type", FORM.parse().unwrap());
+    oncl_api::server::RequestMetadata {
+        peer: "127.0.0.1:45678".parse().unwrap(),
+        headers,
+        content_length: Some(length as u64),
+    }
+}
+
+/// A held staged-artifact data slice keeps the original root and the SDK's own
+/// spool after its deadline, while the native worker permit is already free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_artifact_slice_after_expiry_retains_root_and_temp_but_not_the_worker() {
+    use http_body_util::BodyExt;
+    use oncl_api::server::HashHost;
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.max_in_flight = 1;
+        config.operation_timeout_ms = 4000;
+        config.header_timeout_ms = 1000;
+        config.admission_wait_ms = 500;
+    })
+    .await;
+    let body = multipart(
+        &sign_metadata("cms", r#""attached":true,"#),
+        &[
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: &vec![7u8; 600_000],
+            },
+        ],
+    );
+    let response = service
+        .host
+        .operations(
+            raw_metadata(&service, body.len()),
+            axum::body::Body::from(body),
+        )
+        .await
+        .unwrap();
+    let deadline = response
+        .extensions()
+        .get::<oncl_server::service::ResponseDelivery>()
+        .unwrap()
+        .deadline();
+    let mut body = response.into_body();
+    // Skip protocol frames until a genuine artifact data frame (large, binary).
+    let held = loop {
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        if frame.len() > 1000 {
+            break frame;
+        }
+    };
+    let slice = held.slice(0..1);
+    drop(held);
+    // The artifact exists as SDK scratch while the slice is retained.
+    assert!(!spool_files(&service.scratch()).is_empty());
+    assert_eq!(
+        service.host.executor.running(),
+        0,
+        "native worker is free while output is held"
+    );
+    tokio::time::sleep(deadline.remaining()).await;
+    assert!(
+        matches!(body.frame().await, Some(Err(_))),
+        "no data may escape the original deadline"
+    );
+    drop(body);
+    assert!(
+        service
+            .host
+            .engine
+            .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+            .is_err(),
+        "the last Bytes slice keeps the original root after expiry"
+    );
+    assert!(
+        !spool_files(&service.scratch()).is_empty(),
+        "and keeps its real scratch"
+    );
+    drop(slice);
+    assert!(
+        spool_files(&service.scratch()).is_empty(),
+        "last drop cleans the SDK spool"
+    );
+    assert!(
+        service
+            .host
+            .engine
+            .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+            .is_ok()
+    );
+    service.stop().await;
+}
+
+/// A real peer that never reads the multipart response cannot hold the root,
+/// worker or scratch past the original deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_reading_peer_of_a_large_artifact_response_is_cut_at_the_original_deadline() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.max_in_flight = 1;
+        config.operation_timeout_ms = 3000;
+        config.header_timeout_ms = 1000;
+        config.admission_wait_ms = 500;
+    })
+    .await;
+    let document = vec![9u8; 48 << 20];
+    let body = multipart(
+        &sign_metadata("cms", r#""attached":true,"#),
+        &[
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: &document,
+            },
+        ],
+    );
+    let mut stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let head = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: {FORM}\r\nContent-Length: {}\r\n\r\n",
+        service.address,
+        service.token.as_str(),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(&body).await.unwrap();
+    // Never read. After the original deadline the server must have released all.
+    let started = std::time::Instant::now();
+    loop {
+        if service
+            .host
+            .engine
+            .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+            .is_ok()
+            && spool_files(&service.scratch()).is_empty()
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "a non-reading peer held the root/scratch past its deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(started.elapsed() >= std::time::Duration::from_millis(500));
+    // The peer never receives a terminal success record.
+    let mut received = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut received),
+    )
+    .await;
+    assert!(!String::from_utf8_lossy(&received).contains("\"status\":\"completed\""));
+    assert_eq!(service.host.executor.running(), 0);
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_openapi_examples_are_accepted_by_the_running_service() {
+    use http_body_util::{BodyExt, Empty};
+    let service = Running::start_with(|config, _| {
+        config.tokens[0].actions.push(Permission::Hash);
+    })
+    .await;
+    let get = |token: Option<String>| {
+        let address = service.address;
+        async move {
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let (mut sender, connection) =
+                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                    .await
+                    .unwrap();
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut request = hyper::Request::builder()
+                .method("GET")
+                .uri("/v1/openapi.json")
+                .header("host", address.to_string());
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = sender
+                .send_request(request.body(Empty::<axum::body::Bytes>::new()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            (
+                status,
+                response.into_body().collect().await.unwrap().to_bytes(),
+            )
+        }
+    };
+    assert_eq!(get(None).await.0, 403);
+    let (status, bytes) = get(Some(service.token.to_string())).await;
+    assert_eq!(status, 200);
+    let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["openapi"], "3.1.0");
+    let examples = &document["paths"]["/v1/operations"]["post"]["requestBody"]["content"]["multipart/form-data"]
+        ["examples"];
+    for name in [
+        "hash",
+        "sign_inline",
+        "sign_named",
+        "verify",
+        "extend",
+        "extract",
+        "jws",
+        "jwt_verify",
+        "inspect",
+        "stamp",
+        "verify_stamp",
+    ] {
+        assert!(examples[name]["value"]["items"].is_array(), "{name}");
+    }
+    // The published hash example is a working request.
+    let metadata = examples["hash"]["value"].to_string();
+    let (status, ct, response) = service
+        .post(
+            FORM,
+            multipart(
+                &metadata,
+                &[Part {
+                    name: "doc",
+                    filename: None,
+                    bytes: b"abc",
+                }],
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    assert_eq!(ct, "application/json");
+    let done: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    let published = &document["paths"]["/v1/operations"]["post"]["responses"]["200"]["content"]["application/json"]
+        ["examples"]["hash"]["value"];
+    assert_eq!(
+        done["results"][0]["result"],
+        published["results"][0]["result"]
+    );
+    assert_eq!(done["status"], published["status"]);
+    // A completed Invalid example keeps HTTP 200 semantics in the description.
+    assert_eq!(
+        document["paths"]["/v1/operations"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["examples"]["verification_invalid_is_200"]["value"]["results"][0]["result"]["verdict"],
+        "Invalid"
+    );
+    service.stop().await;
+}
+
+fn xml_oracle(xml: &[u8], dir: &std::path::Path) -> serde_json::Value {
+    let file = dir.join("signed.xml");
+    std::fs::write(&file, xml).unwrap();
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracles/xml_verify.py");
+    let out = std::process::Command::new("python")
+        .arg(script)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enveloped_xml_and_xades_signatures_verify_in_lxml_and_cryptography() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let xml = br#"<root xmlns:x="urn:x"><x:item Id="p">payload text</x:item><holder Id="s"></holder></root>"#;
+    for (profile, xades) in [("xml", false), ("xades_b", true)] {
+        let (_, parts) = sign_inline(
+            &service,
+            &p12,
+            profile,
+            r#""target":"p","parent":"s","signature_id":"sig1","#,
+            xml,
+        )
+        .await;
+        let done = final_event(&parts);
+        assert_eq!(done["status"], "completed", "{profile}: {done}");
+        let signed = artifact(&parts, "artifact-0");
+        let verdict = xml_oracle(signed, dir.path());
+        assert_eq!(verdict["signature_valid"], true, "{profile}: {verdict}");
+        assert!(
+            verdict["references"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["match"] == true),
+            "{verdict}"
+        );
+        assert_eq!(
+            xades,
+            String::from_utf8_lossy(signed).contains("QualifyingProperties")
+        );
+        // Altering signed content breaks the independent digest check.
+        let altered = String::from_utf8_lossy(signed).replace("payload text", "payload texT");
+        let broken = xml_oracle(altered.as_bytes(), dir.path());
+        assert!(
+            broken["references"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["match"] == false),
+            "{broken}"
+        );
+        // The service's own verifier agrees; tampering is a completed Invalid report.
+        let verify = format!(
+            r#"{{"items":[{{"id":"v","operation":{{"kind":"verify","profile":"{}","input":"doc"}}}}],"parts":[{{"name":"doc","item_id":"v","role":"document"}}]}}"#,
+            if xades { "xades_b" } else { "xml" }
+        );
+        let (status, _, response) = operate(
+            &service,
+            &verify,
+            &[Part {
+                name: "doc",
+                filename: None,
+                bytes: altered.as_bytes(),
+            }],
+        )
+        .await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+        let report: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(report["status"], "completed");
+        assert_eq!(
+            report["results"][0]["result"]["verdict"], "Invalid",
+            "{report}"
+        );
+    }
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_signing_input_is_a_typed_not_applied_failure_not_a_transport_abort() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let (_, parts) = sign_inline(&service, &p12, "pdf", "", b"this is not a pdf").await;
+    let done = final_event(&parts);
+    assert_eq!(done["status"], "failed", "{done}");
+    assert_eq!(done["error"]["code"], "InvalidRequest");
+    assert_eq!(done["error"]["applied"], "NotApplied");
+    assert!(parts.iter().all(|(n, _, _)| n != "artifact"));
+    let records = service.host.audit.records().unwrap();
+    assert!(
+        records.iter().all(|r| r.kind != RecordKind::Begin),
+        "no private use for malformed input"
     );
     service.stop().await;
 }

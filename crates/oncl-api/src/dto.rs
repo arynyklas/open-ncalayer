@@ -53,6 +53,14 @@ pub enum Operation {
         /// Attached (encapsulated) CMS/CAdES content when creating.
         #[serde(default)]
         attached: bool,
+        /// XML/XAdES only: unique ID of the element to sign.
+        #[serde(default)]
+        target: Option<String>,
+        /// XML/XAdES only: unique ID of the element that receives the signature.
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        signature_id: Option<String>,
         keys: Vec<KeyRef>,
     },
     /// Keyless public-evidence extension (never opens a private key).
@@ -152,6 +160,11 @@ pub enum SignKind {
     PadesT,
     PadesLt,
     PadesLta,
+    Xml,
+    XadesB,
+    XadesT,
+    XadesLt,
+    XadesLta,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +231,10 @@ pub enum VerifyProfile {
     PadesLta,
     Xml,
     XmlKalkan,
+    XadesB,
+    XadesT,
+    XadesLt,
+    XadesLta,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

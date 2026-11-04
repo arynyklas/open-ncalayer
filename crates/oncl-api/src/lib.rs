@@ -5,4 +5,6 @@ pub mod error;
 #[cfg(feature = "server")]
 pub mod multipart;
 #[cfg(feature = "server")]
+pub mod openapi;
+#[cfg(feature = "server")]
 pub mod server;

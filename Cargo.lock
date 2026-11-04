@@ -4438,6 +4438,7 @@ dependencies = [
  "oncl-pki",
  "oncl-testkit",
  "oncl-token",
+ "oncl-xml",
  "rcgen",
  "ring",
  "rsa",

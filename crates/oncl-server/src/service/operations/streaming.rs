@@ -203,7 +203,12 @@ fn execute(
                 // transport abort (the original first-fatal cause); anything that
                 // may have used a private key, and every typed SDK refusal, gets a
                 // terminal failed record carrying the honest Applied state.
-                if matches!(error, OperationError::Processing(_)) && !applied && !applied_any {
+                let abort = matches!(
+                    &error,
+                    OperationError::Processing(e)
+                        if !matches!(intake::first_cause(e), ProcessingError::InvalidInput(_))
+                );
+                if abort && !applied && !applied_any {
                     return Err(match error {
                         OperationError::Processing(error) => error,
                         _ => unreachable!("matched processing"),

@@ -171,7 +171,79 @@ the original deadline and shared budgets. Dropping a response does not make a
 still-running worker free, and retaining/cloning response bytes retains their
 original reservation/root until the actual final drop.
 
-The full Task24 private/signature/timestamp/plugin/artifact/batch HTTP acceptance
-is not asserted by these public operations. Encryption additionally
-requires the real external GOST backend contract; there are no fabricated
-`encrypt`/`decrypt` routes returning generic Unsupported success.
+## Operation families
+
+All operations use the same `metadata` envelope (JSON-small or metadata-first
+multipart). `GET /v1/openapi.json` (authenticated like `/health`) publishes the
+OpenAPI 3.1 description with request and response examples that are parsed and
+serialized by the real DTOs. Each token needs the matching action:
+
+| `kind` | Token action | Output |
+|---|---|---|
+| `hash` | `hash` | JSON |
+| `verify` (`cms`, `cades_*`, `pdf`, `pades_*`, `xml`, `xml_kalkan`, `xades_*`) | `verify` | JSON; Invalid is a completed HTTP 200 report |
+| `extract` | `extract` | `multipart/mixed` artifact |
+| `sign` (`cms`, `cades_b/t/lt/lta`, `pdf`, `pades_b/t/lt/lta`, `xml`, `xades_b/t/lt/lta`; `mode` `create`/`add` for CMS/CAdES; XML takes optional `target`/`parent`/`signature_id` element IDs) | `sign` plus per-key right | `multipart/mixed` artifact |
+| `extend` (`cades_t/lt/lta`, `pades_t/lt/lta`) | `extend` (keyless; no provider/audit use) | `multipart/mixed` artifact |
+| `jws_sign`, `jws_add`, `jwt_encode` | `sign` plus per-key right | `multipart/mixed` artifact |
+| `jws_verify`, `jwt_verify` | `verify` | JSON; signature, host trust and claims reported separately |
+| `jwt_decode` | `extract` | JSON; `verified` is always `false` |
+| `inspect` (`certificate`, `cms`, `container`) | `inspect` | JSON |
+| `stamp` | `stamp` | `multipart/mixed` token artifact |
+| `verify_stamp` | `verify_stamp` | JSON |
+
+Multiple items execute sequentially under one original deadline and budget. There
+are no encryption/decryption routes: the applicable GOST envelope backend is an
+external prerequisite and is not replaced by an RSA-only or generic Unsupported
+route. WS-Security signing, SDK closed-batch capture/approval (`run_batch`, which
+would add per-item audit ordinals; items here run sequentially in one request
+without it) and the plugin route are not exposed by this HTTP contract yet.
+
+## Keys and secret roles
+
+A signing item names keys as either `{"source":"named","name":"..."}` (operator
+configured alias; the token must list that exact name in `keys`) or
+`{"source":"inline","container":"<part>","password":"<part>","alias":"..."}`.
+Inline use needs both the global `inline_pkcs12 = true` and the token's
+`inline_pkcs12 = true`; the host then grants only the exact immutable InlineID
+computed from the received container and alias. There is no client file path,
+token reader, certificate fingerprint or PIN-cache selection.
+
+Parts with `role:"secret"` are bounded fixed-capacity zeroizing memory (container
+4 MiB, password 4096 bytes). They are declared first and must be sent before every
+`document` part, are never written to the document spool or response, and keep that
+role whatever filename or Content-Type the wire part carries. Secrets are refused
+in JSON-small. Network and parser transport buffers outside the service-owned
+secret owner are not wiped. Container inspection uses the same secret roles and
+shows only aliases the token's `metadata_aliases` lists.
+
+## Audit and Applied state
+
+Before the key is applied the service writes a durable audit BEGIN bound to the
+authenticated principal and the exact key label; a FINAL follows. Audit failure
+before use is a typed `AuditUnavailable`/`NotApplied` failure. If a failure follows
+a possible key application, the terminal record reports `Applied` or `Unknown`; no
+rollback, retry or exactly-once guarantee is given. Closed audit bindings remain
+as tombstones until the original deadline (accepted S01 contract), so at most
+1024 private requests are accepted per `operation_timeout_ms` window.
+
+## Terminal records for streamed responses
+
+`final` has `status` `completed` or `failed`. A `failed` record carries
+`error: {code, applied}` and withholds every artifact of the request (there is no
+partial success); prior items' `applied` values stay visible in `results`. Resource,
+deadline and cancellation failures that never applied a key abort the transport as
+before. A stream without a `completed` final record is not a result.
+
+## Operator configuration (summary)
+
+`[pki]` adds `anchors`, `intermediates`, address-pinned `endpoints`, an optional
+`[pki.tsa]` (`url`, optional `policy`, `timeout_ms`, `skew_ms`) required for
+`*_t/lt/lta` signing and `stamp`, and `[pki.jwt]` (`expected_issuer`,
+`expected_audience`). Tokens gain the actions `extend`, `inspect`, `stamp`,
+`verify_stamp` and `metadata_aliases`. None of these are request fields. Private
+operations use strict validation: they need configured anchors and reachable
+revocation evidence, otherwise they fail before the key is applied.
+
+Encryption additionally requires the real external GOST backend contract. No
+10-GiB/RSS or platform-matrix claim is made by this document.

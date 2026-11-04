@@ -453,6 +453,17 @@ impl HashHost for ServiceHost {
     fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
         self.dispatch_operations(metadata, body)
     }
+    fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture {
+        let result = self.principal(&metadata).map(|_| {
+            let bytes = serde_json::to_vec(&oncl_api::openapi::document()).expect("document");
+            let mut response = axum::body::Body::from(bytes).into_response();
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            response
+        });
+        Box::pin(async move { result })
+    }
     fn health(&self, metadata: RequestMetadata) -> ResponseFuture {
         let result = self
             .principal(&metadata)

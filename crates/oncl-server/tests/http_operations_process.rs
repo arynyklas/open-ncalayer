@@ -75,6 +75,60 @@ fn assert_owner_only_file(path: &std::path::Path) {
     );
 }
 
+/// The SDK publication path hard-links the spool file; the published name must
+/// keep the same protected, owner-only descriptor, not only the unpublished spool.
+#[test]
+fn published_hard_link_copy_keeps_the_protected_owner_only_descriptor() {
+    use oncl_core::{Action, Engine, EngineServices, ExecutionGrant, OperationPolicy};
+    use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceLimits};
+    struct Allow;
+    impl OperationControl for Allow {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    let directory = support::sandbox();
+    let spool = directory.path().join("spool");
+    oncl_pki::private_fs::PrivateDirectory::create(&spool).unwrap();
+    let published = directory.path().join("published");
+    oncl_pki::private_fs::PrivateDirectory::create(&published).unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(&spool).unwrap();
+    let engine = Engine::new(
+        EngineServices::hash_only(ResourceLimits::default()).with_temporary_store(store.clone()),
+    )
+    .unwrap();
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]),
+            OperationPolicy::strict_online(),
+            std::sync::Arc::new(Allow),
+        )
+        .unwrap();
+    let mut staged = store.stage(ctx.resources()).unwrap();
+    staged.write_chunk(b"published artifact bytes").unwrap();
+    let spool_files = {
+        let mut files = scratch_files(&spool);
+        files.sort();
+        files
+    };
+    assert_eq!(spool_files.len(), 1);
+    assert_owner_only_file(&spool_files[0]);
+    let destination = published.join("result.bin");
+    staged.commit(&destination).unwrap();
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        b"published artifact bytes"
+    );
+    // Same descriptor on the PUBLISHED name (Windows: protected DACL, owner SID).
+    #[cfg(windows)]
+    assert_owner_only_file(&destination);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&destination).unwrap().mode() & 0o077, 0);
+    }
+}
+
 #[test]
 fn standalone_multipart_uses_actual_random_private_scratch_and_cleans_it() {
     use std::{

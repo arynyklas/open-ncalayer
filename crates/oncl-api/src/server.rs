@@ -22,12 +22,15 @@ pub trait HashHost: Send + Sync + 'static {
     fn hash(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
     fn health(&self, metadata: RequestMetadata) -> ResponseFuture;
     fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
+    /// The static contract description; authenticated like health.
+    fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture;
 }
 pub fn router(host: Arc<dyn HashHost>) -> Router {
     Router::new()
         .route("/v1/hash", post(hash))
         .route("/v1/operations", post(operations))
         .route("/health", on(MethodFilter::GET, health))
+        .route("/v1/openapi.json", on(MethodFilter::GET, openapi))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(target_boundary))
@@ -54,7 +57,7 @@ async fn target_boundary(request: Request<Body>, next: Next) -> Response {
     let expected = match request.uri().path() {
         "/v1/hash" => Some((Method::POST, "POST")),
         "/v1/operations" => Some((Method::POST, "POST")),
-        "/health" => Some((Method::GET, "GET")),
+        "/health" | "/v1/openapi.json" => Some((Method::GET, "GET")),
         _ => None,
     };
     if let Some((method, allowed)) = expected
@@ -143,6 +146,19 @@ async fn health(
 ) -> Result<Response, ApiError> {
     let content_length = metadata(peer, &request, "health")?;
     host.health(RequestMetadata {
+        peer,
+        headers: request.into_parts().0.headers,
+        content_length,
+    })
+    .await
+}
+async fn openapi(
+    State(host): State<Arc<dyn HashHost>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let content_length = metadata(peer, &request, "openapi")?;
+    host.openapi(RequestMetadata {
         peer,
         headers: request.into_parts().0.headers,
         content_length,

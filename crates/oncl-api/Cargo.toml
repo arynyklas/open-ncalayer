@@ -10,13 +10,14 @@ publish.workspace = true
 
 [features]
 default = []
-server = ["dep:axum", "dep:multer", "dep:futures-util"]
+server = ["dep:axum", "dep:multer", "dep:futures-util", "dep:serde_json"]
 
 [dependencies]
 serde.workspace = true
 axum = { workspace = true, optional = true }
 multer = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

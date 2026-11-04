@@ -44,6 +44,9 @@ impl HashHost for ObserveDelivery {
     fn operations(&self, metadata: RequestMetadata, body: axum::body::Body) -> ResponseFuture {
         self.host.operations(metadata, body)
     }
+    fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture {
+        self.host.openapi(metadata)
+    }
 }
 pub struct WriteGate {
     open: AtomicBool,
