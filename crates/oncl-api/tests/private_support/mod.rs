@@ -233,7 +233,9 @@ impl Pki {
                 std::thread::spawn(move || {
                     socket.set_nonblocking(false).unwrap();
                     socket
-                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        // Hang guard only: a request that the loaded server writes slowly
+                        // must not be dropped unanswered (a 2 s bound was tuned to speed).
+                        .set_read_timeout(Some(Duration::from_secs(30)))
                         .unwrap();
                     let mut bytes = Vec::new();
                     let mut chunk = [0; 4096];
