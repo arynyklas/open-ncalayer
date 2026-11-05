@@ -71,9 +71,6 @@ fn header(kind: Kind, plan: &Plan<'_>) -> Vec<String> {
                 .to_owned(),
         );
     }
-    lines.push(
-        "Made by `cargo xtask winget` (docs/dev/winget.md); not submitted anywhere.".to_owned(),
-    );
     lines.push(format!(
         "yaml-language-server: $schema=https://aka.ms/winget-manifest.{}.{MANIFEST_VERSION}.schema.json",
         match kind {
@@ -242,7 +239,10 @@ pub enum Mode {
     /// A manifest for the proof run: no Apps & Features mapping yet.
     Candidate,
     /// A manifest that may be submitted: the mapping is there and equals the package version.
+    /// A header that says it is not for submission is refused.
     Final,
+    /// Like `Final`, for the output made from synthetic test fixtures (its banner is allowed).
+    Fixture,
 }
 
 /// The facts of a checked manifest.
@@ -313,6 +313,9 @@ pub fn check_dir(dir: &Path, mode: Mode) -> Result<Checked, ManifestError> {
                 continue;
             }
         };
+        if mode != Mode::Candidate && mode != Mode::Fixture && text.contains("NOT FOR SUBMISSION") {
+            problems.push(format!("{name}: its header says it is NOT FOR SUBMISSION"));
+        }
         let value = match yaml::parse(&text) {
             Ok(value) => value,
             Err(e) => {
@@ -481,7 +484,9 @@ fn invariants(
         .and_then(Value::as_array)
     {
         for code in codes {
-            if code["InstallerReturnCode"] != BUSY_EXIT_CODE {
+            if code["InstallerReturnCode"] != BUSY_EXIT_CODE
+                || code["ReturnResponse"] != "packageInUse"
+            {
                 problems.push(format!(
                     "ExpectedReturnCodes names the code {}, which was not proven",
                     code["InstallerReturnCode"]
@@ -504,12 +509,12 @@ fn invariants(
             );
         }
         (Mode::Candidate, None) => {}
-        (Mode::Final, None) => {
+        (Mode::Final | Mode::Fixture, None) => {
             problems.push(
                 "there is no AppsAndFeaturesEntries: the ARP mapping is not proven".to_owned(),
             );
         }
-        (Mode::Final, Some(entries)) => {
+        (Mode::Final | Mode::Fixture, Some(entries)) => {
             if entries.len() != 1 {
                 problems.push("exactly one Apps & Features entry is proven".to_owned());
             }

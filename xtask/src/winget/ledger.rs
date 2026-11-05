@@ -53,7 +53,35 @@ impl Ledger {
     ///
     /// The text is not a ledger.
     pub fn parse(json: &str) -> anyhow::Result<Ledger> {
-        serde_json::from_str(json).context("the hash ledger is not valid")
+        let ledger: Ledger = serde_json::from_str(json).context("the hash ledger is not valid")?;
+        ledger.validate()?;
+        Ok(ledger)
+    }
+
+    /// Every version is a stable `<major>.<minor>.<patch>`, has exactly the keys `x64` and
+    /// `x86`, and a lowercase SHA-256 under each: a mistyped entry would otherwise switch the
+    /// guard off without a word. (A missing ledger file is an error too, see the CLI.)
+    fn validate(&self) -> anyhow::Result<()> {
+        for (version, hashes) in &self.versions {
+            let stable = oncl_update::Version::parse(version)
+                .is_ok_and(|v| v.pre.is_empty() && v.build.is_empty() && v.to_string() == *version);
+            anyhow::ensure!(
+                stable,
+                "ledger version {version:?} is not <major>.<minor>.<patch>"
+            );
+            let keys: Vec<&str> = hashes.keys().map(String::as_str).collect();
+            anyhow::ensure!(
+                keys == ["x64", "x86"],
+                "ledger version {version} must have exactly the keys x64 and x86, has {keys:?}"
+            );
+            for (arch, sha) in hashes {
+                anyhow::ensure!(
+                    sha.len() == 64 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                    "ledger {version} {arch}: {sha:?} is not a lowercase SHA-256"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Fails if `version` is recorded with another hash than `sha256` for any architecture.

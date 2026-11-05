@@ -52,6 +52,10 @@ pub enum WingetCommand {
         /// The evidence file [default: <out>.evidence.json].
         #[arg(long)]
         evidence: Option<PathBuf>,
+        /// Make the directory the final-manifest proof cells install from, before those cells
+        /// exist. The evidence says NOT READY; run again without this flag with the cells.
+        #[arg(long)]
+        final_proof_pending: bool,
         /// Accept probe reports that say they are synthetic fixtures. The output is marked and
         /// is not for submission.
         #[arg(long)]
@@ -103,6 +107,7 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
                     probe_json: None,
                     ledger: &ledger,
                     allow_synthetic: false,
+                    final_proof_pending: false,
                     out: &out,
                     evidence: &evidence,
                 },
@@ -123,6 +128,7 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
             ledger,
             evidence,
             allow_synthetic_fixture,
+            final_proof_pending,
         } => {
             let release = std::fs::read_to_string(&release_json)
                 .with_context(|| format!("reading {}", release_json.display()))?;
@@ -136,6 +142,7 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
                     probe_json: Some(&probe),
                     ledger: &ledger,
                     allow_synthetic: allow_synthetic_fixture,
+                    final_proof_pending,
                     out: &out,
                     evidence: &evidence,
                 },

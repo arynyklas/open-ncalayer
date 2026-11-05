@@ -61,9 +61,23 @@ impl Https {
     }
 }
 
+/// Only HTTPS, and only the hosts GitHub serves release assets from: the first URL and every
+/// redirect hop.
+pub fn github_hop(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.to_ascii_lowercase();
+    host == "github.com" || host.ends_with(".githubusercontent.com")
+}
+
 impl AssetFetch for Https {
     fn fetch(&self, url: &str, limit: u64, dest: &Path) -> anyhow::Result<Downloaded> {
-        let fetcher = self.fetcher.clone().unwrap_or_default();
+        let fetcher = self
+            .fetcher
+            .clone()
+            .unwrap_or_else(|| Fetcher::new().restricted_to(github_hop));
         let done = fetcher
             .download(url, limit, &RequestCtx::default(), dest)
             .with_context(|| format!("downloading {url}"))?;

@@ -394,6 +394,7 @@ impl Reader {
 ///
 /// The document uses anything outside the subset or is malformed.
 pub fn parse(text: &str) -> Result<Value, YamlError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;

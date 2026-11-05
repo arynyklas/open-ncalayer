@@ -1,36 +1,51 @@
 <#
 .SYNOPSIS
-  Merges the cell reports of the WinGet proof matrix (one JSON file per cell, written by
-  Invoke-WingetProbe.ps1 inside the machines) into the probe set that
-  `cargo xtask winget generate --probe` reads.
+  Merges the cell reports of the WinGet proof matrix (one JSON per cell, written by
+  Invoke-WingetProbe.ps1 inside the machines) and the final-manifest cells (written by
+  Invoke-WingetFinalProbe.ps1) into the probe set that `cargo xtask winget generate --probe` reads.
 
 .DESCRIPTION
-  The set is always marked "vm-run": the generator refuses a set marked as a synthetic fixture
-  unless a test asks for it, and this script cannot make one. It does not decide whether the
-  cells prove anything: that is the generator's job, against the bytes it downloads itself.
-
-.EXAMPLE
-  .\Merge-ProbeCells.ps1 -Cells .\cells\*.json -OutFile .\winget\probes\0.3.0.json
+  The set is an OPERATOR ATTESTATION: -AttestedBy and -RunId say who vouches for the run. The
+  generator checks the cells against the published bytes and against each other; it cannot see
+  the machines. If ANY cell says "synthetic": true the whole set is marked "synthetic-fixture",
+  and the generator refuses it for a final manifest: this script cannot turn synthetic cells
+  into a real run.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string[]]$Cells,
+  [Parameter(Mandatory)][string[]]$FinalCells,
+  [Parameter(Mandatory)][string]$AttestedBy,
+  [Parameter(Mandatory)][string]$RunId,
   [Parameter(Mandatory)][string]$OutFile
 )
 
 Set-StrictMode -Version 1
 $ErrorActionPreference = 'Stop'
 
-$files = @(Get-ChildItem -Path $Cells -File | Sort-Object FullName)
-if ($files.Count -eq 0) { throw "no cell report matches $($Cells -join ', ')" }
-
-$reports = @()
-foreach ($file in $files) {
-  $text = [IO.File]::ReadAllText($file.FullName)
-  try { $reports += , ($text | ConvertFrom-Json) }
-  catch { throw "$($file.FullName) is not JSON: $_" }
+function Read-Json($patterns) {
+  $files = @(Get-ChildItem -Path $patterns -File | Sort-Object FullName)
+  if ($files.Count -eq 0) { throw "no file matches $($patterns -join ', ')" }
+  $items = @()
+  foreach ($file in $files) {
+    $text = [IO.File]::ReadAllText($file.FullName)
+    try { $items += , ($text | ConvertFrom-Json) }
+    catch { throw "$($file.FullName) is not JSON: $_" }
+  }
+  , $items
 }
-$set = [ordered]@{ report_format = 1; origin = 'vm-run'; reports = $reports }
+
+$reports = Read-Json $Cells
+$final = Read-Json $FinalCells
+$synthetic = @($reports | Where-Object { $_.synthetic -eq $true }).Count -gt 0
+$origin = if ($synthetic) { 'synthetic-fixture' } else { 'vm-run' }
+$set = [ordered]@{
+  report_format = 1
+  origin = $origin
+  attestation = [ordered]@{ attested_by = $AttestedBy; run_id = $RunId }
+  reports = $reports
+  final_cells = $final
+}
 $json = $set | ConvertTo-Json -Depth 20
 [IO.File]::WriteAllText($OutFile, $json, (New-Object Text.UTF8Encoding($false)))
-Write-Host ("merged $($files.Count) cell report(s) into $OutFile; next: cargo xtask winget generate --probe $OutFile --release-json <release.json>")
+Write-Host ("merged $($reports.Count) cell(s) and $($final.Count) final-manifest cell(s) into $OutFile as $origin; next: cargo xtask winget generate --probe $OutFile --release-json <release.json>")

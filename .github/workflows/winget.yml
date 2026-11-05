@@ -21,9 +21,12 @@ name: WinGet manifests
 #      run exists there is no final manifest.
 # `winget validate` is schema validation by WinGet's own parser, not an installer proof; the
 # installation proof is the run on the machines of the matrix.
+# Triggers: the Release workflow finishing for a tag (a release made with GITHUB_TOKEN starts no
+# `release` event, so, like aur.yml, this follows the workflow run), or by hand with a tag.
 on:
-  release:
-    types: [released]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -45,23 +48,29 @@ env:
 
 jobs:
   manifests:
-    if: github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft)
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
           # The probe reports and the hash ledger are committed after the release.
-          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.repository.default_branch || github.ref }}
           persist-credentials: false
       - name: The release
         id: release
         shell: bash
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+          EVENT: ${{ github.event_name }}
           PROBE_INPUT: ${{ inputs.probe }}
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [ "$EVENT" = workflow_run ]; then
+              echo "::notice::$TAG is not a stable release tag: no WinGet manifest for it"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "::error::$TAG is not a stable release tag (v<major>.<minor>.<patch>): alpha, beta and other tags never get a WinGet manifest"
             exit 1
           fi
@@ -73,9 +82,12 @@ jobs:
             echo "probe=$probe"
           } >> "$GITHUB_OUTPUT"
       - name: Install toolchain (rust-toolchain.toml)
+        if: steps.release.outputs.skip != 'true'
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.release.outputs.skip != 'true'
       - name: Fetch the release
+        if: steps.release.outputs.skip != 'true'
         shell: bash
         env:
           # Read-only: the job's token has `contents: read` and is used for this one GET.
@@ -85,12 +97,14 @@ jobs:
           mkdir -p target
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > target/release.json
       - name: Candidate manifest (input of the installation proof run)
+        if: steps.release.outputs.skip != 'true'
         shell: bash
         run: |
           cargo xtask winget candidate \
             --release-json target/release.json --out target/winget-candidate
           cargo xtask winget check target/winget-candidate --candidate
       - name: Final manifest
+        if: steps.release.outputs.skip != 'true'
         id: final
         shell: bash
         env:
@@ -121,6 +135,7 @@ jobs:
           winget validate target/winget
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Summary
+        if: steps.release.outputs.skip != 'true'
         shell: bash
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -136,6 +151,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: steps.release.outputs.skip != 'true'
         with:
           name: winget-${{ steps.release.outputs.version }}
           path: |

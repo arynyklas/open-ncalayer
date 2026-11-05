@@ -26,9 +26,13 @@ pub const MIN_BUILD: u32 = 17763;
 /// The first build of Windows 11.
 const WINDOWS_11_BUILD: u32 = 22000;
 
+/// The exit code of `winget upgrade` when no upgrade applies (0x8A15002B).
+pub const NO_APPLICABLE_UPGRADE: i32 = -1_978_335_189;
+
 /// What the probe flags WinGet was started with: nothing that skips a check.
-const ALLOWED_FLAGS: [&str; 5] = [
+const ALLOWED_FLAGS: [&str; 6] = [
     "--manifest",
+    "--architecture",
     "--silent",
     "--accept-package-agreements",
     "--accept-source-agreements",
@@ -53,14 +57,70 @@ pub struct ProbeSet {
     pub report_format: u32,
     /// Where they come from.
     pub origin: Origin,
-    /// One report per cell.
+    /// Who says the run happened. The reports are operator attestations: the generator checks
+    /// them against the published bytes and against each other, it cannot see the machines.
+    pub attestation: Attestation,
+    /// One report per cell of the matrix, run on the candidate manifest.
     pub reports: Vec<InstallerProbeReport>,
+    /// Cells that installed, upgraded and uninstalled from the FINAL manifest.
+    pub final_cells: Vec<FinalManifestCell>,
+}
+
+/// The operator's statement about the run.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attestation {
+    /// Who ran the matrix.
+    pub attested_by: String,
+    /// An identifier of the run (a ticket, a date and a name).
+    pub run_id: String,
+}
+
+/// The machine and the script of one cell.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInfo {
+    /// A hash identifying the machine (not its name).
+    pub vm_id: String,
+    /// SHA-256 of the `Invoke-WingetProbe.ps1` that produced the cell; equal in all cells.
+    pub script_sha256: String,
+}
+
+/// A cell that used the final manifest: the correlation of the shipped manifest with an
+/// installed entry (upgrade finds it, uninstall removes it).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalManifestCell {
+    /// The installer architecture.
+    pub installer_arch: Arch,
+    /// 10 or 11.
+    pub windows: u32,
+    /// SHA-256 of the `installer.yaml` of the final manifest that was used.
+    pub installer_yaml_sha256: String,
+    /// `winget install --manifest` exit code.
+    pub install_exit_code: i32,
+    /// `winget upgrade --manifest` over an older version: exit code.
+    pub upgrade_exit_code: i32,
+    /// The older version.
+    pub upgrade_from_version: Version,
+    /// `DisplayVersion` after that upgrade.
+    pub arp_display_version_after_upgrade: Version,
+    /// WinGet matched the older installation to the manifest (it upgraded, not installed beside).
+    pub upgrade_correlated_installed_entry: bool,
+    /// `winget uninstall` exit code.
+    pub uninstall_exit_code: i32,
+    /// The entry was gone afterwards.
+    pub uninstall_removed_entry: bool,
 }
 
 /// One cell of the matrix.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallerProbeReport {
+    /// The cell is a synthetic fixture (a test's), not a run.
+    pub synthetic: bool,
+    /// The machine and script.
+    pub run: RunInfo,
     /// The version the cell tested.
     pub package_version: Version,
     /// When the cell finished, `YYYY-MM-DDTHH:MM:SSZ`.
@@ -180,6 +240,8 @@ pub struct Environment {
 pub struct TestedSwitches {
     /// The flags of `winget install` (names only: no paths).
     pub winget_flags: Vec<String>,
+    /// The value of `--architecture` that was passed: the installer's own.
+    pub winget_architecture: Arch,
     /// The command line the installer was started with in a `--silent` install, as observed.
     pub silent_argv: Vec<String>,
     /// The same in an install without a mode flag (WinGet's `SilentWithProgress`).
@@ -282,7 +344,14 @@ pub struct SelfUpdateStep {
     pub arp_display_version: Version,
     /// `openncalayer --version` after it.
     pub program_version: Version,
-    /// `winget upgrade --manifest` did not offer a downgrade or reinstall afterwards.
+    /// A newer release was installed by the program itself in this cell. False means the
+    /// self-update is NOT PROVEN: only the absence of a downgrade was seen.
+    pub newer_release_tested: bool,
+    /// The exit code of `winget upgrade --manifest` afterwards.
+    pub winget_exit_code: i32,
+    /// An installer process was started by that `winget upgrade`.
+    pub winget_installer_ran: bool,
+    /// `winget upgrade --manifest` offered no downgrade or reinstall afterwards.
     pub no_downgrade_loop: bool,
 }
 
@@ -308,8 +377,9 @@ pub struct Lifecycle {
 pub struct ElevatedRefusal {
     /// The exit code.
     pub exit_code: i32,
-    /// Nothing was written before it refused.
-    pub nothing_written: bool,
+    /// No file, directory or registry key of the program exists in the account's, the other
+    /// admin's or SYSTEM's profile or in HKLM afterwards.
+    pub no_artifacts_in_any_profile: bool,
     /// Started with other credentials through UAC, it did not install into another profile.
     pub other_credentials_install_refused: bool,
 }
@@ -367,6 +437,8 @@ pub enum ProbeError {
     Lifecycle(String),
     /// A safety property is not proven.
     Safety(String),
+    /// The final manifest was not proven by installation.
+    FinalManifest(String),
     /// Cells of the matrix are missing.
     Coverage(String),
     /// Cells contradict each other.
@@ -398,6 +470,7 @@ impl fmt::Display for ProbeError {
             ),
             ProbeError::Lifecycle(d) => ("the install lifecycle is not proven", d.as_str()),
             ProbeError::Safety(d) => ("a safety property is not proven", d.as_str()),
+            ProbeError::FinalManifest(d) => ("the final manifest is not proven", d.as_str()),
             ProbeError::Coverage(d) => ("the test matrix is incomplete", d.as_str()),
             ProbeError::Inconsistent(d) => ("the probe reports contradict each other", d.as_str()),
         };
@@ -446,6 +519,9 @@ pub struct Proof {
     pub cells: usize,
     /// Whether the reports are synthetic fixtures.
     pub synthetic: bool,
+    /// Every cell saw the program's own update install a newer release. When false the
+    /// self-update is NOT PROVEN and the manifest is not ready.
+    pub self_update_proven: bool,
 }
 
 /// Reads a set of reports.
@@ -498,11 +574,94 @@ impl ProbeSet {
         }
         let identity = self.agree()?;
         self.cover()?;
+        self.attested()?;
         Ok(Proof {
             identity,
             cells: self.reports.len(),
             synthetic,
+            self_update_proven: self
+                .reports
+                .iter()
+                .all(|r| r.lifecycle.self_update.newer_release_tested),
         })
+    }
+
+    /// The statement of the operator and the identity of the script and machines.
+    fn attested(&self) -> Result<(), ProbeError> {
+        let who = &self.attestation;
+        if who.attested_by.trim().is_empty() || who.run_id.trim().is_empty() {
+            return Err(ProbeError::Inconsistent(
+                "the run has no attested_by and run_id".to_owned(),
+            ));
+        }
+        let script = &self.reports[0].run.script_sha256;
+        for report in &self.reports {
+            if report.synthetic != (self.origin == Origin::SyntheticFixture) {
+                return Err(ProbeError::Synthetic);
+            }
+            if !is_hex(&report.run.script_sha256, 64)
+                || !report.run.script_sha256.eq_ignore_ascii_case(script)
+            {
+                return Err(ProbeError::Inconsistent(
+                    "the cells were not all made by the same script".to_owned(),
+                ));
+            }
+            if report.run.vm_id.trim().is_empty() {
+                return Err(ProbeError::Inconsistent("a cell has no vm_id".to_owned()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The final manifest, as it will be submitted, was installed, upgraded and uninstalled:
+    /// at least one cell per installer architecture, each with the final `installer.yaml`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProbeError::FinalManifest`].
+    pub fn prove_final(
+        &self,
+        release: &StableRelease,
+        final_installer_sha256: &str,
+    ) -> Result<(), ProbeError> {
+        let fail = |why: String| Err(ProbeError::FinalManifest(why));
+        for arch in [Arch::X64, Arch::X86] {
+            let cells: Vec<_> = self
+                .final_cells
+                .iter()
+                .filter(|c| c.installer_arch == arch)
+                .collect();
+            if cells.is_empty() {
+                return fail(format!("no cell installed the final {arch} manifest"));
+            }
+            for cell in cells {
+                if cell.installer_yaml_sha256.to_ascii_lowercase() != final_installer_sha256 {
+                    return fail(
+                        "a final-manifest cell used another installer.yaml than the one generated"
+                            .to_owned(),
+                    );
+                }
+                if cell.install_exit_code != 0
+                    || cell.upgrade_exit_code != 0
+                    || cell.uninstall_exit_code != 0
+                {
+                    return fail(format!(
+                        "a {arch} final-manifest cell had a non-zero WinGet exit code"
+                    ));
+                }
+                if cell.upgrade_from_version >= release.version
+                    || cell.arp_display_version_after_upgrade != release.version
+                    || !cell.upgrade_correlated_installed_entry
+                    || !cell.uninstall_removed_entry
+                {
+                    return fail(format!(
+                        "a {arch} final-manifest cell did not upgrade the older entry to {} and remove it",
+                        release.version
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The reports describe one installation identity. (That every cell ran the published bytes
@@ -689,6 +848,18 @@ impl InstallerProbeReport {
                 switches.silent_with_progress_argv
             )));
         }
+        if switches.winget_architecture != arch {
+            return Err(ProbeError::Switches(format!(
+                "WinGet was asked for {} but the installer under test is {arch}",
+                switches.winget_architecture
+            )));
+        }
+        if !switches.winget_flags.contains(&"--architecture".to_owned()) {
+            return Err(ProbeError::Switches(
+                "the cell did not pass --architecture, so WinGet chose the installer itself"
+                    .to_owned(),
+            ));
+        }
         if !switches.winget_flags.contains(&"--manifest".to_owned()) {
             return Err(ProbeError::Switches(
                 "the cell did not install from a manifest".to_owned(),
@@ -794,6 +965,8 @@ impl InstallerProbeReport {
             || update.arp_display_version < *version
             || update.arp_display_version != update.program_version
             || !update.no_downgrade_loop
+            || update.winget_installer_ran
+            || update.winget_exit_code != NO_APPLICABLE_UPGRADE
         {
             return Err(ProbeError::Lifecycle(
                 "the self-update did not end at the version the entry shows, or WinGet offers a downgrade"
@@ -804,7 +977,7 @@ impl InstallerProbeReport {
         // Safety.
         let safety = &self.safety;
         if safety.elevated.exit_code != 8
-            || !safety.elevated.nothing_written
+            || !safety.elevated.no_artifacts_in_any_profile
             || !safety.elevated.other_credentials_install_refused
         {
             return Err(ProbeError::Safety(

@@ -64,6 +64,10 @@ pub struct Request<'a> {
     pub ledger: &'a Ledger,
     /// Accept probe reports of the synthetic fixtures (the tests of this repository).
     pub allow_synthetic: bool,
+    /// Skip the check of `final_cells`: makes the final directory that the final-manifest
+    /// proof cells install from. The files are the same bytes the complete run will write, but
+    /// the evidence says NOT READY.
+    pub final_proof_pending: bool,
     /// The directory the manifest is written to: new or empty.
     pub out: &'a Path,
     /// Where the evidence file goes.
@@ -115,6 +119,11 @@ pub struct Evidence {
     pub submitted: bool,
     /// What this is and is not.
     pub status: String,
+    /// A real, fully proven final manifest. False for candidates, synthetic fixtures and while
+    /// the self-update is not proven.
+    pub ready: bool,
+    /// The program's own update was seen installing a newer release in every cell.
+    pub self_update_proven: bool,
     /// The installers as downloaded.
     pub installers: Vec<InstallerEvidence>,
     /// SHA-256 of the candidate `installer.yaml`: what the proof run must have used.
@@ -189,8 +198,8 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
     });
     let candidate_installer_sha = sha256_hex(candidate[2].1.as_bytes());
 
-    let (files, mode, synthetic, cells) = match request.probe_json {
-        None => (candidate, Mode::Candidate, false, None),
+    let (files, mode, synthetic, proof) = match request.probe_json {
+        None => (candidate, Mode::Candidate, false, None::<probe::Proof>),
         Some(json) => {
             let set = probe::parse(json)?;
             let proof = set.prove(
@@ -205,34 +214,59 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
                 identity: Some(&proof.identity),
                 synthetic: proof.synthetic,
             });
-            (files, Mode::Final, proof.synthetic, Some(proof.cells))
+            // The shipped manifest itself must have been installed, upgraded, uninstalled.
+            if !request.final_proof_pending {
+                set.prove_final(&release, &sha256_hex(files[2].1.as_bytes()))?;
+            }
+            (
+                files,
+                if proof.synthetic {
+                    Mode::Fixture
+                } else {
+                    Mode::Final
+                },
+                proof.synthetic,
+                Some(proof),
+            )
         }
     };
 
     write_checked(request.out, &files, mode, &hashes)?;
 
+    let self_update_proven = proof.as_ref().is_some_and(|p| p.self_update_proven);
     let version = release.version.to_string();
     let evidence = Evidence {
         manifest: match mode {
             Mode::Candidate => "candidate",
-            Mode::Final => "final",
+            Mode::Final | Mode::Fixture => "final",
         },
         package_identifier: manifest::PACKAGE_IDENTIFIER,
         version: version.clone(),
         tag: release.tag.clone(),
         synthetic,
         submitted: false,
-        status: match (mode, synthetic) {
-            (Mode::Candidate, _) => "candidate for the installation proof run; not for submission",
-            (Mode::Final, true) => "SYNTHETIC test fixture; not for submission",
-            (Mode::Final, false) => {
-                "ready locally; nothing is submitted and the package is not available in WinGet"
+        ready: mode == Mode::Final
+            && !synthetic
+            && self_update_proven
+            && !request.final_proof_pending,
+        self_update_proven,
+        status: match (mode, synthetic, self_update_proven) {
+            (Mode::Candidate, _, _) => "candidate for the installation proof run; not for submission",
+            (Mode::Fixture, _, _) => "SYNTHETIC test fixture; not for submission",
+            (Mode::Final, _, _) if request.final_proof_pending => {
+                "NOT READY: the final manifest's installation proof is pending (install, upgrade and uninstall from this directory, then generate again without --final-proof-pending); do not submit"
+            }
+            (Mode::Final, _, false) => {
+                "NOT READY: self-update is NOT PROVEN (no newer release was installed by the program itself); a second stable release must be tested. Probe reports are operator attestations checked only for consistency with the published bytes"
+            }
+            (Mode::Final, _, true) => {
+                "ready locally; probe reports are operator attestations checked only for consistency with the published bytes; nothing is submitted and the package is not available in WinGet"
             }
         }
         .to_owned(),
         installers: evidence_installers,
         candidate_installer_yaml_sha256: candidate_installer_sha,
-        probe_cells: cells,
+        probe_cells: proof.as_ref().map(|p| p.cells),
         ledger_entry: Ledger::entry(&version, &hashes),
     };
     let json = serde_json::to_string_pretty(&evidence).context("writing the evidence")?;

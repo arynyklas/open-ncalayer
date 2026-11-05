@@ -59,11 +59,15 @@ $ErrorActionPreference = 'Stop'
 
 $PackageId = 'arynyklas.OpenNCALayer'
 $ArpRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
-$Version = $Tag.TrimStart('v')
+if ($Tag -notmatch '^v\d+\.\d+\.\d+$') { throw "-Tag must be a stable tag v<major>.<minor>.<patch>, not '$Tag'" }
+$Version = $Tag.Substring(1)
+$ScriptSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash.ToLowerInvariant()
+$MySid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $AssetName = "openncalayer-$Version-win-$InstallerArch-winget-setup.exe"
 $AssetUrl = "https://github.com/$Repository/releases/download/$Tag/$AssetName"
 $DataDir = Join-Path $env:APPDATA 'OpenNCALayer'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'OpenNCALayer'
+$VmId = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($env:COMPUTERNAME + (Get-CimInstance Win32_ComputerSystemProduct).UUID))) -replace '-', '').ToLowerInvariant()
 $Work = Join-Path $env:TEMP ("oncl-winget-probe-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $Work | Out-Null
 
@@ -186,16 +190,19 @@ function Get-Installation([string]$KeyName) {
     [xml]$nuspec = Get-Content -Raw $sq
     $manifest = $nuspec.package.metadata.version
   }
-  $owner = $null
-  if (Test-Path $location) { $owner = (Get-Acl $location).Owner }
-  $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+  # Owned by the SID of the account under test and by nobody else: an installation written by an
+  # elevated token belongs to BUILTIN\Administrators and must not pass for the account's own.
+  $ownerSid = $null
+  if (Test-Path $location) {
+    try { $ownerSid = (New-Object Security.Principal.NTAccount((Get-Acl $location).Owner)).Translate([Security.Principal.SecurityIdentifier]) } catch { $ownerSid = $null }
+  }
   @{
     key = $KeyName; display_name = $arp.DisplayName; publisher = $arp.Publisher
     display_version = $arp.DisplayVersion; install_location = $location
     uninstall = $arp.UninstallString; program_version = $said; manifest_version = $manifest
     program_arch = $(if (Test-Path $program) { Get-PeMachine $program } else { $null })
     location_in_profile = [bool]($location -and $location.StartsWith($env:LOCALAPPDATA, [StringComparison]::OrdinalIgnoreCase))
-    owner_is_account = [bool]($owner -and ($owner -eq $me -or $owner -match 'Administrators') -and $location.StartsWith($env:LOCALAPPDATA, [StringComparison]::OrdinalIgnoreCase))
+    owner_is_account = [bool]($ownerSid -and $ownerSid.Value -eq $MySid.Value -and $location.StartsWith($env:LOCALAPPDATA, [StringComparison]::OrdinalIgnoreCase))
     uninstall_runs_update_exe = [bool]($arp.UninstallString -and $arp.UninstallString.ToLowerInvariant().Contains((Join-Path $location 'Update.exe').ToLowerInvariant()))
   }
 }
@@ -213,7 +220,8 @@ function Find-NewKey([string[]]$Before) {
 # is the child that carries the argv), waits for BOTH to end, and returns codes and the argv.
 function Invoke-WingetObserved([string[]]$WingetArgs) {
   $log = Join-Path $Work ('winget-' + [guid]::NewGuid().ToString('N') + '.txt')
-  $w = Start-Process -FilePath 'winget' -ArgumentList $WingetArgs -PassThru -NoNewWindow -RedirectStandardOutput $log
+  $quoted = @($WingetArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
+  $w = Start-Process -FilePath 'winget' -ArgumentList $quoted -PassThru -NoNewWindow -RedirectStandardOutput $log
   $null = $w.Handle
   $seen = @{}
   while (-not $w.HasExited) {
@@ -227,18 +235,22 @@ function Invoke-WingetObserved([string[]]$WingetArgs) {
   }
   $w.WaitForExit()
   $installer = @($seen.Values | Where-Object { $_.command_line -and $_.command_line -match 'winget-setup|\.exe' })
-  if ($installer.Count -lt 1) { Fail 'the installer process of WinGet was not observed: the argv cannot be claimed' }
+  if ($installer.Count -lt 1) {
+    # No installer ran: legitimate only for `winget upgrade` answering `no applicable upgrade`.
+    if ($WingetArgs[0] -eq 'upgrade') { return @{ winget_exit_code = [int]$w.ExitCode; installer_exit_code = 0; installer_started = $false; argv = @(); output = (Get-Content -Raw $log) } }
+    Fail 'the installer process of WinGet was not observed: the argv cannot be claimed'
+  }
   $first = $installer[0]
   $first.proc.WaitForExit()
   $argv = @()
   $rest = $first.command_line.Trim()
   if ($rest.StartsWith('"')) { $rest = $rest.Substring($rest.IndexOf('"', 1) + 1) } else { $rest = ($rest -split '\s+', 2)[1] }
   if ($rest) { $argv = @($rest.Trim() -split '\s+' | Where-Object { $_ }) }
-  @{ winget_exit_code = [int]$w.ExitCode; installer_exit_code = [int]$first.proc.ExitCode; argv = $argv; output = (Get-Content -Raw $log) }
+  @{ winget_exit_code = [int]$w.ExitCode; installer_exit_code = [int]$first.proc.ExitCode; installer_started = $true; argv = $argv; output = (Get-Content -Raw $log) }
 }
 
 function Install-Step([string[]]$ExtraArgs, [string[]]$Before) {
-  $wingetArgs = @('install', '--manifest', $ManifestDir) + $ExtraArgs + @('--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+  $wingetArgs = @('install', '--manifest', $ManifestDir, '--architecture', $InstallerArch) + $ExtraArgs + @('--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
   $run = Invoke-WingetObserved $wingetArgs
   $key = $null; $inst = $null
   if ($run.winget_exit_code -eq 0) { $key = Find-NewKey $Before; $inst = Get-Installation $key }
@@ -291,11 +303,18 @@ try {
   if ($OtherAdminProfile) { $otherProfiles += (Join-Path $OtherAdminProfile 'AppData\Local') }
   $otherProfiles += (Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Local')
   $written = @($otherProfiles | Where-Object { Test-Path (Join-Path $_ 'OpenNCALayer') })
+  # Roaming data and loaded registry hives of other users are looked at too.
+  $roaming = @($env:APPDATA, (Join-Path $OtherAdminProfile 'AppData\Roaming')) | Where-Object { $_ }
+  $written += @($roaming | Where-Object { Test-Path (Join-Path $_ 'OpenNCALayer') })
+  $hiveKeys = @(Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue | ForEach-Object {
+      Get-ChildItem (Join-Path $_.PSPath 'Software\Microsoft\Windows\CurrentVersion\Uninstall') -ErrorAction SilentlyContinue |
+        Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -match 'OpenNCALayer' } })
+  if ($hiveKeys.Count -gt 0) { $written += $hiveKeys | ForEach-Object { $_.Name } }
   $arpAfter = Get-ArpKeys
   $machineArp = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OpenNCALayer'
   $nothingWritten = ($written.Count -eq 0) -and (@($arpAfter | Where-Object { $arpBefore -notcontains $_ }).Count -eq 0) -and -not $machineArp
   $elevatedReport = @{
-    exit_code = [int]$elevated.ExitCode; nothing_written = [bool]$nothingWritten
+    exit_code = [int]$elevated.ExitCode; no_artifacts_in_any_profile = [bool]$nothingWritten
     other_credentials_install_refused = [bool]($elevated.ExitCode -eq 8 -and $nothingWritten)
   }
   if ($elevatedReport.exit_code -ne 8 -or -not $nothingWritten) { Fail "the elevated installer exited $($elevated.ExitCode) (expected 8) / wrote: $($written -join ', ')" }
@@ -335,7 +354,7 @@ try {
   # 6b. signing hold: the operator starts a long signature, the installer must exit 4.
   Note 'SIGNING HOLD (operator): start a LONG signature in the running OpenNCALayer (a very large file in the Tools window, or a batch), then press Enter here'
   $null = Read-Host
-  $holdRun = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+  $holdRun = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--architecture', $InstallerArch, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
   $unchanged = ((Get-Installation $oldKey).display_version -eq $OldVersion)
   Note 'Did the signature finish correctly and unharmed? (operator answers)'
   $answer = Read-Host 'y/n'
@@ -349,7 +368,7 @@ try {
   # 6c. the upgrade with the program idle.
   Note 'Make sure no signature or window of OpenNCALayer is active, then press Enter'
   $null = Read-Host
-  $up = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+  $up = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--architecture', $InstallerArch, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
   $after = Get-Installation $oldKey
   if (-not $after) { $after = Get-Installation $key }
   if (-not $after) { Fail 'no installation after the upgrade' }
@@ -371,14 +390,19 @@ try {
     $deadline = (Get-Date).AddMinutes($SelfUpdateWaitMinutes)
     do { Start-Sleep -Seconds 10; $final = Get-Installation $after.key } until ($final.display_version -eq $SelfUpdateTargetVersion -or (Get-Date) -gt $deadline)
   }
-  $null = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+  $selfRun = Invoke-WingetObserved @('upgrade', '--manifest', $ManifestDir, '--architecture', $InstallerArch, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
   $afterSelfInst = Get-Installation $after.key
   $selfUpdate = @{
     start_version = $Version
     arp_display_version = $afterSelfInst.display_version
     program_version = [string]$afterSelfInst.program_version
-    # WinGet must not have changed the version back, installed over it, or looped.
-    no_downgrade_loop = [bool]($afterSelfInst.display_version -eq $final.display_version)
+    # NOT PROVEN unless a newer release was installed by the program itself in this cell.
+    newer_release_tested = [bool]($SelfUpdateTargetVersion -and $final.display_version -eq $SelfUpdateTargetVersion)
+    winget_exit_code = [int]$selfRun.winget_exit_code
+    # An installer process started by that `winget upgrade` (a reinstall or a downgrade).
+    winget_installer_ran = [bool]$selfRun.installer_started
+    # No installer ran, WinGet said "no applicable upgrade" (0x8A15002B) and the version stayed.
+    no_downgrade_loop = [bool](-not $selfRun.installer_started -and $selfRun.winget_exit_code -eq -1978335189 -and $afterSelfInst.display_version -eq $final.display_version)
   }
 
   # 8. uninstall; nothing was trusted, nothing listens beyond loopback.
@@ -390,12 +414,15 @@ try {
   Stop-Program
 
   $report = @{
+    synthetic = $false
+    run = @{ vm_id = $VmId; script_sha256 = $ScriptSha }
     package_version = $Version
     recorded_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     installer = $published.report
     environment = $environment
     tested_switches = @{
-      winget_flags = @('--manifest', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+      winget_architecture = $InstallerArch
+      winget_flags = @('--manifest', '--architecture', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
       silent_argv = @($silentArgv)
       silent_with_progress_argv = @($progressArgv)
     }
