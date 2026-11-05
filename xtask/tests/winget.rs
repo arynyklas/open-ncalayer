@@ -2331,38 +2331,67 @@ fn each_missing_proof_flips_the_verdict_with_its_exact_reason() {
 }
 
 #[test]
-fn check_for_submission_believes_only_a_matching_ready_or_waived_status() {
+fn for_submission_recomputes_the_verdict_and_never_believes_the_status_file() {
     let published = Published::new();
-    let xtask = |dir: &std::path::Path| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
-            .args(["winget", "check", "--for-submission"])
-            .arg(dir)
-            .output()
-            .unwrap()
-    };
-    let text = |o: &std::process::Output| {
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
+    let release = release_value(&published).to_string();
+    let rig = Rig::of(&published);
+    let verify = |run: &Run, probe: &Value| {
+        xtask::winget::verify_for_submission(
+            &run.out(),
+            &release,
+            &probe.to_string(),
+            &Ledger::default(),
+            &rig.fetch,
         )
     };
-    let (run, _) = made(&published, &real_probe(&published), false);
-    let out = xtask(&run.out());
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("Ready"), "{}", text(&out));
+    let ready_probe = real_probe(&published);
+    let (run, _) = made(&published, &ready_probe, false);
+    assert_eq!(
+        verify(&run, &ready_probe).unwrap().verdict,
+        xtask::winget::Verdict::Ready
+    );
+
     // Changing a file makes the status be about other files.
     let path = run.out().join("arynyklas.OpenNCALayer.locale.en-US.yaml");
     let original = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, original.replace("Apache-2.0", "MIT")).unwrap();
-    let out = xtask(&run.out());
+    assert!(format!("{:#}", verify(&run, &ready_probe).unwrap_err()).contains("other files"));
+    std::fs::write(&path, &original).unwrap();
+    // Other inputs than the ones the status was made from are refused.
+    let mut other = ready_probe.clone();
+    other["attestation"]["run_id"] = json!("another run");
     assert!(
-        !out.status.success() && text(&out).contains("other files"),
-        "{}",
-        text(&out)
+        format!("{:#}", verify(&run, &other).unwrap_err())
+            .contains("another release JSON or probe")
     );
-    std::fs::write(&path, original).unwrap();
-    // The same bytes with a not-ready status are not submittable ...
+
+    // Another release JSON (a harmless extra field) is another input too.
+    let mut changed: Value = serde_json::from_str(&release).unwrap();
+    changed["x"] = json!(1);
+    let error = xtask::winget::verify_for_submission(
+        &run.out(),
+        &changed.to_string(),
+        &ready_probe.to_string(),
+        &Ledger::default(),
+        &rig.fetch,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("another release JSON"),
+        "{error:#}"
+    );
+    // Edited files with a status rewritten to match them are not what the inputs generate.
+    let status_path = format!("{}.status.json", run.out().display());
+    let mut forged: Value = serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+    std::fs::write(&path, original.replace("Apache-2.0", "MIT")).unwrap();
+    forged["manifest_files_sha256"] = json!(manifest::dir_digest(&run.out()).unwrap());
+    std::fs::write(&status_path, forged.to_string()).unwrap();
+    assert!(
+        format!("{:#}", verify(&run, &ready_probe).unwrap_err())
+            .contains("not what the release and the probe generate")
+    );
+
+    // A not-ready directory with a hand-written `ready` status and the right digest:
     let mut none = real_probe(&published);
     for r in none["reports"].as_array_mut().unwrap() {
         let u = &mut r["lifecycle"]["self_update"];
@@ -2371,15 +2400,31 @@ fn check_for_submission_believes_only_a_matching_ready_or_waived_status() {
         u["program_version"] = json!(VERSION);
     }
     let (run, _) = made(&published, &none, false);
-    let out = xtask(&run.out());
+    let error = verify(&run, &none).unwrap_err();
+    assert!(format!("{error:#}").contains("NOT READY"), "{error:#}");
+    let status_path = format!("{}.status.json", run.out().display());
+    let mut status: Value = serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+    status["verdict"] = json!("ready");
+    status["reasons"] = json!([]);
+    std::fs::write(&status_path, status.to_string()).unwrap();
+    let error = verify(&run, &none).unwrap_err();
     assert!(
-        !out.status.success() && text(&out).contains("NOT READY"),
-        "{}",
-        text(&out)
+        format!("{error:#}").contains("the inputs give"),
+        "{error:#}"
     );
-    // ... and a directory without any status is not either.
-    std::fs::remove_file(format!("{}.status.json", run.out().display())).unwrap();
-    assert!(!xtask(&run.out()).status.success());
+    // ... and a directory without any status is not submittable.
+    std::fs::remove_file(&status_path).unwrap();
+    assert!(verify(&run, &none).is_err());
+}
+
+#[test]
+fn the_command_line_needs_the_inputs_to_check_for_submission() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["winget", "check", "--for-submission", "nowhere"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--release-json"));
 }
 
 #[test]
@@ -2498,6 +2543,34 @@ mod ps_flows {
             baseline + 2,
             "and one in another admin's profile when there is one"
         );
+    }
+
+    /// The digest code of the shipped final-cell script gives the generator's value.
+    #[test]
+    fn the_powershell_manifest_digest_equals_the_rust_one() {
+        let published = Published::new();
+        let (run, done) = made(&published, &real_probe(&published), false);
+        done.unwrap();
+        let rust = manifest::dir_digest(&run.out()).unwrap();
+        let out = ps()
+            .env("ONCL_SCRIPT", script("Invoke-WingetFinalProbe.ps1"))
+            .env("ONCL_DIR", run.out())
+            .args([
+                "-Command",
+                "$ErrorActionPreference='Stop'; \
+                 $ast=[System.Management.Automation.Language.Parser]::ParseFile($env:ONCL_SCRIPT,[ref]$null,[ref]$null); \
+                 $f=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ManifestFilesDigest'},$true); \
+                 Invoke-Expression $f.Extent.Text; \
+                 Get-ManifestFilesDigest $env:ONCL_DIR",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), rust);
     }
 
     /// The documented sequence, with the shipped scripts and the generator: merge without final

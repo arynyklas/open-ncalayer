@@ -72,8 +72,14 @@ pub enum WingetCommand {
         candidate: bool,
         /// Also require `<dir>.status.json` to say ready or submittable-with-waiver for exactly
         /// these files.
-        #[arg(long)]
+        #[arg(long, requires_all = ["release_json", "probe"])]
         for_submission: bool,
+        /// With `--for-submission`: the release JSON the manifest was made from.
+        #[arg(long)]
+        release_json: Option<PathBuf>,
+        /// With `--for-submission`: the merged probe reports it was made from.
+        #[arg(long)]
+        probe: Option<PathBuf>,
     },
 }
 
@@ -168,6 +174,8 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
             dir,
             candidate,
             for_submission,
+            release_json,
+            probe,
         } => {
             let mode = if candidate {
                 Mode::Candidate
@@ -176,23 +184,22 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
             };
             let checked = manifest::check_dir(&dir, mode)?;
             if for_submission {
-                let path = format!("{}.status.json", dir.display());
-                let text = std::fs::read_to_string(&path).with_context(|| {
-                    format!("reading {path}: a directory without a status is not submittable")
-                })?;
-                let status: super::StatusFile =
-                    serde_json::from_str(&text).context("the status file")?;
-                anyhow::ensure!(
-                    status.manifest_files_sha256 == manifest::dir_digest(&dir)?,
-                    "{path} is about other files than these"
-                );
-                anyhow::ensure!(
-                    status.verdict != super::Verdict::NotReady,
-                    "NOT READY, do not submit: {}",
-                    status.reasons.join("; ")
-                );
+                let (Some(release), Some(probe)) = (release_json, probe) else {
+                    anyhow::bail!("--for-submission needs --release-json and --probe");
+                };
+                let release = std::fs::read_to_string(&release)
+                    .with_context(|| format!("reading {}", release.display()))?;
+                let probe = std::fs::read_to_string(&probe)
+                    .with_context(|| format!("reading {}", probe.display()))?;
+                let status = super::verify_for_submission(
+                    &dir,
+                    &release,
+                    &probe,
+                    &read_ledger(None)?,
+                    &Https::new(),
+                )?;
                 println!(
-                    "status: {:?}{}",
+                    "status (recomputed from the inputs): {:?}{}",
                     status.verdict,
                     status.waiver.map_or(String::new(), |w| format!(
                         " (waiver by {} on {}: {})",

@@ -38,6 +38,16 @@ if (Get-ChildItem $ArpRoot | Where-Object { (Get-ItemProperty $_.PSPath).Display
   throw 'OpenNCALayer is already installed: revert to a clean snapshot'
 }
 
+# One digest over all files of a manifest directory: SHA-256 of the lines `<name> <sha256>` in
+# ordinal name order. Must equal `manifest::files_digest` of the generator (a test compares them).
+function Get-ManifestFilesDigest([string]$Dir) {
+  $names = @(Get-ChildItem -LiteralPath $Dir -File | ForEach-Object { $_.Name })
+  [Array]::Sort($names, [StringComparer]::Ordinal)
+  $text = ''
+  foreach ($n in $names) { $text += "$n $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Dir $n)).Hash.ToLowerInvariant())`n" }
+  ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($text))) -replace '-', '').ToLowerInvariant()
+}
+
 function Get-OpenNcaKeys { @(Get-ChildItem $ArpRoot | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -match 'OpenNCALayer' } | ForEach-Object { $_.PSChildName }) }
 function Run-Winget([string[]]$WingetArgs) {
   $quoted = @($WingetArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
@@ -72,11 +82,7 @@ $removed = ((Get-OpenNcaKeys).Count -eq 0)
 Get-Process -Name openncalayer, nmhost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 # One digest over all three files: the lines `<name> <sha256>` in ordinal name order.
-$names = @(Get-ChildItem -LiteralPath $ManifestDir -File | ForEach-Object { $_.Name })
-[Array]::Sort($names, [StringComparer]::Ordinal)
-$digestText = ''
-foreach ($n in $names) { $digestText += "$n $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ManifestDir $n)).Hash.ToLowerInvariant())`n" }
-$manifestDigest = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($digestText))) -replace '-', '').ToLowerInvariant()
+$manifestDigest = Get-ManifestFilesDigest $ManifestDir
 
 $build = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
 $cell = [ordered]@{

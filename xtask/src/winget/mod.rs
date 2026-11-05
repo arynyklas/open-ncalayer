@@ -83,6 +83,8 @@ pub struct Generated {
     pub mode: Mode,
     /// What was recorded in the evidence file.
     pub evidence: Evidence,
+    /// The verdict file written next to the directory.
+    pub status: StatusFile,
 }
 
 /// Whether a directory may be submitted. A not-ready directory is byte-identical to a ready one,
@@ -111,6 +113,12 @@ pub struct StatusFile {
     pub version: String,
     /// [`manifest::files_digest`] of the directory this status is about.
     pub manifest_files_sha256: String,
+    /// SHA-256 of the release JSON this was made from.
+    pub release_sha256: String,
+    /// SHA-256 of the probe report, if there was one.
+    pub probe_sha256: Option<String>,
+    /// The version of the generator that wrote it.
+    pub generator_version: String,
 }
 
 /// One downloaded installer.
@@ -319,6 +327,9 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
         },
         version: version.clone(),
         manifest_files_sha256: digest,
+        release_sha256: sha256_hex(request.release_json.as_bytes()),
+        probe_sha256: request.probe_json.map(|p| sha256_hex(p.as_bytes())),
+        generator_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let evidence = Evidence {
         manifest: match mode {
@@ -357,6 +368,7 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
         dir: request.out.to_owned(),
         mode,
         evidence,
+        status: status_file,
     })
 }
 
@@ -403,4 +415,66 @@ fn write_checked(
         }
     }
     written
+}
+
+/// Whether `dir` may be submitted: the verdict is RECOMPUTED from the release and the probe
+/// (everything `generate` does, downloads included, into a scratch directory) and must equal the
+/// one in `<dir>.status.json`, describe exactly the files in `dir`, and not be `not-ready`.
+/// `status.json` is an unsigned accident guard: it is never believed on its own, and none of
+/// this protects against someone who can write the inputs. The probe is operator attestation.
+///
+/// # Errors
+///
+/// The first reason the directory is not submittable.
+pub fn verify_for_submission(
+    dir: &Path,
+    release_json: &str,
+    probe_json: &str,
+    ledger: &Ledger,
+    fetch: &dyn AssetFetch,
+) -> anyhow::Result<StatusFile> {
+    let path = format!("{}.status.json", dir.display());
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!("reading {path}: a directory without a status is not submittable")
+    })?;
+    let stored: StatusFile = serde_json::from_str(&text).context("the status file")?;
+    let digest = manifest::dir_digest(dir)?;
+    if stored.manifest_files_sha256 != digest {
+        bail!("{path} is about other files than these");
+    }
+    if stored.release_sha256 != sha256_hex(release_json.as_bytes())
+        || stored.probe_sha256.as_deref() != Some(sha256_hex(probe_json.as_bytes()).as_str())
+    {
+        bail!("{path} was made from another release JSON or probe report than the ones given");
+    }
+    let scratch = tempfile::tempdir().context("creating a scratch directory")?;
+    let again = generate(
+        &Request {
+            release_json,
+            probe_json: Some(probe_json),
+            ledger,
+            allow_synthetic: false,
+            final_proof_pending: false,
+            out: &scratch.path().join("manifest"),
+            evidence: &scratch.path().join("evidence.json"),
+        },
+        fetch,
+    )?;
+    if again.status.manifest_files_sha256 != digest {
+        bail!("these files are not what the release and the probe generate");
+    }
+    if again.status.verdict != stored.verdict {
+        bail!(
+            "{path} says {:?}, the inputs give {:?}",
+            stored.verdict,
+            again.status.verdict
+        );
+    }
+    if again.status.verdict == Verdict::NotReady {
+        bail!(
+            "NOT READY, do not submit: {}",
+            again.status.reasons.join("; ")
+        );
+    }
+    Ok(again.status)
 }

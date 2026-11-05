@@ -995,16 +995,7 @@ impl InstallerProbeReport {
             ));
         }
         let update = &life.self_update;
-        let moved = update.arp_display_version > update.start_version;
-        if update.start_version != *version
-            || update.arp_display_version != update.program_version
-            || !update.no_downgrade_loop
-            || update.winget_installer_ran
-            || update.winget_exit_code != NO_APPLICABLE_UPGRADE
-            // A claimed newer release must have moved the version up; none must not have.
-            || update.newer_release_tested != moved
-            || update.arp_display_version < update.start_version
-        {
+        if !self_update_consistent(update, version) {
             return Err(ProbeError::Lifecycle(
                 "the self-update did not end at a version the entry shows, the claim of a newer release does not match the versions, or WinGet offers a downgrade"
                     .to_owned(),
@@ -1038,6 +1029,20 @@ impl InstallerProbeReport {
     }
 }
 
+/// The self-update step agrees with itself: versions compared as semantic versions (`0.1.10` is
+/// newer than `0.1.9`), a claimed newer release moved the version up and none did not, WinGet
+/// ran no installer and said "no applicable upgrade".
+fn self_update_consistent(update: &SelfUpdateStep, version: &Version) -> bool {
+    let moved = update.arp_display_version > update.start_version;
+    update.start_version == *version
+        && update.arp_display_version == update.program_version
+        && update.no_downgrade_loop
+        && !update.winget_installer_ran
+        && update.winget_exit_code == NO_APPLICABLE_UPGRADE
+        && update.newer_release_tested == moved
+        && update.arp_display_version >= update.start_version
+}
+
 impl InstallStep {
     fn prove(&self, name: &str, version: &Version) -> Result<(), ProbeError> {
         if !self.postcondition_verified_after_exit {
@@ -1058,5 +1063,37 @@ impl InstallStep {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(start: &str, shown: &str, tested: bool) -> SelfUpdateStep {
+        SelfUpdateStep {
+            start_version: Version::parse(start).unwrap(),
+            arp_display_version: Version::parse(shown).unwrap(),
+            program_version: Version::parse(shown).unwrap(),
+            newer_release_tested: tested,
+            winget_exit_code: NO_APPLICABLE_UPGRADE,
+            winget_installer_ran: false,
+            no_downgrade_loop: true,
+        }
+    }
+
+    #[test]
+    fn versions_are_ordered_as_semver_not_as_text() {
+        let v = Version::parse("0.1.9").unwrap();
+        // 0.1.10 is newer than 0.1.9 (as text it would sort before it).
+        assert!(self_update_consistent(&step("0.1.9", "0.1.10", true), &v));
+        assert!(!self_update_consistent(&step("0.1.9", "0.1.10", false), &v));
+        assert!(!self_update_consistent(&step("0.1.9", "0.1.9", true), &v));
+        // A "newer" 0.1.9 after 0.1.10 is a downgrade.
+        let v10 = Version::parse("0.1.10").unwrap();
+        assert!(!self_update_consistent(
+            &step("0.1.10", "0.1.9", false),
+            &v10
+        ));
     }
 }
