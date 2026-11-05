@@ -168,11 +168,17 @@ impl Pki {
     }
     /// A loopback PKI whose intermediate CRL lists `revoked` unrelated serials (big evidence).
     pub fn start_with_revoked(revoked: usize) -> Self {
+        Self::start_aged(revoked, Duration::ZERO)
+    }
+    /// A PKI whose creation time is `age` in the past, as one that has been up for a
+    /// long test would be (CRL/OCSP issuance is anchored to creation; the TSA is live).
+    pub fn start_aged(revoked: usize, age: Duration) -> Self {
+        let age = time::Duration::try_from(age).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
-        let now = time::OffsetDateTime::now_utc();
+        let now = time::OffsetDateTime::now_utc() - age;
         let inter = with_status_locations(
             &raw("inter-gost2015.key"),
             &raw("root-gost2015.key"),
@@ -180,15 +186,16 @@ impl Pki {
             "root",
         );
         let ocsp = Arc::new(MockOcsp::new(raw("ocsp-gost2015")).with_now(now));
-        let tsa = Arc::new(
-            oncl_pki::tsp::MockTsa::new(with_status_locations(
-                &raw("tsa-gost2015"),
-                &raw("root-gost2015.key"),
-                &origin,
-                "root",
-            ))
-            .with_gen_time(now),
-        );
+        // TSA on the live clock, NOT frozen at creation: the server enforces
+        // |genTime - real clock| <= skew_ms (300 s). A TSA stopped at Pki creation
+        // fails every later timestamp (ClockSkew, after key use) once the Pki is
+        // older than that, which long sweeps exceed.
+        let tsa = Arc::new(oncl_pki::tsp::MockTsa::new(with_status_locations(
+            &raw("tsa-gost2015"),
+            &raw("root-gost2015.key"),
+            &origin,
+            "root",
+        )));
         let root = Arc::new(
             MockCrl::new(raw("root-gost2015.key"))
                 .with_this_update(now - time::Duration::MINUTE)
@@ -226,7 +233,9 @@ impl Pki {
                 std::thread::spawn(move || {
                     socket.set_nonblocking(false).unwrap();
                     socket
-                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        // Hang guard only: a request that the loaded server writes slowly
+                        // must not be dropped unanswered (a 2 s bound was tuned to speed).
+                        .set_read_timeout(Some(Duration::from_secs(30)))
                         .unwrap();
                     let mut bytes = Vec::new();
                     let mut chunk = [0; 4096];
@@ -691,7 +700,10 @@ pub fn spool_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
-            let kind = entry.file_type().unwrap();
+            // An entry removed between listing and typing is simply gone.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_file() {
                 files.push(entry.path());
             } else if kind.is_dir() {
@@ -701,38 +713,188 @@ pub fn spool_files(root: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+/// How long a file may stay unreadable-while-present before the watcher fails.
+/// Only a hang guard: every documented transient state is classified explicitly.
+const UNREADABLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Why a present file could not be read, as far as the OS can tell.
+enum Unreadable {
+    /// The name no longer resolves: removed between listing and reading.
+    Gone,
+    /// The service marked it for deletion (`FileDispositionInfo`) while another
+    /// handle is still open. Windows answers every new open of such a file with
+    /// ERROR_ACCESS_DENIED (5). Such a file is listed, counted and skipped: its
+    /// content cannot be opened by the watcher. Limitation: a file created, filled
+    /// and marked delete-pending between two polls is never listed at all. The
+    /// guarantee is therefore "no needle in any file the watcher could open".
+    /// `SpoolWatch::finish` requires every such path to be gone.
+    DeletePending,
+    /// Present and not delete-pending: a real failure once the deadline passes.
+    Present(String),
+}
+
+#[cfg(windows)]
+fn open_shared(file: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE: the watcher never
+    // blocks the service (create, write, rename, delete) and is never blocked by it.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2 | 0x4)
+        .open(file)
+}
+#[cfg(not(windows))]
+fn open_shared(file: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(file)
+}
+
+fn read_shared(file: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    open_shared(file)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn classify_unreadable(file: &Path) -> Unreadable {
+    use std::os::windows::ffi::OsStrExt;
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileAttributeData {
+        attributes: u32,
+        times: [u64; 3],
+        size_high: u32,
+        size_low: u32,
+    }
+    unsafe extern "system" {
+        fn GetFileAttributesExW(name: *const u16, level: i32, info: *mut FileAttributeData) -> i32;
+    }
+    // Measured discriminator: for a delete-pending file GetFileAttributesExW fails
+    // with ERROR_ACCESS_DENIED (5), while for a file whose DACL denies us read it
+    // SUCCEEDS (it needs no access to the file's data or DACL). `metadata`,
+    // FindFirstFile and attribute-only opens cannot tell the two apart.
+    let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
+    let mut info = FileAttributeData::default();
+    // SAFETY: NUL-terminated path and a correctly sized WIN32_FILE_ATTRIBUTE_DATA
+    // (level 0 = GetFileExInfoStandard) live for the call.
+    let ok = unsafe { GetFileAttributesExW(wide.as_ptr(), 0, &mut info) };
+    if ok != 0 {
+        return Unreadable::Present(format!(
+            "attributes readable (not delete-pending), attributes={:#x}",
+            info.attributes
+        ));
+    }
+    let attribute_error = std::io::Error::last_os_error();
+    match attribute_error.raw_os_error() {
+        Some(2) | Some(3) => Unreadable::Gone,
+        Some(5) => {
+            // Confirm with a fresh read-open: still denied with 5 means delete-pending.
+            match open_shared(file) {
+                Err(second) if second.raw_os_error() == Some(5) => Unreadable::DeletePending,
+                Err(second) if second.kind() == std::io::ErrorKind::NotFound => Unreadable::Gone,
+                Err(second) => Unreadable::Present(format!("re-open failed: {second}")),
+                Ok(_) => Unreadable::Present("became readable after the probe".into()),
+            }
+        }
+        _ => Unreadable::Present(format!("attribute query failed: {attribute_error}")),
+    }
+}
+#[cfg(not(windows))]
+fn classify_unreadable(file: &Path) -> Unreadable {
+    if file.exists() {
+        Unreadable::Present("present".into())
+    } else {
+        Unreadable::Gone
+    }
+}
+
 /// Watch every scratch file while an operation runs; true if `needle` ever hit.
 pub struct SpoolWatch {
     stop: Arc<AtomicBool>,
     hit: Arc<AtomicBool>,
     pub scanned: Arc<AtomicUsize>,
+    /// Distinct scratch paths seen delete-pending (unopenable, hence NOT scanned).
+    delete_pending: Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
+    deadline: Duration,
     failure: Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl SpoolWatch {
     pub fn start(root: PathBuf, needles: Vec<Vec<u8>>) -> Self {
+        Self::start_with(root, needles, true)
+    }
+    /// Mutation for the positive control: a watcher that lists but never reads.
+    pub fn start_mutant_that_never_scans(root: PathBuf, needles: Vec<Vec<u8>>) -> Self {
+        Self::start_with(root, needles, false)
+    }
+    fn start_with(root: PathBuf, needles: Vec<Vec<u8>>, scanning: bool) -> Self {
+        Self::start_full(root, needles, scanning, UNREADABLE_DEADLINE)
+    }
+    /// Like `start`, but fails an unreadable-while-present file after `deadline`.
+    pub fn start_with_deadline(root: PathBuf, needles: Vec<Vec<u8>>, deadline: Duration) -> Self {
+        Self::start_full(root, needles, true, deadline)
+    }
+    fn start_full(
+        root: PathBuf,
+        needles: Vec<Vec<u8>>,
+        scanning: bool,
+        deadline: Duration,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let hit = Arc::new(AtomicBool::new(false));
         let scanned = Arc::new(AtomicUsize::new(0));
+        let delete_pending = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
         let failure = Arc::new(std::sync::Mutex::new(None::<String>));
-        let (s, h, scanned_thread, failure_thread) =
-            (stop.clone(), hit.clone(), scanned.clone(), failure.clone());
+        let (s, h, scanned_thread, pending_thread, failure_thread) = (
+            stop.clone(),
+            hit.clone(),
+            scanned.clone(),
+            delete_pending.clone(),
+            failure.clone(),
+        );
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 for file in spool_files(&root) {
-                    // A file is briefly unreadable while the service creates/protects or
-                    // deletes it (delete-pending, DACL being applied): retry; a file that
-                    // stays unreadable while it still exists is a real failure.
-                    let mut attempt = std::fs::read(&file);
-                    for _ in 0..40 {
-                        if attempt.is_ok() || !file.exists() {
-                            break;
+                    if !scanning {
+                        continue;
+                    }
+                    let started = std::time::Instant::now();
+                    let mut attempts = 0u32;
+                    let outcome = loop {
+                        attempts += 1;
+                        match read_shared(&file) {
+                            Ok(bytes) => break Ok(Some(bytes)),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                break Ok(None);
+                            }
+                            Err(error) => match classify_unreadable(&file) {
+                                Unreadable::Gone => break Ok(None),
+                                Unreadable::DeletePending => {
+                                    pending_thread.lock().unwrap().insert(file.clone());
+                                    break Ok(None);
+                                }
+                                Unreadable::Present(detail) => {
+                                    if started.elapsed() >= deadline {
+                                        let relative = file
+                                            .strip_prefix(&root)
+                                            .unwrap_or(&file)
+                                            .display()
+                                            .to_string();
+                                        break Err(format!(
+                                            "{error} (raw os error {:?}, kind {:?}) on scratch file `{relative}` ({detail}) after {attempts} attempts over {:?}",
+                                            error.raw_os_error(),
+                                            error.kind(),
+                                            started.elapsed()
+                                        ));
+                                    }
+                                }
+                            },
                         }
                         std::thread::sleep(Duration::from_millis(5));
-                        attempt = std::fs::read(&file);
-                    }
-                    match attempt {
-                        Ok(bytes) => {
+                    };
+                    match outcome {
+                        Ok(Some(bytes)) => {
                             scanned_thread.fetch_add(1, Ordering::SeqCst);
                             for needle in &needles {
                                 if bytes.windows(needle.len()).any(|w| w == needle.as_slice()) {
@@ -740,12 +902,9 @@ impl SpoolWatch {
                                 }
                             }
                         }
-                        // A file removed between listing and reading is normal.
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        // Windows reports a delete-pending file as access denied.
-                        Err(_) if !file.exists() => {}
-                        Err(error) => {
-                            *failure_thread.lock().unwrap() = Some(error.to_string());
+                        Ok(None) => {}
+                        Err(message) => {
+                            *failure_thread.lock().unwrap() = Some(message);
                         }
                     }
                 }
@@ -756,16 +915,54 @@ impl SpoolWatch {
             stop,
             hit,
             scanned,
+            delete_pending,
+            deadline,
             failure,
             thread: Some(thread),
         }
     }
-    /// True if a needle was ever seen. Panics if any scan hit a read error.
+    /// True once a needle has been seen (without stopping the watcher).
+    pub fn seen(&self) -> bool {
+        self.hit.load(Ordering::SeqCst)
+    }
+    /// Number of DISTINCT scratch paths seen delete-pending (listed, counted, skipped).
+    pub fn delete_pending_count(&self) -> usize {
+        self.delete_pending.lock().unwrap().len()
+    }
+    /// True if a needle was ever seen. Panics if any scan hit a read error, or if a
+    /// path seen delete-pending still exists after the deadline (a delete-pending
+    /// file must disappear once the last handle closes). Valid only for callers whose
+    /// operation is already finished (every current caller): one deadline (30 s by
+    /// default) is shared across ALL pending paths, not granted per path.
     pub fn finish(mut self) -> bool {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
         if let Some(error) = self.failure.lock().unwrap().take() {
             panic!("spool watcher read error: {error}");
+        }
+        let pending: Vec<PathBuf> = self
+            .delete_pending
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let started = std::time::Instant::now();
+        for path in &pending {
+            while path.exists() {
+                assert!(
+                    started.elapsed() < self.deadline,
+                    "delete-pending scratch file never disappeared: {}",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if !pending.is_empty() {
+            eprintln!(
+                "spool watcher: {} distinct delete-pending scratch path(s) were listed, counted and NOT scanned; all are gone",
+                pending.len()
+            );
         }
         self.hit.load(Ordering::SeqCst)
     }
