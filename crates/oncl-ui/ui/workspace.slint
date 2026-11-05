@@ -186,6 +186,7 @@ export component WorkspaceWindow inherits Window {
                                 enabled: !root.busy;
                                 model: ["SHA-256", @tr("GOST R 34.11-94"), @tr("GOST R 34.11-2012 (512)")];
                                 current-index <=> root.hash-algorithm;
+                                accessible-label: @tr("Algorithm");
                             }
 
                             if root.error-section == 6 && root.error-text != "": ErrorText {
@@ -235,6 +236,7 @@ export component WorkspaceWindow inherits Window {
                                 enabled: !root.busy;
                                 model: [@tr("Certificate"), @tr("Signature file"), @tr("Key store (PKCS#12, JKS)"), @tr("Tokens and ID cards")];
                                 current-index <=> root.inspect-kind;
+                                accessible-label: @tr("What to inspect");
                             }
 
                             if root.inspect-kind != 3: VerticalLayout {
@@ -275,6 +277,7 @@ export component WorkspaceWindow inherits Window {
                                     enabled: !root.busy;
                                     input-type: password;
                                     text <=> root.inspect-password;
+                                    accessible-label: @tr("Password");
                                     accepted => {
                                         root.start-inspect();
                                     }
@@ -287,6 +290,7 @@ export component WorkspaceWindow inherits Window {
                                 LineEdit {
                                     enabled: !root.busy;
                                     text <=> root.inspect-aliases;
+                                    accessible-label: @tr("Key names to show (separated by commas)");
                                     accepted => {
                                         root.start-inspect();
                                     }

@@ -769,6 +769,60 @@ fn a_long_unbreakable_host_is_wrapped_to_its_end_not_run_out_of_the_window() {
 }
 
 #[test]
+fn a_long_unbreakable_origin_is_wrapped_in_the_storage_dialog_too() {
+    offscreen::install();
+    let host = format!("https://{}.test", "a".repeat(200));
+    let content = |origin: &str| {
+        let ui = StorageDialog::new().unwrap();
+        ui.set_origin(origin.into());
+        open(&ui, (480.0, 520.0));
+        ui.get_origin_lines()
+    };
+    assert!(content(&host) >= content("https://a.test") + 20.0);
+}
+
+#[test]
+fn an_empty_status_area_is_not_a_stop_of_the_tab_ring_and_stop_original_stays_safe() {
+    offscreen::install();
+    let ui = StopOriginalWindow::new().unwrap();
+    ui.set_question("Stop it?".into());
+    open(&ui, narrowest(Class::Dialog));
+    let (stopped, on_stop) = counter();
+    ui.on_stop(on_stop);
+    let (dismissed, on_dismiss) = counter();
+    ui.on_dismiss(on_dismiss);
+    for _ in 0..8 {
+        tap(&ui, Key::Tab);
+        assert!(
+            !ui.get_status_focused(),
+            "the empty status area is on the Tab ring"
+        );
+    }
+    // With an outcome the area is a stop, and the defaults are unchanged.
+    ui.set_message(long_error().into());
+    let mut stop_seen = false;
+    for _ in 0..8 {
+        tap(&ui, Key::Tab);
+        stop_seen |= ui.get_status_focused();
+    }
+    assert!(stop_seen);
+    assert_eq!(stopped.get(), 0);
+    let fresh = StopOriginalWindow::new().unwrap();
+    open(&fresh, narrowest(Class::Dialog));
+    let (stopped, on_stop) = counter();
+    fresh.on_stop(on_stop);
+    let (dismissed2, on_dismiss2) = counter();
+    fresh.on_dismiss(on_dismiss2);
+    tap(&fresh, Key::Return);
+    assert_eq!(
+        (stopped.get(), dismissed2.get()),
+        (0, 1),
+        "Enter alone must not stop"
+    );
+    let _ = dismissed;
+}
+
+#[test]
 fn a_status_line_is_read_by_keyboard() {
     offscreen::install();
     let ui = StopOriginalWindow::new().unwrap();
@@ -835,7 +889,7 @@ fn a_storage_is_chosen_by_return_too() {
     assert!(chosen.borrow().contains(&0));
 }
 
-/// Every `LineEdit` and `ComboBox` of the service windows (not the tools window's pages) says what it is to a screen reader:
+/// Every `LineEdit` and `ComboBox` of the service windows, the tools window's pages included, says what it is to a screen reader:
 /// the property is on the control itself (or the control is the one inside `TextField` /
 /// `PathField`, which set it). The compiled components do not list their controls, so this reads
 /// the sources.
@@ -844,18 +898,6 @@ fn every_field_and_combo_box_has_an_accessible_label() {
     let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
     for entry in std::fs::read_dir(ui).unwrap() {
         let path = entry.unwrap().path();
-        // The tools window's pages (workspace, signing, tools, report) are not service windows.
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if [
-            "workspace.slint",
-            "signing.slint",
-            "tools.slint",
-            "report.slint",
-        ]
-        .contains(&name.as_str())
-        {
-            continue;
-        }
         let text = std::fs::read_to_string(&path)
             .unwrap()
             .replace("\r\n", "\n");

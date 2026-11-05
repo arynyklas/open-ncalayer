@@ -46,6 +46,9 @@ export component StorageDialog inherits Window {
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
+    // How tall the origin line is, for the tests.
+    out property <length> origin-lines: origin-line.height;
+
     callback browse();
     callback open();
     callback cancel();
@@ -64,7 +67,7 @@ export component StorageDialog inherits Window {
     VerticalBox {
         HorizontalLayout {
             spacing: 8px;
-            NameText {
+            origin-line := NameText {
                 text: @tr("Request from: {}", root.origin);
                 horizontal-stretch: 1;
                 vertical-alignment: center;

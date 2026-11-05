@@ -153,6 +153,7 @@ export component SigningPage inherits VerticalLayout {
                 horizontal-stretch: 1;
                 model: SigningState.recent;
                 current-index <=> SigningState.recent-index;
+                accessible-label: @tr("Recent");
                 selected => {
                     SigningState.pick-recent();
                 }
@@ -330,6 +331,7 @@ export component SigningPage inherits VerticalLayout {
                 horizontal-stretch: 1;
                 model: SigningState.recent-stores;
                 current-index <=> SigningState.recent-store-index;
+                accessible-label: @tr("Recent key stores");
                 selected => {
                     SigningState.pick-recent-store();
                 }

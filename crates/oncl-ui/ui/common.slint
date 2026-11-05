@@ -145,6 +145,8 @@ export component StatusArea inherits Rectangle {
     in property <length> limit: 96px;
     // How far the text is scrolled (zero or negative).
     out property <length> content-y: sv.content-y;
+    // Whether the keyboard strip has the focus.
+    out property <bool> strip-focused: strip.has-focus;
     vertical-stretch: 0;
     min-height: min(body.preferred-height, 60px);
     preferred-height: min(body.preferred-height, root.limit);
@@ -164,7 +166,9 @@ export component StatusArea inherits Rectangle {
         }
     }
 
-    ScrollKeys {
+    // Nothing to read: no stop on the Tab ring.
+    strip := ScrollKeys {
+        enabled: root.message != "";
         x: 0px;
         y: 0px;
         width: 4px;

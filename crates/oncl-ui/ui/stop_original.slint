@@ -25,6 +25,7 @@ export component StopOriginalWindow inherits Window {
 
     // How far the outcome text is scrolled (zero or negative), for the tests.
     out property <length> status-y: status.content-y;
+    out property <bool> status-focused: status.strip-focused;
 
     callback stop();
     callback dismiss();
