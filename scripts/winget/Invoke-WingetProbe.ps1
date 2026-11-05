@@ -286,6 +286,29 @@ function Get-NonLoopbackListeners {
 
 function Stop-Program { Get-Process -Name openncalayer, nmhost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
 
+# Everything of the program in the account's, another admin's or SYSTEM's profile or in a loaded
+# user registry hive. $OtherAdminProfile may be empty (an administrator cell has no other admin):
+# that profile is then not applicable and simply not looked at.
+function Get-OtherProfileArtifacts([string]$OtherAdminProfile) {
+  $local = @($env:LOCALAPPDATA, (Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Local'))
+  $roaming = @($env:APPDATA)
+  if ($OtherAdminProfile) {
+    $local += (Join-Path $OtherAdminProfile 'AppData\Local')
+    $roaming += (Join-Path $OtherAdminProfile 'AppData\Roaming')
+  }
+  $found = @()
+  foreach ($dir in @($local + $roaming)) {
+    if ($dir -and (Test-Path (Join-Path $dir 'OpenNCALayer'))) { $found += (Join-Path $dir 'OpenNCALayer') }
+  }
+  foreach ($hive in @(Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue)) {
+    $uninstall = Join-Path $hive.PSPath 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    foreach ($key in @(Get-ChildItem $uninstall -ErrorAction SilentlyContinue)) {
+      if ((Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).DisplayName -match 'OpenNCALayer') { $found += $key.Name }
+    }
+  }
+  $found
+}
+
 # ---------------------------------------------------------------- the run
 
 try {
@@ -299,17 +322,7 @@ try {
   Note 'ELEVATED RUN: approve the UAC prompt (a standard account: enter the administrator credentials)'
   $arpBefore = Get-ArpKeys
   $elevated = Start-Process -FilePath $published.path -ArgumentList '--silent' -Verb RunAs -PassThru -Wait
-  $otherProfiles = @($env:LOCALAPPDATA)
-  if ($OtherAdminProfile) { $otherProfiles += (Join-Path $OtherAdminProfile 'AppData\Local') }
-  $otherProfiles += (Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Local')
-  $written = @($otherProfiles | Where-Object { Test-Path (Join-Path $_ 'OpenNCALayer') })
-  # Roaming data and loaded registry hives of other users are looked at too.
-  $roaming = @($env:APPDATA, (Join-Path $OtherAdminProfile 'AppData\Roaming')) | Where-Object { $_ }
-  $written += @($roaming | Where-Object { Test-Path (Join-Path $_ 'OpenNCALayer') })
-  $hiveKeys = @(Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue | ForEach-Object {
-      Get-ChildItem (Join-Path $_.PSPath 'Software\Microsoft\Windows\CurrentVersion\Uninstall') -ErrorAction SilentlyContinue |
-        Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -match 'OpenNCALayer' } })
-  if ($hiveKeys.Count -gt 0) { $written += $hiveKeys | ForEach-Object { $_.Name } }
+  $written = @(Get-OtherProfileArtifacts $OtherAdminProfile)
   $arpAfter = Get-ArpKeys
   $machineArp = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OpenNCALayer'
   $nothingWritten = ($written.Count -eq 0) -and (@($arpAfter | Where-Object { $arpBefore -notcontains $_ }).Count -eq 0) -and -not $machineArp

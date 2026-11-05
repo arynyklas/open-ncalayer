@@ -85,6 +85,34 @@ pub struct Generated {
     pub evidence: Evidence,
 }
 
+/// Whether a directory may be submitted. A not-ready directory is byte-identical to a ready one,
+/// which is why this is written next to it.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    /// Every proof, the program's own update included.
+    Ready,
+    /// Everything but the self-update, and the owner's waiver of that is recorded in the probe.
+    SubmittableWithWaiver,
+    /// Anything else.
+    NotReady,
+}
+
+/// `<out>.status.json`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StatusFile {
+    /// The verdict.
+    pub verdict: Verdict,
+    /// Why not.
+    pub reasons: Vec<String>,
+    /// The recorded waiver, for `submittable-with-waiver`.
+    pub waiver: Option<probe::Waiver>,
+    /// The version.
+    pub version: String,
+    /// [`manifest::files_digest`] of the directory this status is about.
+    pub manifest_files_sha256: String,
+}
+
 /// One downloaded installer.
 #[derive(Clone, Debug, Serialize)]
 pub struct InstallerEvidence {
@@ -119,9 +147,12 @@ pub struct Evidence {
     pub submitted: bool,
     /// What this is and is not.
     pub status: String,
-    /// A real, fully proven final manifest. False for candidates, synthetic fixtures and while
-    /// the self-update is not proven.
+    /// `verdict == Ready`.
     pub ready: bool,
+    /// ready, submittable-with-waiver or not-ready (also in `<out>.status.json`).
+    pub verdict: Verdict,
+    /// Why not (empty when ready).
+    pub reasons: Vec<String>,
     /// The program's own update was seen installing a newer release in every cell.
     pub self_update_proven: bool,
     /// The installers as downloaded.
@@ -132,6 +163,14 @@ pub struct Evidence {
     pub probe_cells: Option<usize>,
     /// The ledger entry to commit with the submission.
     pub ledger_entry: Ledger,
+}
+
+/// The files as (name, bytes), for [`manifest::files_digest`].
+fn owned(files: &manifest::Files) -> Vec<(String, Vec<u8>)> {
+    files
+        .iter()
+        .map(|(name, text)| (name.clone(), text.clone().into_bytes()))
+        .collect()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -216,7 +255,7 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
             });
             // The shipped manifest itself must have been installed, upgraded, uninstalled.
             if !request.final_proof_pending {
-                set.prove_final(&release, &sha256_hex(files[2].1.as_bytes()))?;
+                set.prove_final(&release, &manifest::files_digest(&owned(&files)))?;
             }
             (
                 files,
@@ -234,7 +273,53 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
     write_checked(request.out, &files, mode, &hashes)?;
 
     let self_update_proven = proof.as_ref().is_some_and(|p| p.self_update_proven);
+    let waiver = proof.as_ref().and_then(|p| p.waiver.clone());
     let version = release.version.to_string();
+    // Everything that stops the directory from being submitted, in words; the self-update gap
+    // is the one thing a recorded waiver of the owner can cover.
+    let mut blocking: Vec<String> = Vec::new();
+    match mode {
+        Mode::Candidate => {
+            blocking.push("this is the candidate for the proof run, not a manifest".to_owned())
+        }
+        Mode::Fixture => blocking.push("the inputs are synthetic test fixtures".to_owned()),
+        Mode::Final => {}
+    }
+    if request.final_proof_pending {
+        blocking.push(
+            "the final manifest's installation proof is pending: install, upgrade and uninstall from this directory, then generate again without --final-proof-pending"
+                .to_owned(),
+        );
+    }
+    let self_update_gap = mode != Mode::Candidate && !self_update_proven;
+    let verdict = if !blocking.is_empty() {
+        Verdict::NotReady
+    } else if !self_update_gap {
+        Verdict::Ready
+    } else if waiver.is_some() {
+        Verdict::SubmittableWithWaiver
+    } else {
+        Verdict::NotReady
+    };
+    let mut reasons = blocking;
+    if self_update_gap {
+        reasons.push(
+            "self-update is NOT PROVEN: no cell saw the program install a newer release; the first stable release can never prove it"
+                .to_owned(),
+        );
+    }
+    let digest = manifest::files_digest(&owned(&files));
+    let status_file = StatusFile {
+        verdict,
+        reasons: reasons.clone(),
+        waiver: if verdict == Verdict::SubmittableWithWaiver {
+            waiver.clone()
+        } else {
+            None
+        },
+        version: version.clone(),
+        manifest_files_sha256: digest,
+    };
     let evidence = Evidence {
         manifest: match mode {
             Mode::Candidate => "candidate",
@@ -245,23 +330,14 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
         tag: release.tag.clone(),
         synthetic,
         submitted: false,
-        ready: mode == Mode::Final
-            && !synthetic
-            && self_update_proven
-            && !request.final_proof_pending,
+        ready: verdict == Verdict::Ready,
+        verdict,
+        reasons,
         self_update_proven,
-        status: match (mode, synthetic, self_update_proven) {
-            (Mode::Candidate, _, _) => "candidate for the installation proof run; not for submission",
-            (Mode::Fixture, _, _) => "SYNTHETIC test fixture; not for submission",
-            (Mode::Final, _, _) if request.final_proof_pending => {
-                "NOT READY: the final manifest's installation proof is pending (install, upgrade and uninstall from this directory, then generate again without --final-proof-pending); do not submit"
-            }
-            (Mode::Final, _, false) => {
-                "NOT READY: self-update is NOT PROVEN (no newer release was installed by the program itself); a second stable release must be tested. Probe reports are operator attestations checked only for consistency with the published bytes"
-            }
-            (Mode::Final, _, true) => {
-                "ready locally; probe reports are operator attestations checked only for consistency with the published bytes; nothing is submitted and the package is not available in WinGet"
-            }
+        status: match verdict {
+            Verdict::Ready => "ready locally; probe reports are operator attestations checked only for consistency with the published bytes; nothing is submitted and the package is not available in WinGet",
+            Verdict::SubmittableWithWaiver => "submittable only with the owner's recorded waiver of the self-update proof; nothing is submitted and the package is not available in WinGet",
+            Verdict::NotReady => "NOT READY: do not submit this directory",
         }
         .to_owned(),
         installers: evidence_installers,
@@ -269,6 +345,11 @@ pub fn generate(request: &Request<'_>, fetch: &dyn AssetFetch) -> anyhow::Result
         probe_cells: proof.as_ref().map(|p| p.cells),
         ledger_entry: Ledger::entry(&version, &hashes),
     };
+    // Next to the manifest directory, never in it: `winget validate` must see only manifest files.
+    let status_path = PathBuf::from(format!("{}.status.json", request.out.display()));
+    let status_json = serde_json::to_string_pretty(&status_file).context("writing the status")?;
+    std::fs::write(&status_path, format!("{status_json}\n"))
+        .with_context(|| format!("writing {}", status_path.display()))?;
     let json = serde_json::to_string_pretty(&evidence).context("writing the evidence")?;
     std::fs::write(request.evidence, format!("{json}\n"))
         .with_context(|| format!("writing {}", request.evidence.display()))?;

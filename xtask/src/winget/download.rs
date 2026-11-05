@@ -64,12 +64,13 @@ impl Https {
 /// Only HTTPS, and only the hosts GitHub serves release assets from: the first URL and every
 /// redirect hop.
 pub fn github_hop(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else {
+    // The host comes from the same parser the client connects with (it refuses `user@host`).
+    let Ok(parts) = crate::upstream::http::UrlParts::parse(url) else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.to_ascii_lowercase();
-    host == "github.com" || host.ends_with(".githubusercontent.com")
+    parts.scheme == "https"
+        && parts.port == 443
+        && (parts.host == "github.com" || parts.host.ends_with(".githubusercontent.com"))
 }
 
 impl AssetFetch for Https {

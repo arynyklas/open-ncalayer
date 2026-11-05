@@ -8,13 +8,15 @@
   The set is an OPERATOR ATTESTATION: -AttestedBy and -RunId say who vouches for the run. The
   generator checks the cells against the published bytes and against each other; it cannot see
   the machines. If ANY cell says "synthetic": true the whole set is marked "synthetic-fixture",
-  and the generator refuses it for a final manifest: this script cannot turn synthetic cells
+  and the generator refuses it for a final manifest. -PendingFinal makes a set without final cells,
+  only for `generate --final-proof-pending` (its output is NOT READY): this script cannot turn synthetic cells
   into a real run.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string[]]$Cells,
-  [Parameter(Mandatory)][string[]]$FinalCells,
+  [string[]]$FinalCells = @(),
+  [switch]$PendingFinal,
   [Parameter(Mandatory)][string]$AttestedBy,
   [Parameter(Mandatory)][string]$RunId,
   [Parameter(Mandatory)][string]$OutFile
@@ -36,7 +38,12 @@ function Read-Json($patterns) {
 }
 
 $reports = Read-Json $Cells
-$final = Read-Json $FinalCells
+if ($FinalCells.Count -eq 0) {
+  if (-not $PendingFinal) { throw 'no -FinalCells: pass the final-manifest cells, or -PendingFinal to make the set from which the final directory is generated' }
+  $final = @()
+} else {
+  $final = Read-Json $FinalCells
+}
 $synthetic = @($reports | Where-Object { $_.synthetic -eq $true }).Count -gt 0
 $origin = if ($synthetic) { 'synthetic-fixture' } else { 'vm-run' }
 $set = [ordered]@{
@@ -44,7 +51,7 @@ $set = [ordered]@{
   origin = $origin
   attestation = [ordered]@{ attested_by = $AttestedBy; run_id = $RunId }
   reports = $reports
-  final_cells = $final
+  final_cells = @($final)
 }
 $json = $set | ConvertTo-Json -Depth 20
 [IO.File]::WriteAllText($OutFile, $json, (New-Object Text.UTF8Encoding($false)))

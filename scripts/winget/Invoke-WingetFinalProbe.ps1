@@ -71,11 +71,18 @@ $uninstall = Run-Winget @('uninstall', '--name', $name, '--exact', '--silent', '
 $removed = ((Get-OpenNcaKeys).Count -eq 0)
 Get-Process -Name openncalayer, nmhost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
+# One digest over all three files: the lines `<name> <sha256>` in ordinal name order.
+$names = @(Get-ChildItem -LiteralPath $ManifestDir -File | ForEach-Object { $_.Name })
+[Array]::Sort($names, [StringComparer]::Ordinal)
+$digestText = ''
+foreach ($n in $names) { $digestText += "$n $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ManifestDir $n)).Hash.ToLowerInvariant())`n" }
+$manifestDigest = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($digestText))) -replace '-', '').ToLowerInvariant()
+
 $build = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
 $cell = [ordered]@{
   installer_arch = $InstallerArch
   windows = $(if ($build -ge 22000) { 11 } else { 10 })
-  installer_yaml_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ManifestDir 'arynyklas.OpenNCALayer.installer.yaml')).Hash.ToLowerInvariant()
+  manifest_files_sha256 = $manifestDigest
   install_exit_code = $install
   upgrade_exit_code = $upgrade
   upgrade_from_version = $OldVersion

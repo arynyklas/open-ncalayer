@@ -35,6 +35,8 @@ type Mutation = Box<dyn Fn(&mut Value)>;
 type TextEdit = Box<dyn Fn(&str) -> String>;
 
 const VERSION: &str = "0.3.0";
+/// A newer release the program updated itself to (synthetic).
+const NEWER: &str = "0.4.0";
 const PUBLISHED_AT: &str = "2026-11-09T10:00:00Z";
 const RECORDED_AT: &str = "2026-11-10T12:00:00Z";
 
@@ -261,8 +263,8 @@ fn cell(
             },
             "self_update": {
                 "start_version": VERSION,
-                "arp_display_version": VERSION,
-                "program_version": VERSION,
+                "arp_display_version": NEWER,
+                "program_version": NEWER,
                 "newer_release_tested": true,
                 "winget_exit_code": -1_978_335_189i64,
                 "winget_installer_ran": false,
@@ -308,14 +310,18 @@ fn probe_value(published: &Published, candidate_sha: &str, origin: &str) -> Valu
             ));
         }
     }
-    let final_sha = final_installer_sha(published);
+    let synthetic = origin == "synthetic-fixture";
+    for report in &mut reports {
+        report["synthetic"] = json!(synthetic);
+    }
+    let final_sha = final_digest(published, synthetic);
     let final_cells: Vec<Value> = [Arch::X64, Arch::X86]
         .iter()
         .map(|arch| {
             json!({
                 "installer_arch": arch.to_string(),
                 "windows": 11,
-                "installer_yaml_sha256": final_sha,
+                "manifest_files_sha256": final_sha,
                 "install_exit_code": 0,
                 "upgrade_exit_code": 0,
                 "upgrade_from_version": "0.2.0",
@@ -335,8 +341,8 @@ fn probe_value(published: &Published, candidate_sha: &str, origin: &str) -> Valu
     })
 }
 
-/// SHA-256 of the `installer.yaml` the generator makes for the synthetic identity.
-fn final_installer_sha(published: &Published) -> String {
+/// The digest of the three files the generator makes for the synthetic identity.
+fn final_digest(published: &Published, synthetic: bool) -> String {
     let release = xtask::winget::release::parse(&release_value(published).to_string())
         .unwrap()
         .stable()
@@ -352,9 +358,14 @@ fn final_installer_sha(published: &Published) -> String {
         release: &release,
         sha256: &hashes,
         identity: Some(&identity),
-        synthetic: true,
+        synthetic,
     });
-    sha256(files[2].1.as_bytes())
+    manifest::files_digest(
+        &files
+            .iter()
+            .map(|(n, t)| (n.clone(), t.clone().into_bytes()))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// A local server of the published files and the downloader that reaches it as if it were
@@ -1282,7 +1293,7 @@ fn a_fully_proven_synthetic_release_gives_a_manifest_that_passes_the_pinned_sche
     assert_eq!(done.mode, Mode::Fixture);
     assert!(done.evidence.synthetic);
     assert!(!done.evidence.submitted);
-    assert!(done.evidence.status.contains("SYNTHETIC"));
+    assert!(done.evidence.reasons.join(" ").contains("synthetic"));
 
     // Read back from disk like any consumer would.
     let checked = manifest::check_dir(&run.out(), Mode::Fixture).unwrap();
@@ -1911,7 +1922,7 @@ fn the_final_manifest_itself_must_have_been_installed_upgraded_and_uninstalled()
         ),
         (
             "the candidate's installer.yaml",
-            Box::new(|p| p["final_cells"][0]["installer_yaml_sha256"] = json!("0".repeat(64))),
+            Box::new(|p| p["final_cells"][0]["manifest_files_sha256"] = json!("0".repeat(64))),
         ),
         (
             "an upgrade that did not correlate",
@@ -1959,26 +1970,6 @@ fn the_self_update_must_be_proven_and_the_check_is_not_vacuous() {
             "{what}"
         );
     }
-    // With no newer release the manifest is made but says plainly that it is not ready.
-    let published = Published::new();
-    let candidate = candidate_sha(&published);
-    let mut probe = probe_value(&published, &candidate, "synthetic-fixture");
-    for report in probe["reports"].as_array_mut().unwrap() {
-        report["lifecycle"]["self_update"]["newer_release_tested"] = json!(false);
-    }
-    let run = Run::new();
-    let rig = Rig::of(&published);
-    let done = run
-        .generate(
-            &rig,
-            &release_value(&published),
-            Some(&probe),
-            &Ledger::default(),
-            true,
-        )
-        .unwrap();
-    assert!(!done.evidence.self_update_proven);
-    assert!(!done.evidence.ready);
 }
 
 #[test]
@@ -1990,7 +1981,8 @@ fn a_probe_report_is_an_attestation_that_must_say_who_and_which_script() {
             let candidate = candidate_sha(&published);
             let rig = Rig::of(&published);
             let run = Run::new();
-            let probe = probe_value(&published, &candidate, "vm-run");
+            let mut probe = probe_value(&published, &candidate, "synthetic-fixture");
+            probe["origin"] = json!("vm-run");
             error_of::<ProbeError>(run.generate(
                 &rig,
                 &release_value(&published),
@@ -2152,4 +2144,450 @@ fn the_directory_for_the_final_proof_run_can_be_made_before_the_final_cells_exis
         std::fs::read(run.out().join("arynyklas.OpenNCALayer.installer.yaml")).unwrap(),
         std::fs::read(full.out().join("arynyklas.OpenNCALayer.installer.yaml")).unwrap()
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The verdict: ready / submittable-with-waiver / not-ready. The inputs below are in-test data
+// that says it is a real run (origin "vm-run", cells not synthetic); the downloads come from the
+// local server, so nothing reaches a network or a machine. `ready` can therefore be TRUE here.
+// ---------------------------------------------------------------------------------------------
+
+fn real_probe(published: &Published) -> Value {
+    probe_value(published, &candidate_sha(published), "vm-run")
+}
+
+fn made(
+    published: &Published,
+    probe: &Value,
+    pending: bool,
+) -> (Run, anyhow::Result<xtask::winget::Generated>) {
+    let run = Run::new();
+    let rig = Rig::of(published);
+    let release = release_value(published).to_string();
+    let probe = probe.to_string();
+    let result = generate(
+        &Request {
+            release_json: &release,
+            probe_json: Some(&probe),
+            ledger: &Ledger::default(),
+            allow_synthetic: false,
+            final_proof_pending: pending,
+            out: &run.out(),
+            evidence: &run.evidence(),
+        },
+        &rig.fetch,
+    );
+    (run, result)
+}
+
+fn status_of(run: &Run) -> Value {
+    let path = format!("{}.status.json", run.out().display());
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn ready_is_true_only_when_every_proof_including_a_real_self_update_is_present() {
+    let published = Published::new();
+    let (run, done) = made(&published, &real_probe(&published), false);
+    let done = done.unwrap();
+    assert_eq!(done.mode, Mode::Final);
+    assert!(done.evidence.ready && done.evidence.self_update_proven);
+    assert_eq!(done.evidence.verdict, xtask::winget::Verdict::Ready);
+    let status = status_of(&run);
+    assert_eq!(status["verdict"], "ready");
+    assert_eq!(status["reasons"], json!([]));
+    // The status is next to the directory, never in it.
+    assert_eq!(std::fs::read_dir(run.out()).unwrap().count(), 3);
+    manifest::check_dir(&run.out(), Mode::Final).unwrap();
+    assert_eq!(
+        status["manifest_files_sha256"],
+        manifest::dir_digest(&run.out()).unwrap()
+    );
+}
+
+#[test]
+fn each_missing_proof_flips_the_verdict_with_its_exact_reason() {
+    let published = Published::new();
+    // The self-update was not seen (the version did not move): never ready, with a stated reason.
+    let mut none = real_probe(&published);
+    for r in none["reports"].as_array_mut().unwrap() {
+        let u = &mut r["lifecycle"]["self_update"];
+        u["newer_release_tested"] = json!(false);
+        u["arp_display_version"] = json!(VERSION);
+        u["program_version"] = json!(VERSION);
+    }
+    let (run, done) = made(&published, &none, false);
+    let done = done.unwrap();
+    assert!(!done.evidence.ready && !done.evidence.self_update_proven);
+    assert_eq!(done.evidence.verdict, xtask::winget::Verdict::NotReady);
+    assert!(
+        done.evidence
+            .reasons
+            .join(" ")
+            .contains("self-update is NOT PROVEN")
+    );
+    assert_eq!(status_of(&run)["verdict"], "not-ready");
+
+    // The claim and the versions must agree, in both directions.
+    let mut liar = real_probe(&published);
+    liar["reports"][0]["lifecycle"]["self_update"]["arp_display_version"] = json!(VERSION);
+    liar["reports"][0]["lifecycle"]["self_update"]["program_version"] = json!(VERSION);
+    assert!(matches!(
+        error_of::<ProbeError>(made(&published, &liar, false).1),
+        ProbeError::Lifecycle(_)
+    ));
+    let mut hidden = none.clone();
+    hidden["reports"][0]["lifecycle"]["self_update"]["arp_display_version"] = json!(NEWER);
+    hidden["reports"][0]["lifecycle"]["self_update"]["program_version"] = json!(NEWER);
+    assert!(matches!(
+        error_of::<ProbeError>(made(&published, &hidden, false).1),
+        ProbeError::Lifecycle(_)
+    ));
+
+    // A waiver recorded by the owner covers exactly that gap and nothing else.
+    let mut waived = none.clone();
+    waived["waiver"] =
+        json!({"reason": "first stable release", "approved_by": "owner", "date": "2026-11-06"});
+    let (run, done) = made(&published, &waived, false);
+    let done = done.unwrap();
+    assert_eq!(
+        done.evidence.verdict,
+        xtask::winget::Verdict::SubmittableWithWaiver
+    );
+    assert!(!done.evidence.ready);
+    assert_eq!(status_of(&run)["waiver"]["approved_by"], "owner");
+    // The tools never invent one, and a malformed one is refused.
+    for bad in [
+        json!({"reason": "", "approved_by": "owner", "date": "2026-11-06"}),
+        json!({"reason": "x", "approved_by": " ", "date": "2026-11-06"}),
+        json!({"reason": "x", "approved_by": "owner", "date": "yesterday"}),
+    ] {
+        let mut p = none.clone();
+        p["waiver"] = bad;
+        assert!(matches!(
+            error_of::<ProbeError>(made(&published, &p, false).1),
+            ProbeError::Inconsistent(_)
+        ));
+    }
+    // A waiver does not rescue a pending final proof.
+    let (_, done) = made(&published, &waived, true);
+    let done = done.unwrap();
+    assert_eq!(done.evidence.verdict, xtask::winget::Verdict::NotReady);
+    assert!(
+        done.evidence
+            .reasons
+            .join(" ")
+            .contains("--final-proof-pending")
+    );
+    // ... nor a missing final cell.
+    let mut no_final = waived.clone();
+    no_final["final_cells"] = json!([]);
+    assert!(matches!(
+        error_of::<ProbeError>(made(&published, &no_final, false).1),
+        ProbeError::FinalManifest(_)
+    ));
+    // Even with everything proven a waiver is not recorded as used.
+    let mut full = real_probe(&published);
+    full["waiver"] = waived["waiver"].clone();
+    let (run, done) = made(&published, &full, false);
+    assert_eq!(
+        done.unwrap().evidence.verdict,
+        xtask::winget::Verdict::Ready
+    );
+    assert!(status_of(&run)["waiver"].is_null());
+
+    // Synthetic fixtures and candidates are never ready.
+    let (_, done) = {
+        let run = Run::new();
+        let rig = Rig::of(&published);
+        let r = run.generate(
+            &rig,
+            &release_value(&published),
+            Some(&probe_value(
+                &published,
+                &candidate_sha(&published),
+                "synthetic-fixture",
+            )),
+            &Ledger::default(),
+            true,
+        );
+        (run, r)
+    };
+    assert_eq!(
+        done.unwrap().evidence.verdict,
+        xtask::winget::Verdict::NotReady
+    );
+    let run = Run::new();
+    let cand = run
+        .generate(
+            &Rig::of(&published),
+            &release_value(&published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(cand.evidence.verdict, xtask::winget::Verdict::NotReady);
+}
+
+#[test]
+fn check_for_submission_believes_only_a_matching_ready_or_waived_status() {
+    let published = Published::new();
+    let xtask = |dir: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(["winget", "check", "--for-submission"])
+            .arg(dir)
+            .output()
+            .unwrap()
+    };
+    let text = |o: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    let (run, _) = made(&published, &real_probe(&published), false);
+    let out = xtask(&run.out());
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("Ready"), "{}", text(&out));
+    // Changing a file makes the status be about other files.
+    let path = run.out().join("arynyklas.OpenNCALayer.locale.en-US.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, original.replace("Apache-2.0", "MIT")).unwrap();
+    let out = xtask(&run.out());
+    assert!(
+        !out.status.success() && text(&out).contains("other files"),
+        "{}",
+        text(&out)
+    );
+    std::fs::write(&path, original).unwrap();
+    // The same bytes with a not-ready status are not submittable ...
+    let mut none = real_probe(&published);
+    for r in none["reports"].as_array_mut().unwrap() {
+        let u = &mut r["lifecycle"]["self_update"];
+        u["newer_release_tested"] = json!(false);
+        u["arp_display_version"] = json!(VERSION);
+        u["program_version"] = json!(VERSION);
+    }
+    let (run, _) = made(&published, &none, false);
+    let out = xtask(&run.out());
+    assert!(
+        !out.status.success() && text(&out).contains("NOT READY"),
+        "{}",
+        text(&out)
+    );
+    // ... and a directory without any status is not either.
+    std::fs::remove_file(format!("{}.status.json", run.out().display())).unwrap();
+    assert!(!xtask(&run.out()).status.success());
+}
+
+#[test]
+fn the_final_cells_bind_all_three_manifest_files() {
+    let published = Published::new();
+    let (run, done) = made(&published, &real_probe(&published), false);
+    done.unwrap();
+    // The digest moves when any one file moves, not only installer.yaml.
+    let base = manifest::dir_digest(&run.out()).unwrap();
+    let path = run.out().join("arynyklas.OpenNCALayer.yaml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("DefaultLocale: en-US", "DefaultLocale: en-GB"),
+    )
+    .unwrap();
+    assert_ne!(manifest::dir_digest(&run.out()).unwrap(), base);
+}
+
+#[test]
+fn github_hop_uses_the_parsed_host() {
+    use xtask::winget::download::github_hop;
+    for bad in [
+        "https://evil@a.githubusercontent.com/x",
+        "https://githubusercontent.com.evil.test/x",
+        "https://evilgithubusercontent.com/x",
+        "https://github.com:444/x",
+        "https://github.com:80/x",
+        "https://gıthub.com/x",
+        "https://github.сom/x",
+        "https://xn--githb-qva.com/x",
+        "https://github.com./x",
+        "https://[::1]/x",
+        "HTTP://github.com/x",
+    ] {
+        assert!(!github_hop(bad), "{bad}");
+    }
+    assert!(github_hop("HTTPS://GitHub.com/x"));
+    assert!(github_hop("https://github.com:443/x"));
+}
+
+#[cfg(windows)]
+mod ps_flows {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use super::*;
+
+    fn script(name: &str) -> PathBuf {
+        oncl_testkit::workspace_root()
+            .join("scripts/winget")
+            .join(name)
+    }
+
+    fn ps() -> Command {
+        let mut c = Command::new("powershell.exe");
+        c.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+        ]);
+        c
+    }
+
+    /// The function of the probe script that looks for leftovers, run with an EMPTY other-admin
+    /// profile (an administrator cell) and with the directories pointed at a temp folder.
+    #[test]
+    fn the_leftover_check_runs_for_a_cell_without_another_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("Local");
+        let roaming = temp.path().join("Roaming");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::create_dir_all(&roaming).unwrap();
+        let run = |other: &str| {
+            let out = ps()
+                .env("ONCL_SCRIPT", script("Invoke-WingetProbe.ps1"))
+                .env("LOCALAPPDATA", &local)
+                .env("APPDATA", &roaming)
+                .env("ONCL_OTHER", other)
+                .args([
+                    "-Command",
+                    "$ErrorActionPreference='Stop'; \
+                     $ast=[System.Management.Automation.Language.Parser]::ParseFile($env:ONCL_SCRIPT,[ref]$null,[ref]$null); \
+                     $f=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-OtherProfileArtifacts'},$true); \
+                     Invoke-Expression $f.Extent.Text; \
+                     $r=@(Get-OtherProfileArtifacts $env:ONCL_OTHER); \
+                     $r.Count",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<usize>()
+                .unwrap()
+        };
+        // No leftovers in the temp profile: only what the real HKU holds counts, and the call
+        // must not throw with an empty profile.
+        let baseline = run("");
+        std::fs::create_dir_all(roaming.join("OpenNCALayer")).unwrap();
+        assert_eq!(
+            run(""),
+            baseline + 1,
+            "a leftover in the account's roaming data is found"
+        );
+        let other = temp.path().join("Other");
+        std::fs::create_dir_all(other.join("AppData/Local/OpenNCALayer")).unwrap();
+        assert_eq!(
+            run(other.to_str().unwrap()),
+            baseline + 2,
+            "and one in another admin's profile when there is one"
+        );
+    }
+
+    /// The documented sequence, with the shipped scripts and the generator: merge without final
+    /// cells, `generate --final-proof-pending`, final cells bound to the directory it made,
+    /// merge again, `generate`.
+    #[test]
+    fn the_pending_final_sequence_runs_end_to_end() {
+        let published = Published::new();
+        let whole = real_probe(&published);
+        let dir = tempfile::tempdir().unwrap();
+        for (i, r) in whole["reports"].as_array().unwrap().iter().enumerate() {
+            std::fs::write(dir.path().join(format!("cell-{i}.json")), r.to_string()).unwrap();
+        }
+        let merge = |extra: &[&std::ffi::OsStr], out: &std::path::Path| {
+            let output = ps()
+                .arg("-File")
+                .arg(script("Merge-ProbeCells.ps1"))
+                .arg("-Cells")
+                .arg(dir.path().join("cell-*.json"))
+                .args(["-AttestedBy", "in-test operator", "-RunId", "in-test-run"])
+                .args(extra)
+                .arg("-OutFile")
+                .arg(out)
+                .output()
+                .unwrap();
+            (
+                output.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+        };
+        // Without final cells and without the switch the script refuses.
+        let pending_set = dir.path().join("pending.json");
+        let (ok, text) = merge(&[], &pending_set);
+        assert!(!ok && text.contains("PendingFinal"), "{text}");
+        let (ok, text) = merge(&["-PendingFinal".as_ref()], &pending_set);
+        assert!(ok, "{text}");
+        let set = std::fs::read_to_string(&pending_set).unwrap();
+        let parsed = xtask::winget::probe::parse(&set).unwrap();
+        assert_eq!(parsed.origin, xtask::winget::probe::Origin::VmRun);
+        assert!(parsed.final_cells.is_empty());
+
+        // Generate the directory the final cells install from.
+        let rig = Rig::of(&published);
+        let release = release_value(&published).to_string();
+        let first = Run::new();
+        let pending = generate(
+            &Request {
+                release_json: &release,
+                probe_json: Some(&set),
+                ledger: &Ledger::default(),
+                allow_synthetic: false,
+                final_proof_pending: true,
+                out: &first.out(),
+                evidence: &first.evidence(),
+            },
+            &rig.fetch,
+        )
+        .unwrap();
+        assert_eq!(pending.evidence.verdict, xtask::winget::Verdict::NotReady);
+
+        // The cells of the run on that directory, as the final script would write them.
+        let digest = manifest::dir_digest(&first.out()).unwrap();
+        for (i, c) in whole["final_cells"].as_array().unwrap().iter().enumerate() {
+            let mut c = c.clone();
+            c["manifest_files_sha256"] = json!(digest);
+            std::fs::write(dir.path().join(format!("final-{i}.json")), c.to_string()).unwrap();
+        }
+        let full_set = dir.path().join("full.json");
+        let finals = dir.path().join("final-*.json");
+        let (ok, text) = merge(&["-FinalCells".as_ref(), finals.as_os_str()], &full_set);
+        assert!(ok, "{text}");
+        let second = Run::new();
+        let full = generate(
+            &Request {
+                release_json: &release,
+                probe_json: Some(&std::fs::read_to_string(&full_set).unwrap()),
+                ledger: &Ledger::default(),
+                allow_synthetic: false,
+                final_proof_pending: false,
+                out: &second.out(),
+                evidence: &second.evidence(),
+            },
+            &rig.fetch,
+        )
+        .unwrap();
+        assert_eq!(full.evidence.verdict, xtask::winget::Verdict::Ready);
+        assert_eq!(manifest::dir_digest(&second.out()).unwrap(), digest);
+    }
 }

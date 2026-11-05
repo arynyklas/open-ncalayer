@@ -233,6 +233,39 @@ pub fn render(plan: &Plan<'_>) -> Files {
     ]
 }
 
+/// One digest over every file of a manifest: SHA-256 of the lines `<name> <sha256 of the file>\n`
+/// in ordinal name order. A proof run binds to this, not to `installer.yaml` alone.
+pub fn files_digest(files: &[(String, Vec<u8>)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut text = String::new();
+    for (name, bytes) in sorted {
+        text.push_str(&format!(
+            "{name} {}\n",
+            crate::upstream::hex(&Sha256::digest(bytes))
+        ));
+    }
+    crate::upstream::hex(&Sha256::digest(text.as_bytes()))
+}
+
+/// [`files_digest`] of the written manifest `dir`.
+///
+/// # Errors
+///
+/// The directory or a file cannot be read.
+pub fn dir_digest(dir: &Path) -> std::io::Result<String> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        files.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            std::fs::read(entry.path())?,
+        ));
+    }
+    Ok(files_digest(&files))
+}
+
 /// What is expected of a directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

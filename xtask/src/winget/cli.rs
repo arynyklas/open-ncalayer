@@ -70,6 +70,10 @@ pub enum WingetCommand {
         /// Expect a candidate (no Apps & Features mapping) instead of a final manifest.
         #[arg(long)]
         candidate: bool,
+        /// Also require `<dir>.status.json` to say ready or submittable-with-waiver for exactly
+        /// these files.
+        #[arg(long)]
+        for_submission: bool,
     },
 }
 
@@ -149,22 +153,53 @@ pub fn run(command: WingetCommand) -> anyhow::Result<()> {
                 &Https::new(),
             )?;
             println!(
-                "manifest of {} in {} (evidence: {}): {}\nrun `winget validate {}`; nothing was submitted",
+                "manifest of {} in {} (evidence: {}): {}\nstatus: {:?} {}\nrun `winget validate {}`; nothing was submitted",
                 done.evidence.version,
                 done.dir.display(),
                 evidence.display(),
                 done.evidence.status,
+                done.evidence.verdict,
+                done.evidence.reasons.join("; "),
                 done.dir.display()
             );
             Ok(())
         }
-        WingetCommand::Check { dir, candidate } => {
+        WingetCommand::Check {
+            dir,
+            candidate,
+            for_submission,
+        } => {
             let mode = if candidate {
                 Mode::Candidate
             } else {
                 Mode::Final
             };
             let checked = manifest::check_dir(&dir, mode)?;
+            if for_submission {
+                let path = format!("{}.status.json", dir.display());
+                let text = std::fs::read_to_string(&path).with_context(|| {
+                    format!("reading {path}: a directory without a status is not submittable")
+                })?;
+                let status: super::StatusFile =
+                    serde_json::from_str(&text).context("the status file")?;
+                anyhow::ensure!(
+                    status.manifest_files_sha256 == manifest::dir_digest(&dir)?,
+                    "{path} is about other files than these"
+                );
+                anyhow::ensure!(
+                    status.verdict != super::Verdict::NotReady,
+                    "NOT READY, do not submit: {}",
+                    status.reasons.join("; ")
+                );
+                println!(
+                    "status: {:?}{}",
+                    status.verdict,
+                    status.waiver.map_or(String::new(), |w| format!(
+                        " (waiver by {} on {}: {})",
+                        w.approved_by, w.date, w.reason
+                    ))
+                );
+            }
             println!(
                 "{}: schema 1.12.0 and the package invariants hold for {} {} ({} installers); this is not an installer proof",
                 dir.display(),

@@ -60,10 +60,25 @@ pub struct ProbeSet {
     /// Who says the run happened. The reports are operator attestations: the generator checks
     /// them against the published bytes and against each other, it cannot see the machines.
     pub attestation: Attestation,
+    /// A recorded decision to submit without the self-update proof. Never made by the tools.
+    #[serde(default)]
+    pub waiver: Option<Waiver>,
     /// One report per cell of the matrix, run on the candidate manifest.
     pub reports: Vec<InstallerProbeReport>,
     /// Cells that installed, upgraded and uninstalled from the FINAL manifest.
     pub final_cells: Vec<FinalManifestCell>,
+}
+
+/// A waiver of the self-update proof, decided by the project's owner.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Waiver {
+    /// Why.
+    pub reason: String,
+    /// Who approved it.
+    pub approved_by: String,
+    /// `YYYY-MM-DD`.
+    pub date: String,
 }
 
 /// The operator's statement about the run.
@@ -95,8 +110,8 @@ pub struct FinalManifestCell {
     pub installer_arch: Arch,
     /// 10 or 11.
     pub windows: u32,
-    /// SHA-256 of the `installer.yaml` of the final manifest that was used.
-    pub installer_yaml_sha256: String,
+    /// [`super::manifest::files_digest`] of the three files of the final manifest that was used.
+    pub manifest_files_sha256: String,
     /// `winget install --manifest` exit code.
     pub install_exit_code: i32,
     /// `winget upgrade --manifest` over an older version: exit code.
@@ -344,8 +359,9 @@ pub struct SelfUpdateStep {
     pub arp_display_version: Version,
     /// `openncalayer --version` after it.
     pub program_version: Version,
-    /// A newer release was installed by the program itself in this cell. False means the
-    /// self-update is NOT PROVEN: only the absence of a downgrade was seen.
+    /// A newer release was installed by the program itself in this cell: `arp_display_version`
+    /// is then higher than `start_version`. False means the self-update is NOT PROVEN: the
+    /// version did not change and only the absence of a downgrade was seen.
     pub newer_release_tested: bool,
     /// The exit code of `winget upgrade --manifest` afterwards.
     pub winget_exit_code: i32,
@@ -522,6 +538,8 @@ pub struct Proof {
     /// Every cell saw the program's own update install a newer release. When false the
     /// self-update is NOT PROVEN and the manifest is not ready.
     pub self_update_proven: bool,
+    /// The owner's recorded waiver of the self-update proof, if any.
+    pub waiver: Option<Waiver>,
 }
 
 /// Reads a set of reports.
@@ -583,6 +601,7 @@ impl ProbeSet {
                 .reports
                 .iter()
                 .all(|r| r.lifecycle.self_update.newer_release_tested),
+            waiver: self.waiver.clone(),
         })
     }
 
@@ -593,6 +612,21 @@ impl ProbeSet {
             return Err(ProbeError::Inconsistent(
                 "the run has no attested_by and run_id".to_owned(),
             ));
+        }
+        if let Some(w) = &self.waiver {
+            let date_ok = w.date.len() == 10
+                && w.date.bytes().enumerate().all(|(i, b)| {
+                    if i == 4 || i == 7 {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_digit()
+                    }
+                });
+            if w.reason.trim().is_empty() || w.approved_by.trim().is_empty() || !date_ok {
+                return Err(ProbeError::Inconsistent(
+                    "a waiver needs a reason, who approved it and a YYYY-MM-DD date".to_owned(),
+                ));
+            }
         }
         let script = &self.reports[0].run.script_sha256;
         for report in &self.reports {
@@ -635,9 +669,9 @@ impl ProbeSet {
                 return fail(format!("no cell installed the final {arch} manifest"));
             }
             for cell in cells {
-                if cell.installer_yaml_sha256.to_ascii_lowercase() != final_installer_sha256 {
+                if cell.manifest_files_sha256.to_ascii_lowercase() != final_installer_sha256 {
                     return fail(
-                        "a final-manifest cell used another installer.yaml than the one generated"
+                        "a final-manifest cell used other manifest files than the ones generated"
                             .to_owned(),
                     );
                 }
@@ -961,15 +995,18 @@ impl InstallerProbeReport {
             ));
         }
         let update = &life.self_update;
+        let moved = update.arp_display_version > update.start_version;
         if update.start_version != *version
-            || update.arp_display_version < *version
             || update.arp_display_version != update.program_version
             || !update.no_downgrade_loop
             || update.winget_installer_ran
             || update.winget_exit_code != NO_APPLICABLE_UPGRADE
+            // A claimed newer release must have moved the version up; none must not have.
+            || update.newer_release_tested != moved
+            || update.arp_display_version < update.start_version
         {
             return Err(ProbeError::Lifecycle(
-                "the self-update did not end at the version the entry shows, or WinGet offers a downgrade"
+                "the self-update did not end at a version the entry shows, the claim of a newer release does not match the versions, or WinGet offers a downgrade"
                     .to_owned(),
             ));
         }

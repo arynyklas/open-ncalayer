@@ -145,7 +145,7 @@ jobs:
             echo "### WinGet manifests of $VERSION"
             echo "- candidate manifest: made (artifact \`winget-$VERSION\`, directory \`winget-candidate\`); it is the input of the proof run and is NOT for submission"
             if [ "$GENERATED" = true ]; then
-              echo "- final manifest: made and checked (artifact, directory \`winget\`); **nothing was submitted and the package is not available in WinGet**"
+              echo "- final manifest: made and checked (artifact, directory \`winget\`); verdict: \`$(sed -n 's/.*"verdict": "\(.*\)".*/\1/p' target/winget.status.json | head -n1)\` (target/winget.status.json); **nothing was submitted and the package is not available in WinGet**"
             else
               echo "- final manifest: not made (no probe reports)"
             fi
@@ -159,5 +159,7 @@ jobs:
             target/winget-candidate.evidence.json
             target/winget
             target/winget.evidence.json
+            target/winget.status.json
+            target/winget-candidate.status.json
           if-no-files-found: error
           retention-days: 90
