@@ -45,11 +45,13 @@ cargo xtask fetch-fixtures     # тестовые ключи NCANode → target/
 cargo xtask interop-ncanode
 ```
 
-Контейнер называется `oncl-ncanode-interop` и слушает случайный порт на `127.0.0.1`. После проверки контейнер удаляется, а том с кэшем и образ остаются (как их удалить — выше). Контейнер с тем же именем, оставшийся от прерванного запуска, удаляется перед стартом.
+Контейнер называется `oncl-ncanode-interop` (`ONCL_NCANODE_CONTAINER` меняет имя, `ONCL_NCANODE_CACHE_VOLUME` — том кэша) и слушает случайный порт на `127.0.0.1`. После проверки контейнер удаляется, а том с кэшем и образ остаются (как их удалить — выше). Контейнер с тем же именем, оставшийся от прерванного запуска, удаляется перед стартом.
 
 Если `docker pull` падает с `docker-credential-desktop.exe: executable file not found` (в WSL остался `~/.docker/config.json` от Docker Desktop), образ можно скачать с пустым конфигом: `DOCKER_CONFIG=<пустой каталог> docker pull <образ>`. Сама команда после этого скачивать образ уже не будет.
 
 В CI команда запускается только в job `live` (по расписанию и вручную), не на каждый push. Все 47 проверок проходят.
+
+Полная независимая матрица семейств NCANode OpenAPI (CMS/CAdES, XML/XAdES, PDF/PAdES и далее) — `cargo xtask platform-interop`, см. [platform-interop.md](platform-interop.md). Эта команда проверяет наши ключевые файлы и XMLDSig/CMS Kalkan'ом.
 
 ## Что проверяется
 

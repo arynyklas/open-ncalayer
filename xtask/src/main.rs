@@ -73,6 +73,28 @@ enum Command {
     },
     /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
     InteropNcanode,
+    /// The independent interop matrix of the platform: every capability family of the pinned
+    /// NCANode OpenAPI, judged by OpenSSL, pyHanko, lxml/cryptography and NCANode (Linux:
+    /// `docs/dev/platform-interop.md`); writes `report.json` and `report.md` into `--out`.
+    PlatformInterop {
+        /// Output directory (reports and the artifacts of every row).
+        #[arg(long, default_value = "target/platform-interop")]
+        out: PathBuf,
+        /// The `oncl` binary to test [default: `cargo build -p oncl-cli`, debug profile].
+        #[arg(long)]
+        oncl: Option<PathBuf>,
+        /// Run only the rows whose id starts with this (repeatable); such a run is not a
+        /// verdict.
+        #[arg(long = "case")]
+        cases: Vec<String>,
+        /// List the rows and exit.
+        #[arg(long)]
+        list: bool,
+        /// Start the loopback PKI, write its paths to `<out>/world.env` and serve until
+        /// stdin closes (to reproduce a row by hand with `oncl`).
+        #[arg(long)]
+        hold_world: bool,
+    },
     /// Sign an update index with minisign: writes `<index>.minisig` beside it, with the
     /// trusted comment `channel=<channel>;seq=<seq>`. The password is read without echo.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -807,6 +829,22 @@ fn main() -> anyhow::Result<()> {
         }
         Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
         Command::InteropNcanode => xtask::ncanode::interop_ncanode(),
+        Command::PlatformInterop {
+            out,
+            oncl,
+            cases,
+            list,
+            hold_world,
+        } => xtask::platform_interop::run(
+            &oncl_testkit::workspace_root(),
+            &xtask::platform_interop::Options {
+                out,
+                oncl,
+                filter: cases,
+                list,
+                hold_world,
+            },
+        ),
         Command::GenFixtures { check: false } => {
             xtask::fixtures::gen_fixtures(&oncl_testkit::workspace_root())
         }

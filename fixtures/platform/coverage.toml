@@ -1,0 +1,1597 @@
+# The matrix of `cargo xtask platform-interop` (docs/dev/platform-interop.md).
+#
+# capability -> cases -> oracle descriptors -> expected grade. A test fails when a route of
+# the pinned OpenAPI has no capability, a capability has no case, a case has no row here, a
+# row has no case, an oracle has no descriptor. The run fails a row whose observed grade is
+# not exactly `expected`.
+#
+# The grade of a case lists one `key=value` per judge. `crypto=ok` means every judge that
+# can check the signature value and the digests accepted them; `crypto=failure` is a
+# counterexample (signed data or the signature altered) that every judge rejected. The
+# certificate grade is separate and never stands for the cryptographic one: `ours=Valid`
+# is the verdict of a strict run against the loopback PKI, `ncanode=INDETERMINATE/...` the
+# grade of NCANode, whose world does not know our roots (synthetic keys) or whose test
+# certificates have expired.
+#
+# Limitations of the oracles that are recorded, not adopted as desired behaviour:
+#   * NCANode's /xml/verify does not register `Id` attributes (an internal DTD subset that
+#     declares them is added to documents it verifies) and grades only the first signature;
+#   * NCANode's /x509/verify and /pkcs12/info return `valid` over the certificate chain too:
+#     with expired test certificates and unknown synthetic roots it is always false, so it
+#     cannot tell a good raw signature from a bad one;
+#   * NCANode's expired test PKI: every NCANode key grades OUT_OF_BOUNDS_NO_POE.
+
+schema = 1
+
+[pins]
+ncanode_commit = "0adab29a7d30c181d70e8cc6b4f243122f50c3b8"
+ncanode_image = "malikzh/ncanode@sha256:052222f30ac73d9f0060a5c80c572723d25dd84e21073435795a10db254c02b8"
+openapi_sha256 = "43fcf7bf3a46ca47bdaf38c73f7b5af588654ae016baf7f5f0a42c90bc95ee3c"
+openapi_routes = [
+  "/cms/extend", "/cms/extract", "/cms/sign", "/cms/sign/add", "/cms/verify",
+  "/jws/sign", "/jws/sign/add", "/jws/verify",
+  "/jwt/decode", "/jwt/encode",
+  "/pdf/extend", "/pdf/sign", "/pdf/verify",
+  "/pkcs12/aliases", "/pkcs12/info",
+  "/wsse/sign", "/wsse/verify",
+  "/x509/info", "/x509/sign", "/x509/verify",
+  "/xml/sign", "/xml/verify",
+]
+
+# ---- oracle descriptors ---------------------------------------------------------------
+
+[[oracle]]
+id = "ncanode"
+tool = "NCANode (Kalkan)"
+version = "3.5.1"
+match_version = "exact"
+pin = "malikzh/ncanode@sha256:052222f30ac73d9f0060a5c80c572723d25dd84e21073435795a10db254c02b8 (commit 0adab29a7d30c181d70e8cc6b4f243122f50c3b8)"
+role = "independent GOST 2004/2015-512 and RSA implementation of CMS/CAdES, XMLDSig/XAdES, WS-Security, PAdES, JWS/JWT, X.509 and PKCS#12; the only GOST math oracle"
+
+[[oracle]]
+id = "openssl"
+tool = "OpenSSL"
+version = "3."
+match_version = "prefix"
+role = "RSA CMS/CAdES verification with full path validation, raw signatures, X.509 and PKCS#12 reading, RFC 3161 token verification"
+
+[[oracle]]
+id = "pyhanko"
+tool = "pyHanko"
+version = "0.38.0"
+match_version = "exact"
+pin = "with pyhanko-certvalidator 0.33.0"
+role = "PAdES/CAdES validation (integrity, DSS contents, document timestamps, revocation from DSS)"
+
+[[oracle]]
+id = "lxml"
+tool = "lxml (libxml2 canonicalization)"
+version = "6.1.3"
+match_version = "exact"
+role = "Canonical XML for XMLDSig/XAdES/WS-Security references and SignedInfo"
+
+[[oracle]]
+id = "cryptography"
+tool = "cryptography (pyca)"
+version = "50.0.2"
+match_version = "exact"
+role = "RSA PKCS#1 v1.5 verification of CMS signed attributes, SignedInfo, JWS and timestamp tokens"
+
+[[oracle]]
+id = "asn1crypto"
+tool = "asn1crypto"
+version = "1.5.1"
+match_version = "exact"
+role = "independent BER/DER reader of CMS, RFC 3161 tokens and certificates"
+
+# ---- capabilities ---------------------------------------------------------------------
+
+[[capability]]
+id = "cms.sign"
+title = "CMS / CAdES-B signing, attached and detached"
+routes = ["/cms/sign"]
+
+[[capability]]
+id = "cms.verify"
+title = "CMS verification of signatures made by NCANode/OpenSSL, with counterexamples"
+routes = ["/cms/verify"]
+
+[[capability]]
+id = "cms.sign.add"
+title = "CMS: adding a signer to an existing CMS (both directions)"
+routes = ["/cms/sign/add"]
+
+[[capability]]
+id = "cms.extract"
+title = "CMS: extraction of the signed content"
+routes = ["/cms/extract"]
+
+[[capability]]
+id = "cms.levels"
+title = "CAdES-T/LT/LTA signatures"
+routes = ["/cms/sign"]
+
+[[capability]]
+id = "cms.extend"
+title = "CAdES extension B->T->LT->LTA"
+routes = ["/cms/extend"]
+
+[[capability]]
+id = "xml.sign"
+title = "XMLDSig signing: whole document, element reference, second signature"
+routes = ["/xml/sign"]
+
+[[capability]]
+id = "xml.verify"
+title = "XMLDSig verification, with counterexamples"
+routes = ["/xml/verify"]
+
+[[capability]]
+id = "xades.levels"
+title = "XAdES-B/T/LT/LTA in both directions"
+routes = ["/xml/sign", "/xml/verify"]
+
+[[capability]]
+id = "pdf.sign"
+title = "PDF signing: adbe.pkcs7.detached, second signature, PAdES-B/T/LT/LTA"
+routes = ["/pdf/sign"]
+
+[[capability]]
+id = "pdf.verify"
+title = "PDF/PAdES verification, with counterexamples and the Kalkan fixtures"
+routes = ["/pdf/verify"]
+
+[[capability]]
+id = "pdf.extend"
+title = "PAdES extension B->T->LT->LTA"
+routes = ["/pdf/extend"]
+
+# ---- cases ----------------------------------------------------------------------------
+
+[[case]]
+id = "cms-sign-rsa-attached"
+capability = "cms.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl signs attached; NCANode, OpenSSL (full path) and pyca/asn1crypto verify"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE openssl=verified python-rsa=ok"
+
+[[case]]
+id = "cms-sign-rsa-detached"
+capability = "cms.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl signs detached; NCANode, OpenSSL (full path) and pyca/asn1crypto verify with the data"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE openssl=verified python-rsa=ok"
+
+[[case]]
+id = "cms-sign-gost2015-attached"
+capability = "cms.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs attached with GOST 2015-512; Kalkan verifies"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-sign-gost2015-detached"
+capability = "cms.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs detached with GOST 2015-512; Kalkan verifies with the data"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-sign-gost2004-attached"
+capability = "cms.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs attached with GOST 34.310-2004; Kalkan verifies"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-sign-gost2004-detached"
+capability = "cms.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs detached with GOST 34.310-2004; Kalkan verifies with the data"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-tamper-rsa-content"
+capability = "cms.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "one byte of the attached content altered: every judge must reject (NCANode answers 400: the message digest attribute no longer matches)"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs openssl=rejected python-rsa=rejected"
+
+[[case]]
+id = "cms-tamper-rsa-signature"
+capability = "cms.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "one byte of the signature value altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=INVALID/SIG_CRYPTO_FAILURE openssl=rejected python-rsa=rejected"
+
+[[case]]
+id = "cms-tamper-gost2015-content"
+capability = "cms.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "one byte of the attached content altered: Kalkan and we must reject (it answers 400: the message digest attribute no longer matches)"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-tamper-gost2015-signature"
+capability = "cms.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "one byte of the signature value altered: Kalkan and we must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "cms-tamper-gost2004-content"
+capability = "cms.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "one byte of the attached content altered: Kalkan and we must reject (it answers 400: the message digest attribute no longer matches)"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-tamper-gost2004-signature"
+capability = "cms.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "one byte of the signature value altered: Kalkan and we must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "cms-tamper-rsa-detached-data"
+capability = "cms.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "the data a detached signature covers altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs openssl=rejected python-rsa=rejected"
+
+[[case]]
+id = "cms-tamper-gost2015-detached-data"
+capability = "cms.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "the data a detached signature covers altered: Kalkan and we must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-tamper-gost2004-detached-data"
+capability = "cms.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "the data a detached signature covers altered: Kalkan and we must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-verify-ncanode-rsa-attached"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "NCANode (Kalkan) signs attached with its rsa test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE openssl-noverify=verified python-rsa=ok"
+
+[[case]]
+id = "cms-verify-ncanode-rsa-detached"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "NCANode (Kalkan) signs detached with its rsa test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE openssl-noverify=verified python-rsa=ok"
+
+[[case]]
+id = "cms-verify-ncanode-rsa-tamper"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "one byte of the content of NCANode's rsa CMS altered: oncl must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs openssl-noverify=rejected python-rsa=rejected"
+
+[[case]]
+id = "cms-add-ours-then-ncanode-rsa"
+capability = "cms.sign.add"
+profile = "rsa"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "our RSA CMS gets NCANode's rsa signature through /cms/sign/add; both verify"
+expected = "crypto=ok ours-signers=2 ours=sig=Passed/chain=Failed/validity=Failed | sig=Passed/chain=Passed/validity=Passed ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/OUT_OF_BOUNDS_NO_POE python-rsa=ok+ok"
+
+[[case]]
+id = "cms-add-openssl-then-ours-rsa"
+capability = "cms.sign.add"
+profile = "rsa"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "OpenSSL's RSA CMS (trusted) gets our rsa signature through oncl sign --add; we and NCANode verify both"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE python-rsa=ok+ok"
+
+[[case]]
+id = "cms-extract-rsa"
+capability = "cms.extract"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "content extraction from our rsa CMS: oncl, NCANode and OpenSSL return the original"
+expected = "ours=bytes-equal ncanode=bytes-equal openssl=bytes-equal"
+
+[[case]]
+id = "cms-cades-rsa-t"
+capability = "cms.levels"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl signs CAdES-T with rsa (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T evidence=certs>=1 revocation>=0 unsigned=signature_time_stamp_token python-rsa=ok+token openssl=verified"
+
+[[case]]
+id = "cms-cades-rsa-lt"
+capability = "cms.levels"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl signs CAdES-LT with rsa (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token python-rsa=ok+token openssl=verified"
+
+[[case]]
+id = "cms-cades-rsa-lta"
+capability = "cms.levels"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl signs CAdES-LTA with rsa (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token+0.4.0.1733.2.4 python-rsa=ok+token openssl=verified"
+
+[[case]]
+id = "cms-verify-ncanode-gost2015-attached"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs attached with its gost2015 test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2015-detached"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs detached with its gost2015 test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2015-tamper"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "one byte of the content of NCANode's gost2015 CMS altered: oncl must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-add-ours-then-ncanode-gost2015"
+capability = "cms.sign.add"
+profile = "gost2015"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "our RSA CMS gets NCANode's gost2015 signature through /cms/sign/add; both verify"
+expected = "crypto=ok ours-signers=2 ours=sig=Passed/chain=Failed/validity=Failed | sig=Passed/chain=Passed/validity=Passed ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/OUT_OF_BOUNDS_NO_POE python-rsa=ok+skipped(non-RSA key (1.2.398.3.10.1.1.2.2))"
+
+[[case]]
+id = "cms-add-openssl-then-ours-gost2015"
+capability = "cms.sign.add"
+profile = "gost2015"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "OpenSSL's RSA CMS (trusted) gets our gost2015 signature through oncl sign --add; we and NCANode verify both"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE python-rsa=ok+skipped(non-RSA key (1.2.398.3.10.1.1.2.2))"
+
+[[case]]
+id = "cms-extract-gost2015"
+capability = "cms.extract"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "content extraction from our gost2015 CMS: oncl, NCANode and OpenSSL return the original"
+expected = "ours=bytes-equal ncanode=bytes-equal"
+
+[[case]]
+id = "cms-cades-gost2015-t"
+capability = "cms.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-T with gost2015 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T evidence=certs>=1 revocation>=0 unsigned=signature_time_stamp_token"
+
+[[case]]
+id = "cms-cades-gost2015-lt"
+capability = "cms.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-LT with gost2015 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token"
+
+[[case]]
+id = "cms-cades-gost2015-lta"
+capability = "cms.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-LTA with gost2015 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token+0.4.0.1733.2.4"
+
+[[case]]
+id = "cms-verify-ncanode-gost2004-attached"
+capability = "cms.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs attached with its gost2004 test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2004-detached"
+capability = "cms.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs detached with its gost2004 test key; oncl verifies the signature value and digests (the certificate is expired and untrusted by design)"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2004-tamper"
+capability = "cms.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "one byte of the content of NCANode's gost2004 CMS altered: oncl must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP400/content-hash-differs"
+
+[[case]]
+id = "cms-add-ours-then-ncanode-gost2004"
+capability = "cms.sign.add"
+profile = "gost2004"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "our RSA CMS gets NCANode's gost2004 signature through /cms/sign/add; both verify"
+expected = "crypto=ok ours-signers=2 ours=sig=Passed/chain=Failed/validity=Failed | sig=Passed/chain=Passed/validity=Passed ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/OUT_OF_BOUNDS_NO_POE python-rsa=ok+skipped(non-RSA key (1.2.398.3.10.1.1.1.1))"
+
+[[case]]
+id = "cms-add-openssl-then-ours-gost2004"
+capability = "cms.sign.add"
+profile = "gost2004"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "OpenSSL's RSA CMS (trusted) gets our gost2004 signature through oncl sign --add; we and NCANode verify both"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE python-rsa=ok+skipped(non-RSA key (1.2.398.3.10.1.1.1.1))"
+
+[[case]]
+id = "cms-extract-gost2004"
+capability = "cms.extract"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "content extraction from our gost2004 CMS: oncl, NCANode and OpenSSL return the original"
+expected = "ours=bytes-equal ncanode=bytes-equal"
+
+[[case]]
+id = "cms-cades-gost2004-t"
+capability = "cms.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-T with gost2004 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T evidence=certs>=1 revocation>=0 unsigned=signature_time_stamp_token"
+
+[[case]]
+id = "cms-cades-gost2004-lt"
+capability = "cms.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-LT with gost2004 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token"
+
+[[case]]
+id = "cms-cades-gost2004-lta"
+capability = "cms.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs CAdES-LTA with gost2004 (loopback TSA, OCSP evidence); verified at that level by us, NCANode and the independent oracles"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA evidence=certs>=3 revocation>=2 unsigned=signature_time_stamp_token+0.4.0.1733.2.4"
+
+[[case]]
+id = "cms-verify-openssl-rsa-attached"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["openssl"]
+what = "OpenSSL signs attached with our RSA key; oncl verifies it strictly (Valid)"
+expected = "crypto=ok ours=Valid openssl=signed+verified"
+
+[[case]]
+id = "cms-verify-openssl-rsa-detached"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["openssl"]
+what = "OpenSSL signs detached with our RSA key; oncl verifies it strictly (Valid)"
+expected = "crypto=ok ours=Valid openssl=signed+verified"
+
+[[case]]
+id = "cms-verify-openssl-rsa-tamper"
+capability = "cms.verify"
+profile = "rsa"
+oracles = ["openssl"]
+what = "content of OpenSSL's CMS altered: oncl and OpenSSL must reject"
+expected = "crypto=failure ours=Invalid/Failed openssl=rejected"
+
+[[case]]
+id = "cms-add-ncanode-untrusted-refused"
+capability = "cms.sign.add"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl sign --add onto NCANode's CMS (expired test key, untrusted CA) is refused before any key is used: the design requires existing signatures to validate"
+expected = "ours=refused/InvalidInput key=not-applied published=nothing"
+
+[[case]]
+id = "cms-extend-ours-rsa"
+capability = "cms.extend"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "cryptography", "asn1crypto"]
+what = "oncl extend B->T->LT->LTA of our rsa CAdES (detached); verified at each level by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=T:INDETERMINATE/CHAIN_INCOMPLETE LT:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE python-rsa=ok+token openssl=verified"
+
+[[case]]
+id = "cms-verify-ncanode-rsa-t"
+capability = "cms.levels"
+profile = "rsa"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "NCANode signs CAdES-T with its rsa test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=T python-rsa=ok"
+
+[[case]]
+id = "cms-verify-ncanode-rsa-lt"
+capability = "cms.levels"
+profile = "rsa"
+oracles = ["ncanode", "cryptography", "asn1crypto"]
+what = "NCANode signs CAdES-LT with its rsa test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=LT python-rsa=ok"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-rsa-t"
+capability = "cms.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa CAdES-B to T through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "cms-extend-ncanode-rsa-lt"
+capability = "cms.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa CAdES-B to LT through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=LT"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-rsa-lta"
+capability = "cms.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa CAdES-B to LTA through /cms/extend; oncl verifies at that level"
+expected = "ncanode=HTTP500"
+
+[[case]]
+id = "cms-extend-ours-gost2015"
+capability = "cms.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl extend B->T->LT->LTA of our gost2015 CAdES (detached); verified at each level by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=T:INDETERMINATE/CHAIN_INCOMPLETE LT:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2015-t"
+capability = "cms.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode signs CAdES-T with its gost2015 test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=T"
+
+[[case]]
+id = "cms-verify-ncanode-gost2015-lt"
+capability = "cms.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode signs CAdES-LT with its gost2015 test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=LT"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-gost2015-t"
+capability = "cms.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 CAdES-B to T through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "cms-extend-ncanode-gost2015-lt"
+capability = "cms.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 CAdES-B to LT through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=LT"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-gost2015-lta"
+capability = "cms.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 CAdES-B to LTA through /cms/extend; oncl verifies at that level"
+expected = "ncanode=HTTP500"
+
+[[case]]
+id = "cms-extend-ours-gost2004"
+capability = "cms.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl extend B->T->LT->LTA of our gost2004 CAdES (detached); verified at each level by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=T:INDETERMINATE/CHAIN_INCOMPLETE LT:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "cms-verify-ncanode-gost2004-t"
+capability = "cms.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode signs CAdES-T with its gost2004 test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=T"
+
+[[case]]
+id = "cms-verify-ncanode-gost2004-lt"
+capability = "cms.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode signs CAdES-LT with its gost2004 test key (NCA timestamp); oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=LT"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-gost2004-t"
+capability = "cms.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 CAdES-B to T through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "cms-extend-ncanode-gost2004-lt"
+capability = "cms.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 CAdES-B to LT through /cms/extend; oncl verifies at that level"
+expected = "ours=Invalid/sig=Passed/chain=Passed/validity=Passed/ts=Failed/level=none ncanode-verify=INDETERMINATE/CHAIN_INCOMPLETE/level=LT"
+defect = "D1"
+
+[[case]]
+id = "cms-extend-ncanode-gost2004-lta"
+capability = "cms.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 CAdES-B to LTA through /cms/extend; oncl verifies at that level"
+expected = "ncanode=HTTP500"
+
+[[case]]
+id = "cms-verify-fixture-gost2015-b"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's CAdES-B fixture of NCANode's repository (GOST 2015): oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=NotApplicable/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B"
+
+[[case]]
+id = "cms-verify-fixture-gost2015-t"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's CAdES-T fixture of NCANode's repository (GOST 2015): oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=Failed/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "cms-verify-fixture-gost2015-lt"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's CAdES-LT fixture of NCANode's repository (GOST 2015): oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=Failed/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT"
+
+[[case]]
+id = "cms-verify-fixture-gost2015-lta"
+capability = "cms.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's CAdES-LTA fixture of NCANode's repository (GOST 2015): oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=Failed/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
+
+# ---- production defects exposed by the matrix -----------------------------------------
+
+[[defect]]
+id = "D1"
+title = "oncl refuses every CAdES-LT NCANode makes: MemoryLimit"
+reproduction = "NCANode `POST /cms/sign` with cadesLevel LT (withTsp true, any test key) or `POST /cms/extend` to LT of our CAdES-B; then `oncl verify --profile cades-lt --input <that CMS>` (also `--profile cms`, `cades-b`, `oncl inspect --profile cms`) with or without --offline / --configuration-bytes"
+observed = "exit 1, `oncl: MemoryLimit; applied=NotApplied`, no report. The CMS is 20.45 MB: Kalkan embeds the complete NCA CRL (20.45 MB) in the LT; the default metadata quota (oncl-pki ResourceLimits.metadata_bytes = 64 MiB, the container is charged a multiple of its size) does not admit it and the CLI has no option to raise it"
+expected = "signature Passed (NCANode, pyca/asn1crypto and OpenSSL agree the signature value and digests are valid), certificate/chain/timestamp graded by the host trust: the same report shape as for the CAdES-T of the same key"
+
+[[case]]
+id = "xml-sign-rsa-document"
+capability = "xml.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl signs the whole document (enveloped, exclusive C14N) with rsa; NCANode (and lxml + cryptography for RSA) verify"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE lxml-rsa=ok/root"
+
+[[case]]
+id = "xml-sign-rsa-element"
+capability = "xml.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl signs the element `payload` by Id with rsa; NCANode verifies (with the internal DTD subset its Id handling needs)"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE lxml-rsa=ok/data"
+
+[[case]]
+id = "xml-tamper-rsa-content"
+capability = "xml.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "a character of the signed content altered in our rsa signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE lxml-rsa=rejected"
+
+[[case]]
+id = "xml-tamper-rsa-digest"
+capability = "xml.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "a character of the DigestValue altered in our rsa signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE lxml-rsa=rejected"
+
+[[case]]
+id = "xml-tamper-rsa-signature"
+capability = "xml.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "a character of the SignatureValue altered in our rsa signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE lxml-rsa=rejected"
+
+[[case]]
+id = "xml-add-ours-rsa"
+capability = "xml.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "a second signature (rsa) added with oncl sign --add to our RSA signature of the element payload: we verify both, NCANode counts two signers and grades the first"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=signers=2 first=INDETERMINATE/CHAIN_INCOMPLETE lxml-rsa=ok+ok"
+
+[[case]]
+id = "xml-verify-ncanode-rsa-document"
+capability = "xml.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "NCANode (Kalkan) signs the document with its rsa test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE lxml-rsa=ok"
+
+[[case]]
+id = "xml-verify-ncanode-rsa-element"
+capability = "xml.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "NCANode (Kalkan) signs the element with its rsa test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE lxml-rsa=ok"
+
+[[case]]
+id = "xades-sign-rsa-b"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl makes XAdES-B with rsa; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B xades-structure=certdigest-ok timestamps=0 certs=0 ocsp=0 archive=0 lxml-rsa=ok"
+
+[[case]]
+id = "xades-sign-rsa-t"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl makes XAdES-T with rsa; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T xades-structure=certdigest-ok timestamps=1 certs=0 ocsp=0 archive=0 lxml-rsa=ok"
+
+[[case]]
+id = "xades-sign-rsa-lt"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl makes XAdES-LT with rsa; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "(desired grade after the fix of D4; the row fails until then)"
+defect = "D4"
+
+[[case]]
+id = "xades-sign-rsa-lta"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl makes XAdES-LTA with rsa; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA xades-structure=certdigest-ok timestamps=1 certs=0 ocsp=2 archive=1 lxml-rsa=ok"
+
+[[case]]
+id = "xades-verify-ncanode-rsa-b"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-B with its rsa test key; oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=NotApplicable/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=B"
+
+[[case]]
+id = "xades-verify-ncanode-rsa-t"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-T with its rsa test key; oncl verifies at that level"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed/ts=Failed/level=none ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE/level=T"
+
+[[case]]
+id = "xades-verify-ncanode-rsa-lt"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-LT with its rsa test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "xml-sign-gost2015-document"
+capability = "xml.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs the whole document (enveloped, exclusive C14N) with gost2015; NCANode (and lxml + cryptography for RSA) verify"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-sign-gost2015-element"
+capability = "xml.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs the element `payload` by Id with gost2015; NCANode verifies (with the internal DTD subset its Id handling needs)"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-tamper-gost2015-content"
+capability = "xml.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "a character of the signed content altered in our gost2015 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-tamper-gost2015-digest"
+capability = "xml.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "a character of the DigestValue altered in our gost2015 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-tamper-gost2015-signature"
+capability = "xml.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "a character of the SignatureValue altered in our gost2015 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-add-ours-gost2015"
+capability = "xml.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "a second signature (gost2015) added with oncl sign --add to our RSA signature of the element payload: we verify both, NCANode counts two signers and grades the first"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=signers=2 first=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-verify-ncanode-gost2015-document"
+capability = "xml.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs the document with its gost2015 test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "xml-verify-ncanode-gost2015-element"
+capability = "xml.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs the element with its gost2015 test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "xades-sign-gost2015-b"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-B with gost2015; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B"
+
+[[case]]
+id = "xades-sign-gost2015-t"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-T with gost2015; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "xades-sign-gost2015-lt"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-LT with gost2015; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "(desired grade after the fix of D4; the row fails until then)"
+defect = "D4"
+
+[[case]]
+id = "xades-sign-gost2015-lta"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-LTA with gost2015; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
+
+[[case]]
+id = "xades-verify-ncanode-gost2015-b"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-B with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-ncanode-gost2015-t"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-T with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-ncanode-gost2015-lt"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-LT with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "xml-sign-gost2004-document"
+capability = "xml.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs the whole document (enveloped, exclusive C14N) with gost2004; NCANode (and lxml + cryptography for RSA) verify"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-sign-gost2004-element"
+capability = "xml.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs the element `payload` by Id with gost2004; NCANode verifies (with the internal DTD subset its Id handling needs)"
+expected = "crypto=ok ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-tamper-gost2004-content"
+capability = "xml.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "a character of the signed content altered in our gost2004 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-tamper-gost2004-digest"
+capability = "xml.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "a character of the DigestValue altered in our gost2004 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-tamper-gost2004-signature"
+capability = "xml.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "a character of the SignatureValue altered in our gost2004 signature: every judge must reject"
+expected = "crypto=failure ours=Invalid ncanode=INVALID/SIG_CRYPTO_FAILURE"
+
+[[case]]
+id = "xml-add-ours-gost2004"
+capability = "xml.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "a second signature (gost2004) added with oncl sign --add to our RSA signature of the element payload: we verify both, NCANode counts two signers and grades the first"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=signers=2 first=INDETERMINATE/CHAIN_INCOMPLETE"
+
+[[case]]
+id = "xml-verify-ncanode-gost2004-document"
+capability = "xml.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs the document with its gost2004 test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "xml-verify-ncanode-gost2004-element"
+capability = "xml.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode (Kalkan) signs the element with its gost2004 test key; oncl verifies it under the `xml` and `xml-kalkan` profiles"
+expected = "crypto=ok ours=xml:Invalid/sig=Passed/chain=Failed/validity=Failed xml-kalkan:Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=INDETERMINATE/OUT_OF_BOUNDS_NO_POE"
+
+[[case]]
+id = "xades-sign-gost2004-b"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-B with gost2004; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B"
+
+[[case]]
+id = "xades-sign-gost2004-t"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-T with gost2004; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T"
+
+[[case]]
+id = "xades-sign-gost2004-lt"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-LT with gost2004; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "(desired grade after the fix of D4; the row fails until then)"
+defect = "D4"
+
+[[case]]
+id = "xades-sign-gost2004-lta"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl makes XAdES-LTA with gost2004; verified at that level by us, NCANode (level and grade) and the independent structure oracle"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
+
+[[case]]
+id = "xades-verify-ncanode-gost2004-b"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-B with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-ncanode-gost2004-t"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-T with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-ncanode-gost2004-lt"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode makes XAdES-LT with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "xades-verify-fixture-gost2015-b"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's XAdES-B fixture of NCANode's repository (GOST 2015): oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-fixture-gost2015-t"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's XAdES-T fixture of NCANode's repository (GOST 2015): oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-fixture-gost2015-lt"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's XAdES-LT fixture of NCANode's repository (GOST 2015): oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xades-verify-fixture-gost2015-lta"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "Kalkan's XAdES-LTA fixture of NCANode's repository (GOST 2015): oncl verifies at that level"
+expected = "(desired grade after the fix of D3; the row fails until then)"
+defect = "D3"
+
+[[case]]
+id = "xml-add-whole-document-refused"
+capability = "xml.sign"
+profile = "rsa"
+oracles = ["lxml", "cryptography"]
+what = "oncl sign --add onto a document whose first signature covers the whole document is refused (it would invalidate it): nothing is published and the first signature still verifies in lxml"
+expected = "(desired grade after the fix of D2; the row fails until then)"
+defect = "D2"
+
+[[case]]
+id = "xades-extend-ours-rsa"
+capability = "xades.levels"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl extend --profile xml of our rsa XAdES-T to LT and LTA; each step verified at its level by us and NCANode, structure by the independent oracle"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT xades-structure=certdigest-ok timestamps=1 certs=2 ocsp=4 archive=0 lxml-rsa=ok ;; crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA xades-structure=certdigest-ok timestamps=1 certs=2 ocsp=4 archive=1 lxml-rsa=ok"
+
+[[case]]
+id = "xades-extend-ours-gost2015"
+capability = "xades.levels"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl extend --profile xml of our gost2015 XAdES-T to LT and LTA; each step verified at its level by us and NCANode, structure by the independent oracle"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT ;; crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
+
+[[case]]
+id = "xades-extend-ours-gost2004"
+capability = "xades.levels"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl extend --profile xml of our gost2004 XAdES-T to LT and LTA; each step verified at its level by us and NCANode, structure by the independent oracle"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT ;; crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
+
+[[case]]
+id = "pdf-sign-rsa"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl signs sample.pdf (adbe.pkcs7.detached) with rsa; NCANode, the ByteRange decomposition (hashlib over the ranges + CMS) and (RSA) pyHanko verify"
+expected = "crypto=ok ours=Valid/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=adbe.pkcs7.detached pyhanko=trusted dss=false doc-timestamps=0"
+
+[[case]]
+id = "pdf-tamper-rsa"
+capability = "pdf.verify"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "one byte of the signed ByteRange altered in our rsa PDF: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=VerifyError/content-hash-differs byterange=digest-mismatch pyhanko=not-intact"
+
+[[case]]
+id = "pdf-second-signature-rsa"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "a second signature (rsa) in an incremental revision over our RSA-signed PDF: both verify"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE byterange=2x digest=ok pyhanko=2x trusted"
+
+[[case]]
+id = "pades-sign-rsa-b"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl signs PAdES-B with rsa; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=ETSI.CAdES.detached pyhanko=trusted dss=false doc-timestamps=0"
+
+[[case]]
+id = "pades-sign-rsa-t"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl signs PAdES-T with rsa; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T byterange=1x digest=ok subfilter=ETSI.CAdES.detached pyhanko=trusted dss=false doc-timestamps=0"
+
+[[case]]
+id = "pades-sign-rsa-lt"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl signs PAdES-LT with rsa; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT byterange=1x digest=ok subfilter=ETSI.CAdES.detached pyhanko=trusted dss=true doc-timestamps=0"
+
+[[case]]
+id = "pades-sign-rsa-lta"
+capability = "pdf.sign"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl signs PAdES-LTA with rsa; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA byterange=2x digest=ok subfilter=ETSI.CAdES.detached pyhanko=trusted dss=true doc-timestamps=1"
+
+[[case]]
+id = "pades-extend-ours-rsa"
+capability = "pdf.extend"
+profile = "rsa"
+oracles = ["ncanode", "pyhanko", "asn1crypto", "cryptography"]
+what = "oncl extend --profile pdf of our rsa PAdES-B to T, LT and LTA; each step verified by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE byterange=3x digest=ok pyhanko=trusted dss-certs=3 doc-timestamps=2"
+
+[[case]]
+id = "pdf-verify-ncanode-rsa-b"
+capability = "pdf.verify"
+profile = "rsa"
+oracles = ["ncanode", "asn1crypto", "pyhanko"]
+what = "NCANode signs PAdES-B with its rsa test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-rsa-t"
+capability = "pdf.verify"
+profile = "rsa"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-T with its rsa test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-rsa-lt"
+capability = "pdf.verify"
+profile = "rsa"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-LT with its rsa test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "pdf-extend-ncanode-rsa-t"
+capability = "pdf.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa PAdES-B to T through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-rsa-lt"
+capability = "pdf.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa PAdES-B to LT through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-rsa-lta"
+capability = "pdf.extend"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode extends our rsa PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-sign-gost2015"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs sample.pdf (adbe.pkcs7.detached) with gost2015; NCANode, the ByteRange decomposition (hashlib over the ranges + CMS) and (RSA) pyHanko verify"
+expected = "crypto=ok ours=Valid/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=adbe.pkcs7.detached"
+
+[[case]]
+id = "pdf-tamper-gost2015"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "one byte of the signed ByteRange altered in our gost2015 PDF: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=VerifyError/content-hash-differs byterange=digest-mismatch"
+
+[[case]]
+id = "pdf-second-signature-gost2015"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "a second signature (gost2015) in an incremental revision over our RSA-signed PDF: both verify"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE byterange=2x digest=ok"
+
+[[case]]
+id = "pades-sign-gost2015-b"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-B with gost2015; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2015-t"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-T with gost2015; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2015-lt"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-LT with gost2015; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2015-lta"
+capability = "pdf.sign"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-LTA with gost2015; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA byterange=2x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-extend-ours-gost2015"
+capability = "pdf.extend"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl extend --profile pdf of our gost2015 PAdES-B to T, LT and LTA; each step verified by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE byterange=3x digest=ok"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2015-b"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-B with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2015-t"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-T with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2015-lt"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-LT with its gost2015 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2015-t"
+capability = "pdf.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 PAdES-B to T through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2015-lt"
+capability = "pdf.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 PAdES-B to LT through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2015-lta"
+capability = "pdf.extend"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2015 PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-sign-gost2004"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs sample.pdf (adbe.pkcs7.detached) with gost2004; NCANode, the ByteRange decomposition (hashlib over the ranges + CMS) and (RSA) pyHanko verify"
+expected = "crypto=ok ours=Valid/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=adbe.pkcs7.detached"
+
+[[case]]
+id = "pdf-tamper-gost2004"
+capability = "pdf.verify"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "one byte of the signed ByteRange altered in our gost2004 PDF: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=VerifyError/content-hash-differs byterange=digest-undetermined"
+
+[[case]]
+id = "pdf-second-signature-gost2004"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "a second signature (gost2004) in an incremental revision over our RSA-signed PDF: both verify"
+expected = "crypto=ok ours-signers=2 ours=Valid ncanode=INDETERMINATE/CHAIN_INCOMPLETE+INDETERMINATE/CHAIN_INCOMPLETE byterange=2x digest=ok"
+
+[[case]]
+id = "pades-sign-gost2004-b"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-B with gost2004; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=B ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=B byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2004-t"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-T with gost2004; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=T ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=T byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2004-lt"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-LT with gost2004; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lt ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LT byterange=1x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-sign-gost2004-lta"
+capability = "pdf.sign"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl signs PAdES-LTA with gost2004; verified at that level by us, NCANode, the ByteRange decomposition and (RSA) pyHanko"
+expected = "crypto=ok ours=Valid/level=Lta ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA byterange=2x digest=ok subfilter=ETSI.CAdES.detached"
+
+[[case]]
+id = "pades-extend-ours-gost2004"
+capability = "pdf.extend"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "oncl extend --profile pdf of our gost2004 PAdES-B to T, LT and LTA; each step verified by us and NCANode, the last by the independent oracles"
+expected = "crypto=ok ours=Valid@T+Lt+Lta ncanode=LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE LTA:INDETERMINATE/CHAIN_INCOMPLETE byterange=3x digest=ok"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2004-b"
+capability = "pdf.verify"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-B with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2004-t"
+capability = "pdf.verify"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-T with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-ncanode-gost2004-lt"
+capability = "pdf.verify"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "NCANode signs PAdES-LT with its gost2004 test key; oncl verifies at that level"
+expected = "(desired grade after the fix of D1; the row fails until then)"
+defect = "D1"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2004-t"
+capability = "pdf.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 PAdES-B to T through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2004-lt"
+capability = "pdf.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 PAdES-B to LT through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-extend-ncanode-gost2004-lta"
+capability = "pdf.extend"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode extends our gost2004 PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
+expected = "ncanode=HTTP400"
+
+[[case]]
+id = "pdf-verify-fixture-b"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "Kalkan's PAdES-B fixture of NCANode's repository (GOST 2015): oncl verifies at that level, the ByteRange decomposition agrees"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-fixture-t"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "Kalkan's PAdES-T fixture of NCANode's repository (GOST 2015): oncl verifies at that level, the ByteRange decomposition agrees"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-fixture-lt"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "Kalkan's PAdES-LT fixture of NCANode's repository (GOST 2015): oncl verifies at that level, the ByteRange decomposition agrees"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[case]]
+id = "pdf-verify-fixture-lta"
+capability = "pdf.verify"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "Kalkan's PAdES-LTA fixture of NCANode's repository (GOST 2015): oncl verifies at that level, the ByteRange decomposition agrees"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+defect = "D5"
+
+[[defect]]
+id = "D2"
+title = "oncl sign --profile xml --add over a whole-document signature fails only after the key was used"
+reproduction = "oncl sign --profile xml --input doc.xml --output f.xml ...; oncl sign --profile xml --add --input f.xml --output t.xml ... (same key, strict loopback PKI)"
+observed = "exit 1, `oncl: InvalidInput; applied=Applied`: the private key signed, nothing was published. The refusal (a whole-document reference cannot survive an Add: oncl-xml sign.rs doc comment) depends only on the existing signature's reference and could precede the key use"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+
+[[defect]]
+id = "D3"
+title = "oncl refuses NCANode's GOST XAdES (InvalidInput), RSA XAdES verifies"
+reproduction = "oncl verify --profile xades-b|xades-t|xades-lt|xades-lta (also xml, xml-kalkan) --input target/fixtures/ncanode/xades-test-signed-b.xml (any level of that fixture) or NCANode /xml/sign with xadesLevel B and a GOST 2015 or GOST 2004 test key; deleting the ds:Object makes the `xml` profile accept the structure"
+observed = "exit 1, `oncl: InvalidInput; applied=NotApplied`, no report. The same request with the RSA test key verifies (signature Passed, level B/T)"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+
+[[defect]]
+id = "D4"
+title = "oncl sign --profile xades-lt: NCANode reads our XAdES-LT as T"
+reproduction = "oncl sign --profile xades-lt --tsa-url ... --tsa-policy 1.2.398.3.3.2.6.2 --signature-id sig-1 (any key), then NCANode POST /xml/verify of the result"
+observed = "oncl reports level Lt; NCANode adesLevel T. The document carries 1 signature timestamp and 2 OCSP values but no CertificateValues (certs=0); the same document extended with `oncl extend --profile xml --level lt` and --evidence-certificate (certs=2, ocsp=4) is read as LT by NCANode"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+
+[[defect]]
+id = "D5"
+title = "oncl verify --profile pades-* reports Signature(Malformed) for Kalkan's PAdES"
+reproduction = "oncl verify --profile pades-b --input target/fixtures/ncanode/sample-signed-b.pdf (or any PDF from NCANode /pdf/sign); compare --profile pdf and the independent decomposition (oracle.py pdf-byterange: ByteRange digest and, for RSA, the signature value verify; pyHanko: intact and valid)"
+observed = "signature=Failed, reasons include Signature(Malformed) under pades-*; under `pdf` the same file gives signature=Passed. The CMS is ETSI.CAdES.detached with signed attributes contentType, signingTime, signingCertificateV2, messageDigest (no CMSAlgorithmProtection)"
+expected = "(desired grade after the fix of D5; the row fails until then)"
+
+# ---- capabilities with no cases yet (the matrix is INCOMPLETE until this list is empty) ----
+
+[[pending]]
+id = "wsse"
+title = "WS-Security sign/verify (SOAP 1.1/1.2, NCANode key identifier)"
+routes = ["/wsse/sign", "/wsse/verify"]
+missing = "cases not written (oncl sign|verify --profile wsse vs NCANode /wsse/*, the repository's wsse-ncanode.xml and the lxml oracle)"
+
+[[pending]]
+id = "jose"
+title = "JWS sign/add/verify and JWT encode/decode"
+routes = ["/jws/sign", "/jws/sign/add", "/jws/verify", "/jwt/decode", "/jwt/encode"]
+missing = "cases not written. Known from probing: NCANode names its GOST algorithms GG2015/GG2004 and rejects ECGOST3410-2015-512 (HTTP 400 `Unsupported algorithm`), oncl supports RS256 and ECGOST3410-2015-512 only: RS256 can be judged by OpenSSL and NCANode, GOST JOSE has no external verifier for our algorithm name"
+
+[[pending]]
+id = "x509"
+title = "X.509 info and raw signature sign/verify"
+routes = ["/x509/info", "/x509/sign", "/x509/verify"]
+missing = "cases not written. Known from probing: NCANode /x509/verify folds the certificate chain into `valid` (always false for expired or untrusted certificates), so it cannot judge a raw signature; OpenSSL judges RSA, no external GOST raw verifier exists; oncl has `sign --profile raw` but no raw verify profile"
+
+[[pending]]
+id = "pkcs12"
+title = "PKCS#12 aliases and info"
+routes = ["/pkcs12/aliases", "/pkcs12/info"]
+missing = "cases not written (oncl inspect --profile container vs NCANode /pkcs12/* vs `openssl pkcs12 -legacy`; the existing interop-ncanode rows cover our key files only)"
+
+[[pending]]
+id = "extras"
+title = "our hash, RFC 3161 timestamp and plugin call cases"
+missing = "cases not written (hash vs OpenSSL/gostcrypto/Kalkan messageDigest; timestamp acquire/verify vs openssl ts -verify; plugin call output verified by OpenSSL)"
+
+[[pending]]
+id = "large"
+title = "decomposed independent checks of artifacts beyond 2/4/10 GiB"
+missing = "no run: the decomposition tools exist (oracle.py pdf-byterange streams the ranges; `openssl cms -verify -content` streams detached CMS) but no multi-GiB artifact was produced or judged; V01's generator is in another worktree and is not merged"
+
+[[excluded]]
+id = "envelope"
+title = "CMS encryption/decryption (envelope), RSA and KZ GOST profiles"
+reason = "G01/G02 (the KZ GOST encryption backend) is the one external blocker of the platform: no encrypt/decrypt implementation exists in oncl, so there is nothing to judge; no RSA-only substitute is claimed"

@@ -98,6 +98,51 @@ const REMOTE_FILES: &[RemoteFile] = &[
         path: "src/test/groovy/kz/ncanode/unit/service/WsseServiceTest.groovy",
         sha256: "f8bf7b5982c6777938c91b2904fb573913e788656c30527a7d91715c359a3d59",
     },
+    // The OpenAPI of the pinned commit: `platform-interop` checks its routes against
+    // `fixtures/platform/coverage.toml`.
+    RemoteFile {
+        path: "openapi.yml",
+        sha256: "43fcf7bf3a46ca47bdaf38c73f7b5af588654ae016baf7f5f0a42c90bc95ee3c",
+    },
+    // CAdES-T/LT/LTA by Kalkan (GOST 2015), the artifacts our verification is judged on.
+    RemoteFile {
+        path: "src/test/resources/cades/cades-test-signed-t.p7s",
+        sha256: "972773888ff1c04aa58649a2dafd2db9d4993a361e9380de0a24acae55a801a4",
+    },
+    RemoteFile {
+        path: "src/test/resources/cades/cades-test-signed-lt.p7s",
+        sha256: "92c112b5b4298bf0252c1b3aaffd6db1e4991734459fff45d1c097b323cb4e0c",
+    },
+    RemoteFile {
+        path: "src/test/resources/cades/cades-test-signed-lta.p7s",
+        sha256: "6801775a628759537c177ac162a1de44aeec68839d78fb69f7f4ece634eb1c78",
+    },
+    // PAdES by NCANode: the unsigned sample and its B/T/LT/LTA signed forms.
+    RemoteFile {
+        path: "src/test/resources/pades/sample.pdf",
+        sha256: "229defbb0cee6f02673a5cde290d0673e75a0dc31cec43989c8ab2a4eca7e1bb",
+    },
+    RemoteFile {
+        path: "src/test/resources/pades/sample-signed-b.pdf",
+        sha256: "8389345392ea09a9d7481ce39ee53e3f18c104ded3c124503e307da9735ddb31",
+    },
+    RemoteFile {
+        path: "src/test/resources/pades/sample-signed-t.pdf",
+        sha256: "544839f43eeb1562c17408807897ff0b22519ba8cc44d6ba0e9f4ff12a974199",
+    },
+    RemoteFile {
+        path: "src/test/resources/pades/sample-signed-lt.pdf",
+        sha256: "3884cb840f85e220358d32630a73b44f4bbfd8f26047fa4c798b99d32cc960c8",
+    },
+    RemoteFile {
+        path: "src/test/resources/pades/sample-signed-lta.pdf",
+        sha256: "310b83b7b23feeffbf01abbe80a888ce373c47d29a5a613d77c063254238bac0",
+    },
+    // The unsigned document of the XAdES fixtures.
+    RemoteFile {
+        path: "src/test/resources/xades/xades-test.xml",
+        sha256: "97d693f57af9ed23d1077f9475822571f9e60ae01068e0edaaca4d258620685e",
+    },
 ];
 
 /// The test keys. Despite its name, `KEY_INDIVIDUAL_VALID_SIGN_2004` is an RSA-2048 key
