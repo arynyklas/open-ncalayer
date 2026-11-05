@@ -1,0 +1,1764 @@
+//! The WinGet manifest generator against SYNTHETIC fixtures.
+//!
+//! Everything here is made by this test: the "release" is a JSON object shaped like GitHub's, the
+//! "installers" are minimal PE images carrying a payload in the format of the real entry, the
+//! "probe reports" are what a proof run would write, with made-up identity values. None of it
+//! is a published release and none of it was installed on a machine: no stable release of
+//! OpenNCALayer exists yet, and the machines of the matrix are an external prerequisite
+//! (`docs/dev/winget.md`). What is real here is the generator and checker code, the real
+//! downloader streaming from a local server, the pinned schemas and (in the ignored test) the
+//! real `winget validate`.
+
+mod upstream_common;
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use oncl_update::Version;
+use oncl_winget_setup::payload::{self, Arch as PayloadArch};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use upstream_common::{MockServer, Response};
+use xtask::upstream::http::Fetcher;
+use xtask::winget::download::{AssetError, AssetFetch, Downloaded, Https};
+use xtask::winget::ledger::{HashChanged, Ledger};
+use xtask::winget::manifest::{self, Mode};
+use xtask::winget::probe::ProbeError;
+use xtask::winget::release::ReleaseError;
+use xtask::winget::schema::{self, Kind};
+use xtask::winget::yaml;
+use xtask::winget::{Arch, Generated, Request, generate};
+
+/// An edit of a release object.
+type Mutation = Box<dyn Fn(&mut Value)>;
+/// An edit of a manifest text.
+type TextEdit = Box<dyn Fn(&str) -> String>;
+
+const VERSION: &str = "0.3.0";
+const PUBLISHED_AT: &str = "2026-11-09T10:00:00Z";
+const RECORDED_AT: &str = "2026-11-10T12:00:00Z";
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+const fn payload_arch(arch: Arch) -> PayloadArch {
+    match arch {
+        Arch::X64 => PayloadArch::X64,
+        Arch::X86 => PayloadArch::X86,
+    }
+}
+
+/// A PE image of one section; with `certificates` bytes of certificate table at its end.
+fn pe(arch: Arch, section: &[u8], certificates: Option<usize>) -> Vec<u8> {
+    let pe_at = 0x80usize;
+    let optional_size = 0xf0usize;
+    let headers = 0x200usize;
+    let machine: u16 = match arch {
+        Arch::X64 => 0x8664,
+        Arch::X86 => 0x014c,
+    };
+    let mut image = vec![0u8; headers];
+    image[..2].copy_from_slice(b"MZ");
+    image[0x3c..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+    image[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+    let coff = pe_at + 4;
+    image[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+    image[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes());
+    image[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
+    let optional = coff + 20;
+    image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+    image[optional + 60..optional + 64].copy_from_slice(&(headers as u32).to_le_bytes());
+    image[optional + 108..optional + 112].copy_from_slice(&16u32.to_le_bytes());
+    let table = optional + optional_size;
+    image[table + 16..table + 20].copy_from_slice(&(section.len() as u32).to_le_bytes());
+    image[table + 20..table + 24].copy_from_slice(&(headers as u32).to_le_bytes());
+    image.extend_from_slice(section);
+    if let Some(size) = certificates {
+        while !image.len().is_multiple_of(8) {
+            image.push(0);
+        }
+        let offset = image.len() as u32;
+        let entry = optional + 112 + 4 * 8;
+        image[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+        image[entry + 4..entry + 8].copy_from_slice(&(size as u32).to_le_bytes());
+        image.extend(std::iter::repeat_n(0xAB, size));
+    }
+    image
+}
+
+/// A synthetic installer entry: the unsigned entry with a payload of `version`, then (when
+/// `signed`) a certificate table written after it, as Authenticode does.
+fn installer(arch: Arch, version: &str, signed: bool) -> Vec<u8> {
+    let version = Version::parse(version).unwrap();
+    let image = pe(arch, &[1; 64], None);
+    let setup = pe(arch, &[7; 2048], None);
+    let mut entry = payload::append(&image, &setup, &version, payload_arch(arch)).unwrap();
+    if signed {
+        // The certificate table after the footer, its data directory pointing at it.
+        while !entry.len().is_multiple_of(8) {
+            entry.push(0);
+        }
+        let offset = entry.len() as u32;
+        let at = 0x80 + 4 + 20 + 112 + 4 * 8;
+        entry[at..at + 4].copy_from_slice(&offset.to_le_bytes());
+        entry[at + 4..at + 8].copy_from_slice(&64u32.to_le_bytes());
+        entry.extend(std::iter::repeat_n(0xCD, 64));
+    }
+    entry
+}
+
+fn asset_name(version: &str, arch: Arch) -> String {
+    format!("openncalayer-{version}-win-{arch}-winget-setup.exe")
+}
+
+fn asset_path(version: &str, arch: Arch) -> String {
+    format!(
+        "/arynyklas/open-ncalayer/releases/download/v{version}/{}",
+        asset_name(version, arch)
+    )
+}
+
+/// The published bytes of the synthetic release.
+struct Published {
+    x64: Vec<u8>,
+    x86: Vec<u8>,
+}
+
+impl Published {
+    fn new() -> Published {
+        Published {
+            x64: installer(Arch::X64, VERSION, true),
+            x86: installer(Arch::X86, VERSION, true),
+        }
+    }
+
+    fn bytes(&self, arch: Arch) -> &[u8] {
+        match arch {
+            Arch::X64 => &self.x64,
+            Arch::X86 => &self.x86,
+        }
+    }
+}
+
+/// A release object shaped like GitHub's; `mutate` changes it before it is serialized.
+fn release_value(published: &Published) -> Value {
+    let assets: Vec<Value> = [Arch::X64, Arch::X86]
+        .iter()
+        .map(|arch| {
+            let name = asset_name(VERSION, *arch);
+            json!({
+                "name": name,
+                "state": "uploaded",
+                "size": published.bytes(*arch).len(),
+                "digest": format!("sha256:{}", sha256(published.bytes(*arch))),
+                "browser_download_url": format!(
+                    "https://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{name}"
+                ),
+            })
+        })
+        .collect();
+    json!({
+        "tag_name": format!("v{VERSION}"),
+        "draft": false,
+        "prerelease": false,
+        "published_at": PUBLISHED_AT,
+        "assets": assets,
+    })
+}
+
+/// One cell of a synthetic probe set.
+fn cell(
+    published: &Published,
+    candidate_sha: &str,
+    arch: Arch,
+    windows: u32,
+    build: u32,
+    os_arch: Arch,
+    account: &str,
+) -> Value {
+    let step = |winget: i32| {
+        json!({
+            "winget_exit_code": winget,
+            "installer_exit_code": 0,
+            "postcondition_verified_after_exit": true,
+            "arp_display_version": VERSION,
+            "program_version": VERSION,
+        })
+    };
+    json!({
+        "package_version": VERSION,
+        "recorded_at": RECORDED_AT,
+        "installer": {
+            "asset_name": asset_name(VERSION, arch),
+            "url": format!(
+                "https://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{}",
+                asset_name(VERSION, arch)
+            ),
+            "arch": arch.to_string(),
+            "sha256": sha256(published.bytes(arch)),
+            "size": published.bytes(arch).len(),
+            "authenticode": {
+                "status": "valid",
+                "signer_subject": "CN=Synthetic Fixture Publisher",
+                "signer_thumbprint": "0123456789abcdef0123456789abcdef01234567",
+                "timestamped": true,
+            },
+        },
+        "environment": {
+            "windows": windows,
+            "build": build,
+            "os_arch": os_arch.to_string(),
+            "account": account,
+            "host": "vm",
+            "clean_image": true,
+            "profile_belongs_to_account_sid": true,
+            "winget_version": "synthetic",
+        },
+        "tested_switches": {
+            "winget_flags": ["--manifest", "--silent", "--accept-package-agreements"],
+            "silent_argv": ["--silent"],
+            "silent_with_progress_argv": ["--silent"],
+        },
+        "tested_manifest": {
+            "manifest_version": "1.12.0",
+            "installer_yaml_sha256": candidate_sha,
+        },
+        "identity": {
+            "arp_key_name": "SyntheticKey",
+            "display_name": "Synthetic Display Name",
+            "publisher": "Synthetic Publisher",
+            "display_version": VERSION,
+            "program_version": VERSION,
+            "package_manifest_version": VERSION,
+            "program_arch": arch.to_string(),
+            "install_location_in_account_profile": true,
+            "uninstall_runs_update_exe": true,
+        },
+        "prerequisite_free": {
+            "no_redistributable_on_image": true,
+            "installed_without_prerequisite_step": true,
+        },
+        "lifecycle": {
+            "install": step(0),
+            "upgrade": {
+                "from_version": "0.2.0",
+                "result": step(0),
+                "user_data_preserved": true,
+            },
+            "reinstall": step(0),
+            "uninstall": {
+                "winget_exit_code": 0,
+                "arp_entry_removed": true,
+                "install_directory_removed": true,
+            },
+            "self_update": {
+                "start_version": VERSION,
+                "arp_display_version": VERSION,
+                "program_version": VERSION,
+                "no_downgrade_loop": true,
+            },
+        },
+        "safety": {
+            "elevated": {
+                "exit_code": 8,
+                "nothing_written": true,
+                "other_credentials_install_refused": true,
+            },
+            "signing_hold": {
+                "busy_exit_code": 4,
+                "signature_completed_correctly": true,
+                "installation_unchanged": true,
+            },
+            "no_ca_trust_added": true,
+            "http_api_stayed_disabled": true,
+        },
+    })
+}
+
+/// The whole matrix: both installers, Windows 10 and 11, standard and admin accounts; the x86
+/// installer on a 32-bit Windows 10 and on 64-bit Windows 11.
+fn probe_value(published: &Published, candidate_sha: &str, origin: &str) -> Value {
+    let mut reports = Vec::new();
+    for account in ["standard", "admin_non_elevated"] {
+        for (arch, windows, build, os_arch) in [
+            (Arch::X64, 10, 19045, Arch::X64),
+            (Arch::X64, 11, 22631, Arch::X64),
+            (Arch::X86, 10, 19045, Arch::X86),
+            (Arch::X86, 11, 22631, Arch::X64),
+        ] {
+            reports.push(cell(
+                published,
+                candidate_sha,
+                arch,
+                windows,
+                build,
+                os_arch,
+                account,
+            ));
+        }
+    }
+    json!({ "report_format": 1, "origin": origin, "reports": reports })
+}
+
+/// A local server of the published files and the downloader that reaches it as if it were
+/// `https://github.com`.
+struct Rig {
+    _server: MockServer,
+    fetch: Mapped,
+    requests: std::sync::Arc<AtomicUsize>,
+}
+
+struct Mapped {
+    port: u16,
+    https: Https,
+    requests: std::sync::Arc<AtomicUsize>,
+}
+
+impl AssetFetch for Mapped {
+    fn fetch(&self, url: &str, limit: u64, dest: &Path) -> anyhow::Result<Downloaded> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let local = url
+            .strip_prefix("https://github.com")
+            .map(|rest| format!("http://127.0.0.1:{}{rest}", self.port))
+            .unwrap_or_else(|| panic!("{url} is not a github.com URL"));
+        self.https.fetch(&local, limit, dest)
+    }
+}
+
+impl Rig {
+    fn new(served: &[(String, Vec<u8>)]) -> Rig {
+        let server = MockServer::start();
+        for (path, bytes) in served {
+            server.route("GET", path, Response::ok(bytes.clone()));
+        }
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let fetch = Mapped {
+            port: server.port,
+            https: Https::with(Fetcher::for_tests()),
+            requests: requests.clone(),
+        };
+        Rig {
+            _server: server,
+            fetch,
+            requests,
+        }
+    }
+
+    fn of(published: &Published) -> Rig {
+        Rig::new(&[
+            (asset_path(VERSION, Arch::X64), published.x64.clone()),
+            (asset_path(VERSION, Arch::X86), published.x86.clone()),
+        ])
+    }
+
+    fn downloads(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+struct Run {
+    dir: tempfile::TempDir,
+}
+
+impl Run {
+    fn new() -> Run {
+        Run {
+            dir: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    fn out(&self) -> PathBuf {
+        self.dir.path().join("manifest")
+    }
+
+    fn evidence(&self) -> PathBuf {
+        self.dir.path().join("evidence.json")
+    }
+
+    fn generate(
+        &self,
+        rig: &Rig,
+        release: &Value,
+        probe: Option<&Value>,
+        ledger: &Ledger,
+        allow_synthetic: bool,
+    ) -> anyhow::Result<Generated> {
+        let release = release.to_string();
+        let probe = probe.map(Value::to_string);
+        generate(
+            &Request {
+                release_json: &release,
+                probe_json: probe.as_deref(),
+                ledger,
+                allow_synthetic,
+                out: &self.out(),
+                evidence: &self.evidence(),
+            },
+            &rig.fetch,
+        )
+    }
+}
+
+/// Runs the candidate stage and gives its `installer.yaml` hash, as a proof run's script would
+/// compute it over the file.
+fn candidate_sha(published: &Published) -> String {
+    let run = Run::new();
+    let rig = Rig::of(published);
+    let done = run
+        .generate(
+            &rig,
+            &release_value(published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .expect("the candidate of a good release");
+    let text = std::fs::read(run.out().join("arynyklas.OpenNCALayer.installer.yaml")).unwrap();
+    assert_eq!(done.evidence.candidate_installer_yaml_sha256, sha256(&text));
+    sha256(&text)
+}
+
+fn error_of<E: std::error::Error + Send + Sync + 'static>(result: anyhow::Result<Generated>) -> E {
+    match result {
+        Ok(_) => panic!("a manifest was made where it must be refused"),
+        Err(e) => e
+            .downcast::<E>()
+            .unwrap_or_else(|e| panic!("another error than expected: {e:#}")),
+    }
+}
+
+fn final_manifest(published: &Published) -> (Run, Generated) {
+    let candidate = candidate_sha(published);
+    let run = Run::new();
+    let rig = Rig::of(published);
+    let probe = probe_value(published, &candidate, "synthetic-fixture");
+    let done = run
+        .generate(
+            &rig,
+            &release_value(published),
+            Some(&probe),
+            &Ledger::default(),
+            true,
+        )
+        .expect("the manifest of a fully proven synthetic release");
+    (run, done)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The plan's named tests.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn prerelease_and_draft_rejected() {
+    let published = Published::new();
+    let cases: Vec<(&str, Mutation, ReleaseError)> = vec![
+        (
+            "a draft",
+            Box::new(|r| r["draft"] = json!(true)),
+            ReleaseError::Draft,
+        ),
+        (
+            "a pre-release flag on a stable tag",
+            Box::new(|r| r["prerelease"] = json!(true)),
+            ReleaseError::Prerelease,
+        ),
+        (
+            "an alpha tag with the flag cleared",
+            Box::new(|r| r["tag_name"] = json!("v0.3.0-alpha.1")),
+            ReleaseError::TagNotStable("v0.3.0-alpha.1".to_owned()),
+        ),
+        (
+            "a beta tag",
+            Box::new(|r| r["tag_name"] = json!("v0.3.0-beta.2")),
+            ReleaseError::TagNotStable("v0.3.0-beta.2".to_owned()),
+        ),
+        (
+            "a tag with build metadata",
+            Box::new(|r| r["tag_name"] = json!("v0.3.0+build.5")),
+            ReleaseError::TagNotStable("v0.3.0+build.5".to_owned()),
+        ),
+        (
+            "a branch name for a tag",
+            Box::new(|r| r["tag_name"] = json!("latest")),
+            ReleaseError::TagNotStable("latest".to_owned()),
+        ),
+        (
+            "an unpublished release",
+            Box::new(|r| r["published_at"] = Value::Null),
+            ReleaseError::NotPublished,
+        ),
+    ];
+    for (what, mutate, expected) in cases {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut release = release_value(&published);
+        mutate(&mut release);
+        let error =
+            error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert_eq!(error, expected, "{what}");
+        // A refused release downloads nothing and leaves nothing.
+        assert_eq!(
+            rig.downloads(),
+            0,
+            "{what}: a refused release was downloaded"
+        );
+        assert!(!run.out().exists(), "{what}: a manifest directory exists");
+        assert!(!run.evidence().exists(), "{what}: evidence exists");
+    }
+}
+
+#[test]
+fn mutable_latest_urls_and_foreign_assets_are_rejected_before_any_download() {
+    let published = Published::new();
+    let latest = format!(
+        "https://github.com/arynyklas/open-ncalayer/releases/latest/download/{}",
+        asset_name(VERSION, Arch::X64)
+    );
+    let cases: Vec<(&str, Mutation)> = vec![
+        (
+            "a latest URL",
+            Box::new(move |r| r["assets"][0]["browser_download_url"] = json!(latest.clone())),
+        ),
+        (
+            "another repository",
+            Box::new(|r| {
+                r["assets"][1]["browser_download_url"] = json!(format!(
+                    "https://github.com/someone/else/releases/download/v{VERSION}/{}",
+                    asset_name(VERSION, Arch::X86)
+                ));
+            }),
+        ),
+        (
+            "plain http",
+            Box::new(|r| {
+                r["assets"][0]["browser_download_url"] = json!(format!(
+                    "http://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{}",
+                    asset_name(VERSION, Arch::X64)
+                ));
+            }),
+        ),
+        (
+            "another tag's URL",
+            Box::new(|r| {
+                r["assets"][0]["browser_download_url"] = json!(format!(
+                    "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0/{}",
+                    asset_name(VERSION, Arch::X64)
+                ));
+            }),
+        ),
+        (
+            "a query string",
+            Box::new(|r| {
+                let url = r["assets"][0]["browser_download_url"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                r["assets"][0]["browser_download_url"] = json!(format!("{url}?x=1"));
+            }),
+        ),
+    ];
+    for (what, mutate) in cases {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut release = release_value(&published);
+        mutate(&mut release);
+        let error =
+            error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(
+            matches!(error, ReleaseError::UrlNotVersionSpecific { .. }),
+            "{what}: {error}"
+        );
+        assert_eq!(rig.downloads(), 0, "{what}");
+    }
+
+    // A WinGet installer of another version or flavor attached to the release, an asset
+    // missing, one twice, one not uploaded, one empty, a digest that is not sha256.
+    let extra = |name: &str| {
+        let mut release = release_value(&published);
+        let mut asset = release["assets"][0].clone();
+        asset["name"] = json!(name);
+        release["assets"].as_array_mut().unwrap().push(asset);
+        release
+    };
+    let rig = Rig::of(&published);
+    let run = Run::new();
+    for name in [
+        "openncalayer-0.2.0-win-x64-winget-setup.exe",
+        "openncalayer-0.3.0-win7-x64-winget-setup.exe",
+        "openncalayer-0.3.0-win-arm64-winget-setup.exe",
+    ] {
+        let error = error_of::<ReleaseError>(run.generate(
+            &rig,
+            &extra(name),
+            None,
+            &Ledger::default(),
+            false,
+        ));
+        assert_eq!(error, ReleaseError::ForeignAsset(name.to_owned()));
+    }
+    let mut release = release_value(&published);
+    release["assets"].as_array_mut().unwrap().remove(1);
+    assert_eq!(
+        error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false)),
+        ReleaseError::AssetMissing(asset_name(VERSION, Arch::X86))
+    );
+    let mut release = release_value(&published);
+    let again = release["assets"][0].clone();
+    release["assets"].as_array_mut().unwrap().push(again);
+    assert_eq!(
+        error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false)),
+        ReleaseError::AssetDuplicated(asset_name(VERSION, Arch::X64))
+    );
+    let mut release = release_value(&published);
+    release["assets"][0]["state"] = json!("starter");
+    assert!(matches!(
+        error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false)),
+        ReleaseError::AssetNotUploaded { .. }
+    ));
+    let mut release = release_value(&published);
+    release["assets"][0]["size"] = json!(0);
+    assert!(matches!(
+        error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false)),
+        ReleaseError::AssetEmpty(_)
+    ));
+    let mut release = release_value(&published);
+    release["assets"][1]["digest"] = json!("md5:abcdef");
+    assert!(matches!(
+        error_of::<ReleaseError>(run.generate(&rig, &release, None, &Ledger::default(), false)),
+        ReleaseError::DigestMalformed(_)
+    ));
+    assert_eq!(rig.downloads(), 0);
+}
+
+#[test]
+fn asset_hash_or_flavor_mismatch_rejected() {
+    let published = Published::new();
+    let ok_release = release_value(&published);
+
+    // The API digest is only an expected value: bytes that hash differently end the run.
+    {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][0]["digest"] = json!(format!("sha256:{}", sha256(b"something else")));
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(
+            matches!(error, AssetError::DigestMismatch { .. }),
+            "{error}"
+        );
+        assert!(!run.out().exists());
+    }
+    // The size the API reports is not the size that arrived.
+    {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][1]["size"] = json!(published.x86.len() + 1);
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(matches!(error, AssetError::SizeMismatch { .. }), "{error}");
+    }
+    // The x86 asset is the x64 entry: right name, wrong flavor.
+    {
+        let rig = Rig::new(&[
+            (asset_path(VERSION, Arch::X64), published.x64.clone()),
+            (asset_path(VERSION, Arch::X86), published.x64.clone()),
+        ]);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][1]["digest"] = json!(format!("sha256:{}", sha256(&published.x64)));
+        release["assets"][1]["size"] = json!(published.x64.len());
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(
+            matches!(error, AssetError::NotTheInstaller { .. }),
+            "{error}"
+        );
+    }
+    // The entry of another version under this version's name.
+    {
+        let old = installer(Arch::X64, "0.2.0", true);
+        let rig = Rig::new(&[
+            (asset_path(VERSION, Arch::X64), old.clone()),
+            (asset_path(VERSION, Arch::X86), published.x86.clone()),
+        ]);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][0]["digest"] = json!(format!("sha256:{}", sha256(&old)));
+        release["assets"][0]["size"] = json!(old.len());
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(
+            matches!(error, AssetError::NotTheInstaller { .. }),
+            "{error}"
+        );
+    }
+    // Not an installer at all.
+    {
+        let junk = b"<html>not found</html>".to_vec();
+        let rig = Rig::new(&[
+            (asset_path(VERSION, Arch::X64), junk.clone()),
+            (asset_path(VERSION, Arch::X86), published.x86.clone()),
+        ]);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][0]["digest"] = json!(format!("sha256:{}", sha256(&junk)));
+        release["assets"][0]["size"] = json!(junk.len());
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert!(
+            matches!(error, AssetError::NotTheInstaller { .. }),
+            "{error}"
+        );
+    }
+    // An unsigned final file: the signature is part of what is published.
+    {
+        let unsigned = installer(Arch::X64, VERSION, false);
+        let rig = Rig::new(&[
+            (asset_path(VERSION, Arch::X64), unsigned.clone()),
+            (asset_path(VERSION, Arch::X86), published.x86.clone()),
+        ]);
+        let run = Run::new();
+        let mut release = ok_release.clone();
+        release["assets"][0]["digest"] = json!(format!("sha256:{}", sha256(&unsigned)));
+        release["assets"][0]["size"] = json!(unsigned.len());
+        let error =
+            error_of::<AssetError>(run.generate(&rig, &release, None, &Ledger::default(), false));
+        assert_eq!(error, AssetError::NotSigned(asset_name(VERSION, Arch::X64)));
+    }
+    // A download that fails or is larger than the release says leaves nothing.
+    {
+        let rig = Rig::new(&[(asset_path(VERSION, Arch::X64), published.x64.clone())]);
+        let run = Run::new();
+        assert!(
+            run.generate(&rig, &ok_release, None, &Ledger::default(), false)
+                .is_err()
+        );
+        assert!(!run.out().exists());
+    }
+    // The probe ran other bytes than the ones published (the file was replaced after the run).
+    {
+        let candidate = candidate_sha(&published);
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut probe = probe_value(&published, &candidate, "synthetic-fixture");
+        probe["reports"][0]["installer"]["sha256"] =
+            json!(sha256(b"the file before it was replaced"));
+        let error = error_of::<ProbeError>(run.generate(
+            &rig,
+            &ok_release,
+            Some(&probe),
+            &Ledger::default(),
+            true,
+        ));
+        assert!(
+            matches!(error, ProbeError::NotThePublishedFile(_)),
+            "{error}"
+        );
+        assert!(!run.out().exists());
+    }
+    // A version submitted before may not come back with other bytes.
+    {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let ledger = Ledger::entry(
+            VERSION,
+            &[
+                (Arch::X64, sha256(&published.x64)),
+                (Arch::X86, sha256(b"the hash submitted before")),
+            ],
+        );
+        let error = error_of::<HashChanged>(run.generate(&rig, &ok_release, None, &ledger, false));
+        assert_eq!(error.arch, Arch::X86);
+        assert_eq!(error.now, sha256(&published.x86));
+        assert!(!run.out().exists());
+        // The same bytes under the same version are fine.
+        let same = Ledger::entry(
+            VERSION,
+            &[
+                (Arch::X64, sha256(&published.x64)),
+                (Arch::X86, sha256(&published.x86)),
+            ],
+        );
+        run.generate(&rig, &ok_release, None, &same, false).unwrap();
+    }
+}
+
+#[test]
+fn arp_version_mapping_must_be_proven() {
+    let published = Published::new();
+    let candidate = candidate_sha(&published);
+    let refused = |mutate: &dyn Fn(&mut Value), allow: bool| -> ProbeError {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut probe = probe_value(&published, &candidate, "synthetic-fixture");
+        mutate(&mut probe);
+        let error = error_of::<ProbeError>(run.generate(
+            &rig,
+            &release_value(&published),
+            Some(&probe),
+            &Ledger::default(),
+            allow,
+        ));
+        assert!(
+            !run.out().exists(),
+            "a refused probe left a manifest: {error}"
+        );
+        error
+    };
+
+    // The Apps & Features version is not the package version.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][3]["identity"]["display_version"] = json!("0.3.1"),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    // The program or the installation's own manifest says another version.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][2]["identity"]["program_version"] = json!("0.2.9"),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][1]["identity"]["package_manifest_version"] = json!("0.3.1"),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    // No key, name or publisher.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["identity"]["arp_key_name"] = json!(" "),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    // The cells do not describe one entry.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][5]["identity"]["publisher"] = json!("Someone Else"),
+            true
+        ),
+        ProbeError::Inconsistent(_)
+    ));
+    // The entry is another architecture's, or not per-user, or uninstalls something else.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["identity"]["program_arch"] = json!("x86"),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["identity"]["install_location_in_account_profile"] = json!(false),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["identity"]["uninstall_runs_update_exe"] = json!(false),
+            true
+        ),
+        ProbeError::ArpMapping(_)
+    ));
+    // A field that is not there at all is not "proven by default".
+    assert!(matches!(
+        refused(
+            &|p| {
+                p["reports"][0]["identity"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("display_version");
+            },
+            true
+        ),
+        ProbeError::Malformed(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| {
+                p["reports"][0].as_object_mut().unwrap().remove("lifecycle");
+            },
+            true
+        ),
+        ProbeError::Malformed(_)
+    ));
+    // A field nobody asked for is not tolerated either.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["identity"]["note"] = json!("trust me"),
+            true
+        ),
+        ProbeError::Malformed(_)
+    ));
+}
+
+#[test]
+fn a_probe_that_proves_less_than_everything_is_refused() {
+    let published = Published::new();
+    let candidate = candidate_sha(&published);
+    let refused = |mutate: &dyn Fn(&mut Value), allow: bool, origin: &str| -> ProbeError {
+        let rig = Rig::of(&published);
+        let run = Run::new();
+        let mut probe = probe_value(&published, &candidate, origin);
+        mutate(&mut probe);
+        let error = error_of::<ProbeError>(run.generate(
+            &rig,
+            &release_value(&published),
+            Some(&probe),
+            &Ledger::default(),
+            allow,
+        ));
+        assert!(!run.out().exists());
+        error
+    };
+    let synth = "synthetic-fixture";
+
+    // A synthetic report is not a real run unless the caller says so.
+    assert_eq!(refused(&|_| {}, false, synth), ProbeError::Synthetic);
+
+    // Signing state.
+    for status in [
+        "not_signed",
+        "hash_mismatch",
+        "not_trusted",
+        "unknown_error",
+    ] {
+        assert!(
+            matches!(
+                refused(
+                    &|p| p["reports"][0]["installer"]["authenticode"]["status"] = json!(status),
+                    true,
+                    synth
+                ),
+                ProbeError::Unsigned(_)
+            ),
+            "{status}"
+        );
+    }
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["installer"]["authenticode"]["timestamped"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Unsigned(_)
+    ));
+    // Switches: exactly `--silent`, never the generic `/S` of other installers, nothing extra.
+    for argv in [
+        json!(["/S"]),
+        json!(["--silent", "--force"]),
+        json!([]),
+        json!(["--SILENT"]),
+    ] {
+        assert!(
+            matches!(
+                refused(
+                    &|p| p["reports"][4]["tested_switches"]["silent_argv"] = argv.clone(),
+                    true,
+                    synth
+                ),
+                ProbeError::Switches(_)
+            ),
+            "{argv}"
+        );
+        assert!(
+            matches!(
+                refused(
+                    &|p| p["reports"][4]["tested_switches"]["silent_with_progress_argv"] =
+                        argv.clone(),
+                    true,
+                    synth
+                ),
+                ProbeError::Switches(_)
+            ),
+            "{argv}"
+        );
+    }
+    for flag in [
+        "--force",
+        "--ignore-security-hash",
+        "--override",
+        "--custom",
+    ] {
+        assert!(
+            matches!(
+                refused(
+                    &|p| p["reports"][0]["tested_switches"]["winget_flags"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!(flag)),
+                    true,
+                    synth
+                ),
+                ProbeError::Switches(_)
+            ),
+            "{flag}"
+        );
+    }
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["tested_switches"]["winget_flags"] = json!(["--silent"]),
+            true,
+            synth
+        ),
+        ProbeError::Switches(_)
+    ));
+    // The manifest that was tested is not the one the generator makes.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["tested_manifest"]["installer_yaml_sha256"] =
+                json!(sha256(b"another manifest")),
+            true,
+            synth
+        ),
+        ProbeError::ManifestNotTested(_)
+    ));
+    // Prerequisites.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["prerequisite_free"]["installed_without_prerequisite_step"] =
+                json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Prerequisite(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["environment"]["clean_image"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Environment(_)
+    ));
+    // After the native exit: a zero code alone proves nothing.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["install"]["postcondition_verified_after_exit"] =
+                json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Postcondition(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["upgrade"]["result"]["arp_display_version"] =
+                json!("0.2.0"),
+            true,
+            synth
+        ),
+        ProbeError::Postcondition(_)
+    ));
+    // Lifecycle and safety.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["reinstall"]["installer_exit_code"] = json!(7),
+            true,
+            synth
+        ),
+        ProbeError::Lifecycle(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["upgrade"]["user_data_preserved"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Lifecycle(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["upgrade"]["from_version"] = json!("0.3.0"),
+            true,
+            synth
+        ),
+        ProbeError::Lifecycle(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["self_update"]["no_downgrade_loop"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Lifecycle(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["lifecycle"]["uninstall"]["arp_entry_removed"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Lifecycle(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["safety"]["elevated"]["exit_code"] = json!(0),
+            true,
+            synth
+        ),
+        ProbeError::Safety(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["safety"]["signing_hold"]["signature_completed_correctly"] =
+                json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Safety(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["safety"]["no_ca_trust_added"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Safety(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["safety"]["http_api_stayed_disabled"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Safety(_)
+    ));
+    // The machine.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["environment"]["profile_belongs_to_account_sid"] = json!(false),
+            true,
+            synth
+        ),
+        ProbeError::Environment(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["environment"]["build"] = json!(17134),
+            true,
+            synth
+        ),
+        ProbeError::Environment(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["recorded_at"] = json!("2026-11-01T00:00:00Z"),
+            true,
+            synth
+        ),
+        ProbeError::NotThePublishedFile(_)
+    ));
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["package_version"] = json!("0.3.1"),
+            true,
+            synth
+        ),
+        ProbeError::NotThePublishedFile(_)
+    ));
+    // A matrix with a hole is no proof: drop every standard-account cell of Windows 11.
+    assert!(matches!(
+        refused(
+            &|p| {
+                p["reports"].as_array_mut().unwrap().retain(|r| {
+                    !(r["environment"]["windows"] == 11
+                        && r["environment"]["account"] == "standard")
+                });
+            },
+            true,
+            synth
+        ),
+        ProbeError::Coverage(_)
+    ));
+    // No 32-bit Windows for the x86 installer.
+    assert!(matches!(
+        refused(
+            &|p| {
+                p["reports"].as_array_mut().unwrap().retain(|r| {
+                    !(r["installer"]["arch"] == "x86" && r["environment"]["os_arch"] == "x86")
+                });
+            },
+            true,
+            synth
+        ),
+        ProbeError::Coverage(_)
+    ));
+    assert!(matches!(
+        refused(&|p| p["reports"] = json!([]), true, synth),
+        ProbeError::Coverage(_)
+    ));
+    // A cell that ran other bytes than the published ones.
+    assert!(matches!(
+        refused(
+            &|p| p["reports"][0]["installer"]["sha256"] = json!("0".repeat(64)),
+            true,
+            synth
+        ),
+        ProbeError::NotThePublishedFile(_)
+    ));
+    // Another format.
+    assert!(matches!(
+        refused(&|p| p["report_format"] = json!(2), true, synth),
+        ProbeError::Malformed(_)
+    ));
+}
+
+// ---------------------------------------------------------------------------------------------
+// What is written.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_fully_proven_synthetic_release_gives_a_manifest_that_passes_the_pinned_schemas() {
+    let published = Published::new();
+    let (run, done) = final_manifest(&published);
+    assert_eq!(done.mode, Mode::Final);
+    assert!(done.evidence.synthetic);
+    assert!(!done.evidence.submitted);
+    assert!(done.evidence.status.contains("SYNTHETIC"));
+
+    // Read back from disk like any consumer would.
+    let checked = manifest::check_dir(&run.out(), Mode::Final).unwrap();
+    assert_eq!(checked.version, VERSION);
+    // The hashes in the manifest are those of the bytes the server served, not of anything else.
+    for (arch, url, sha) in &checked.installers {
+        assert_eq!(*sha, sha256(published.bytes(*arch)).to_ascii_uppercase());
+        assert!(url.ends_with(&asset_name(VERSION, *arch)));
+    }
+    // Each file validates against its own pinned schema.
+    for (name, kind) in [
+        ("arynyklas.OpenNCALayer.yaml", Kind::Version),
+        (
+            "arynyklas.OpenNCALayer.locale.en-US.yaml",
+            Kind::DefaultLocale,
+        ),
+        ("arynyklas.OpenNCALayer.installer.yaml", Kind::Installer),
+    ] {
+        let text = std::fs::read_to_string(run.out().join(name)).unwrap();
+        assert!(
+            text.contains("SYNTHETIC TEST FIXTURE"),
+            "{name} is not marked"
+        );
+        let value = yaml::parse(&text).unwrap();
+        assert_eq!(
+            schema::validate(kind, &value),
+            Vec::<String>::new(),
+            "{name}"
+        );
+    }
+    // It was not written as a candidate.
+    assert!(manifest::check_dir(&run.out(), Mode::Candidate).is_err());
+    // The evidence says nothing was submitted and carries the ledger entry to commit later.
+    let evidence: Value = serde_json::from_slice(&std::fs::read(run.evidence()).unwrap()).unwrap();
+    assert_eq!(evidence["submitted"], false);
+    assert_eq!(
+        evidence["ledger_entry"]["versions"][VERSION]["x64"],
+        sha256(&published.x64)
+    );
+    // The output directory is never reused: a stale file cannot hide among the manifest's.
+    let again = Run::new();
+    std::fs::create_dir_all(again.out()).unwrap();
+    std::fs::write(again.out().join("stale.yaml"), "x: 1\n").unwrap();
+    let rig = Rig::of(&published);
+    let error = again
+        .generate(
+            &rig,
+            &release_value(&published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("not empty"), "{error:#}");
+}
+
+#[test]
+fn the_candidate_is_not_a_submittable_manifest() {
+    let published = Published::new();
+    let run = Run::new();
+    let rig = Rig::of(&published);
+    let done = run
+        .generate(
+            &rig,
+            &release_value(&published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(done.mode, Mode::Candidate);
+    manifest::check_dir(&run.out(), Mode::Candidate).unwrap();
+    let problems = manifest::check_dir(&run.out(), Mode::Final)
+        .unwrap_err()
+        .0
+        .join("\n");
+    assert!(problems.contains("ARP mapping is not proven"), "{problems}");
+    // The candidate is a pure function of the release and the published bytes.
+    let again = Run::new();
+    again
+        .generate(
+            &rig,
+            &release_value(&published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .unwrap();
+    for name in manifest::file_names() {
+        assert_eq!(
+            std::fs::read(run.out().join(&name)).unwrap(),
+            std::fs::read(again.out().join(&name)).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+/// Edits `installer.yaml` of a fresh final manifest and checks it again.
+fn damaged(published: &Published, edit: impl Fn(&str) -> String) -> String {
+    let (run, _) = final_manifest(published);
+    let path = run.out().join("arynyklas.OpenNCALayer.installer.yaml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = edit(&text);
+    assert_ne!(edited, text, "the edit changed nothing");
+    std::fs::write(&path, edited).unwrap();
+    manifest::check_dir(&run.out(), Mode::Final)
+        .expect_err("a damaged manifest was accepted")
+        .0
+        .join("\n")
+}
+
+#[test]
+fn a_manifest_that_breaks_an_invariant_of_the_package_is_refused() {
+    let published = Published::new();
+    let cases: Vec<(&str, TextEdit, &str)> = vec![
+        (
+            "machine scope",
+            Box::new(|t| t.replace("Scope: user", "Scope: machine")),
+            "Scope is not user",
+        ),
+        (
+            "an elevating installer",
+            Box::new(|t| t.replace("elevationProhibited", "elevationRequired")),
+            "ElevationRequirement",
+        ),
+        (
+            "a generic silent switch",
+            Box::new(|t| t.replace("Silent: \"--silent\"", "Silent: /S")),
+            "Silent is not the proven --silent",
+        ),
+        (
+            "an untested custom switch",
+            Box::new(|t| {
+                t.replace(
+                    "InstallerSwitches:\n",
+                    "InstallerSwitches:\n  Custom: \"/VERYSILENT\"\n",
+                )
+            }),
+            "never tested",
+        ),
+        (
+            "uninstallPrevious",
+            Box::new(|t| {
+                t.replace(
+                    "UpgradeBehavior: install",
+                    "UpgradeBehavior: uninstallPrevious",
+                )
+            }),
+            "UpgradeBehavior",
+        ),
+        (
+            "a denied upgrade",
+            Box::new(|t| t.replace("UpgradeBehavior: install", "UpgradeBehavior: deny")),
+            "UpgradeBehavior",
+        ),
+        (
+            "no explicit-upgrade policy",
+            Box::new(|t| {
+                t.replace(
+                    "RequireExplicitUpgrade: true",
+                    "RequireExplicitUpgrade: false",
+                )
+            }),
+            "RequireExplicitUpgrade",
+        ),
+        (
+            "widened success codes",
+            Box::new(|t| {
+                t.replace(
+                    "UpgradeBehavior:",
+                    "InstallerSuccessCodes:\n- 4\nUpgradeBehavior:",
+                )
+            }),
+            "InstallerSuccessCodes",
+        ),
+        (
+            "an interactive mode",
+            Box::new(|t| t.replace("- silent\n", "- interactive\n- silent\n")),
+            "interactive",
+        ),
+        (
+            "a lower minimum Windows",
+            Box::new(|t| t.replace("10.0.17763.0", "6.1.7601.0")),
+            "MinimumOSVersion",
+        ),
+        (
+            "a zip instead of an exe",
+            Box::new(|t| t.replace("InstallerType: exe\nScope", "InstallerType: zip\nScope")),
+            "InstallerType",
+        ),
+        (
+            "a misspelt key the schema itself would let pass",
+            Box::new(|t| t.replace("ElevationRequirement:", "ElevationRequirment:")),
+            "ElevationRequirment is not a property",
+        ),
+        (
+            "a latest URL",
+            Box::new(|t| t.replace("releases/download/v0.3.0/", "releases/latest/download/")),
+            "version-specific release URL",
+        ),
+        (
+            "a hash that is not a SHA-256",
+            Box::new(|t| {
+                let at = t.find("InstallerSha256: ").unwrap();
+                let end = at + t[at..].find('\n').unwrap();
+                format!("{}InstallerSha256: XYZ1{}", &t[..at], &t[end..])
+            }),
+            "InstallerSha256",
+        ),
+        (
+            "a package version that is not the Apps & Features version",
+            Box::new(|t| t.replace("DisplayVersion: 0.3.0", "DisplayVersion: 0.3.1")),
+            "DisplayVersion is not the PackageVersion",
+        ),
+        (
+            "a missing x86 installer",
+            Box::new(|t| {
+                let at = t.find("- Architecture: x86").unwrap();
+                let end = t.find("ManifestType:").unwrap();
+                format!("{}{}", &t[..at], &t[end..])
+            }),
+            "exactly one x64 and one x86",
+        ),
+        (
+            "an unproven return code",
+            Box::new(|t| t.replace("InstallerReturnCode: 4", "InstallerReturnCode: 5")),
+            "was not proven",
+        ),
+        (
+            "another schema version",
+            Box::new(|t| t.replace("ManifestVersion: 1.12.0", "ManifestVersion: 1.10.0")),
+            "ManifestVersion",
+        ),
+    ];
+    for (what, edit, expect) in cases {
+        let problems = damaged(&published, edit);
+        assert!(problems.contains(expect), "{what}: {problems}");
+    }
+}
+
+#[test]
+fn a_manifest_directory_must_be_exactly_its_three_files() {
+    let published = Published::new();
+    let (run, _) = final_manifest(&published);
+    std::fs::write(run.out().join("extra.yaml"), "A: 1\n").unwrap();
+    assert!(
+        manifest::check_dir(&run.out(), Mode::Final)
+            .unwrap_err()
+            .0
+            .join("\n")
+            .contains("extra.yaml")
+    );
+    std::fs::remove_file(run.out().join("extra.yaml")).unwrap();
+    std::fs::remove_file(run.out().join("arynyklas.OpenNCALayer.locale.en-US.yaml")).unwrap();
+    assert!(manifest::check_dir(&run.out(), Mode::Final).is_err());
+}
+
+#[test]
+fn the_pinned_schema_validator_catches_what_a_schema_catches() {
+    let installer = json!({
+        "PackageIdentifier": "arynyklas.OpenNCALayer",
+        "PackageVersion": "0.3.0",
+        "Installers": [{ "Architecture": "x64", "InstallerUrl": "ftp://x", "InstallerSha256": "abc" }],
+        "ManifestType": "installer",
+        "ManifestVersion": "1.12.0",
+    });
+    let errors = schema::validate(Kind::Installer, &installer).join("\n");
+    assert!(errors.contains("InstallerUrl"), "{errors}");
+    assert!(errors.contains("InstallerSha256"), "{errors}");
+    let bad_enum = json!({
+        "PackageIdentifier": "arynyklas.OpenNCALayer", "PackageVersion": "0.3.0",
+        "Installers": [{ "Architecture": "mips", "InstallerUrl": "https://x/y", "InstallerSha256": "0".repeat(64) }],
+        "ManifestType": "installer", "ManifestVersion": "1.12.0",
+    });
+    assert!(
+        schema::validate(Kind::Installer, &bad_enum)
+            .join("\n")
+            .contains("Architecture")
+    );
+    let no_required = json!({ "PackageIdentifier": "arynyklas.OpenNCALayer" });
+    let errors = schema::validate(Kind::Version, &no_required).join("\n");
+    assert!(errors.contains("PackageVersion is required"), "{errors}");
+    let bad_id = json!({
+        "PackageIdentifier": "OpenNCALayer", "PackageVersion": "0.3.0", "DefaultLocale": "en-US",
+        "ManifestType": "version", "ManifestVersion": "1.12.0",
+    });
+    assert!(
+        schema::validate(Kind::Version, &bad_id)
+            .join("\n")
+            .contains("PackageIdentifier")
+    );
+}
+
+/// The command line as a person runs it (`cargo xtask winget …`): the same refusals, the same
+/// check, an exit status that CI can use.
+#[test]
+fn the_command_line_refuses_an_alpha_and_checks_a_manifest_directory() {
+    let published = Published::new();
+    let xtask = |args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("winget")
+            .args(args)
+            .output()
+            .expect("xtask runs")
+    };
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    // A pre-release (the shape of the latest real tags): no candidate, no directory, no network.
+    let run = Run::new();
+    let mut alpha = release_value(&published);
+    alpha["tag_name"] = json!("v0.3.0-alpha.1");
+    alpha["prerelease"] = json!(true);
+    let release = run.dir.path().join("release.json");
+    std::fs::write(&release, alpha.to_string()).unwrap();
+    let out = run.out();
+    let output = xtask(&[
+        "candidate".as_ref(),
+        "--release-json".as_ref(),
+        release.as_os_str(),
+        "--out".as_ref(),
+        out.as_os_str(),
+    ]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("pre-release"), "{}", text(&output));
+    assert!(!out.exists());
+
+    // A proven synthetic manifest passes `check`; as a candidate it does not, and the other
+    // way round.
+    let (made, _) = final_manifest(&published);
+    let dir = made.out();
+    let output = xtask(&["check".as_ref(), dir.as_os_str()]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("not an installer proof"),
+        "{}",
+        text(&output)
+    );
+    let output = xtask(&["check".as_ref(), dir.as_os_str(), "--candidate".as_ref()]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("candidate manifest has an Apps & Features mapping"),
+        "{}",
+        text(&output)
+    );
+    let path = dir.join("arynyklas.OpenNCALayer.installer.yaml");
+    let manifest = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, manifest.replace("Scope: user", "Scope: machine")).unwrap();
+    let output = xtask(&["check".as_ref(), dir.as_os_str()]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output).contains("Scope is not user"),
+        "{}",
+        text(&output)
+    );
+}
+
+/// The real `winget validate` on a synthetic manifest: schema validation by WinGet's own
+/// parser, which is not an installer proof. Read-only: it changes nothing on the machine.
+/// Run with `cargo test -p xtask --test winget -- --ignored real_winget`.
+#[test]
+#[ignore = "needs winget.exe on PATH (read-only `winget validate`)"]
+fn real_winget_validates_the_emitted_manifests() {
+    let published = Published::new();
+    let (run, _) = final_manifest(&published);
+    let validated = |dir: &Path| {
+        let output = std::process::Command::new("winget")
+            .arg("validate")
+            .arg(dir)
+            .output()
+            .expect("winget is on PATH");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.code(), text)
+    };
+    let (code, text) = validated(&run.out());
+    eprintln!("winget validate (final): exit {code:?}\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+
+    // The tool is a real judge: a manifest the checker refuses is refused by it too.
+    let broken = Run::new();
+    let text =
+        std::fs::read_to_string(run.out().join("arynyklas.OpenNCALayer.installer.yaml")).unwrap();
+    std::fs::create_dir_all(broken.out()).unwrap();
+    for name in manifest::file_names() {
+        std::fs::copy(run.out().join(&name), broken.out().join(&name)).unwrap();
+    }
+    std::fs::write(
+        broken.out().join("arynyklas.OpenNCALayer.installer.yaml"),
+        text.replace("Scope: user", "Scope: roaming"),
+    )
+    .unwrap();
+    let (code, text) = validated(&broken.out());
+    eprintln!("winget validate (broken): exit {code:?}\n{text}");
+    assert_ne!(code, Some(0));
+
+    // The candidate passes too.
+    let candidate = Run::new();
+    let rig = Rig::of(&published);
+    candidate
+        .generate(
+            &rig,
+            &release_value(&published),
+            None,
+            &Ledger::default(),
+            false,
+        )
+        .unwrap();
+    let (code, text) = validated(&candidate.out());
+    eprintln!("winget validate (candidate): exit {code:?}\n{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The proof scripts (they run only inside the machines of the matrix; here they are parsed, and the
+// merge step, which needs no installation, is run for real).
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod scripts {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use super::*;
+
+    fn script(name: &str) -> PathBuf {
+        oncl_testkit::workspace_root()
+            .join("scripts/winget")
+            .join(name)
+    }
+
+    fn powershell() -> Command {
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+        ]);
+        command
+    }
+
+    #[test]
+    fn the_proof_scripts_parse() {
+        for name in ["Invoke-WingetProbe.ps1", "Merge-ProbeCells.ps1"] {
+            let output = powershell()
+                .env("ONCL_SCRIPT", script(name))
+                .args([
+                    "-Command",
+                    "$e = $null; $t = $null; \
+                     [void][System.Management.Automation.Language.Parser]::ParseFile($env:ONCL_SCRIPT, [ref]$t, [ref]$e); \
+                     if ($e.Count -gt 0) { $e | ForEach-Object { $_.Message + ' @' + $_.Extent.StartLineNumber }; exit 1 }",
+                ])
+                .output()
+                .expect("powershell.exe runs");
+            assert!(
+                output.status.success(),
+                "{name} does not parse: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn merged_cell_reports_are_a_probe_set_the_generator_reads() {
+        let published = Published::new();
+        let candidate = candidate_sha(&published);
+        let whole = probe_value(&published, &candidate, "synthetic-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        for (index, report) in whole["reports"].as_array().unwrap().iter().enumerate() {
+            std::fs::write(
+                dir.path().join(format!("cell-{index}.json")),
+                report.to_string(),
+            )
+            .unwrap();
+        }
+        let merged = dir.path().join("merged.json");
+        let output = powershell()
+            .arg("-File")
+            .arg(script("Merge-ProbeCells.ps1"))
+            .arg("-Cells")
+            .arg(dir.path().join("cell-*.json"))
+            .arg("-OutFile")
+            .arg(&merged)
+            .output()
+            .expect("powershell.exe runs");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&merged).unwrap();
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "the merged file has a byte order mark"
+        );
+        let set = xtask::winget::probe::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(set.origin, xtask::winget::probe::Origin::VmRun);
+        assert_eq!(set.reports.len(), 8);
+        // The merged set, as the script wrote it, proves exactly what the cells prove.
+        let proof = set
+            .prove(
+                &xtask::winget::release::parse(&release_value(&published).to_string())
+                    .unwrap()
+                    .stable()
+                    .unwrap(),
+                &[Arch::X64, Arch::X86].map(|arch| xtask::winget::probe::Published {
+                    arch,
+                    sha256: sha256(published.bytes(arch)),
+                    size: published.bytes(arch).len() as u64,
+                }),
+                &candidate,
+                false,
+            )
+            .unwrap();
+        assert_eq!(proof.cells, 8);
+        assert!(
+            !proof.synthetic,
+            "the script marks every set it makes as a real run"
+        );
+    }
+}

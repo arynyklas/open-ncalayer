@@ -27,3 +27,6 @@ plugins/qoltanba/fonts/OFL.txt -text
 # Issue templates embedded with include_str!: the rendered issue body (and its golden
 # fixtures) must not depend on the checkout's line endings.
 xtask/src/upstream/templates/*.md text eol=lf
+# The pinned WinGet manifest schemas (sha256 checked by `xtask/src/winget/schema.rs`): byte for byte.
+xtask/assets/winget/schema-1.12.0/*.json -text
+xtask/assets/winget/schema-1.12.0/LICENSE -text
