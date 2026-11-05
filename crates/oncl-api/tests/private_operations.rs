@@ -1280,9 +1280,11 @@ async fn non_reading_peer_of_a_large_artifact_response_is_cut_at_the_original_de
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     };
-    // Lower bound: not early (the original deadline is 3 s from admission). Upper bound
-    // is only a hang guard: the 48 MiB upload and native work before the deadline
-    // starts counting stretch under CPU load, so it is not a speed assertion.
+    // Lower bound: not early (the original deadline is 3 s from admission). The upper
+    // bound is only a hang guard, kept because the 5 s bound failed under load (measured
+    // release at 5.01 s and 7.23 s from `started`; those logs were later deleted by a
+    // cleanup, see the report). `started` is taken after the 48 MiB upload, while the
+    // server's deadline starts at admission, so this is not a precise deadline measure.
     assert!(
         released_at >= std::time::Duration::from_millis(1800)
             && released_at <= std::time::Duration::from_secs(30),
@@ -2134,7 +2136,24 @@ async fn watcher_fails_on_an_acl_denied_file_instead_of_classifying_it() {
             .unwrap();
         assert!(out.status.success(), "icacls {args:?}: {out:?}");
     };
-    icacls(&["/inheritance:r"]);
+    // The guard restores the DACL on EVERY exit path (a failing assert must not leave a
+    // deny ACE that makes the temp dir undeletable). icacls ships with Windows; if it is
+    // genuinely unavailable this test fails loudly rather than skipping.
+    struct RestoreAcl(std::path::PathBuf, String);
+    impl Drop for RestoreAcl {
+        fn drop(&mut self) {
+            for args in [
+                vec!["/remove:d".to_string(), self.1.clone()],
+                vec!["/grant".to_string(), format!("{}:F", self.1)],
+            ] {
+                let _ = std::process::Command::new("icacls")
+                    .arg(&self.0)
+                    .args(args)
+                    .output();
+            }
+        }
+    }
+    let _restore = RestoreAcl(path.clone(), user.clone());
     icacls(&["/deny", &format!("{user}:(R,RD,REA,RA)")]);
     assert_eq!(
         std::fs::read(&path).unwrap_err().raw_os_error(),
@@ -2153,8 +2172,6 @@ async fn watcher_fails_on_an_acl_denied_file_instead_of_classifying_it() {
         "an ACL denial is not delete-pending"
     );
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.finish()));
-    icacls(&["/remove:d", &user]);
-    icacls(&["/grant", &format!("{user}:F")]);
     let message = *caught
         .expect_err("an ACL-denied file must fail the watcher")
         .downcast::<String>()

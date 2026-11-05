@@ -930,8 +930,10 @@ impl SpoolWatch {
         self.delete_pending.lock().unwrap().len()
     }
     /// True if a needle was ever seen. Panics if any scan hit a read error, or if a
-    /// path seen delete-pending still exists after a generous bound (a delete-pending
-    /// file must disappear once the last handle closes).
+    /// path seen delete-pending still exists after the deadline (a delete-pending
+    /// file must disappear once the last handle closes). Valid only for callers whose
+    /// operation is already finished (every current caller): one deadline (30 s by
+    /// default) is shared across ALL pending paths, not granted per path.
     pub fn finish(mut self) -> bool {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
