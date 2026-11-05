@@ -203,7 +203,11 @@ pub struct Fetcher {
     timeout: Duration,
     connect_timeout: Duration,
     lookup: Option<Lookup>,
+    hop_check: Option<HopCheck>,
 }
+
+/// A test of every URL a request visits, redirects included.
+type HopCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl fmt::Debug for Fetcher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -262,6 +266,7 @@ impl Fetcher {
             timeout: Duration::from_secs(30 * 60),
             connect_timeout: Duration::from_secs(30),
             lookup: None,
+            hop_check: None,
         }
     }
 
@@ -273,6 +278,7 @@ impl Fetcher {
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(5),
             lookup: None,
+            hop_check: None,
         }
     }
 
@@ -284,6 +290,16 @@ impl Fetcher {
         lookup: impl Fn(&str, u16) -> Vec<SocketAddr> + Send + Sync + 'static,
     ) -> Fetcher {
         self.lookup = Some(Arc::new(lookup));
+        self
+    }
+
+    /// This client refusing every URL (the first and each redirect hop) that `check` rejects.
+    #[must_use]
+    pub fn restricted_to(
+        mut self,
+        check: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> Fetcher {
+        self.hop_check = Some(Arc::new(check));
         self
     }
 
@@ -391,6 +407,13 @@ impl Fetcher {
     ) -> Result<(String, Answer), FetchError> {
         let mut url = url.to_owned();
         for _ in 0..=REDIRECTS_MAX {
+            if let Some(check) = &self.hop_check
+                && !check(&url)
+            {
+                return Err(FetchError::Network(
+                    "a URL outside the allowed hosts".to_owned(),
+                ));
+            }
             let parts = UrlParts::parse(&url)?;
             let response = self.call(method, &url, &parts, ctx)?;
             let status = response.status().as_u16();

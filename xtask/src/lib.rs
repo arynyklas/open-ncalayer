@@ -20,3 +20,4 @@ pub mod sign;
 pub mod token_emu;
 pub mod upstream;
 pub mod win7;
+pub mod winget;
