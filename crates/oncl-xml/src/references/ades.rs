@@ -133,13 +133,16 @@ pub(super) fn check_carried_evidence(
         );
         let cert = xchild(xchild(signed, "SigningCertificateV2")?, "Cert")?;
         let digest = xchild(cert, "CertDigest")?;
-        if plain_algorithm(child(digest, "DigestMethod")?)?
-            != "http://www.w3.org/2001/04/xmlenc#sha256"
-        {
-            return Err(XmlSourceError::Unsupported("SigningCertificateV2 digest"));
-        }
+        // EN 319 132-1 lets `CertDigest` use any collision-resistant digest: the
+        // national GOST digests Kalkan/NCANode write for GOST keys as well as
+        // SHA-256. SHA-1 (which `digest_method` also maps) stays refused.
+        let digest_alg = crate::digest_method(plain_algorithm(child(digest, "DigestMethod")?)?)
+            .filter(|alg| *alg != oncl_pki::key::SigAlg::RsaSha1)
+            .ok_or(XmlSourceError::Unsupported("SigningCertificateV2 digest"))?;
         if base64(child(digest, "DigestValue")?)?
-            != oncl_pki::key::HashAlg::Sha256.digest(&crate::cert_der(signer.certificate)?)
+            != digest_alg
+                .hash_alg()
+                .digest(&crate::cert_der(signer.certificate)?)
         {
             return Err(invalid("SigningCertificateV2 leaf binding"));
         }
@@ -261,12 +264,88 @@ pub(super) fn check_carried_evidence(
         AdesLevel::B
     };
     level = level.map(|_| evidence_level);
+    // EN 319 132-1 §5.4.2/§6.3: B-LT incorporates the material needed to validate
+    // the signature: the CA certificates of the signing path and the trust
+    // anchor's certificate (the signing certificate is in ds:KeyInfo). Revocation
+    // data alone is not LT: the claim drops to T, and a host that REQUIRES LT/LTA
+    // is refused (as for a missing baseline DataObjectFormat) instead of being told
+    // Valid. Validation itself still runs at the carried level.
+    let requires_material = profile.required_level.is_some_and(|l| l >= AdesLevel::Lt);
+    if level.is_some_and(|l| l >= AdesLevel::Lt) || requires_material {
+        match signing_path_embedded(&signer, &mut bundle, &rows, ctx, scope)? {
+            Some(true) => {}
+            // A path exists but its CA/anchor certificates are not all carried.
+            Some(false) if requires_material => {
+                return Err(invalid(
+                    "required XAdES-LT/LTA CertificateValues for the signing path absent",
+                ));
+            }
+            // No path from the host's anchors: validation reports the untrusted chain.
+            Some(false) | None => {
+                if level.is_some_and(|l| l >= AdesLevel::Lt) {
+                    level = Some(AdesLevel::T);
+                }
+            }
+        }
+    }
     let required = profile
         .required_level
         .unwrap_or(AdesLevel::B)
         .max(evidence_level);
     let report = validate_evidence(&signer, &mut bundle, &proofs, required, ctx, network, scope)?;
     Ok((report, level))
+}
+/// Whether every certificate of the signing path above the signing certificate
+/// (CA certificates and the trust anchor, EN 319 132-1 §5.4.2) is carried in the
+/// signature's `CertificateValues`. `None`: no path can be built from the host's anchors
+/// and the carried certificates (the validation reports the untrusted chain).
+fn signing_path_embedded(
+    signer: &SignerEvidence<'_>,
+    bundle: &mut EvidenceBundle,
+    rows: &[EvidenceRow],
+    ctx: &ValidationContext<'_>,
+    scope: &ResourceScope,
+) -> Result<Option<bool>> {
+    let mut embedded_der = Vec::new();
+    let mut embedded = Vec::new();
+    for row in rows.iter().filter(|r| r.kind == EvidenceKind::Certificate) {
+        let len = bundle
+            .entry(row.id)
+            .ok_or_else(|| invalid("carried certificate entry"))?
+            .region()
+            .len;
+        let _memory = scope.reserve_memory(len.saturating_mul(2))?;
+        let mut der = vec![0; len as usize];
+        let mut offset = 0;
+        while offset < der.len() {
+            let end = der.len().min(offset + oncl_pki::resource::IO_CHUNK_BYTES);
+            let n = bundle.read_entry(row.id, offset as u64, &mut der[offset..end])?;
+            if n == 0 {
+                return Err(invalid("short carried certificate"));
+            }
+            offset += n;
+        }
+        if let Ok(cert) = oncl_pki::cert::parse(&der) {
+            embedded.push(cert);
+            embedded_der.push(der);
+        }
+    }
+    let mut candidates: Vec<_> = ctx.intermediates.to_vec();
+    candidates.extend(embedded.iter().cloned());
+    let Ok(path) = oncl_pki::pkix::build_anchored_path(
+        signer.certificate,
+        ctx.anchors,
+        &candidates,
+        oncl_pki::pkix::validation_time(signer.certificate, ctx.now),
+    ) else {
+        return Ok(None);
+    };
+    for cert in path.iter().skip(1) {
+        if !embedded_der.contains(&crate::cert_der(cert)?) {
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(true))
 }
 fn copy_stage(
     source: &mut oncl_pki::io::StagedArtifact,

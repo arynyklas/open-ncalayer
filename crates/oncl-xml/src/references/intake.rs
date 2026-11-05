@@ -119,6 +119,66 @@ pub(crate) fn index_signed(
     drop(framing);
     Ok(document)
 }
+/// Key-independent check for an Add: inserting a new `ds:Signature` at `at` changes the
+/// bytes of every reference of an existing signature that covers that offset (the whole
+/// document, or an element around it) unless the reference's XPath filter drops all
+/// signatures. That signature would then fail verification, so the Add is refused
+/// BEFORE the key is used. Only the document's own existing signatures are read; no
+/// trust or algorithm decision is made here. Manifest member references are not
+/// followed (the final verification still catches those).
+pub(crate) fn check_insertion_keeps_existing_references(
+    document: &mut XmlDocument,
+    at: u64,
+    profile: &XmlVerifyProfile,
+    scope: &ResourceScope,
+) -> Result<()> {
+    let signatures = scan_optional(document, profile, scope)?;
+    let mut work = profile.max_work;
+    for signature in &signatures {
+        scope.checkpoint()?;
+        let xml = metadata(
+            document,
+            signature.info,
+            &signature.info_namespaces,
+            profile.max_metadata_bytes,
+        )?;
+        let _parsed = parse_guards(scope, xml.len())?;
+        let parsed =
+            roxmltree::Document::parse(&xml).map_err(|_| invalid("SignedInfo metadata"))?;
+        let info = parsed
+            .root_element()
+            .first_element_child()
+            .ok_or_else(|| invalid("SignedInfo"))?;
+        for reference in info.children().filter(|n| crate::is_ds(*n, "Reference")) {
+            let drops_signatures = reference
+                .children()
+                .filter(|n| crate::is_ds(*n, "Transforms"))
+                .flat_map(|transforms| transforms.children().filter(Node::is_element))
+                .any(|transform| {
+                    algorithm(transform)
+                        .is_ok_and(|uri| uri == "http://www.w3.org/TR/1999/REC-xpath-19991116")
+                });
+            if drops_signatures {
+                continue;
+            }
+            let (target, missing, _) =
+                resolve_reference_uri(document, reference, &mut work, scope)?;
+            if missing {
+                continue;
+            }
+            let covers = match target {
+                None => true,
+                Some(region) => region.offset < at && at < region.end()?,
+            };
+            if covers {
+                return Err(XmlSourceError::Unsupported(
+                    "Add would change the bytes an existing signature reference covers",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 fn metadata_shape(
     document: &mut XmlDocument,
     signature: &Metadata,

@@ -1,0 +1,241 @@
+//! Regressions for the XML/XAdES interop defects D2, D3 and D4 found by the independent
+//! interop matrix (NCANode, lxml, OpenSSL). Each runs the real `oncl` binary.
+mod support;
+use der::Encode;
+use std::{path::Path, process::Command};
+use support::*;
+
+fn python() -> Option<&'static str> {
+    ["python", "python3", "py"].into_iter().find(|candidate| {
+        Command::new(candidate)
+            .args(["-c", "import lxml, cryptography"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+fn trust(w: &World) -> Vec<&str> {
+    vec![
+        "--root",
+        path(&w.root),
+        "--pki-endpoint",
+        &w.origin,
+        "--as-of",
+        "1793620800",
+    ]
+}
+fn sign_args<'a>(
+    w: &'a World,
+    profile: &'a str,
+    input: &'a Path,
+    output: &'a Path,
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "sign",
+        "--profile",
+        profile,
+        "--input",
+        path(input),
+        "--output",
+        path(output),
+        "--key",
+        path(&w.rsa_key),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+    ];
+    args.extend(trust(w));
+    args
+}
+fn verify_json(w: &World, profile: &str, signed: &Path) -> (Option<i32>, serde_json::Value) {
+    let mut args = vec![
+        "verify",
+        "--profile",
+        profile,
+        "--input",
+        path(signed),
+        "--json",
+    ];
+    args.extend(trust(w));
+    let result = run(&args, b"");
+    let report = serde_json::from_slice(&result.stdout).unwrap_or(serde_json::Value::Null);
+    (result.status.code(), report)
+}
+/// Independent lxml+cryptography re-derivation of every reference digest and every
+/// SignedInfo signature (RSA-SHA256), no oncl code involved.
+fn lxml_oracle(w: &World, signed: &Path) -> Option<String> {
+    let Some(python) = python() else {
+        assert!(
+            std::env::var_os("ONCL_ALLOW_NO_ORACLE").is_some(),
+            "python with lxml+cryptography is required (set ONCL_ALLOW_NO_ORACLE=1 to skip explicitly)"
+        );
+        return None;
+    };
+    let script = w.dir.path().join("xmldsig_oracle.py");
+    std::fs::write(&script, include_str!("support/xmldsig_oracle.py")).unwrap();
+    let leaf = w.dir.path().join("oracle-leaf.der");
+    std::fs::write(&leaf, w.pki.rsa.cert.to_der().unwrap()).unwrap();
+    let result = Command::new(python)
+        .args([path(&script), path(signed), path(&leaf)])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "oracle rejected {}: {}",
+        signed.display(),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    Some(String::from_utf8(result.stdout).unwrap())
+}
+
+/// D2: `--add` over a whole-document signature can never verify (the new signature is
+/// inside the covered bytes). It must be refused before the key is used
+/// (`applied=NotApplied`), while an Add over element-reference signatures still works.
+#[test]
+fn add_over_a_whole_document_signature_is_refused_before_the_key_is_used() {
+    let w = world();
+    let doc = w.dir.path().join("doc.xml");
+    std::fs::write(&doc, b"<r><p Id=\"a\">one</p><q Id=\"b\">two</q></r>").unwrap();
+
+    // Whole-document first signature.
+    let first = w.dir.path().join("first.xml");
+    let created = run(&sign_args(&w, "xml", &doc, &first), b"");
+    assert_eq!(created.status.code(), Some(0), "{created:?}");
+    let first_text = std::fs::read_to_string(&first).unwrap();
+    assert!(first_text.contains("URI=\"\""), "{first_text}");
+
+    let refused_out = w.dir.path().join("refused.xml");
+    let mut add = sign_args(&w, "xml", &first, &refused_out);
+    add.push("--add");
+    let refused = run(&add, b"");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(stderr.contains("InvalidInput"), "{stderr}");
+    assert!(
+        stderr.contains("applied=NotApplied"),
+        "the key must not have been used: {stderr}"
+    );
+    assert!(!refused_out.exists());
+
+    // Element-reference signatures survive an Add and verify (lxml oracle, two signatures).
+    let one = w.dir.path().join("one.xml");
+    let mut by_id = sign_args(&w, "xml", &doc, &one);
+    by_id.extend(["--target-id", "a"]);
+    let created = run(&by_id, b"");
+    assert_eq!(created.status.code(), Some(0), "{created:?}");
+    let two = w.dir.path().join("two.xml");
+    let mut add = sign_args(&w, "xml", &one, &two);
+    add.extend(["--add", "--target-id", "b"]);
+    let added = run(&add, b"");
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let (code, report) = verify_json(&w, "xml", &two);
+    assert_eq!(code, Some(0), "{report}");
+    if let Some(proof) = lxml_oracle(&w, &two) {
+        assert!(proof.contains("SIGNATURES=2"), "{proof}");
+    }
+}
+
+/// D3: NCANode's own GOST 2015 XAdES (certificate digest GOST R 34.11-2015) was refused
+/// with `InvalidInput` and no report at every level, while its RSA shape verified.
+/// The pinned fixtures are fetched, never committed (`cargo xtask fetch-fixtures`).
+#[test]
+fn ncanode_gost_xades_is_read_not_refused() {
+    let w = world();
+    for level in ["b", "t", "lt", "lta"] {
+        let fixture = oncl_testkit::ncanode(&format!("xades-test-signed-{level}.xml"));
+        for profile in ["xml", "xades-b"] {
+            let (code, report) = verify_json(&w, profile, &fixture);
+            // The test CA is not a configured anchor: Invalid for the chain (exit 2)
+            // with a full report, never a refusal of the structure (exit 1, no report).
+            assert_eq!(code, Some(2), "{level}/{profile}: {report}");
+            let signer = &report["signers"][0];
+            assert_eq!(signer["signature"], "Passed", "{level}/{profile}: {report}");
+            assert_eq!(signer["chain"], "Failed", "{level}/{profile}: {report}");
+        }
+    }
+}
+
+/// D4: an LT signature must carry `CertificateValues` with the signing path's CA
+/// certificates and the trust anchor (EN 319 132-1 §5.4.2), or NCANode reads it as T.
+/// Our verifier must not claim LT for a document without them either.
+#[test]
+fn xades_lt_carries_the_trust_anchor_and_the_verifier_does_not_claim_lt_without_it() {
+    let w = world();
+    let tsa = format!("{}/tsa", w.origin);
+    let doc = w.dir.path().join("doc.xml");
+    std::fs::write(&doc, b"<r><p>lt</p></r>").unwrap();
+    let signed = w.dir.path().join("lt.xml");
+    let mut args = sign_args(&w, "xades-lt", &doc, &signed);
+    args.extend([
+        "--tsa-url",
+        &tsa,
+        "--tsa-policy",
+        "1.2.398.3.3.2.6.2",
+        "--signature-id",
+        "sig-1",
+    ]);
+    let result = run(&args, b"");
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+    let text = std::fs::read_to_string(&signed).unwrap();
+
+    // Independent structure oracle (Python ElementTree, no oncl code): the carried
+    // certificates, compared with the root DER the loopback PKI really uses.
+    let python = ["python", "python3", "py"]
+        .into_iter()
+        .find(|c| Command::new(c).arg("--version").output().is_ok())
+        .expect("python");
+    let script = w.dir.path().join("lt_values.py");
+    std::fs::write(
+        &script,
+        "import sys,base64,xml.etree.ElementTree as E\n\
+         X='{http://uri.etsi.org/01903/v1.3.2#}'\n\
+         t=E.parse(sys.argv[1])\n\
+         root=open(sys.argv[2],'rb').read()\n\
+         certs=[base64.b64decode(e.text) for cv in t.iter(X+'CertificateValues') for e in cv.iter(X+'EncapsulatedX509Certificate')]\n\
+         ocsp=[1 for e in t.iter(X+'EncapsulatedOCSPValue')]\n\
+         ts=[1 for e in t.iter(X+'EncapsulatedTimeStamp')]\n\
+         print('CERTS=%d OCSP=%d TS=%d ROOT=%s'%(len(certs),len(ocsp),len(ts),root in certs))\n",
+    )
+    .unwrap();
+    let root_der = w.dir.path().join("root.der");
+    std::fs::write(&root_der, w.pki.root.cert.to_der().unwrap()).unwrap();
+    let structure = |file: &Path| {
+        let out = Command::new(python)
+            .args([path(&script), path(file), path(&root_der)])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let facts = structure(&signed);
+    assert!(facts.contains("ROOT=True"), "{facts}");
+    assert!(!facts.contains("CERTS=0"), "{facts}");
+    assert!(facts.contains("TS=1"), "{facts}");
+
+    let (code, report) = verify_json(&w, "xades-lt", &signed);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["ades_level"], "Lt", "{report}");
+
+    // The same document without CertificateValues is T material, not LT.
+    let start = text
+        .find("<xades:CertificateValues")
+        .expect("CertificateValues");
+    let end = start
+        + text[start..].find("</xades:CertificateValues>").unwrap()
+        + "</xades:CertificateValues>".len();
+    let stripped_text = format!("{}{}", &text[..start], &text[end..]);
+    let stripped = w.dir.path().join("lt-stripped.xml");
+    std::fs::write(&stripped, stripped_text).unwrap();
+    assert!(structure(&stripped).contains("CERTS=0"));
+    let (code, report) = verify_json(&w, "xades-lt", &stripped);
+    assert_ne!(
+        code,
+        Some(0),
+        "stripped LT must not satisfy xades-lt: {report}"
+    );
+    let (_, report) = verify_json(&w, "xades-t", &stripped);
+    assert_eq!(report["ades_level"], "T", "{report}");
+}
