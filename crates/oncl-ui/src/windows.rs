@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use oncl_desktop::Settings;
+use oncl_desktop::{Settings, UiScale};
 use oncl_flows::Locale;
 
 use crate::about_view::{self, AboutInfo, AboutTab};
@@ -38,6 +38,9 @@ pub struct DesktopWindows {
     pub about: AboutInfo,
     pub tls: TlsWizardServices,
     pub plugins: Box<dyn PluginsServices>,
+    /// The scale of the windows until the settings window saves another
+    /// ([`Settings::ui`]).
+    pub scale: UiScale,
     /// Runs on the event loop once the settings window has saved new settings.
     pub on_saved: Box<dyn Fn(&Settings)>,
 }
@@ -59,6 +62,7 @@ thread_local! {
 /// Makes the windows available. Call it on the thread that runs
 /// [`run_event_loop`](crate::run_event_loop), before it does.
 pub fn set_desktop_windows(windows: DesktopWindows) {
+    crate::scale::set(windows.scale);
     let desktop = Desktop {
         locale: Cell::new(windows.locale),
         settings: Arc::new(windows.settings),

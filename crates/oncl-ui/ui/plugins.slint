@@ -2,7 +2,8 @@
 // question, allow an update that may do more), the plugins the catalog offers (install), a
 // plugin from a file, and a new download of the catalog. The rows' texts are composed in Rust.
 
-import { Button, ScrollView, VerticalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ActionBar, BusyRow, DialogScroll, EscapeScope, Hint, Metrics, NameText, StatusArea, Subheading, Tone } from "common.slint";
 
 export struct InstalledRow {
     // The name and version.
@@ -28,8 +29,10 @@ export struct AvailableRow {
 
 export component PluginsWindow inherits Window {
     title: @tr("Plugins");
-    min-width: 600px;
-    min-height: 500px;
+    min-width: Metrics.wide-min-width;
+    min-height: Metrics.wide-min-height;
+    preferred-width: 640px;
+    preferred-height: 520px;
 
     in property <string> catalog;
     in property <bool> catalog-error;
@@ -43,6 +46,8 @@ export component PluginsWindow inherits Window {
     // The installed row whose removal is asked about; -1: none.
     in-out property <int> removing: -1;
     in property <string> remove-question;
+    // «Close» is inside the window, whatever the texts and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback toggle(int);
     callback remove(int);
@@ -53,192 +58,201 @@ export component PluginsWindow inherits Window {
     callback refresh();
     callback dismiss();
 
-    VerticalBox {
-        Text {
-            text: root.catalog;
-            wrap: word-wrap;
-            color: root.catalog-error ? #c42b1c : #888888;
+    // The question gone (answered or not), the keyboard comes back to the window instead of
+    // being lost with the question's button.
+    changed removing => {
+        if root.removing < 0 {
+            keys.focus();
         }
+    }
 
-        Text {
-            text: @tr("Installed");
-            font-weight: 700;
+    // Escape works from the first moment: the focus starts here, and Tab goes on from it.
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            // A question about a removal is answered (no) before the window is left, and a
+            // running action's outcome must be seen.
+            if root.removing >= 0 {
+                root.removing = -1;
+            } else if !root.busy {
+                root.dismiss();
+            }
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                Text {
+                    text: root.catalog;
+                    wrap: word-wrap;
+                    color: root.catalog-error ? Tone.error() : Tone.quiet();
+                    font-weight: root.catalog-error ? 700 : 400;
+                }
 
-        if root.installed.length == 0: Text {
-            text: @tr("No plugins are installed.");
-            color: #888888;
-        }
-
-        ScrollView {
-            vertical-stretch: 1;
-            min-height: 120px;
-            VerticalLayout {
-                spacing: 8px;
-                alignment: start;
-                for row[i] in root.installed: HorizontalLayout {
-                    spacing: 8px;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text {
-                            text: row.title;
-                            font-weight: 700;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: row.details;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: row.state;
-                            wrap: word-wrap;
-                            color: row.error ? #c42b1c : #888888;
-                        }
-
-                        if row.update != "": Text {
-                            text: row.update;
-                            wrap: word-wrap;
-                            color: #1a73e8;
-                        }
-                    }
-
-                    if row.update != "": Button {
-                        text: @tr("Allow the update");
+                HorizontalLayout {
+                    spacing: Metrics.gap;
+                    alignment: start;
+                    Button {
+                        text: @tr("Install from file…");
                         enabled: !root.busy;
                         clicked => {
-                            root.confirm-update(i);
+                            root.install-file();
                         }
                     }
 
-                    if row.can-toggle: Button {
-                        text: row.enabled ? @tr("Turn off") : @tr("Turn on");
+                    Button {
+                        text: @tr("Refresh the catalog");
                         enabled: !root.busy;
                         clicked => {
-                            root.toggle(i);
+                            root.refresh();
                         }
                     }
+                }
 
+                Subheading {
+                    text: @tr("Installed");
+                }
+
+                if root.installed.length == 0: Hint {
+                    text: @tr("No plugins are installed.");
+                }
+                for row[i] in root.installed: VerticalLayout {
+                    spacing: 4px;
+                    NameText {
+                        text: row.title;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: row.details;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: row.state;
+                        wrap: word-wrap;
+                        color: row.error ? Tone.error() : Tone.quiet();
+                        font-weight: row.error ? 700 : 400;
+                    }
+
+                    if row.update != "": Text {
+                        text: row.update;
+                        wrap: word-wrap;
+                        color: Tone.link();
+                    }
+                    HorizontalLayout {
+                        spacing: Metrics.gap;
+                        alignment: start;
+                        if row.update != "": Button {
+                            text: @tr("Allow the update");
+                            enabled: !root.busy;
+                            clicked => {
+                                root.confirm-update(i);
+                            }
+                        }
+
+                        if row.can-toggle: Button {
+                            text: row.enabled ? @tr("Turn off") : @tr("Turn on");
+                            enabled: !root.busy;
+                            clicked => {
+                                root.toggle(i);
+                            }
+                        }
+
+                        Button {
+                            text: @tr("Remove");
+                            enabled: !root.busy;
+                            clicked => {
+                                root.remove(i);
+                            }
+                        }
+                    }
+                }
+
+                Subheading {
+                    text: @tr("Available in the catalog");
+                }
+
+                if root.available.length == 0: Hint {
+                    text: @tr("The catalog offers no other plugins.");
+                }
+                for row[i] in root.available: VerticalLayout {
+                    spacing: 4px;
+                    NameText {
+                        text: row.title;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: row.details;
+                        wrap: word-wrap;
+                    }
+
+                    if row.needed != "": Text {
+                        text: row.needed;
+                        wrap: word-wrap;
+                        color: Tone.link();
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: @tr("Install…");
+                            enabled: !root.busy;
+                            clicked => {
+                                root.install(i);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The question about a removal stays in view, outside the scrolling body; «Cancel»
+            // is the default.
+            if root.removing >= 0: VerticalLayout {
+                spacing: Metrics.gap;
+                // The keyboard goes to the question when it appears, on the safe answer.
+                init => {
+                    cancel-removal.focus();
+                }
+                StatusArea {
+                    message: root.remove-question;
+                    neutral: true;
+                    limit: 140px;
+                }
+
+                ActionBar {
                     Button {
                         text: @tr("Remove");
                         enabled: !root.busy;
                         clicked => {
-                            root.remove(i);
-                        }
-                    }
-                }
-            }
-        }
-
-        if root.removing >= 0: HorizontalLayout {
-            spacing: 8px;
-            Text {
-                text: root.remove-question;
-                wrap: word-wrap;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-            }
-
-            Button {
-                text: @tr("Remove");
-                enabled: !root.busy;
-                clicked => {
-                    root.confirm-remove(root.removing);
-                }
-            }
-
-            Button {
-                text: @tr("Cancel");
-                primary: true;
-                clicked => {
-                    root.removing = -1;
-                }
-            }
-        }
-
-        Text {
-            text: @tr("Available in the catalog");
-            font-weight: 700;
-        }
-
-        if root.available.length == 0: Text {
-            text: @tr("The catalog offers no other plugins.");
-            color: #888888;
-        }
-
-        ScrollView {
-            vertical-stretch: 1;
-            min-height: 100px;
-            VerticalLayout {
-                spacing: 8px;
-                alignment: start;
-                for row[i] in root.available: HorizontalLayout {
-                    spacing: 8px;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text {
-                            text: row.title;
-                            font-weight: 700;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: row.details;
-                            wrap: word-wrap;
-                        }
-
-                        if row.needed != "": Text {
-                            text: row.needed;
-                            wrap: word-wrap;
-                            color: #1a73e8;
+                            root.confirm-remove(root.removing);
                         }
                     }
 
-                    Button {
-                        text: @tr("Install…");
-                        enabled: !root.busy;
+                    cancel-removal := Button {
+                        text: @tr("Cancel");
+                        primary: true;
                         clicked => {
-                            root.install(i);
+                            root.removing = -1;
                         }
                     }
                 }
             }
-        }
-
-        if root.message != "": Text {
-            text: root.message;
-            wrap: word-wrap;
-            color: root.message-is-error ? #c42b1c : #2e7d32;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            Button {
-                text: @tr("Install from file…");
-                enabled: !root.busy;
-                clicked => {
-                    root.install-file();
-                }
+            if root.busy: BusyRow {
+                label: @tr("Please wait…");
             }
-
-            Button {
-                text: @tr("Refresh the catalog");
-                enabled: !root.busy;
-                clicked => {
-                    root.refresh();
-                }
+            if root.message != "": StatusArea {
+                message: root.message;
+                error: root.message-is-error;
             }
-
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            Button {
-                text: @tr("Close");
-                enabled: !root.busy;
-                clicked => {
-                    root.dismiss();
+            actions := ActionBar {
+                Button {
+                    text: @tr("Close");
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => {
+                        root.dismiss();
+                    }
                 }
             }
         }

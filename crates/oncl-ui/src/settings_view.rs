@@ -23,7 +23,7 @@ use oncl_desktop::original::{EntryKind, EntryState};
 use oncl_desktop::settings::Channel;
 use oncl_desktop::{
     Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
-    ProxySetting, Settings, TokenSettings, UpdateSettings,
+    ProxySetting, Settings, TokenSettings, UiScale, UiSettings, UpdateSettings,
 };
 use oncl_flows::Locale;
 
@@ -106,6 +106,8 @@ pub struct SettingsForm {
     /// «Обновлять автоматически».
     pub updates_enabled: bool,
     pub update_channel: Channel,
+    /// «Масштаб окон».
+    pub scale: UiScale,
     /// «Токены и удостоверение личности (экспериментально)».
     pub tokens_enabled: bool,
 }
@@ -136,6 +138,7 @@ impl SettingsForm {
             updates_enabled: settings.updates.enabled,
             update_channel: settings.updates.channel,
             tokens_enabled: settings.tokens.enabled,
+            scale: settings.ui.scale,
         }
     }
 
@@ -169,6 +172,7 @@ impl SettingsForm {
             tokens: TokenSettings {
                 enabled: self.tokens_enabled,
             },
+            ui: UiSettings { scale: self.scale },
         })
     }
 }
@@ -665,6 +669,7 @@ mod tests {
     use super::fakes::{FakeOriginal, services};
     use super::*;
     use oncl_desktop::original::AutostartEntry;
+    use oncl_desktop::{UiScale, UiSettings};
     use std::path::Path;
 
     fn manual(url: &str) -> SettingsForm {
@@ -676,6 +681,7 @@ mod tests {
             updates_enabled: true,
             update_channel: Channel::Stable,
             tokens_enabled: false,
+            scale: UiScale::P100,
         }
     }
 
@@ -692,6 +698,9 @@ mod tests {
                     channel: Channel::Beta,
                 },
                 tokens: TokenSettings::default(),
+                ui: UiSettings {
+                    scale: UiScale::P150,
+                },
             },
             Settings {
                 locale: Some("en".to_owned()),
@@ -949,6 +958,45 @@ mod tests {
             Err(SaveError::Form(FormError::ProxyUrlInvalid))
         ));
         assert!(s.autostart.enabled().unwrap());
+        assert_eq!(std::fs::read(&s.settings_path).unwrap(), before);
+    }
+
+    #[test]
+    fn the_scale_is_saved_and_the_rest_of_the_file_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = services(dir.path(), FakeOriginal::default());
+        std::fs::write(
+            &s.settings_path,
+            r#"{"recentPath": "a.p12", "ui": {"density": "tight"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.load().form.scale, UiScale::P100);
+
+        let form = SettingsForm {
+            scale: UiScale::P175,
+            ..manual("http://proxy.test:3128")
+        };
+        let saved = s.save(&form).unwrap();
+        assert_eq!(saved.ui.scale, UiScale::P175);
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&s.settings_path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["ui"],
+            serde_json::json!({"scale": 175, "density": "tight"})
+        );
+        assert_eq!(on_disk["recentPath"], "a.p12");
+        assert_eq!(s.load().form, form);
+
+        // A form that cannot be saved changes no scale either.
+        let before = std::fs::read(&s.settings_path).unwrap();
+        let bad = SettingsForm {
+            scale: UiScale::P200,
+            ..manual("socks5://proxy.test:1080")
+        };
+        assert!(matches!(
+            s.save(&bad),
+            Err(SaveError::Form(FormError::ProxyUrlInvalid))
+        ));
         assert_eq!(std::fs::read(&s.settings_path).unwrap(), before);
     }
 

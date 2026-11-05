@@ -4,18 +4,8 @@
 
 import { SigningPage } from "signing.slint";
 import { ToolPage } from "tools.slint";
+import { ErrorText, FieldLabel, Heading } from "common.slint";
 import { Button, ComboBox, LineEdit, Palette, ProgressIndicator, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
-
-// A label above a field.
-component FieldLabel inherits Text {
-    font-weight: 600;
-}
-
-// The error of the page's last action, next to the fields it concerns.
-component PageError inherits Text {
-    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
-    wrap: word-wrap;
-}
 
 export component WorkspaceWindow inherits Window {
     title: @tr("OpenNCALayer tools");
@@ -104,10 +94,8 @@ export component WorkspaceWindow inherits Window {
                         alignment: start;
                         if root.section == 0: VerticalLayout {
                             spacing: 12px;
-                            Text {
+                            Heading {
                                 text: @tr("Tools");
-                                font-size: 22px;
-                                font-weight: 700;
                             }
 
                             Text {
@@ -160,10 +148,8 @@ export component WorkspaceWindow inherits Window {
                         }
                         if root.section == 6: VerticalLayout {
                             spacing: 8px;
-                            Text {
+                            Heading {
                                 text: @tr("Hash a file");
-                                font-size: 22px;
-                                font-weight: 700;
                             }
 
                             FieldLabel {
@@ -200,9 +186,10 @@ export component WorkspaceWindow inherits Window {
                                 enabled: !root.busy;
                                 model: ["SHA-256", @tr("GOST R 34.11-94"), @tr("GOST R 34.11-2012 (512)")];
                                 current-index <=> root.hash-algorithm;
+                                accessible-label: @tr("Algorithm");
                             }
 
-                            if root.error-section == 6 && root.error-text != "": PageError {
+                            if root.error-section == 6 && root.error-text != "": ErrorText {
                                 text: root.error-text;
                             }
                             HorizontalLayout {
@@ -237,10 +224,8 @@ export component WorkspaceWindow inherits Window {
                         }
                         if root.section == 7: VerticalLayout {
                             spacing: 8px;
-                            Text {
+                            Heading {
                                 text: @tr("Inspect");
-                                font-size: 22px;
-                                font-weight: 700;
                             }
 
                             FieldLabel {
@@ -251,6 +236,7 @@ export component WorkspaceWindow inherits Window {
                                 enabled: !root.busy;
                                 model: [@tr("Certificate"), @tr("Signature file"), @tr("Key store (PKCS#12, JKS)"), @tr("Tokens and ID cards")];
                                 current-index <=> root.inspect-kind;
+                                accessible-label: @tr("What to inspect");
                             }
 
                             if root.inspect-kind != 3: VerticalLayout {
@@ -291,6 +277,7 @@ export component WorkspaceWindow inherits Window {
                                     enabled: !root.busy;
                                     input-type: password;
                                     text <=> root.inspect-password;
+                                    accessible-label: @tr("Password");
                                     accepted => {
                                         root.start-inspect();
                                     }
@@ -303,12 +290,13 @@ export component WorkspaceWindow inherits Window {
                                 LineEdit {
                                     enabled: !root.busy;
                                     text <=> root.inspect-aliases;
+                                    accessible-label: @tr("Key names to show (separated by commas)");
                                     accepted => {
                                         root.start-inspect();
                                     }
                                 }
                             }
-                            if root.error-section == 7 && root.error-text != "": PageError {
+                            if root.error-section == 7 && root.error-text != "": ErrorText {
                                 text: root.error-text;
                             }
                             HorizontalLayout {

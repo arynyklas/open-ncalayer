@@ -426,6 +426,7 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
         oncl_ui::set_desktop_windows(desktop_windows(
             &daemon.paths,
             locale,
+            settings.ui.scale,
             on_settings_saved(
                 http,
                 tokens,
@@ -751,6 +752,7 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
+    scale: oncl_desktop::UiScale,
     on_saved: Box<dyn Fn(&Settings)>,
     reports: Arc<SelftestReports>,
     wss: Arc<Wss>,
@@ -769,6 +771,7 @@ fn desktop_windows(
     let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
+        scale,
         settings: desktop::settings_services(paths, executables, wss.port(), Box::new(updates)),
         about: AboutInfo {
             commit: env!("ONCL_GIT_COMMIT").to_owned(),

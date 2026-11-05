@@ -1,4 +1,5 @@
-//! Windows: a dialog that was just shown takes the foreground and the keyboard focus.
+//! Windows: a dialog that was just shown takes the foreground and the keyboard focus, and the
+//! scale chosen in the settings ([`crate::scale`]).
 //!
 //! Windows' foreground lock lets a background process put a window on top but not activate
 //! it. Without this, the first dialog after the daemon starts stays inactive and the
@@ -6,9 +7,11 @@
 
 use slint::ComponentHandle;
 
-/// Brings `ui`, just shown, to the foreground with the keyboard focus once its window
-/// exists; logs a warning if Windows refuses. Does nothing on other systems.
+/// Puts `ui`, just shown, at the scale chosen in the settings, and brings it to the foreground
+/// with the keyboard focus once its window exists; logs a warning if Windows refuses. The
+/// foreground is Windows' alone: other systems only get the scale.
 pub(crate) fn take<C: ComponentHandle + 'static>(ui: &C) {
+    crate::scale::track(ui);
     #[cfg(windows)]
     win::take(ui.as_weak(), win::ATTEMPTS);
     #[cfg(not(windows))]

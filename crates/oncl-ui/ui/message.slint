@@ -1,11 +1,13 @@
 // A plugin's message: who shows it, how it looks and its text (plain text, not markup).
 
-import { Button, Palette, VerticalBox } from "std-widgets.slint";
+import { Button, Palette } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading, Tone } from "common.slint";
 
 export component MessageDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 420px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
     max-width: 640px;
     forward-focus: ok-button;
 
@@ -20,39 +22,51 @@ export component MessageDialog inherits Window {
     // The translated header lines.
     out property <string> requester: @tr("Request from: {}", root.origin);
     out property <string> heading: root.kind == 2 ? @tr("Error") : root.kind == 1 ? @tr("Warning") : @tr("Information");
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+    // How far the text is scrolled (zero or negative).
+    out property <length> body-y: body.content-y;
+    out property <length> body-visible: body.visible-height;
+    out property <length> body-content: body.content-height;
 
     callback ok();
     callback cancel();
 
-    VerticalBox {
-        Text {
-            text: root.requester;
-            wrap: word-wrap;
+    EscapeScope {
+        escape => {
+            root.cancel();
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            body := DialogScroll {
+                Text {
+                    text: root.requester;
+                    wrap: word-wrap;
+                }
 
-        Text {
-            text: @tr("Plugin: {}", root.source);
-            wrap: word-wrap;
-        }
+                NameText {
+                    text: @tr("Plugin: {}", root.source);
+                }
 
-        Text {
-            text: root.heading;
-            font-weight: 700;
-            color: root.kind == 2 ? #c62828 : root.kind == 1 ? #a15c00 : Palette.foreground;
-        }
+                Subheading {
+                    text: root.heading;
+                    color: root.kind == 2 ? Tone.error() : root.kind == 1 ? Tone.warning() : Palette.foreground;
+                }
 
-        Text {
-            text: root.text;
-            wrap: word-wrap;
-        }
+                Text {
+                    text: root.text;
+                    wrap: word-wrap;
+                }
+            }
 
-        HorizontalLayout {
-            alignment: end;
-            ok-button := Button {
-                text: @tr("OK");
-                primary: true;
-                clicked => {
-                    root.ok();
+            actions := ActionBar {
+                ok-button := Button {
+                    text: @tr("OK");
+                    primary: true;
+                    clicked => {
+                        root.ok();
+                    }
                 }
             }
         }

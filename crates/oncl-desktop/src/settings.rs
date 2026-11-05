@@ -1,6 +1,6 @@
 //! `settings.json` in the data directory, one JSON object shared by the settings window
-//! ([`Settings`]: `locale`, `autostart`, `proxy`, `updates`, `tokens`) and other owners of
-//! single keys (the `recentPath` of the key store dialogs). Every change is a read-modify-
+//! ([`Settings`]: `locale`, `autostart`, `proxy`, `updates`, `tokens`, `ui`) and other owners
+//! of single keys (the `recentPath` of the key store dialogs). Every change is a read-modify-
 //! write of the whole object ([`update`]) that keeps the keys it does not change, unknown
 //! ones included.
 //! The file may hold a proxy password: it is written readable by its owner only (mode
@@ -28,6 +28,8 @@ const UPDATES: &str = "updates";
 const ENABLED: &str = "enabled";
 const CHANNEL: &str = "channel";
 const TOKENS: &str = "tokens";
+const UI: &str = "ui";
+const SCALE: &str = "scale";
 
 /// The settings of the settings window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -45,6 +47,62 @@ pub struct Settings {
     pub updates: UpdateSettings,
     /// Hardware tokens and ID cards (`{"enabled": false}`): experimental, off by default.
     pub tokens: TokenSettings,
+    /// How big the windows and their text are (`{"scale": 150}`): the system's size by
+    /// default.
+    pub ui: UiSettings,
+}
+
+/// How the windows look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiSettings {
+    /// The size of every window and its text, in steps of the system's scale.
+    pub scale: UiScale,
+}
+
+/// The scale of the windows and their text, relative to the system's: one of the steps the
+/// settings window offers. Windows and the text in them grow together, on top of the
+/// display's own scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiScale {
+    /// The system's size.
+    #[default]
+    P100,
+    P125,
+    P150,
+    P175,
+    P200,
+}
+
+impl UiScale {
+    /// The steps, smallest first (the order of the settings window's list).
+    pub const ALL: [UiScale; 5] = [
+        UiScale::P100,
+        UiScale::P125,
+        UiScale::P150,
+        UiScale::P175,
+        UiScale::P200,
+    ];
+
+    /// The percentage of the system's scale: 100, 125, 150, 175 or 200.
+    pub fn percent(self) -> u16 {
+        match self {
+            UiScale::P100 => 100,
+            UiScale::P125 => 125,
+            UiScale::P150 => 150,
+            UiScale::P175 => 175,
+            UiScale::P200 => 200,
+        }
+    }
+
+    /// The step of `percent`; `None` for any number that is not one of them.
+    pub fn from_percent(percent: u16) -> Option<UiScale> {
+        UiScale::ALL.into_iter().find(|s| s.percent() == percent)
+    }
+
+    /// The factor the system's scale is multiplied by.
+    pub fn factor(self) -> f32 {
+        f32::from(self.percent()) / 100.0
+    }
 }
 
 /// Whether hardware tokens and ID cards are used.
@@ -159,18 +217,27 @@ impl Settings {
                 defaults.tokens
             }),
         };
+        let ui = match object.get(UI) {
+            None => defaults.ui,
+            Some(v) => ui_of(v).unwrap_or_else(|| {
+                ignored(UI);
+                defaults.ui
+            }),
+        };
         Settings {
             locale,
             autostart,
             proxy,
             updates,
             tokens,
+            ui,
         }
     }
 
     /// Writes the settings into `object`. Other members of a `proxy` object stay; its `url`
     /// goes when the mode is not manual, so no proxy password is kept that is not used. The
-    /// `tokens` key is written once support is turned on (absent, it is off).
+    /// `tokens` key is written once support is turned on (absent, it is off), the `ui` key
+    /// once a scale is chosen.
     fn store(&self, object: &mut Map<String, Value>) {
         match &self.locale {
             Some(l) => object.insert(LOCALE.to_owned(), Value::String(l.clone())),
@@ -221,6 +288,19 @@ impl Settings {
                 tokens.insert(ENABLED.to_owned(), Value::Bool(self.tokens.enabled));
             }
         }
+        // Written once a scale other than the default is chosen, and kept after that, with
+        // every member of the object this build does not know.
+        if self.ui.scale != UiScale::default() || object.contains_key(UI) {
+            let ui = object
+                .entry(UI)
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !ui.is_object() {
+                *ui = Value::Object(Map::new());
+            }
+            if let Value::Object(ui) = ui {
+                ui.insert(SCALE.to_owned(), Value::from(self.ui.scale.percent()));
+            }
+        }
     }
 }
 
@@ -265,6 +345,16 @@ fn tokens_of(v: &Value) -> Option<TokenSettings> {
         Some(on) => on.as_bool()?,
     };
     Some(TokenSettings { enabled })
+}
+
+/// The settings of a `ui` object: a `scale` missing keeps its default; `None` if it is not an
+/// object or the scale is not one of [`UiScale::ALL`]'s percentages.
+fn ui_of(v: &Value) -> Option<UiSettings> {
+    let scale = match v.as_object()?.get(SCALE) {
+        None => UiScale::default(),
+        Some(percent) => UiScale::from_percent(u16::try_from(percent.as_u64()?).ok()?)?,
+    };
+    Some(UiSettings { scale })
 }
 
 /// Our language of a locale name such as `ru`, `kk_KZ.UTF-8` or `en-US`; `None` for any
@@ -651,6 +741,7 @@ mod tests {
                     channel: Channel::Beta,
                 },
                 tokens: TokenSettings::default(),
+                ui: UiSettings::default(),
             }
         );
         s.save(&f).unwrap();
@@ -715,6 +806,63 @@ mod tests {
         }
         let (_d, f) = file_with(r#"{"tokens": {}}"#);
         assert!(!Settings::load(&f).unwrap().tokens.enabled);
+    }
+
+    #[test]
+    fn ui_scale_defaults_to_100_and_keeps_every_unknown_key() {
+        // Absent: 100%, and a save of the defaults does not add the key.
+        let (_d, f) = file_with(r#"{"recentPath": "k.p12"}"#);
+        let mut s = Settings::load(&f).unwrap();
+        assert_eq!(s.ui.scale, UiScale::P100);
+        s.save(&f).unwrap();
+        assert!(on_disk(&f).get("ui").is_none());
+
+        // Chosen: stored as a plain percentage, the rest of the file untouched.
+        s.ui.scale = UiScale::P150;
+        s.save(&f).unwrap();
+        assert_eq!(on_disk(&f)["ui"], json!({"scale": 150}));
+        assert_eq!(on_disk(&f)["recentPath"], json!("k.p12"));
+        assert_eq!(Settings::load(&f).unwrap().ui.scale, UiScale::P150);
+
+        // Members of `ui` this build does not know survive both a change and a return to 100%.
+        let (_d, f) = file_with(r#"{"ui": {"scale": 200, "density": "tight", "later": [1]}}"#);
+        let mut s = Settings::load(&f).unwrap();
+        assert_eq!(s.ui.scale, UiScale::P200);
+        s.ui.scale = UiScale::P100;
+        s.save(&f).unwrap();
+        assert_eq!(
+            on_disk(&f)["ui"],
+            json!({"scale": 100, "density": "tight", "later": [1]})
+        );
+        assert_eq!(Settings::load(&f).unwrap().ui.scale, UiScale::P100);
+    }
+
+    #[test]
+    fn ui_scale_not_understood_is_100_and_never_fails_the_load() {
+        for ui in [
+            r#"{"scale": 130}"#,
+            r#"{"scale": 0}"#,
+            r#"{"scale": 5000}"#,
+            r#"{"scale": -150}"#,
+            r#"{"scale": 150.5}"#,
+            r#"{"scale": "150"}"#,
+            r#"{"scale": null}"#,
+            "150",
+            "[]",
+            "{}",
+        ] {
+            let (_d, f) = file_with(&format!(r#"{{"autostart": true, "ui": {ui}}}"#));
+            let s = Settings::load(&f).unwrap();
+            assert_eq!(s.ui.scale, UiScale::P100, "{ui}");
+            // The other settings are read as usual.
+            assert!(s.autostart, "{ui}");
+        }
+        // Every step the window offers is understood, and no other number is.
+        for scale in UiScale::ALL {
+            assert_eq!(UiScale::from_percent(scale.percent()), Some(scale));
+        }
+        assert_eq!(UiScale::from_percent(130), None);
+        assert_eq!(UiScale::from_percent(0), None);
     }
 
     #[test]

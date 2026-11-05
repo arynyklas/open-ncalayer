@@ -1,12 +1,14 @@
 // A plugin's question with its own buttons (one to three) and, if it has options, a list to
 // pick from: who asks, how it looks, its heading and text (plain text, not markup).
 
-import { Button, Palette, StandardListView, VerticalBox } from "std-widgets.slint";
+import { Button, Palette, StandardListView } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading, Tone } from "common.slint";
 
 export component ChoiceDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 420px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
     max-width: 640px;
 
     // The requesting page's origin.
@@ -23,6 +25,9 @@ export component ChoiceDialog inherits Window {
     in property <[string]> buttons;
     // The button Enter presses.
     in property <int> default-button;
+    // The labels are too long for one row (set by the host): the buttons stand one under
+    // another at the end of the body, which scrolls, instead of widening the window.
+    in property <bool> stack-buttons;
     // The list to pick from; empty: none.
     in property <[StandardListViewItem]> options;
     // The option selected; -1: none.
@@ -30,48 +35,69 @@ export component ChoiceDialog inherits Window {
     // The translated header lines.
     out property <string> requester: @tr("Request from: {}", root.origin);
     out property <string> heading: root.title-text != "" ? root.title-text : root.kind == 2 ? @tr("Error") : root.kind == 1 ? @tr("Warning") : @tr("Information");
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     // A button pressed: its index and the option selected (-1: none).
     callback pressed(int, int);
     callback cancel();
 
-    VerticalBox {
-        Text {
-            text: root.requester;
-            wrap: word-wrap;
+    // Escape works from the first moment: the focus starts here, and Tab goes on from it.
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            root.cancel();
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                NameText {
+                    text: root.requester;
+                }
 
-        Text {
-            text: @tr("Plugin: {}", root.source);
-            wrap: word-wrap;
-        }
+                NameText {
+                    text: @tr("Plugin: {}", root.source);
+                }
 
-        Text {
-            text: root.heading;
-            font-weight: 700;
-            wrap: word-wrap;
-            color: root.kind == 2 ? #c62828 : root.kind == 1 ? #a15c00 : Palette.foreground;
-        }
+                Subheading {
+                    text: root.heading;
+                    color: root.kind == 2 ? Tone.error() : root.kind == 1 ? Tone.warning() : Palette.foreground;
+                }
 
-        Text {
-            text: root.text;
-            wrap: word-wrap;
-        }
+                Text {
+                    text: root.text;
+                    wrap: word-wrap;
+                }
 
-        if root.options.length > 0: StandardListView {
-            min-height: 120px;
-            model: root.options;
-            current-item <=> root.selected;
-        }
+                if root.options.length > 0: StandardListView {
+                    min-height: 120px;
+                    model: root.options;
+                    current-item <=> root.selected;
+                }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            for label[i] in root.buttons: Button {
-                text: label;
-                primary: i == root.default-button;
-                clicked => {
-                    root.pressed(i, root.selected);
+                if root.stack-buttons: VerticalLayout {
+                    spacing: Metrics.gap;
+                    for label[i] in root.buttons: Button {
+                        text: label;
+                        primary: i == root.default-button;
+                        clicked => {
+                            root.pressed(i, root.selected);
+                        }
+                    }
+                }
+            }
+
+            actions := ActionBar {
+                if !root.stack-buttons: HorizontalLayout {
+                    spacing: Metrics.gap;
+                    for label[i] in root.buttons: Button {
+                        text: label;
+                        primary: i == root.default-button;
+                        clicked => {
+                            root.pressed(i, root.selected);
+                        }
+                    }
                 }
             }
         }

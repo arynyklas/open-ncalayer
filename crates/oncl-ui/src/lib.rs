@@ -19,9 +19,12 @@ mod foreground;
 mod install_plugin;
 #[cfg(test)]
 mod offscreen;
+#[cfg(test)]
+mod pages;
 pub mod plugins_view;
 mod prompter;
 mod reports;
+mod scale;
 #[cfg(test)]
 mod screenshots;
 pub mod settings_view;

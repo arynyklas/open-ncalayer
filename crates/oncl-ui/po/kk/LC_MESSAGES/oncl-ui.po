@@ -562,3 +562,21 @@ msgstr "Тексеру деректері: OCSP жауаптары (файлда
 
 msgid "Evidence: certificates of the chain (files, separated by ;)"
 msgstr "Тексеру деректері: тізбек сертификаттары (файлдар, ; арқылы)"
+
+msgid "Advanced"
+msgstr "Қосымша"
+
+msgid "On top of the system's own scale; every window takes it as soon as it is saved."
+msgstr "Жүйелік масштабтың үстіне; сақтаған бойда әрбір терезе оны қабылдайды."
+
+msgid "Please wait…"
+msgstr "Күте тұрыңыз…"
+
+msgid "Proxy address"
+msgstr "Прокси мекенжайы"
+
+msgid "Size of the windows and the text"
+msgstr "Терезелер мен мәтін өлшемі"
+
+msgid "Text of the window"
+msgstr "Терезе мәтіні"

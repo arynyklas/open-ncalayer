@@ -1,7 +1,8 @@
 // The key dialog: one row per key of the opened store. Rows of keys whose OCSP check is
 // still running show a spinner and change in place when it ends.
 
-import { Button, ListView, Palette, Spinner, VerticalBox } from "std-widgets.slint";
+import { Button, Palette, ScrollView, Spinner, VerticalBox } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, NameText, StatusArea, Tone } from "common.slint";
 
 // A key in the list.
 export struct KeyItem {
@@ -39,6 +40,12 @@ export component KeyDialog inherits Window {
     // Index of the chosen key, -1 for none.
     in-out property <int> selected: -1;
 
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+
+    // How tall the header text is (its lines counted), for the tests.
+    out property <length> header-content: header.content-height;
+
     callback sign();
     callback cancel();
 
@@ -48,32 +55,46 @@ export component KeyDialog inherits Window {
     // Whether the button may be pressed: the selected key is enabled and the dialog is armed.
     out property <bool> can-sign: root.armed && root.selected >= 0 && root.keys[root.selected].enabled;
 
+    // Escape works from the first moment; the focus starts here, never on «Sign».
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            root.cancel();
+        }
     VerticalBox {
-        Text {
-            text: @tr("Request from: {}", root.origin);
-            wrap: word-wrap;
-        }
+        header := DialogScroll {
+            vertical-stretch: 0;
+            max-height: 110px;
+            NameText {
+                text: @tr("Request from: {}", root.origin);
+            }
 
-        Text {
-            text: root.key-info ? @tr("Action: key information") : root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
-            font-weight: 700;
-        }
+            Text {
+                text: root.key-info ? @tr("Action: key information") : root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
+                font-weight: 700;
+            }
 
-        if !root.detail.is-empty: Text {
-            text: root.detail;
-            wrap: word-wrap;
+            if !root.detail.is-empty: Text {
+                text: root.detail;
+                wrap: char-wrap;
+            }
         }
 
         Text {
             text: root.has-usable ? @tr("Choose a key") : @tr("No suitable key found");
-            color: root.has-usable ? Palette.foreground : #c42b1c;
+            color: root.has-usable ? Palette.foreground : Tone.error();
         }
 
-        ListView {
-            vertical-stretch: 1;
-            min-height: 160px;
+        // Every row exists, so that Tab reaches each of them and scrolls it into view.
+        ScrollView {
+          vertical-stretch: 1;
+          min-height: 100px;
+          VerticalLayout {
+            alignment: start;
             for row[i] in root.keys: Rectangle {
                 border-radius: 4px;
+                border-width: row-focus.has-focus ? 2px : 0px;
+                border-color: Palette.accent-background;
                 background: i == root.selected ? Palette.selection-background : transparent;
                 accessible-role: list-item;
                 accessible-label: row.title;
@@ -85,6 +106,18 @@ export component KeyDialog inherits Window {
                 accessible-action-default => {
                     root.selected = i;
                 }
+                // The keyboard reaches the row (Tab) and selects it (Enter or Space); only the
+                // button signs.
+                row-focus := FocusScope {
+                    key-pressed(event) => {
+                        if event.text == Key.Return || event.text == " " {
+                            root.selected = i;
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
                 TouchArea {
                     clicked => {
                         root.selected = i;
@@ -101,13 +134,13 @@ export component KeyDialog inherits Window {
                     Text {
                         text: row.title;
                         font-weight: 700;
-                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.enabled && !row.pending ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     Text {
                         text: row.details;
                         wrap: word-wrap;
-                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.enabled && !row.pending ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     if row.pending: HorizontalLayout {
@@ -131,34 +164,31 @@ export component KeyDialog inherits Window {
                             text: @tr("Checking the certificate status…");
                             vertical-alignment: center;
                             font-italic: true;
-                            color: i == root.selected ? Palette.selection-foreground : #888888;
+                            color: i == root.selected ? Palette.selection-foreground : Tone.quiet();
                         }
                     }
 
                     if !row.revoked.is-empty: Text {
                         text: row.revoked;
                         font-weight: 700;
-                        color: #c42b1c;
+                        color: Tone.error();
                     }
                 }
             }
+          }
         }
 
-        if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: Text {
-            text: root.keys[root.selected].note;
-            wrap: word-wrap;
-            color: #c42b1c;
+        if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: StatusArea {
+            message: root.keys[root.selected].note;
+            error: true;
         }
 
-        if !root.error.is-empty: Text {
-            text: root.error;
-            wrap: word-wrap;
-            color: #c42b1c;
+        if !root.error.is-empty: StatusArea {
+            message: root.error;
+            error: true;
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
+        actions := ActionBar {
             Button {
                 text: root.key-info ? @tr("Send") : @tr("Sign");
                 primary: true;
@@ -175,5 +205,6 @@ export component KeyDialog inherits Window {
                 }
             }
         }
+    }
     }
 }

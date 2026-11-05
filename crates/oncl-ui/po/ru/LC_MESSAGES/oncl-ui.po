@@ -562,3 +562,21 @@ msgstr "Данные проверки: ответы OCSP (файлы, через
 
 msgid "Evidence: certificates of the chain (files, separated by ;)"
 msgstr "Данные проверки: сертификаты цепочки (файлы, через ;)"
+
+msgid "Advanced"
+msgstr "Дополнительно"
+
+msgid "On top of the system's own scale; every window takes it as soon as it is saved."
+msgstr "Поверх масштаба системы; каждое окно принимает его сразу после сохранения."
+
+msgid "Please wait…"
+msgstr "Подождите…"
+
+msgid "Proxy address"
+msgstr "Адрес прокси"
+
+msgid "Size of the windows and the text"
+msgstr "Размер окон и текста"
+
+msgid "Text of the window"
+msgstr "Текст окна"
