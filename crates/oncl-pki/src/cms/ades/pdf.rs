@@ -562,7 +562,17 @@ pub fn verify_snapshot_pades(
     let mut bytes = signatures
         .iter()
         .map(|source| source.metadata.as_bytes())
-        .chain(material.iter().map(|item| item.value.as_bytes()))
+        .chain(
+            material
+                .iter()
+                // Only a CRL over the BER limit is scanned in place; a smaller one is
+                // normalized into a tree and keeps the amplified charge.
+                .filter(|item| {
+                    item.kind != EvidenceKind::Crl
+                        || item.value.as_bytes().len() <= crate::crl::MAX_BER_CRL_LEN
+                })
+                .map(|item| item.value.as_bytes()),
+        )
         .chain(documents.iter().map(|item| item.token.as_bytes()))
         .try_fold(0u64, |sum, value| {
             sum.checked_add(value.len() as u64)
@@ -575,7 +585,13 @@ pub fn verify_snapshot_pades(
                 .checked_add(u64::from(length))
                 .ok_or(ProcessingError::MetadataLimit)?;
         }
-        for status in services.material.ocsp.iter().chain(services.material.crls) {
+        for status in services.material.ocsp.iter().chain(
+            services
+                .material
+                .crls
+                .iter()
+                .filter(|crl| crl.len() <= crate::crl::MAX_BER_CRL_LEN),
+        ) {
             bytes = bytes
                 .checked_add(status.len() as u64)
                 .ok_or(ProcessingError::MetadataLimit)?;

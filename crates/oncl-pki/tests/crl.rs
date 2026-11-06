@@ -735,3 +735,379 @@ fn fetch_for_cdp_and_freshest() {
         oncl_pki::http::NetKind::Other
     );
 }
+
+// ---- serial_status: the single-pass scan must decide exactly as the full decode does ----
+
+fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if value.len() < 128 {
+        out.push(value.len() as u8);
+    } else {
+        let length: Vec<u8> = value
+            .len()
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|b| *b == 0)
+            .collect();
+        out.push(0x80 | length.len() as u8);
+        out.extend(length);
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+/// `crl` with its `TBSCertList` bytes patched by `patch` and signed anew by `signer`, so
+/// the damage survives the signature gate and reaches the structure checks.
+fn resigned(crl: &[u8], signer: &KeyEntry, patch: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    use der::{Reader, SliceReader};
+    let outer = AnyRef::from_der(crl).unwrap();
+    let mut reader = SliceReader::new(outer.value()).unwrap();
+    let mut tbs = reader.tlv_bytes().unwrap().to_vec();
+    let algorithm = reader.tlv_bytes().unwrap().to_vec();
+    patch(&mut tbs);
+    let alg = match signer.key.alg() {
+        oncl_pki::key::KeyAlg::Gost2004 => SigAlg::Gost2004,
+        oncl_pki::key::KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
+        oncl_pki::key::KeyAlg::Rsa => SigAlg::RsaSha256,
+    };
+    let signature = signer.key.sign(alg, &tbs).unwrap();
+    let mut bits = vec![0u8];
+    bits.extend(signature);
+    der_tlv(0x30, &[tbs, algorithm, der_tlv(0x03, &bits)].concat())
+}
+
+/// What the full decode path answers, as `(status | error class)`.
+fn full_decode(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    at: OffsetDateTime,
+) -> Result<CrlStatus, std::mem::Discriminant<CrlError>> {
+    crl::verify_crl(crl_der, issuer, at)
+        .map(|list| crl::lookup(&list, serial))
+        .map_err(|e| std::mem::discriminant(&e))
+}
+
+fn scanned(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    at: OffsetDateTime,
+) -> Result<CrlStatus, std::mem::Discriminant<CrlError>> {
+    crl::serial_status(crl_der, issuer, serial, at).map_err(|e| std::mem::discriminant(&e))
+}
+
+const SCAN_NOW: OffsetDateTime = datetime!(2026-11-02 12:00 UTC);
+
+fn scan_crl() -> MockCrl {
+    MockCrl::new(entry("inter-gost2015.key"))
+        .with_this_update(SCAN_NOW - time::Duration::MINUTE)
+        .next_update(Some(SCAN_NOW + time::Duration::HOUR))
+}
+
+/// The scan equals the full decode, and is the `expected` answer (which pins the case).
+fn same_as_full_decode(
+    crl_der: &[u8],
+    serial: &[u8],
+    at: OffsetDateTime,
+    expected: Result<CrlStatus, CrlError>,
+) {
+    let issuer = cer("inter-gost2015");
+    let expected = expected.map_err(|e| std::mem::discriminant(&e));
+    assert_eq!(scanned(crl_der, &issuer, serial, at), expected, "scan");
+    assert_eq!(full_decode(crl_der, &issuer, serial, at), expected, "full");
+}
+
+fn revoked(day: i64, reason: Option<u8>) -> CrlStatus {
+    CrlStatus::Revoked {
+        time: datetime!(2026-10-01 00:00 UTC) + time::Duration::days(day),
+        reason,
+    }
+}
+
+#[test]
+fn scan_finds_first_middle_last_duplicate_and_absent_serials_like_the_full_decode() {
+    let base = datetime!(2026-10-01 00:00 UTC);
+    let mut crl = scan_crl();
+    for n in 0..40u8 {
+        crl = crl.revoke(&[0x10, n + 1], base);
+    }
+    crl = crl
+        .revoke_with_reason(&[0x20, 1], base + time::Duration::days(1), 5)
+        // The same serial again, later and with another reason: the first entry wins.
+        .revoke_with_reason(&[0x20, 1], base + time::Duration::days(2), 1)
+        .revoke(&[0x30, 9], base + time::Duration::days(3));
+    let der = crl.der();
+    same_as_full_decode(&der, &[0x10, 1], SCAN_NOW, Ok(revoked(0, None)));
+    same_as_full_decode(&der, &[0x10, 20], SCAN_NOW, Ok(revoked(0, None)));
+    same_as_full_decode(&der, &[0x10, 40], SCAN_NOW, Ok(revoked(0, None)));
+    same_as_full_decode(&der, &[0x20, 1], SCAN_NOW, Ok(revoked(1, Some(5))));
+    // The last entry of the list.
+    same_as_full_decode(&der, &[0x30, 9], SCAN_NOW, Ok(revoked(3, None)));
+    // Leading zeros of the asked serial do not matter; an absent serial is good.
+    same_as_full_decode(&der, &[0, 0, 0x30, 9], SCAN_NOW, Ok(revoked(3, None)));
+    same_as_full_decode(&der, &[0x40, 1], SCAN_NOW, Ok(CrlStatus::Good));
+}
+
+#[test]
+fn scan_applies_the_time_window_like_the_full_decode() {
+    let next = SCAN_NOW + time::Duration::HOUR;
+    let der = scan_crl()
+        .revoke(&[7], SCAN_NOW - time::Duration::DAY)
+        .der();
+    let this = SCAN_NOW - time::Duration::MINUTE;
+    let late = |e: CrlError| Err::<CrlStatus, _>(e);
+    same_as_full_decode(
+        &der,
+        &[7],
+        this - time::Duration::SECOND,
+        late(CrlError::NotYetValid),
+    );
+    same_as_full_decode(
+        &der,
+        &[7],
+        this,
+        Ok(CrlStatus::Revoked {
+            time: SCAN_NOW - time::Duration::DAY,
+            reason: None,
+        }),
+    );
+    same_as_full_decode(
+        &der,
+        &[8],
+        next - time::Duration::SECOND,
+        Ok(CrlStatus::Good),
+    );
+    same_as_full_decode(&der, &[7], next, late(CrlError::Outdated));
+    same_as_full_decode(
+        &der,
+        &[7],
+        next + time::Duration::DAY,
+        late(CrlError::Outdated),
+    );
+    // No nextUpdate: never outdated.
+    let open = scan_crl().next_update(None).revoke(&[7], this).der();
+    same_as_full_decode(
+        &open,
+        &[8],
+        next + time::Duration::days(3650),
+        Ok(CrlStatus::Good),
+    );
+}
+
+fn unknown_extension(oid: &str, critical: bool) -> Extension {
+    Extension {
+        extn_id: oid.parse().unwrap(),
+        critical,
+        extn_value: OctetString::new(vec![0x05, 0x00]).unwrap(),
+    }
+}
+
+#[test]
+fn scan_refuses_the_crl_extensions_the_full_decode_refuses() {
+    let revoked_at = SCAN_NOW - time::Duration::DAY;
+    let malformed = || Err(CrlError::Malformed(String::new()));
+    for (name, extension) in [
+        ("critical unknown", unknown_extension("1.2.3.4", true)),
+        ("deltaCRLIndicator", unknown_extension("2.5.29.27", false)),
+        (
+            "deltaCRLIndicator critical",
+            unknown_extension("2.5.29.27", true),
+        ),
+        (
+            "issuingDistributionPoint",
+            unknown_extension("2.5.29.28", false),
+        ),
+        (
+            "issuingDistributionPoint critical",
+            unknown_extension("2.5.29.28", true),
+        ),
+    ] {
+        let der = scan_crl()
+            .revoke(&[7], revoked_at)
+            .extension(extension)
+            .der();
+        let _ = name;
+        same_as_full_decode(&der, &[7], SCAN_NOW, malformed());
+        same_as_full_decode(&der, &[8], SCAN_NOW, malformed());
+    }
+    // A non-critical unknown extension is ignored, as is a known critical one.
+    let der = scan_crl()
+        .revoke(&[7], revoked_at)
+        .extension(unknown_extension("1.2.3.4", false))
+        .der();
+    same_as_full_decode(
+        &der,
+        &[7],
+        SCAN_NOW,
+        Ok(CrlStatus::Revoked {
+            time: revoked_at,
+            reason: None,
+        }),
+    );
+}
+
+#[test]
+fn scan_refuses_a_damaged_entry_extension_even_for_other_serials() {
+    // Turn the OID of one entry's extension into an OCTET STRING: still valid BER (so the
+    // normalizer lets it pass), signed by the CRL's real issuer, so only the structure check
+    // of the entries can catch it, and it must catch it for an unrelated serial too, as the
+    // full decode does.
+    let issuer = entry("inter-gost2015.key");
+    let good = scan_crl()
+        .revoke(&[1], SCAN_NOW - time::Duration::DAY)
+        .revoke_with_reason(&[2], SCAN_NOW - time::Duration::DAY, 1)
+        .revoke(&[3], SCAN_NOW - time::Duration::DAY)
+        .der();
+    let damaged = resigned(&good, &issuer, |tbs| {
+        // 06 03 55 1d 15: the CRLReason extension id of entry [2].
+        let at = tbs
+            .windows(5)
+            .position(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x15])
+            .expect("CRLReason extension");
+        tbs[at] = 0x04;
+    });
+    let malformed = || Err(CrlError::Malformed(String::new()));
+    same_as_full_decode(&damaged, &[1], SCAN_NOW, malformed());
+    same_as_full_decode(&damaged, &[2], SCAN_NOW, malformed());
+    same_as_full_decode(&damaged, &[9], SCAN_NOW, malformed());
+    // The same CRL undamaged is fine, so the refusal is the damage.
+    same_as_full_decode(
+        &good,
+        &[2],
+        SCAN_NOW,
+        Ok(CrlStatus::Revoked {
+            time: SCAN_NOW - time::Duration::DAY,
+            reason: Some(1),
+        }),
+    );
+}
+
+#[test]
+fn scan_requires_the_version_field_like_the_full_decode() {
+    // Remove `version INTEGER 1` from the TBS (a v1-looking CRL) and sign it anew: the full
+    // decode refuses it, and the scan must not accept what the decode refuses.
+    let issuer = entry("inter-gost2015.key");
+    let der = scan_crl()
+        .revoke(&[7], SCAN_NOW - time::Duration::DAY)
+        .der();
+    let v1 = resigned(&der, &issuer, |tbs| {
+        let at = tbs
+            .windows(3)
+            .position(|w| w == [0x02, 0x01, 0x01])
+            .expect("version");
+        tbs.drain(at..at + 3);
+        // Shrink the TBS SEQUENCE length (one-octet or two-octet form).
+        if tbs[1] == 0x82 {
+            let n = u16::from_be_bytes([tbs[2], tbs[3]]) - 3;
+            tbs[2..4].copy_from_slice(&n.to_be_bytes());
+        } else if tbs[1] == 0x81 {
+            tbs[2] -= 3;
+        } else {
+            tbs[1] -= 3;
+        }
+    });
+    let issuer = cer("inter-gost2015");
+    assert!(crl::verify_crl(&v1, &issuer, SCAN_NOW).is_err());
+    assert!(crl::serial_status(&v1, &issuer, &[7], SCAN_NOW).is_err());
+}
+
+#[test]
+fn scan_uses_the_first_crl_reason_even_when_it_is_malformed() {
+    let issuer = entry("inter-gost2015.key");
+    let der = scan_crl()
+        .revoke_with_reason(&[7], SCAN_NOW - time::Duration::DAY, 1)
+        .der();
+    // Break the ENUMERATED tag of the first (only) CRLReason value: the decode reads no reason.
+    let broken = resigned(&der, &issuer, |tbs| {
+        let at = tbs
+            .windows(5)
+            .position(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x15])
+            .unwrap();
+        let value = tbs[at..]
+            .windows(3)
+            .position(|w| w == [0x0a, 0x01, 0x01])
+            .unwrap();
+        tbs[at + value] = 0x02;
+    });
+    same_as_full_decode(
+        &broken,
+        &[7],
+        SCAN_NOW,
+        Ok(CrlStatus::Revoked {
+            time: SCAN_NOW - time::Duration::DAY,
+            reason: None,
+        }),
+    );
+}
+
+#[test]
+fn scan_ignores_a_second_crl_reason_after_a_malformed_first_one() {
+    // Two CRLReason extensions in one entry, the first malformed and the second valid (1):
+    // the first decides, so there is no reason, on both paths.
+    let issuer = entry("inter-gost2015.key");
+    let der = scan_crl()
+        .revoke_with_reason(&[7], SCAN_NOW - time::Duration::DAY, 1)
+        .der();
+    let doubled = resigned(&der, &issuer, |tbs| {
+        // 30 L 06 03 55 1d 15 04 L2 0a 01 01: the whole Extension, found by its id.
+        let id = tbs
+            .windows(5)
+            .position(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x15])
+            .unwrap();
+        let start = id - 2;
+        let extension_len = 2 + tbs[start + 1] as usize;
+        let valid = tbs[start..start + extension_len].to_vec();
+        let mut broken = valid.clone();
+        let value = broken
+            .windows(3)
+            .position(|w| w == [0x0a, 0x01, 0x01])
+            .unwrap();
+        broken[value] = 0x02;
+        // The entry's Extensions SEQUENCE, the entry and every outer length grow by one
+        // Extension: patch the (short-form) lengths on the path to this extension.
+        let grow = extension_len as i64;
+        tbs.splice(start..start + extension_len, [broken, valid].concat());
+        patch_enclosing_lengths(tbs, start, grow);
+    });
+    same_as_full_decode(
+        &doubled,
+        &[7],
+        SCAN_NOW,
+        Ok(CrlStatus::Revoked {
+            time: SCAN_NOW - time::Duration::DAY,
+            reason: None,
+        }),
+    );
+}
+
+/// Adds `grow` to the length of every DER element of `tbs` that encloses offset `at`
+/// (short, one- and two-octet long forms), skipping the element starting at `at` itself.
+fn patch_enclosing_lengths(tbs: &mut [u8], at: usize, grow: i64) {
+    fn walk(tbs: &mut [u8], start: usize, end: usize, at: usize, grow: i64) {
+        let mut pos = start;
+        while pos < end {
+            let (header, length) = match tbs[pos + 1] {
+                n if n < 0x80 => (2, n as usize),
+                0x81 => (3, tbs[pos + 2] as usize),
+                0x82 => (4, u16::from_be_bytes([tbs[pos + 2], tbs[pos + 3]]) as usize),
+                other => panic!("length form {other:#x}"),
+            };
+            let content = pos + header;
+            if pos < at && at < content + length {
+                // Encloses `at` (the grown content): fix this length, then descend.
+                let new = (length as i64 + grow) as usize;
+                match tbs[pos + 1] {
+                    n if n < 0x80 => tbs[pos + 1] = new as u8,
+                    0x81 => tbs[pos + 2] = new as u8,
+                    _ => tbs[pos + 2..pos + 4].copy_from_slice(&(new as u16).to_be_bytes()),
+                }
+                walk(tbs, content, content + new, at, grow);
+                return;
+            }
+            pos = content + length;
+        }
+    }
+    let total = tbs.len();
+    walk(tbs, 0, total, at, grow);
+}

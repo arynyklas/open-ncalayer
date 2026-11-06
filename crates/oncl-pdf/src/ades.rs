@@ -9,7 +9,7 @@ use crate::{
     ScopedPdfRows,
     objects::{Value, get, white},
     verify::Candidate,
-    xref::Entry,
+    xref::{Entry, StreamMode},
 };
 use der::Encode;
 use oncl_pki::{
@@ -187,7 +187,7 @@ fn dss(
                     return Err(PdfError::Malformed("DSS duplicate or aliased material"));
                 }
                 result.objects.insert((id, generation));
-                let object = doc.indirect(offset, Some((id, generation)), true)?;
+                let object = doc.indirect(offset, Some((id, generation)), StreamMode::Region)?;
                 if object.end > doc.revisions[revision].end
                     || object
                         .value
@@ -366,15 +366,29 @@ fn permitted(
     if !same(&doc.revisions[prior].root, &doc.revisions[revision].root) {
         return Err(PdfError::Unsupported("incremental root substitution"));
     }
-    for key in [b"Info".as_slice(), b"ID"] {
-        match (
-            doc.revisions[prior].trailer.get(key),
-            doc.revisions[revision].trailer.get(key),
-        ) {
-            (Some(a), Some(b)) if same(a, b) => {}
-            (None, None) => {}
-            _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
-        }
+    match (
+        doc.revisions[prior].trailer.get(b"Info".as_slice()),
+        doc.revisions[revision].trailer.get(b"Info".as_slice()),
+    ) {
+        (Some(a), Some(b)) if same(a, b) => {}
+        (None, None) => {}
+        _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
+    }
+    // ISO 32000-1 14.4: ID[0] is the permanent original identifier and MUST
+    // stay; ID[1] identifies the latest revision and legitimately changes.
+    match (
+        doc.revisions[prior].trailer.get(b"ID".as_slice()),
+        doc.revisions[revision].trailer.get(b"ID".as_slice()),
+    ) {
+        (None, None) => {}
+        (Some(Value::Array(a)), Some(Value::Array(b)))
+            if a.len() == 2
+                && b.len() == 2
+                && matches!(&a[1], Value::Bytes(..))
+                && matches!(&b[1], Value::Bytes(..))
+                && matches!(&a[0], Value::Bytes(..))
+                && same(&a[0], &b[0]) => {}
+        _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
     }
     let root = doc.revisions[revision].root.clone();
     let before = doc.resolve(prior, &root)?;
@@ -457,7 +471,7 @@ fn permitted(
                         "xref object aliases an existing object",
                     ));
                 }
-                let object = doc.indirect(offset, Some((id, generation)), true)?;
+                let object = doc.indirect(offset, Some((id, generation)), StreamMode::Decode)?;
                 if !get(object.value.dict()?, b"Type")?.name(b"XRef") {
                     return Err(PdfError::Malformed("incremental xref object identity"));
                 }
@@ -487,13 +501,23 @@ fn permitted(
                 let object = doc.indirect(
                     offset,
                     Some((id, generation)),
-                    current
+                    if current
                         .material
                         .iter()
-                        .any(|m| m.reference == (id, generation)),
+                        .any(|m| m.reference == (id, generation))
+                    {
+                        StreamMode::Region
+                    } else {
+                        StreamMode::Reject
+                    },
                 )?;
                 spans.push((offset, object.end));
             }
+            // Object 0 is the mandatory head of the free list (ISO 32000-1
+            // 7.5.4); every revision's xref re-lists it. Only that entry,
+            // and only when it was already free, is not an object change.
+            Entry::Free { next, generation }
+                if id == 0 && generation == 65535 && free_head_unchanged(doc, revision, next) => {}
             _ => {
                 return Err(PdfError::Unsupported(
                     "free or compressed augmentation entry",
@@ -508,6 +532,22 @@ fn permitted(
         at = end;
     }
     white_gap(doc, at, xref)
+}
+/// Object 0 may be re-listed only as the free-list head: it was never in use,
+/// and its next-free link ends the list (0) or names another free entry.
+fn free_head_unchanged(doc: &PdfDocument<'_, '_>, revision: usize, next: u64) -> bool {
+    let latest = |id: u64| {
+        doc.revisions[..=revision]
+            .iter()
+            .rev()
+            .find_map(|r| r.entries.get(&u32::try_from(id).ok()?))
+    };
+    doc.revisions[..revision].iter().all(|r| {
+        !matches!(
+            r.entries.get(&0),
+            Some(Entry::Direct(..) | Entry::Compressed(..))
+        )
+    }) && (next == 0 || matches!(latest(next), Some(Entry::Free { .. })))
 }
 struct Parsed {
     candidates: Vec<(usize, Candidate)>,
@@ -609,7 +649,7 @@ pub fn verify(
     allowed: &[SigAlg],
     scope: &mut ResourceScope,
 ) -> Result<PadesReport> {
-    let mut frozen = FrozenInput::capture(input, services.temporary, scope)?;
+    let mut frozen = crate::verify::capture_signed(input, services.temporary, limits, scope)?;
     verify_view(
         required,
         PdfSnapshot::input(&mut frozen, scope)?,
@@ -935,7 +975,8 @@ pub fn extend(
 ) -> Result<PadesReport> {
     let mut transaction = PdfSignatureOutput::new(output, scope)?;
     let mut operation = scope.shared_view();
-    let mut frozen = FrozenInput::capture(input, services.temporary, &mut operation)?;
+    let mut frozen =
+        crate::verify::capture_signed(input, services.temporary, limits, &mut operation)?;
     let old = verify_frozen(
         AdesLevel::B,
         &mut frozen,

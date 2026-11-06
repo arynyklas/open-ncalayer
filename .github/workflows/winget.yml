@@ -1,0 +1,165 @@
+name: WinGet manifests
+
+# Generates and checks the WinGet manifests of a STABLE release (docs/dev/winget.md). It only
+# produces files: no token with write access, no fork, no pull request to microsoft/winget-pkgs,
+# no secret. The first submission is a separate decision of the project's owner, made by hand
+# after the checks (docs/dev/winget.md, "Submission"); a green run of this workflow is not a
+# publication and does not make the package available in WinGet.
+#
+# What it does for the tag:
+#   1. reads the release from the GitHub API and refuses anything but a published stable release
+#      (no draft, no pre-release, no alpha/beta tag) with both installers at their
+#      version-specific URLs;
+#   2. downloads each installer ONCE, hashes that stream, and compares it with the API's digest;
+#      the same hash goes into the manifest;
+#   3. always writes the CANDIDATE manifest (the input of the installation proof run on clean
+#      machines, scripts/winget);
+#   4. with the merged probe reports of that run (`winget/probes/<version>.json` on the default
+#      branch, or the `probe` input) writes the final manifest and checks it against the
+#      pinned schemas 1.12.0 and the package's invariants, then runs `winget validate` if
+#      winget is on the runner. Without the reports the job says so and stops: until the proof
+#      run exists there is no final manifest.
+# `winget validate` is schema validation by WinGet's own parser, not an installer proof; the
+# installation proof is the run on the machines of the matrix.
+# Triggers: the Release workflow finishing for a tag (a release made with GITHUB_TOKEN starts no
+# `release` event, so, like aur.yml, this follows the workflow run), or by hand with a tag.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The stable release tag, v<major>.<minor>.<patch>
+        required: true
+      probe:
+        description: The merged probe reports in the repository [default winget/probes/<version>.json]
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  manifests:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The probe reports and the hash ledger are committed after the release.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.repository.default_branch || github.ref }}
+          persist-credentials: false
+      - name: The release
+        id: release
+        shell: bash
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+          EVENT: ${{ github.event_name }}
+          PROBE_INPUT: ${{ inputs.probe }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [ "$EVENT" = workflow_run ]; then
+              echo "::notice::$TAG is not a stable release tag: no WinGet manifest for it"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::$TAG is not a stable release tag (v<major>.<minor>.<patch>): alpha, beta and other tags never get a WinGet manifest"
+            exit 1
+          fi
+          version="${TAG#v}"
+          probe="${PROBE_INPUT:-winget/probes/$version.json}"
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "probe=$probe"
+          } >> "$GITHUB_OUTPUT"
+      - name: Install toolchain (rust-toolchain.toml)
+        if: steps.release.outputs.skip != 'true'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.release.outputs.skip != 'true'
+      - name: Fetch the release
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          # Read-only: the job's token has `contents: read` and is used for this one GET.
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p target
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > target/release.json
+      - name: Candidate manifest (input of the installation proof run)
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          cargo xtask winget candidate \
+            --release-json target/release.json --out target/winget-candidate
+          cargo xtask winget check target/winget-candidate --candidate
+      - name: Final manifest
+        if: steps.release.outputs.skip != 'true'
+        id: final
+        shell: bash
+        env:
+          PROBE: ${{ steps.release.outputs.probe }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if [ ! -f "$PROBE" ]; then
+            msg="PENDING: $PROBE does not exist. The installation proof run on clean machines (docs/dev/winget.md) has not been recorded for $VERSION, so NO final manifest was made and nothing is ready to submit."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cargo xtask winget generate \
+            --release-json target/release.json --probe "$PROBE" --out target/winget
+          cargo xtask winget check target/winget
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+      - name: winget validate (schema validation by WinGet's own parser; not an installer proof)
+        if: steps.final.outputs.generated == 'true'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host '::warning::winget is not on this runner: `winget validate` was NOT run here. The pinned-schema check above passed; run `winget validate target/winget` on a machine that has winget before any submission.'
+            'winget validate was not run on the runner (winget missing).' | Add-Content $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          winget --version
+          winget validate target/winget
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Summary
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          GENERATED: ${{ steps.final.outputs.generated }}
+        run: |
+          {
+            echo "### WinGet manifests of $VERSION"
+            echo "- candidate manifest: made (artifact \`winget-$VERSION\`, directory \`winget-candidate\`); it is the input of the proof run and is NOT for submission"
+            if [ "$GENERATED" = true ]; then
+              echo "- final manifest: made and checked (artifact, directory \`winget\`); verdict: \`$(sed -n 's/.*"verdict": "\(.*\)".*/\1/p' target/winget.status.json | head -n1)\` (target/winget.status.json); **nothing was submitted and the package is not available in WinGet**"
+            else
+              echo "- final manifest: not made (no probe reports)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: steps.release.outputs.skip != 'true'
+        with:
+          name: winget-${{ steps.release.outputs.version }}
+          path: |
+            target/winget-candidate
+            target/winget-candidate.evidence.json
+            target/winget
+            target/winget.evidence.json
+            target/winget.status.json
+            target/winget-candidate.status.json
+          if-no-files-found: error
+          retention-days: 90

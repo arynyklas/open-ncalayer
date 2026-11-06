@@ -9,7 +9,11 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Entry {
-    Free,
+    /// Free entry: next free object number and the generation to use if reused.
+    Free {
+        next: u64,
+        generation: u32,
+    },
     Direct(u64, u16),
     Compressed(u32, u32),
 }
@@ -28,6 +32,16 @@ pub(crate) struct Indirect {
     pub stream: Option<Vec<u8>>,
     pub stream_region: Option<oncl_pki::io::Region>,
     pub end: u64,
+}
+/// What `indirect` does with the stream of an object.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamMode {
+    /// A stream is not part of this graph.
+    Reject,
+    /// Copy and (Flate) decode the body, bounded by `max_decoded_bytes`.
+    Decode,
+    /// Unfiltered evidence: record the extent only, never the bytes.
+    Region,
 }
 type XrefSection = (BTreeMap<u32, Entry>, BTreeMap<Vec<u8>, Value>, u64);
 impl PdfDocument<'_, '_> {
@@ -49,7 +63,7 @@ impl PdfDocument<'_, '_> {
         &mut self,
         offset: u64,
         expected: Option<(u32, u16)>,
-        decode: bool,
+        mode: StreamMode,
     ) -> Result<Indirect> {
         let bytes = self.window(offset)?;
         let mut p = self.parser(&bytes, offset);
@@ -77,7 +91,7 @@ impl PdfDocument<'_, '_> {
             } else {
                 return Err(PdfError::Malformed("stream newline"));
             }
-            if !decode {
+            if matches!(mode, StreamMode::Reject) {
                 return Err(PdfError::Unsupported("stream in signature metadata graph"));
             }
             let dict = value.dict()?;
@@ -91,6 +105,35 @@ impl PdfDocument<'_, '_> {
                 offset: offset + p.pos as u64,
                 len: length as u64,
             });
+            if matches!(mode, StreamMode::Region) {
+                // Validation evidence (a CRL can be tens of MB): only its extent is
+                // recorded, never its bytes; the owner spools the region. The keyword
+                // after the body is read from its own small window.
+                if dict.contains_key(b"Filter".as_slice()) {
+                    return Err(PdfError::Unsupported("filtered evidence stream"));
+                }
+                let body_start = offset
+                    .checked_add(p.pos as u64)
+                    .ok_or(PdfError::Limit("stream size"))?;
+                let body_end = body_start
+                    .checked_add(length as u64)
+                    .filter(|end| *end <= self.input.extent)
+                    .ok_or(PdfError::Malformed("stream beyond the source"))?;
+                self.work = self
+                    .work
+                    .checked_add(64)
+                    .ok_or(PdfError::Limit("read work"))?;
+                let tail = self.input.read_at(body_end, 64, self.scope)?;
+                let mut after = self.parser(&tail, body_end);
+                after.expect(b"endstream")?;
+                after.expect(b"endobj")?;
+                return Ok(Indirect {
+                    value,
+                    stream: None,
+                    stream_region,
+                    end: body_end + after.pos as u64,
+                });
+            }
             let encoded = p
                 .bytes
                 .get(p.pos..end)
@@ -297,7 +340,11 @@ impl PdfDocument<'_, '_> {
                     let generation = p.integer()?;
                     let kind = p.word()?;
                     let entry = match kind {
-                        b"f" => Entry::Free,
+                        b"f" => Entry::Free {
+                            next: offset,
+                            generation: u32::try_from(generation)
+                                .map_err(|_| PdfError::Malformed("generation"))?,
+                        },
                         b"n" => Entry::Direct(
                             offset,
                             u16::try_from(generation)
@@ -319,7 +366,7 @@ impl PdfDocument<'_, '_> {
             }
             Ok((entries, dict, offset + p.pos as u64))
         } else {
-            let object = self.indirect(offset, None, true)?;
+            let object = self.indirect(offset, None, StreamMode::Decode)?;
             let dict = object.value.dict()?.clone();
             if !get(&dict, b"Type")?.name(b"XRef") {
                 return Err(PdfError::Malformed("xref stream type"));
@@ -374,7 +421,19 @@ impl PdfDocument<'_, '_> {
                         field[0] = 1;
                     }
                     let entry = match field[0] {
-                        0 => Entry::Free,
+                        0 => Entry::Free {
+                            next: field[1],
+                            // ISO 32000-1 7.5.8.3 defaults an absent field (W[2] == 0)
+                            // to 0, while the free-list head is 65535. Producers
+                            // such as NCANode omit it, so that tolerated deviation
+                            // is read as the head's 65535; with a real field the
+                            // stored value is used unchanged.
+                            generation: if w[2] == 0 {
+                                65535
+                            } else {
+                                u32::try_from(field[2]).unwrap_or(u32::MAX)
+                            },
+                        },
                         1 => Entry::Direct(
                             field[1],
                             u16::try_from(field[2])
@@ -412,12 +471,12 @@ impl PdfDocument<'_, '_> {
             .copied()
             .ok_or(PdfError::Malformed("unresolved reference"))?;
         match entry {
-            Entry::Free => Err(PdfError::Malformed("free object reference")),
+            Entry::Free { .. } => Err(PdfError::Malformed("free object reference")),
             Entry::Direct(offset, gen_actual) => {
                 if gen_actual != *generation || offset >= self.revisions[revision].end {
                     return Err(PdfError::Malformed("reference generation or revision"));
                 }
-                let object = self.indirect(offset, Some((*id, *generation)), false)?;
+                let object = self.indirect(offset, Some((*id, *generation)), StreamMode::Reject)?;
                 if object.end > self.revisions[revision].end {
                     return Err(PdfError::Malformed("object crosses revision boundary"));
                 }
@@ -444,7 +503,8 @@ impl PdfDocument<'_, '_> {
                     .as_ref()
                     .is_some_and(|(r, id, _, _)| *r == revision && *id == stream_id)
                 {
-                    let object = self.indirect(offset, Some((stream_id, generation)), true)?;
+                    let object =
+                        self.indirect(offset, Some((stream_id, generation)), StreamMode::Decode)?;
                     if object.end > self.revisions[revision].end {
                         return Err(PdfError::Malformed(
                             "object stream crosses revision boundary",

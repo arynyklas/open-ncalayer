@@ -333,11 +333,11 @@ pub(crate) fn acquire(
     let transport = DeadlineTransport::new(services.validation.http, services.network, scope);
     let mut values = Vec::new();
     let result = (|| {
-        for cert in path
-            .iter()
-            .skip(1)
-            .filter(|c| !services.validation.anchors.certs().contains(c))
-        {
+        // EN 319 132-1 §5.4.2: the values are the signing certificate path's CA
+        // certificates AND the trust anchor's certificate when one exists (the
+        // signing certificate itself is already in ds:KeyInfo). Dropping a
+        // trust-anchor issuer left a validly LT signature with no CertificateValues.
+        for cert in path.iter().skip(1) {
             values.push((EvidenceKind::Certificate, crate::cert_der(cert)?));
         }
         for pair in path.windows(2) {
@@ -673,6 +673,9 @@ pub(crate) fn intersect_limits(a: EvidenceLimits, b: EvidenceLimits) -> Evidence
         max_items: a.max_items.min(b.max_items),
         max_bytes: a.max_bytes.min(b.max_bytes),
         max_item_bytes: a.max_item_bytes.min(b.max_item_bytes),
+        max_crl_bytes: a.max_crl_bytes.min(b.max_crl_bytes),
+        max_crl_item_bytes: a.max_crl_item_bytes.min(b.max_crl_item_bytes),
+        max_total_bytes: a.max_total_bytes.min(b.max_total_bytes),
         max_chain_len: a.max_chain_len.min(b.max_chain_len),
         max_proofs: a.max_proofs.min(b.max_proofs),
         max_coverage_parts: a.max_coverage_parts.min(b.max_coverage_parts),
@@ -688,6 +691,9 @@ pub(crate) fn effective_limits(
         max_items: 24,
         max_bytes: 24 * metadata as u64,
         max_item_bytes: metadata as u64,
+        max_crl_bytes: 24 * metadata as u64,
+        max_crl_item_bytes: metadata as u64,
+        max_total_bytes: 24 * metadata as u64,
         max_chain_len: 16,
         max_proofs: 8,
         max_coverage_parts: 256,

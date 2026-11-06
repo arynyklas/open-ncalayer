@@ -563,6 +563,15 @@ fn reason_text(t: &Texts, reason: &ValidationReason) -> String {
             oncl_pki::validation::FormatFailure::ReferenceTargetMissing => t.p_ref_missing,
         }
         .to_owned(),
+        ValidationReason::Profile(violation) => match violation {
+            oncl_pki::validation::ProfileViolation::SigningTimeForbidden => t.prof_time_forbidden,
+            oncl_pki::validation::ProfileViolation::SigningTimeMissing => t.prof_time_missing,
+            oncl_pki::validation::ProfileViolation::ContentTypeNotData => t.prof_content_type,
+            oncl_pki::validation::ProfileViolation::SigningCertificateMissing => {
+                t.prof_signing_cert
+            }
+        }
+        .to_owned(),
         ValidationReason::CertificateValidity => t.r_validity.to_owned(),
         ValidationReason::UntrustedChain => t.r_chain.to_owned(),
         ValidationReason::KeyUsage => t.r_key_usage.to_owned(),
@@ -756,6 +765,10 @@ struct Texts {
     p_tsp_imprint: &'static str,
     p_ref_digest: &'static str,
     p_ref_missing: &'static str,
+    prof_time_forbidden: &'static str,
+    prof_time_missing: &'static str,
+    prof_content_type: &'static str,
+    prof_signing_cert: &'static str,
     r_validity: &'static str,
     r_chain: &'static str,
     r_key_usage: &'static str,
@@ -887,6 +900,10 @@ static RU: Texts = Texts {
     p_tsp_imprint: "метка времени относится к другой подписи",
     p_ref_digest: "ссылка: дайджест не совпадает",
     p_ref_missing: "ссылка: цель не найдена",
+    prof_time_forbidden: "несоответствие PAdES: в CMS есть атрибут signing-time (заявленное время должно быть в записи /M PDF)",
+    prof_time_missing: "несоответствие CAdES: в CMS нет атрибута signing-time",
+    prof_content_type: "несоответствие базовому профилю: тип содержимого не id-data",
+    prof_signing_cert: "несоответствие базовому профилю: сертификат подписанта не защищён атрибутом signing-certificate",
     r_validity: "срок действия сертификата не позволяет принять подпись",
     r_chain: "сертификат не связан с доверенным корнем",
     r_key_usage: "сертификат не предназначен для подписи",
@@ -1008,6 +1025,10 @@ static KK: Texts = Texts {
     p_tsp_imprint: "уақыт белгісі басқа қолтаңбаға қатысты",
     p_ref_digest: "сілтеме: дайджест сәйкес емес",
     p_ref_missing: "сілтеме: нысан табылмады",
+    prof_time_forbidden: "PAdES-қа сәйкес емес: CMS құрамында signing-time атрибуты бар (мәлімделген уақыт PDF /M жазбасында болуы тиіс)",
+    prof_time_missing: "CAdES-қа сәйкес емес: CMS құрамында signing-time атрибуты жоқ",
+    prof_content_type: "базалық профильге сәйкес емес: мазмұн түрі id-data емес",
+    prof_signing_cert: "базалық профильге сәйкес емес: қол қоюшы сертификатын signing-certificate атрибуты қорғамайды",
     r_validity: "сертификат мерзімі қолтаңбаны қабылдауға мүмкіндік бермейді",
     r_chain: "сертификат сенімді түбірмен байланыспаған",
     r_key_usage: "сертификат қол қоюға арналмаған",
@@ -1129,6 +1150,10 @@ static EN: Texts = Texts {
     p_tsp_imprint: "the timestamp is of another signature",
     p_ref_digest: "reference: the digest does not match",
     p_ref_missing: "reference: the target was not found",
+    prof_time_forbidden: "PAdES profile violation: the CMS carries a signing-time attribute (the claimed time belongs in the PDF /M entry)",
+    prof_time_missing: "CAdES profile violation: the CMS carries no signing-time attribute",
+    prof_content_type: "baseline profile violation: the content type is not id-data",
+    prof_signing_cert: "baseline profile violation: no signing-certificate attribute protects the signer certificate",
     r_validity: "the certificate's validity period does not allow the signature",
     r_chain: "the certificate does not chain to a trusted root",
     r_key_usage: "the certificate is not meant for signing",
@@ -1250,6 +1275,50 @@ mod tests {
                 .count();
             assert!(cautions >= 4, "{locale:?}: {r:?}");
             assert!(r.rows.iter().all(|row| !row.text.is_empty()));
+        }
+    }
+
+    /// Every baseline finding names its cause in every language, distinct from the signature
+    /// failures and from each other, and a signer carrying one is rendered as a failure.
+    #[test]
+    fn every_profile_violation_has_its_own_text_in_every_language() {
+        use oncl_pki::validation::ProfileViolation::*;
+        let all = [
+            SigningTimeForbidden,
+            SigningTimeMissing,
+            ContentTypeNotData,
+            SigningCertificateMissing,
+        ];
+        for locale in LOCALES {
+            let t = Texts::of(locale);
+            let texts: Vec<String> = all
+                .iter()
+                .map(|v| reason_text(t, &ValidationReason::Profile(*v)))
+                .collect();
+            for (i, text) in texts.iter().enumerate() {
+                assert!(!text.trim().is_empty(), "{locale:?}: {:?}", all[i]);
+                assert_ne!(
+                    text,
+                    &reason_text(t, &ValidationReason::Signature(Problem::Malformed)),
+                    "{locale:?}: {:?}",
+                    all[i]
+                );
+                for other in &texts[i + 1..] {
+                    assert_ne!(text, other, "{locale:?}");
+                }
+            }
+            assert!(
+                texts[0].contains("signing-time") && texts[1].contains("signing-time"),
+                "{locale:?}"
+            );
+            assert!(
+                texts[2].contains("id-data") && texts[3].contains("signing-certificate"),
+                "{locale:?}"
+            );
+            assert_eq!(
+                reason_tone(&ValidationReason::Profile(SigningTimeForbidden)),
+                Tone::Failure
+            );
         }
     }
 
