@@ -165,6 +165,9 @@ pub struct Ctx {
     pub dir: PathBuf,
     pub oracle_py: PathBuf,
     nc: NodeState,
+    /// Directory of the large artifacts and their size.
+    pub scratch: PathBuf,
+    pub large_bytes: u64,
     pub coverage: std::sync::Arc<Coverage>,
 }
 
@@ -384,6 +387,11 @@ pub struct Options {
     /// Start the loopback PKI, write its paths to `<out>/world.env`, and keep serving until
     /// stdin closes: to reproduce a row by hand with `oncl`.
     pub hold_world: bool,
+    /// Where the large artifacts are generated (default: `ONCL_INTEROP_SCRATCH`, else a
+    /// directory under the temporary directory): a volume with room for a few of them.
+    pub scratch: Option<PathBuf>,
+    /// The size of the large artifacts in bytes.
+    pub large_bytes: u64,
 }
 
 /// Runs the matrix and writes `<out>/report.json` and `<out>/report.md`.
@@ -427,10 +435,27 @@ pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
             .container_host
             .unwrap_or(std::net::Ipv4Addr::LOCALHOST),
     )?;
+    let scratch = match &options.scratch {
+        Some(dir) => dir.clone(),
+        None => std::env::var_os("ONCL_INTEROP_SCRATCH")
+            .map_or_else(|| base.join("large"), PathBuf::from),
+    };
+    std::fs::create_dir_all(&scratch).with_context(|| scratch.display().to_string())?;
     let oracle_py = world.dir.path().join("oracle.py");
     std::fs::write(&oracle_py, ORACLE_PY)?;
     if options.hold_world {
         return hold_world(&world, &out, &oncl);
+    }
+    // Public validation material is evidence, not a key export. Preserve it so artifacts
+    // remain independently checkable after the ephemeral world has been removed.
+    let public = out.join("public-pki");
+    std::fs::create_dir_all(&public)?;
+    for source in [&world.root, &world.tsa_cert, &world.responder_cert]
+        .into_iter()
+        .chain(world.signers.iter().map(|s| &s.cert_der))
+    {
+        let name = source.file_name().context("public certificate filename")?;
+        std::fs::copy(source, public.join(name))?;
     }
     let fixture_digests = fixture_digests()?;
     let openapi = check_openapi(&coverage)?;
@@ -442,6 +467,8 @@ pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
         dir: PathBuf::new(),
         oracle_py,
         nc: NodeState::Idle,
+        scratch,
+        large_bytes: options.large_bytes,
         coverage: coverage.clone(),
     };
     let oracle_versions = oracle_versions(&ctx, &coverage);

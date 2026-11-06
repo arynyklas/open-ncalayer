@@ -69,6 +69,8 @@ x509-cert.workspace = true
 zip.workspace = true
 # `sign`: passwords wiped after use.
 zeroize.workspace = true
+# `platform-interop`: the synthetic WebAssembly plugin of the plugin-call cases.
+wat.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # `ext-e2e`: signal handling and killing process groups.

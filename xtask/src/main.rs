@@ -94,6 +94,13 @@ enum Command {
         /// stdin closes (to reproduce a row by hand with `oncl`).
         #[arg(long)]
         hold_world: bool,
+        /// Directory of the large artifacts [default: `ONCL_INTEROP_SCRATCH`, else under the
+        /// temporary directory]: use a volume with a few GiB free.
+        #[arg(long)]
+        scratch: Option<PathBuf>,
+        /// Size in bytes of the large artifacts of the matrix.
+        #[arg(long, default_value_t = 1_181_116_006)]
+        large_bytes: u64,
     },
     /// Sign an update index with minisign: writes `<index>.minisig` beside it, with the
     /// trusted comment `channel=<channel>;seq=<seq>`. The password is read without echo.
@@ -835,6 +842,8 @@ fn main() -> anyhow::Result<()> {
             cases,
             list,
             hold_world,
+            scratch,
+            large_bytes,
         } => xtask::platform_interop::run(
             &oncl_testkit::workspace_root(),
             &xtask::platform_interop::Options {
@@ -843,6 +852,8 @@ fn main() -> anyhow::Result<()> {
                 filter: cases,
                 list,
                 hold_world,
+                scratch,
+                large_bytes,
             },
         ),
         Command::GenFixtures { check: false } => {

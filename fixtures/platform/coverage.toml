@@ -146,6 +146,86 @@ id = "pdf.extend"
 title = "PAdES extension B->T->LT->LTA"
 routes = ["/pdf/extend"]
 
+[[capability]]
+id = "wsse.sign"
+title = "WS-Security signing (SOAP 1.1/1.2, NCANode key identifier, BinarySecurityToken)"
+routes = ["/wsse/sign"]
+
+[[capability]]
+id = "wsse.verify"
+title = "WS-Security verification, counterexamples, the Kalkan fixture"
+routes = ["/wsse/verify"]
+
+[[capability]]
+id = "jws.sign"
+title = "JWS signing (compact, flattened, general, detached), tamper"
+routes = ["/jws/sign"]
+
+[[capability]]
+id = "jws.add"
+title = "JWS: adding a signer, both directions"
+routes = ["/jws/sign/add"]
+
+[[capability]]
+id = "jws.verify"
+title = "JWS verification of NCANode's JWS and GOST algorithm naming"
+routes = ["/jws/verify"]
+
+[[capability]]
+id = "jwt.encode"
+title = "JWT encoding, tamper, alg=none"
+routes = ["/jwt/encode"]
+
+[[capability]]
+id = "jwt.decode"
+title = "JWT decoding/verification"
+routes = ["/jwt/decode"]
+
+[[capability]]
+id = "x509.info"
+title = "Certificate information: oncl inspect vs asn1crypto vs NCANode /x509/info"
+routes = ["/x509/info"]
+
+[[capability]]
+id = "x509.sign"
+title = "Raw signature creation (/x509/sign) and its verification"
+routes = ["/x509/sign"]
+
+[[capability]]
+id = "x509.verify"
+title = "Raw signature verification (/x509/verify) and the oracle's limit"
+routes = ["/x509/verify"]
+
+[[capability]]
+id = "pkcs12.aliases"
+title = "PKCS#12 aliases"
+routes = ["/pkcs12/aliases"]
+
+[[capability]]
+id = "pkcs12.info"
+title = "PKCS#12 certificate info"
+routes = ["/pkcs12/info"]
+
+[[capability]]
+id = "hash"
+title = "oncl hash against independent digests"
+routes = []
+
+[[capability]]
+id = "timestamp"
+title = "RFC 3161 acquire/verify against the loopback TSA"
+routes = []
+
+[[capability]]
+id = "plugin"
+title = "plugin call with operator grants (WebAssembly guest)"
+routes = []
+
+[[capability]]
+id = "large"
+title = "signed artifacts of at least 1 GiB judged by independent decomposition"
+routes = []
+
 # ---- cases ----------------------------------------------------------------------------
 
 [[case]]
@@ -698,7 +778,8 @@ oracles = ["ncanode"]
 what = "Kalkan's CAdES-LTA fixture of NCANode's repository (GOST 2015): oncl verifies the signature value and digests"
 expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=Failed/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA"
 
-# ---- production defects exposed by the matrix -----------------------------------------
+# ---- production defects exposed by the matrix (a `[[pending]]` list, if any, keeps the
+# ---- matrix INCOMPLETE: capabilities without cases) ------------------------------------
 
 [[defect]]
 id = "D1"
@@ -1243,7 +1324,7 @@ capability = "pdf.extend"
 profile = "rsa"
 oracles = ["ncanode"]
 what = "NCANode extends our rsa PAdES-B to T through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 PAdES extension supports only LT and LTA; sign at B or T level"
 
 [[case]]
 id = "pdf-extend-ncanode-rsa-lt"
@@ -1251,7 +1332,7 @@ capability = "pdf.extend"
 profile = "rsa"
 oracles = ["ncanode"]
 what = "NCANode extends our rsa PAdES-B to LT through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-extend-ncanode-rsa-lta"
@@ -1259,7 +1340,7 @@ capability = "pdf.extend"
 profile = "rsa"
 oracles = ["ncanode"]
 what = "NCANode extends our rsa PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-sign-gost2015"
@@ -1358,7 +1439,7 @@ capability = "pdf.extend"
 profile = "gost2015"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2015 PAdES-B to T through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 PAdES extension supports only LT and LTA; sign at B or T level"
 
 [[case]]
 id = "pdf-extend-ncanode-gost2015-lt"
@@ -1366,7 +1447,7 @@ capability = "pdf.extend"
 profile = "gost2015"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2015 PAdES-B to LT through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-extend-ncanode-gost2015-lta"
@@ -1374,7 +1455,7 @@ capability = "pdf.extend"
 profile = "gost2015"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2015 PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-sign-gost2004"
@@ -1473,7 +1554,7 @@ capability = "pdf.extend"
 profile = "gost2004"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2004 PAdES-B to T through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 PAdES extension supports only LT and LTA; sign at B or T level"
 
 [[case]]
 id = "pdf-extend-ncanode-gost2004-lt"
@@ -1481,7 +1562,7 @@ capability = "pdf.extend"
 profile = "gost2004"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2004 PAdES-B to LT through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-extend-ncanode-gost2004-lta"
@@ -1489,7 +1570,7 @@ capability = "pdf.extend"
 profile = "gost2004"
 oracles = ["ncanode"]
 what = "NCANode extends our gost2004 PAdES-B to LTA through /pdf/extend; oncl verifies at that level"
-expected = "ncanode=HTTP400"
+expected = "ncanode=HTTP400 Cannot build AdES-LT: no OCSP or CRL data available for the signer chain. Configure NCANOD"
 
 [[case]]
 id = "pdf-verify-fixture-b"
@@ -1555,43 +1636,537 @@ reproduction = "oncl verify --profile pades-b --input target/fixtures/ncanode/sa
 observed = "signature=Failed, reasons include Signature(Malformed) under pades-*; under `pdf` the same file gives signature=Passed. The CMS is ETSI.CAdES.detached with signed attributes contentType, signingTime, signingCertificateV2, messageDigest (no CMSAlgorithmProtection)"
 expected = "(desired grade after the fix of D5; the row fails until then)"
 
-# ---- capabilities with no cases yet (the matrix is INCOMPLETE until this list is empty) ----
+# ---- exclusions ------------------------------------------------------------------------
 
-[[pending]]
-id = "wsse"
-title = "WS-Security sign/verify (SOAP 1.1/1.2, NCANode key identifier)"
-routes = ["/wsse/sign", "/wsse/verify"]
-missing = "cases not written (oncl sign|verify --profile wsse vs NCANode /wsse/*, the repository's wsse-ncanode.xml and the lxml oracle)"
-
-[[pending]]
-id = "jose"
-title = "JWS sign/add/verify and JWT encode/decode"
-routes = ["/jws/sign", "/jws/sign/add", "/jws/verify", "/jwt/decode", "/jwt/encode"]
-missing = "cases not written. Known from probing: NCANode names its GOST algorithms GG2015/GG2004 and rejects ECGOST3410-2015-512 (HTTP 400 `Unsupported algorithm`), oncl supports RS256 and ECGOST3410-2015-512 only: RS256 can be judged by OpenSSL and NCANode, GOST JOSE has no external verifier for our algorithm name"
-
-[[pending]]
-id = "x509"
-title = "X.509 info and raw signature sign/verify"
-routes = ["/x509/info", "/x509/sign", "/x509/verify"]
-missing = "cases not written. Known from probing: NCANode /x509/verify folds the certificate chain into `valid` (always false for expired or untrusted certificates), so it cannot judge a raw signature; OpenSSL judges RSA, no external GOST raw verifier exists; oncl has `sign --profile raw` but no raw verify profile"
-
-[[pending]]
-id = "pkcs12"
-title = "PKCS#12 aliases and info"
-routes = ["/pkcs12/aliases", "/pkcs12/info"]
-missing = "cases not written (oncl inspect --profile container vs NCANode /pkcs12/* vs `openssl pkcs12 -legacy`; the existing interop-ncanode rows cover our key files only)"
-
-[[pending]]
-id = "extras"
-title = "our hash, RFC 3161 timestamp and plugin call cases"
-missing = "cases not written (hash vs OpenSSL/gostcrypto/Kalkan messageDigest; timestamp acquire/verify vs openssl ts -verify; plugin call output verified by OpenSSL)"
-
-[[pending]]
-id = "large"
-title = "decomposed independent checks of artifacts beyond 2/4/10 GiB"
-missing = "no run: the decomposition tools exist (oracle.py pdf-byterange streams the ranges; `openssl cms -verify -content` streams detached CMS) but no multi-GiB artifact was produced or judged; V01's generator is in another worktree and is not merged"
+[[defect]]
+id = "D6"
+title = "oncl sign --profile pdf refuses a PDF of many pages with MetadataLimit"
+reproduction = "cargo xtask platform-interop --case large-pdf-signature-rsa --large-bytes 134217728 (a classic-xref PDF of 8000 pages with 16 KiB content streams each, 16000 objects, 128 MiB; generated by xtask/src/platform/interop/cases/large.rs write_pdf), or `oncl sign --profile pdf` of that file; the same size with 1 MiB streams (about 120 pages) signs and verifies; 32 MiB with 16 KiB streams (about 2000 pages) signs"
+observed = "exit 1, `oncl: MetadataLimit; applied=NotApplied` from 128 MiB up (also 512 MiB and 1.1 GiB); no key use. The size is not the cause: the page/object count is"
+expected = "a signature: the design's PDF acceptance names object streams, revisions and a large number of objects/pages, not only padding to the target length; a page-count metadata quota must admit the control document"
 
 [[excluded]]
 id = "envelope"
 title = "CMS encryption/decryption (envelope), RSA and KZ GOST profiles"
 reason = "G01/G02 (the KZ GOST encryption backend) is the one external blocker of the platform: no encrypt/decrypt implementation exists in oncl, so there is nothing to judge; no RSA-only substitute is claimed"
+
+[[case]]
+id = "wsse-sign-rsa"
+capability = "wsse.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl signs the SOAP Body with rsa (NCANode key-identifier form); we verify strictly, NCANode verifies, lxml names the signed node (RSA)"
+expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false lxml-rsa=ok/Body"
+
+[[case]]
+id = "wsse-tamper-rsa-body"
+capability = "wsse.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "the body of our rsa WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false lxml-rsa=rejected"
+
+[[case]]
+id = "wsse-tamper-rsa-signature"
+capability = "wsse.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "the signature of our rsa WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false lxml-rsa=rejected"
+
+[[case]]
+id = "wsse-verify-ncanode-rsa"
+capability = "wsse.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "NCANode signs a SOAP message with its rsa test key (/wsse/sign); oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=HTTP200 signers=1 valid=false lxml-rsa=ok/Body"
+
+[[case]]
+id = "wsse-sign-gost2015"
+capability = "wsse.sign"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "oncl signs the SOAP Body with gost2015 (NCANode key-identifier form); we verify strictly, NCANode verifies, lxml names the signed node (RSA)"
+expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false"
+
+[[case]]
+id = "wsse-tamper-gost2015-body"
+capability = "wsse.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "the body of our gost2015 WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+
+[[case]]
+id = "wsse-tamper-gost2015-signature"
+capability = "wsse.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "the signature of our gost2015 WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+
+[[case]]
+id = "wsse-verify-ncanode-gost2015"
+capability = "wsse.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "NCANode signs a SOAP message with its gost2015 test key (/wsse/sign); oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=HTTP200 signers=1 valid=false"
+
+[[case]]
+id = "wsse-sign-gost2004"
+capability = "wsse.sign"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "oncl signs the SOAP Body with gost2004 (NCANode key-identifier form); we verify strictly, NCANode verifies, lxml names the signed node (RSA)"
+expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false"
+
+[[case]]
+id = "wsse-tamper-gost2004-body"
+capability = "wsse.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "the body of our gost2004 WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+
+[[case]]
+id = "wsse-tamper-gost2004-signature"
+capability = "wsse.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "the signature of our gost2004 WS-Security message altered: every judge must reject"
+expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+
+[[case]]
+id = "wsse-verify-ncanode-gost2004"
+capability = "wsse.verify"
+profile = "gost2004"
+oracles = ["ncanode"]
+what = "NCANode signs a SOAP message with its gost2004 test key (/wsse/sign); oncl verifies the signature value and digests"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=HTTP200 signers=1 valid=false"
+
+[[case]]
+id = "wsse-sign-rsa-binary-security-token"
+capability = "wsse.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl signs with a BinarySecurityToken reference; we and lxml verify, NCANode refuses the token form (its limitation)"
+expected = "crypto=ok ours=Valid ncanode=HTTP500/token-form-unsupported lxml-rsa=ok/Body"
+
+[[case]]
+id = "wsse-sign-rsa-soap12"
+capability = "wsse.sign"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "oncl signs a SOAP 1.2 envelope; we verify with --soap-version soap12, lxml names the signed Body"
+expected = "crypto=ok ours=Valid ncanode=HTTP500/soap11-only lxml-rsa=ok/Body"
+
+[[case]]
+id = "wsse-verify-fixture-rsa"
+capability = "wsse.verify"
+profile = "rsa"
+oracles = ["ncanode", "lxml", "cryptography"]
+what = "Kalkan's WS-Security fixture of NCANode's repository (RSA): oncl verifies it, lxml agrees"
+expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncanode=HTTP200 signers=1 valid=false lxml-rsa=ok/Body"
+
+[[case]]
+id = "jws-sign-rsa-compact"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "oncl signs RS256 (compact); we verify strictly, NCANode /jws/verify and OpenSSL dgst -verify accept"
+expected = "crypto=ok ours=Valid/crypto=[Passed] ncanode=valid=true openssl=RS256-verified"
+
+[[case]]
+id = "jws-sign-rsa-flattened"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "oncl signs RS256 (flattened); we verify strictly, NCANode /jws/verify and OpenSSL dgst -verify accept"
+expected = "crypto=ok ours=Valid/crypto=[Passed] ncanode=valid=true openssl=RS256-verified"
+
+[[case]]
+id = "jws-sign-rsa-general"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "oncl signs RS256 (general); we verify strictly, NCANode /jws/verify and OpenSSL dgst -verify accept"
+expected = "crypto=ok ours=Valid/crypto=[Passed] ncanode=valid=true openssl=RS256-verified"
+
+[[case]]
+id = "jws-sign-rsa-detached"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "oncl signs RS256 (detached general); we verify strictly, NCANode /jws/verify and OpenSSL dgst -verify accept"
+expected = "crypto=ok ours=Valid/crypto=[Passed] ncanode=valid=true openssl=RS256-verified"
+
+[[case]]
+id = "jws-tamper-rsa-payload"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "the payload of our RS256 JWS altered: oncl, NCANode and OpenSSL reject"
+expected = "crypto=failure ours=Invalid/crypto=[Failed] ncanode=valid=false openssl=rejected"
+
+[[case]]
+id = "jws-tamper-rsa-signature"
+capability = "jws.sign"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "the signature of our RS256 JWS altered: oncl, NCANode and OpenSSL reject"
+expected = "crypto=failure ours=Invalid/crypto=[Failed] ncanode=valid=false openssl=rejected"
+
+[[case]]
+id = "jws-verify-ncanode-rsa-general"
+capability = "jws.verify"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "NCANode signs RS256 (general); oncl verifies the signature (chain untrusted by design), OpenSSL agrees"
+expected = "crypto=ok ours=Invalid/crypto=[Passed]/exit=Some(2) openssl=RS256-verified"
+
+[[case]]
+id = "jws-verify-ncanode-rsa-detached"
+capability = "jws.verify"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "NCANode signs RS256 detached; oncl verifies with --detached-input, OpenSSL agrees"
+expected = "crypto=ok ours=Invalid/crypto=[Passed]/exit=Some(2) openssl=RS256-verified"
+
+[[case]]
+id = "jws-add-ours-rsa"
+capability = "jws.add"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "oncl jws sign --add adds a second signer to our JWS; we and NCANode verify both"
+expected = "crypto=ok ours-signers=2 ours=Valid/crypto=[Passed,Passed] ncanode=valid=true signers=2"
+
+[[case]]
+id = "jws-add-ncanode-rsa"
+capability = "jws.add"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode /jws/sign/add adds its signer to our JWS; we and NCANode verify both"
+expected = "crypto=ok ours-signers=2 ours=Invalid/crypto=[Passed,Passed] ncanode=valid=true signers=2"
+
+[[case]]
+id = "jws-add-ncanode-untrusted-refused"
+capability = "jws.add"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "oncl jws sign --add onto NCANode's JWS (untrusted signer) is refused before any key use"
+expected = "ours=refused key=not-applied published=nothing"
+
+[[case]]
+id = "jwt-encode-ours-rsa"
+capability = "jwt.encode"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "oncl jwt encode (RS256); we verify strictly, NCANode /jwt/decode reads the claims with our certificate, OpenSSL verifies"
+expected = "crypto=ok ours=Valid ncanode-decode=claims-equal valid=true openssl=RS256-verified"
+
+[[case]]
+id = "jwt-tamper-rsa"
+capability = "jwt.decode"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "claims of our JWT altered: oncl, NCANode /jwt/decode (valid=false) and OpenSSL reject"
+expected = "crypto=failure ours=Invalid ncanode-decode=valid=false openssl=rejected"
+
+[[case]]
+id = "jwt-verify-ncanode-rsa"
+capability = "jwt.decode"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "NCANode /jwt/encode (RS256); oncl verifies with the operator-named certificate, OpenSSL agrees"
+expected = "crypto=ok ours=Invalid/crypto=[Passed]/exit=Some(2) openssl=RS256-verified"
+
+[[case]]
+id = "jwt-alg-none-refused"
+capability = "jwt.decode"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "an alg=none token is never accepted by oncl jwt verify; NCANode's answer is recorded"
+expected = "ours=refused/exit=Some(1) ncanode-decode=HTTP400"
+
+[[case]]
+id = "jws-gost2015-name-mismatch"
+capability = "jws.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "GOST JOSE naming: our ECGOST3410-2015-512 is refused by NCANode (Unsupported algorithm), NCANode's GG2015 JWS is refused by oncl; each round-trips alone"
+expected = "ours-roundtrip=Valid/crypto=[Passed] ncanode-on-ours=HTTP400/unsupported-alg ours-on-gg2015=refused/exit=1"
+
+[[case]]
+id = "jws-gost2015-independent-signature"
+capability = "jws.verify"
+profile = "gost2015"
+oracles = ["ncanode"]
+what = "independent verification of our ECGOST3410-2015-512 signature value"
+expected = "crypto=ok (requires independent ECGOST3410-2015-512 verifier)"
+
+[[case]]
+id = "x509-info-ours-rsa"
+capability = "x509.info"
+profile = "rsa"
+oracles = ["ncanode", "asn1crypto"]
+what = "ours rsa certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=SHA256WithRSAEncryption ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ours-rsa"
+capability = "pkcs12.aliases"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ours rsa PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-info-ncanode-rsa"
+capability = "x509.info"
+profile = "rsa"
+oracles = ["ncanode", "asn1crypto"]
+what = "ncanode rsa certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=SHA256WithRSAEncryption ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ncanode-rsa"
+capability = "pkcs12.aliases"
+profile = "rsa"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ncanode rsa PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-sign-ours-rsa"
+capability = "x509.sign"
+profile = "rsa"
+oracles = ["openssl"]
+what = "oncl sign --profile raw with rsa: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
+expected = "crypto=ok openssl=verified, altered data rejected signature-bytes=256"
+
+[[case]]
+id = "x509-sign-ncanode-rsa"
+capability = "x509.sign"
+profile = "rsa"
+oracles = ["openssl"]
+what = "NCANode /x509/sign with its rsa key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
+expected = "crypto=ok openssl=verified, altered data rejected oncl=no raw verify profile"
+
+[[case]]
+id = "x509-info-ours-gost2015"
+capability = "x509.info"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "ours gost2015 certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=SHA256WithRSAEncryption ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ours-gost2015"
+capability = "pkcs12.aliases"
+profile = "gost2015"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ours gost2015 PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-info-ncanode-gost2015"
+capability = "x509.info"
+profile = "gost2015"
+oracles = ["ncanode", "asn1crypto"]
+what = "ncanode gost2015 certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=ECGOST3410-2015-512 ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ncanode-gost2015"
+capability = "pkcs12.aliases"
+profile = "gost2015"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ncanode gost2015 PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-sign-ours-gost2015"
+capability = "x509.sign"
+profile = "gost2015"
+oracles = ["openssl"]
+what = "oncl sign --profile raw with gost2015: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
+expected = "crypto=ok (requires independent raw GOST verifier)"
+
+[[case]]
+id = "x509-sign-ncanode-gost2015"
+capability = "x509.sign"
+profile = "gost2015"
+oracles = ["openssl"]
+what = "NCANode /x509/sign with its gost2015 key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
+expected = "crypto=ok (requires independent raw GOST verifier)"
+
+[[case]]
+id = "x509-info-ours-gost2004"
+capability = "x509.info"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "ours gost2004 certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=SHA256WithRSAEncryption ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ours-gost2004"
+capability = "pkcs12.aliases"
+profile = "gost2004"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ours gost2004 PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-info-ncanode-gost2004"
+capability = "x509.info"
+profile = "gost2004"
+oracles = ["ncanode", "asn1crypto"]
+what = "ncanode gost2004 certificate: oncl inspect, asn1crypto and NCANode /x509/info agree on serial, validity, subject CN and algorithms"
+expected = "serial=equal not-before=equal not-after=equal subject-cn=equal algorithms=equal ncanode-signAlg=ECGOST34310 ncanode-valid=false"
+
+[[case]]
+id = "pkcs12-ncanode-gost2004"
+capability = "pkcs12.aliases"
+profile = "gost2004"
+oracles = ["ncanode", "openssl", "asn1crypto"]
+what = "ncanode gost2004 PKCS#12: aliases (NCANode, OpenSSL friendlyName, oncl) and certificate serial (oncl, NCANode /pkcs12/info, OpenSSL+asn1crypto) agree"
+expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,openssl+asn1crypto) ncanode-info-valid=false"
+
+[[case]]
+id = "x509-sign-ours-gost2004"
+capability = "x509.sign"
+profile = "gost2004"
+oracles = ["openssl"]
+what = "oncl sign --profile raw with gost2004: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
+expected = "crypto=ok (requires independent raw GOST verifier)"
+
+[[case]]
+id = "x509-sign-ncanode-gost2004"
+capability = "x509.sign"
+profile = "gost2004"
+oracles = ["openssl"]
+what = "NCANode /x509/sign with its gost2004 key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
+expected = "crypto=ok (requires independent raw GOST verifier)"
+
+[[case]]
+id = "x509-verify-ncanode-discrimination"
+capability = "x509.verify"
+profile = "rsa"
+oracles = ["ncanode"]
+what = "NCANode /x509/verify gives the same valid=false for a good and an altered raw signature: it cannot serve as the verifier"
+expected = "ncanode-good=valid=false ncanode-altered=valid=false"
+
+[[case]]
+id = "pkcs12-wrong-password-rsa"
+capability = "pkcs12.info"
+profile = "rsa"
+oracles = ["ncanode", "openssl"]
+what = "a wrong password is refused by oncl, NCANode and OpenSSL"
+expected = "oncl=refused ncanode=HTTP500 openssl=refused"
+
+[[case]]
+id = "hash-sha256"
+capability = "hash"
+profile = "any"
+oracles = ["openssl"]
+what = "oncl hash --algorithm sha256 over empty, abc and 3 MiB inputs equals OpenSSL dgst"
+expected = "inputs=empty+abc+3mib independent=OpenSSL dgst equal"
+
+[[case]]
+id = "hash-gost2015-512"
+capability = "hash"
+profile = "gost2015"
+oracles = ["asn1crypto", "ncanode"]
+what = "oncl hash gost2015-512 equals gostcrypto Streebog-512 on three inputs and Kalkan's messageDigest of a CMS over the same content"
+expected = "inputs=empty+abc+3mib independent=gostcrypto streebog512 equal; equal(Kalkan messageDigest)"
+
+[[case]]
+id = "hash-gost2004"
+capability = "hash"
+profile = "gost2004"
+oracles = ["asn1crypto", "ncanode"]
+what = "oncl hash gost2004 equals Kalkan's messageDigest of a CMS over the same content (no independent GOST 34.11-94 implementation besides Kalkan)"
+expected = "inputs=empty+abc+3mib independent=equal(Kalkan messageDigest)"
+
+[[case]]
+id = "timestamp-sha256"
+capability = "timestamp"
+profile = "rsa"
+oracles = ["openssl", "asn1crypto", "cryptography"]
+what = "oncl timestamp acquire (loopback TSA) then verify; OpenSSL ts -verify and the Python token oracle (imprint, RSA signature) agree"
+expected = "ours=verified independent=imprint+RSA signature ok (sha256) openssl-ts=verified"
+
+[[case]]
+id = "timestamp-tamper-sha256"
+capability = "timestamp"
+profile = "rsa"
+oracles = ["openssl", "asn1crypto", "cryptography"]
+what = "the token verified against altered data: oncl, OpenSSL and the imprint check reject"
+expected = "ours=rejected independent-imprint=mismatch openssl-ts=rejected"
+
+[[case]]
+id = "timestamp-gost2015-512"
+capability = "timestamp"
+profile = "gost2015"
+oracles = ["asn1crypto", "cryptography"]
+what = "a Streebog-512 imprint: oncl verifies; gostcrypto recomputes the imprint, the token's RSA signature is checked in Python"
+expected = "ours=verified independent=imprint+RSA signature ok (streebog512)"
+
+[[case]]
+id = "plugin-hash-sha256"
+capability = "plugin"
+profile = "any"
+oracles = ["openssl"]
+what = "a WebAssembly guest calls the hash import: granted it returns OpenSSL's digest, ungranted it is PermissionDenied"
+expected = "granted=digest equals OpenSSL ungranted=PermissionDenied, no output"
+
+[[case]]
+id = "plugin-sign-raw-rsa"
+capability = "plugin"
+profile = "rsa"
+oracles = ["openssl"]
+what = "a guest signs through the operator-bound key (keys_sign_raw): OpenSSL verifies the RSA signature; another handle or no --authorize never reaches the key"
+expected = "crypto=ok openssl=RSA signature verified other-handle=PermissionDenied, key unused no-authorize=AuthorityRequired"
+
+[[case]]
+id = "plugin-sign-raw-gost2015"
+capability = "plugin"
+profile = "gost2015"
+oracles = ["openssl"]
+what = "a guest signs with a GOST 2015 key: independent verification of the raw signature"
+expected = "crypto=ok (requires independent raw GOST verifier)"
+
+[[case]]
+id = "large-cms-detached-rsa"
+capability = "large"
+profile = "rsa"
+oracles = ["openssl", "asn1crypto", "cryptography"]
+what = "a 1.1 GiB pseudo-random file, detached CMS: OpenSSL streams -content, Python streams the digest and checks signedAttrs RSA; one flipped bit in the middle is rejected by all"
+expected = "size=1.1GiB crypto=ok ours=Valid openssl=streamed -content verified decomposition=streamed sha256 = messageDigest, RSA over signedAttrs ok altered=rejected by oncl, OpenSSL and the streamed digest"
+
+[[case]]
+id = "large-xml-enveloped-rsa"
+capability = "large"
+profile = "rsa"
+oracles = ["lxml", "cryptography"]
+what = "a 1.1 GiB canonical-by-construction XML document, enveloped signature: streamed digest of the bytes outside ds:Signature and the SignedInfo RSA check; one flipped bit is rejected"
+expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed sha256 of the bytes outside ds:Signature = DigestValue, SignedInfo RSA ok altered=rejected by oncl and the independent digest"
+
+[[case]]
+id = "large-pdf-signature-rsa"
+capability = "large"
+profile = "rsa"
+oracles = ["asn1crypto", "cryptography"]
+what = "a 1.1 GiB PDF of many content-bearing pages, adbe.pkcs7.detached: memory-mapped ByteRange decomposition (digest, CMS RSA) without a PDF library; one flipped bit is rejected"
+expected = "(desired grade after the fix of D6; the row fails until then)"
+defect = "D6"
+
+[[case]]
+id = "large-pdf-signature-rsa-1mib-pages"
+capability = "large"
+profile = "rsa"
+oracles = ["asn1crypto", "cryptography"]
+what = "the same 1.1 GiB PDF with 1 MiB content streams (about 1100 pages instead of 71000): the object count, not the size, is what varies"
+expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"

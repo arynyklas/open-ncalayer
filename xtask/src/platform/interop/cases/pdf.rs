@@ -540,8 +540,14 @@ fn extend_ncanode(ctx: &mut Ctx, profile: Profile, level: &str) -> anyhow::Resul
         }),
     )?;
     if status != 200 {
+        let message: String = answer["message"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(90)
+            .collect();
         return Ok(Observed {
-            grade: grade(&[("ncanode", format!("HTTP{status}"))]),
+            grade: grade(&[("ncanode", format!("HTTP{status} {message}"))]),
             ours: "not reached".to_owned(),
             oracle: format!("NCANode /pdf/extend {level}: HTTP {status} {answer}"),
             detail: String::new(),

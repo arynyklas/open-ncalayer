@@ -85,6 +85,9 @@ pub struct World {
     pub signers: Vec<Signer>,
     /// A secret file in an owner-only directory holding [`PASSWORD`].
     pub secret: PathBuf,
+    /// The owner-only directory and the secret files of NCANode's test keys in it
+    /// (`nc-gost2015.secret`, `nc-rsa-gost2004.secret`, `wrong.secret`).
+    pub private: PathBuf,
     /// The responder's origin, e.g. `http://127.0.0.1:41234`.
     pub origin: String,
     stop: Arc<AtomicBool>,
@@ -199,10 +202,17 @@ impl World {
         let private = dir.path().join("private");
         let namespace = PrivateDirectory::create(&private)
             .map_err(|e| anyhow::anyhow!("creating the owner-only directory: {e:?}"))?;
-        namespace
-            .create_file("key.secret")
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?
-            .write_all(PASSWORD.as_bytes())?;
+        for (name, text) in [
+            ("key.secret", PASSWORD),
+            ("nc-gost2015.secret", "Aa123456"),
+            ("nc-rsa-gost2004.secret", "Qwerty12"),
+            ("wrong.secret", "not-the-password"),
+        ] {
+            namespace
+                .create_file(name)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                .write_all(text.as_bytes())?;
+        }
 
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -234,6 +244,7 @@ impl World {
         });
         Ok(World {
             secret: private.join("key.secret"),
+            private,
             root: root_path,
             root_pem,
             root_entry: root,
@@ -326,7 +337,8 @@ fn serve(
     tsa: &MockTsa,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A client may connect early and ask minutes later (a large document is read first).
+    stream.set_read_timeout(Some(Duration::from_secs(1800)))?;
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
     let end = loop {

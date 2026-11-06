@@ -93,7 +93,7 @@ impl Oncl {
             .args(args.iter().map(AsRef::as_ref))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY");
-        exec(&mut command, b"", Duration::from_secs(900))
+        exec(&mut command, b"", Duration::from_secs(3600))
     }
 
     /// `oncl --json verify` with the matrix's trust; extra arguments follow.

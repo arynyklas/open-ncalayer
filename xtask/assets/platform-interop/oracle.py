@@ -15,6 +15,14 @@ reads its fields, the exit status only says the script ran.
   pdf-verify FILE --root DER --at UNIX
                                      pyHanko: integrity, validity, trust under `root` at the
                                      given instant, DSS contents, document timestamps
+  hash streebog512 FILE              independent Streebog-512 (gostcrypto) of a file
+  tst-verify FILE --data FILE        an RFC 3161 token: imprint of the data, RSA signature
+  cert-info FILE                     serial, validity, subject CN, algorithms of a certificate
+  cms-stream-verify FILE --content FILE
+                                     like cms-verify, the content streamed (any size)
+  xml-large-verify FILE              enveloped XMLDSig of a canonical-by-construction document
+                                     of any size: the digest of the bytes outside the
+                                     Signature element (streamed) and the RSA SignedInfo check
   xades-info FILE                    XAdES structure: SigningCertificate digest, signature
                                      timestamp imprint (+ RSA TSA signature), evidence
 """
@@ -145,7 +153,7 @@ def tst_facts(token, signature):
     }
 
 
-def rsa_check(sd, signer, content, rsa_certs_only=True):
+def rsa_check(sd, signer, content, digest=None):
     """Verify one signer's RSA signature and message digest. Returns a dict."""
     result = {}
     cert = find_cert(sd, signer["sid"])
@@ -169,9 +177,9 @@ def rsa_check(sd, signer, content, rsa_certs_only=True):
         result["digest_ok"] = None
     else:
         md = attr_values(attrs, "message_digest")[0].native
-        if content is None:
+        if content is None and digest is None:
             return {"error": "no content to hash (detached)"}
-        result["digest_ok"] = hasher[0](content).digest() == md
+        result["digest_ok"] = (digest if digest is not None else hasher[0](content).digest()) == md
         signed = signed_attrs_der(signer)
     public = c_x509.load_der_x509_certificate(cert.dump()).public_key()
     try:
@@ -372,6 +380,13 @@ def signer_public_key(signature, cert_path):
     else:
         node = signature.find(".//" + q(DS, "X509Certificate"))
         if node is None:
+            # WS-Security: a KeyIdentifier of the signature's SecurityTokenReference, or the
+            # BinarySecurityToken the reference points at, carries the certificate.
+            for candidate in signature.getroottree().getroot().iter():
+                if isinstance(candidate.tag, str) and etree.QName(candidate).localname in ("KeyIdentifier", "BinarySecurityToken") and candidate.text:
+                    node = candidate
+                    break
+        if node is None:
             raise ValueError("no certificate to verify with")
         cert = c_x509.load_der_x509_certificate(base64.b64decode("".join(node.text.split())))
     return cert.public_key(), cert
@@ -428,8 +443,12 @@ PDF_SIG_RE = re.compile(rb"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]"
 
 
 def pdf_signatures(path):
-    """(byte_range, contents_hex_span) of every signature dictionary, from the raw bytes."""
-    data = read(path)
+    """(byte_range, contents_hex_span) of every signature dictionary, from the raw bytes
+    (memory-mapped: a large file is never copied)."""
+    import mmap
+
+    handle = open(path, "rb")
+    data = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
     found = []
     for m in PDF_SIG_RE.finditer(data):
         a, b, c, d = (int(g) for g in m.groups())
@@ -437,6 +456,15 @@ def pdf_signatures(path):
         gap = data[a + b : c]
         found.append(((a, b, c, d), gap))
     return data, found
+
+
+def feed(h, data, start, length):
+    """Feed a range of a (memory-mapped) file to a hash in 1 MiB steps."""
+    end = start + length
+    while start < end:
+        step = min(1 << 20, end - start)
+        h.update(data[start : start + step])
+        start += step
 
 
 def cmd_pdf_byterange(args):
@@ -466,8 +494,8 @@ def cmd_pdf_byterange(args):
             imprint_alg = tst["message_imprint"]["hash_algorithm"]["algorithm"].native
             want = tst["message_imprint"]["hashed_message"].native
             h = DIGESTS[imprint_alg][0]()
-            h.update(data[a : a + b])
-            h.update(data[c : c + d])
+            feed(h, data, a, b)
+            feed(h, data, c, d)
             entry["doc_timestamp"] = True
             entry["subfilter"] = "ETSI.RFC3161"
             entry["digest_ok"] = h.digest() == want
@@ -481,20 +509,20 @@ def cmd_pdf_byterange(args):
             import gostcrypto
 
             g = gostcrypto.gosthash.new("streebog512")
-            g.update(data[a : a + b])
-            g.update(data[c : c + d])
+            feed(g, data, a, b)
+            feed(g, data, c, d)
             entry["byterange_digest"] = bytes(g.digest()).hex()
             entry["message_digest"] = md.hex()
             entry["digest_ok"] = bytes(g.digest()) == md
             entry["signature_note"] = "GOST signature: judged by NCANode only"
         elif hasher is not None:
             h = hasher[0]()
-            h.update(data[a : a + b])
-            h.update(data[c : c + d])
+            feed(h, data, a, b)
+            feed(h, data, c, d)
             entry["byterange_digest"] = h.hexdigest()
             entry["message_digest"] = md.hex()
             entry["digest_ok"] = h.digest() == md
-            result = rsa_check(sd, signer, data[a : a + b] + data[c : c + d])
+            result = rsa_check(sd, signer, None, digest=h.digest())
             entry["signature_ok"] = result.get("signature_ok")
             entry["signature_note"] = result.get("skipped")
         else:
@@ -568,6 +596,171 @@ def cmd_pdf_verify(args):
     out(result)
 
 
+def cmd_cert(args):
+    raw = read(args.file)
+    if b"-----BEGIN" in raw:
+        from asn1crypto import pem
+
+        raw = raw[raw.index(b"-----BEGIN") :]
+
+        _, _, raw = pem.unarmor(raw)
+    cert = asn1_x509.Certificate.load(raw)
+    tbs = cert["tbs_certificate"]
+    cn = None
+    for rdn in tbs["subject"].chosen:
+        for item in rdn:
+            if item["type"].native == "common_name":
+                cn = item["value"].native
+    out(
+        {
+            "ok": True,
+            "serial_hex": "%x" % tbs["serial_number"].native,
+            "not_before": int(tbs["validity"]["not_before"].native.timestamp()),
+            "not_after": int(tbs["validity"]["not_after"].native.timestamp()),
+            "subject_cn": cn,
+            "signature_oid": cert["signature_algorithm"]["algorithm"].dotted,
+            "key_oid": tbs["subject_public_key_info"]["algorithm"]["algorithm"].dotted,
+        }
+    )
+
+
+def cmd_hash(args):
+    import gostcrypto
+
+    h = gostcrypto.gosthash.new(args.alg)
+    with open(args.file, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+    out({"ok": True, "digest": bytes(h.digest()).hex()})
+
+
+def cmd_tst(args):
+    token = cms.ContentInfo.load(read(args.file))
+    sd = token["content"]
+    tst = sd["encap_content_info"]["content"].parsed
+    imprint = tst["message_imprint"]
+    alg = imprint["hash_algorithm"]["algorithm"].native
+    want = imprint["hashed_message"].native
+    data = read(args.data)
+    if alg in DIGESTS:
+        got = DIGESTS[alg][0](data).digest()
+    elif imprint["hash_algorithm"]["algorithm"].dotted == "1.2.398.3.10.1.3.3":
+        import gostcrypto
+
+        h = gostcrypto.gosthash.new("streebog512")
+        h.update(data)
+        got = bytes(h.digest())
+        alg = "streebog512"
+    else:
+        out({"ok": False, "error": "no digest for " + alg})
+    signer = list(sd["signer_infos"])[0]
+    result = rsa_check(sd, signer, sd["encap_content_info"]["content"].contents)
+    out(
+        {
+            "ok": True,
+            "imprint_alg": alg,
+            "imprint_ok": got == want,
+            "signature_ok": result.get("signature_ok"),
+            "gen_time": tst["gen_time"].native.isoformat(),
+            "policy": tst["policy"].native,
+        }
+    )
+
+
+def stream_digest(path, name, start=0, length=None, extra=()):
+    """Digest of a file range (and of `extra` byte ranges of the same file), streamed."""
+    h = hashlib.new(name)
+    with open(path, "rb") as f:
+        spans = [(start, length)] + list(extra)
+        for begin, count in spans:
+            f.seek(begin)
+            left = count
+            while left is None or left > 0:
+                chunk = f.read(1 << 20 if left is None else min(1 << 20, left))
+                if not chunk:
+                    break
+                h.update(chunk)
+                if left is not None:
+                    left -= len(chunk)
+    return h.digest()
+
+
+def cmd_cms_stream(args):
+    data, sd = load_signed_data(args.file)
+    results = []
+    for signer in sd["signer_infos"]:
+        name = signer["digest_algorithm"]["algorithm"].native
+        digest = stream_digest(args.content, name)
+        results.append(rsa_check(sd, signer, None, digest=digest))
+    ok = all(r.get("signature_ok") is True and r.get("digest_ok") is not False for r in results)
+    out({"ok": ok, "signers": results})
+
+
+def cmd_xml_large(args):
+    size = os.path.getsize(args.file)
+    with open(args.file, "rb") as f:
+        head = f.read(4096)
+        f.seek(max(0, size - (1 << 20)))
+        tail = f.read()
+    tail_at = max(0, size - (1 << 20))
+    root_start = head.index(b"<root")
+    sig_start = tail_at + tail.rindex(b"<ds:Signature ")
+    sig_end = tail_at + tail.rindex(b"</ds:Signature>") + len(b"</ds:Signature>")
+    root_end = tail_at + tail.rindex(b"</root>") + len(b"</root>")
+    sig_xml = tail[sig_start - tail_at : sig_end - tail_at]
+    digest = stream_digest(args.file, "sha256", root_start, sig_start - root_start, extra=[(sig_end, root_end - sig_end)])
+    # Independently certify the generator's restricted canonical form, not merely its
+    # digest: literal root/item tags, one monotonically numbered attribute, ASCII text
+    # without escaping, one trailing Signature, no comments/entities/DTD/PIs. A streaming
+    # recogniser retains at most one short item, never a DOM of the document.
+    item_pattern = re.compile(rb'<item n="([0-9]+)">([a-z0-9 ]+)</item>')
+    with open(args.file, "rb") as f:
+        f.seek(root_start)
+        if f.read(6) != b"<root>":
+            raise ValueError("unexpected root spelling")
+        remaining = sig_start - root_start - 6
+        buffered = b""
+        items = 0
+        while remaining:
+            chunk = f.read(min(1 << 20, remaining))
+            if not chunk:
+                raise ValueError("truncated canonical document")
+            remaining -= len(chunk)
+            buffered += chunk
+            at = 0
+            while True:
+                match = item_pattern.match(buffered, at)
+                if match is None:
+                    break
+                if match[1] != str(items).encode("ascii"):
+                    raise ValueError("noncanonical or nonmonotonic item number")
+                items += 1
+                at = match.end()
+            buffered = buffered[at:]
+            if len(buffered) > 4096:
+                raise ValueError("document is outside the independently specified profile")
+        if buffered or items < 2:
+            raise ValueError("incomplete canonical item sequence")
+        f.seek(sig_end)
+        if f.read() != b"</root>":
+            raise ValueError("unexpected bytes after Signature")
+    node = etree.fromstring(sig_xml)
+    declared = base64.b64decode("".join(node.find(".//" + q(DS, "DigestValue")).text.split()))
+    info = node.find(q(DS, "SignedInfo"))
+    uri = info.find(q(DS, "CanonicalizationMethod")).get("Algorithm")
+    value = base64.b64decode("".join(node.find(q(DS, "SignatureValue")).text.split()))
+    public, cert = signer_public_key(node, None)
+    try:
+        public.verify(value, c14n(info, uri), padding.PKCS1v15(), hashes.SHA256())
+        signed_info = True
+    except InvalidSignature:
+        signed_info = False
+    out({"ok": digest == declared and signed_info, "digest_ok": digest == declared, "signed_info_ok": signed_info, "canonical_items": items, "bytes": size})
+
+
 def cmd_xades(args):
     tree = parse_xml(args.file)
     root = tree.getroot()
@@ -636,6 +829,24 @@ def main():
     p.add_argument("--at", required=True)
     p.add_argument("--revocation", default="soft-fail")
     p.set_defaults(fn=cmd_pdf_verify)
+    p = sub.add_parser("hash")
+    p.add_argument("alg")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_hash)
+    p = sub.add_parser("tst-verify")
+    p.add_argument("file")
+    p.add_argument("--data", required=True)
+    p.set_defaults(fn=cmd_tst)
+    p = sub.add_parser("cms-stream-verify")
+    p.add_argument("file")
+    p.add_argument("--content", required=True)
+    p.set_defaults(fn=cmd_cms_stream)
+    p = sub.add_parser("xml-large-verify")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_xml_large)
+    p = sub.add_parser("cert-info")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_cert)
     p = sub.add_parser("xades-info")
     p.add_argument("file")
     p.set_defaults(fn=cmd_xades)

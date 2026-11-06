@@ -52,3 +52,33 @@ fn no_capability_is_left_without_cases() {
         "capabilities without cases: {pending:?}"
     );
 }
+
+/// Defect-marked reds are not absent coverage: each references an explicit reproduction,
+/// and every row (including blocked profiles) has a nonempty expected grade. This checks
+/// completeness of the matrix, not success of a live oracle run.
+#[test]
+fn defect_markers_reference_reproductions_and_grades_are_defined() {
+    let coverage = Coverage::load().unwrap();
+    for row in &coverage.case {
+        assert!(
+            !row.expected.trim().is_empty() && row.expected != "?",
+            "row {} has no expected grade",
+            row.id
+        );
+        if let Some(defect) = &row.defect {
+            let description = coverage
+                .defect
+                .iter()
+                .find(|d| &d.id == defect)
+                .unwrap_or_else(|| panic!("row {} names unknown defect {defect}", row.id));
+            assert!(!description.reproduction.is_empty());
+            assert!(!description.expected.is_empty());
+        } else {
+            assert!(
+                !row.expected.starts_with("(desired grade"),
+                "row {} has an unrecorded defect",
+                row.id
+            );
+        }
+    }
+}
