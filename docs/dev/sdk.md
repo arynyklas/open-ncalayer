@@ -288,8 +288,38 @@ separately should derive that bound from `EvidenceLimits.max_total_bytes`. PDF D
 streams are read as regions: they are no longer limited by `PdfLimits::max_object_bytes`,
 only by the scope's container and memory accounting and the evidence quotas.
 
-Scope of D1: offline verification/inspection of CMS/CAdES with an embedded complete CRL.
-Not covered: online CRL download (`crl::fetch_for`, still decoded in full at 128x), operator
-CRL files (`--evidence-crl` is limited to 256 KiB per file), PAdES-LT of real NCANode files
-(separate structural guards in `oncl-pdf`), XAdES-LT (XML element cap and DOM
-materialization of `EncapsulatedCRLValue`).
+Scope of D1: offline verification of CMS/CAdES and, with the XML slice below, of XAdES with
+an embedded complete CRL. Not covered: online CRL download (`crl::fetch_for`, still decoded
+in full at 128x), operator CRL files (`--evidence-crl` is limited to 256 KiB per file),
+PAdES-LT of real NCANode files (separate structural guards in `oncl-pdf`), and the SIGN side
+of XAdES (below).
+
+### XAdES with a complete CRL (verify side)
+
+NCANode/Kalkan XAdES-LT writes the complete NCA CRL (about 20 MB, 27 MB of base64 with `&#13;`
+line ends) into `xades:EncapsulatedCRLValue`. `XmlVerifyProfile::max_metadata_bytes` now bounds
+structural markup only: the text of `EncapsulatedX509Certificate/OCSPValue/CRLValue` leaves is
+recorded as source extents by the scan, subtracted from the property it sits in, and streamed
+through `EvidenceStore::collect_base64` (entity references and CDATA decoded on the fly, 16 KiB
+buffers) so the decoded bytes are charged to `max_crl_item_bytes`/`max_crl_bytes`/
+`max_total_bytes` before they are stored. No `String`, DOM or base64 `Vec` of a leaf exists.
+`validate_unsigned_layout` decides from structure recorded by the scan, and the archive
+timestamp representation takes the canonical text spans of each leaf from the canonical
+renderer (`canonical_stream::stage_with_leaves`), not from parsing the rendered bytes. WSSE
+embedding applies the same markup-only bound to the `Signature` extent.
+
+Host-visible changes: host-configured `EvidenceLimits` are no longer clipped by the metadata
+cap (`effective_limits`: the cap only scales the defaults of a host that configured nothing,
+so an unconfigured SDK host still refuses a CRL over 256 KiB with `EvidenceError::Limit`);
+`VerifyRequest::xades_with_limits` is the XAdES counterpart of `cades`/`pades`, and the CLI
+uses it with its 32 MiB CRL quota; the readback of a scanned (DER, over 1 MiB) CRL is charged
+as memory only, not also as metadata (the XML index admission is 56 MiB of the 64 MiB default
+metadata budget). `oncl-server` and `oncl-ui` pass no XAdES limits and keep refusing.
+
+Not covered (SIGN side): `xades::source::material_xml`/`complete_signature`, `sign.rs`,
+`xades.rs` and `references/extension.rs` still build the unsigned properties as `String`s
+bounded by `max_metadata_bytes`, so signing or extending a XAdES-LT/LTA with a CRL over
+256 KiB is refused with `MetadataLimit`. The design that remains: write the generated
+properties to a staged artifact (their canonical form under exclusive C14N equals the text
+they are generated as, so the archive coverage and its leaf spans need no parse; prove with
+a differential test against `canonical_stream`), and assemble head + staged unsigned + tail.

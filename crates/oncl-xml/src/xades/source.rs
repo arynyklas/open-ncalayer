@@ -699,7 +699,9 @@ pub(crate) fn effective_limits(
         max_coverage_parts: 256,
         max_coverage_bytes: work,
     };
-    let limits = configured.map_or(defaults, |c| intersect_limits(defaults, c));
+    // The metadata cap bounds markup only: it scales the defaults of a host that
+    // configured nothing, and never clips the evidence quotas a host chose itself.
+    let limits = configured.unwrap_or(defaults);
     limits.validate()?;
     Ok(limits)
 }
