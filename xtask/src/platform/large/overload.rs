@@ -604,3 +604,83 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.check("the host's scratch is empty afterwards", files == 0, format!("{files} files, {bytes} bytes"));
     Ok(())
 }
+
+// ------------------------------------------------------------------------------------------
+// Diagnostic of the streamed progress frames of one long operation.
+
+/// One CPU-bound signature through the real server with a raw client that keeps the whole
+/// response, to measure how many progress frames and bytes the server streams while it works.
+/// Every frame is charged to the operation's output allowance (`account_output`), so a long
+/// operation's frame traffic is a budget of its own: this case records its rate and the time
+/// it would take to consume the default output limit.
+pub fn run_progress_rate(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
+    let mut case = Case::new(
+        env,
+        target,
+        "http-progress-frame-rate",
+        "progress frames streamed by the real server during one CPU-bound signature",
+    )?;
+    if let Err(e) = progress_body(&mut case) {
+        case.check("the diagnostic ran to completion", false, format!("{e:#}"));
+    }
+    Ok(case.finish())
+}
+
+fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
+    let env = case.env;
+    let bytes = env.manifest.document_bytes;
+    let path = env.doc("xml-archive")?.path.clone();
+    let collector = Collector::start()?;
+    case.server_settings.telemetry_endpoint = Some(collector.url.clone());
+    case.ensure_server()?;
+    let (address, token) = {
+        let s = case.server.as_ref().unwrap();
+        (s.address.clone(), std::fs::read_to_string(&s.token_file)?.trim().to_owned())
+    };
+    let reply = http_raw::send(
+        &address,
+        &token,
+        &Upload {
+            path: "/v1/operations".into(),
+            metadata: sign_metadata(),
+            document: Source::File(path),
+            chunked: false,
+            expect_continue: true,
+            bytes_per_second: None,
+            stall_after: None,
+            abort_after: None,
+        },
+    );
+    let marker = b"\"type\":\"progress\"";
+    let frames = reply.body.windows(marker.len()).filter(|w| *w == marker).count();
+    let seconds = reply.elapsed.as_secs_f64();
+    let limit = 11_878_268_928f64;
+    let per_second = reply.body_len as f64 / seconds.max(1e-9);
+    case.note(
+        "progress_traffic",
+        json!({
+            "document_bytes": bytes, "seconds": seconds, "status": reply.status,
+            "response_bytes": reply.body_len, "retained_response_bytes": reply.body.len(),
+            "progress_frames_in_retained_prefix": frames, "transport_error": reply.transport_error,
+            "response_bytes_per_second": per_second,
+            "seconds_to_consume_default_output_limit_at_this_rate": limit / per_second.max(1e-9),
+            "default_output_limit_bytes": limit,
+        }),
+    );
+    // Drain the final metrics export after an abort; there is only one workload here.
+    thread::sleep(Duration::from_secs(2));
+    case.note("otlp_error_tokens", json!(collector.error_tokens()));
+    case.check(
+        "the HTTP entity completed without a transport abort",
+        reply.status == 200 && reply.transport_error.is_none(),
+        format!("status {}, {:?}; {} bytes received", reply.status, reply.transport_error, reply.body_len),
+    );
+    if reply.body_len == reply.body.len() as u64 {
+        case.check(
+            "the retained response has a completed final record",
+            http_raw::multipart_final(&reply).is_some_and(|(f, _)| f["status"] == "completed"),
+            "final-record parsing is only meaningful when the entire entity was retained",
+        );
+    }
+    Ok(())
+}

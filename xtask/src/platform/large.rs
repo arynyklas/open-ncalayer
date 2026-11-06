@@ -245,6 +245,7 @@ fn plan() -> Vec<Case> {
         Case { id: "hash-unknown-length", surfaces: ALL, run: hash_unknown_length },
         Case { id: "overload-profile", surfaces: &[Target::Http], run: overload::run },
         Case { id: "overload-token-apdu", surfaces: &[Target::Http], run: overload::run_token },
+        Case { id: "http-progress-frame-rate", surfaces: &[Target::Http], run: overload::run_progress_rate },
     ]
 }
 
@@ -374,7 +375,7 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
         "environment": {"machine": machine, "data_storage": out_storage, "scratch_storage": scratch_storage, "rustc": toolchain, "git_head": revision, "programs": programs},
         "reference_validation": reference,
         "artifacts": artifacts,
-        "cases": [],
+        "cases": results.clone(),
         "status": "RUNNING",
     });
     write_report(&out, &report)?;
@@ -390,6 +391,7 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
     let jobs: Vec<(Target, &Case)> = cases
         .iter()
         .filter(|c| args.only.is_empty() || args.only.iter().any(|o| c.id.contains(o.as_str())))
+        .filter(|c| c.id != "http-progress-frame-rate" || args.only.iter().any(|o| o == c.id))
         .flat_map(|c| c.surfaces.iter().map(move |t| (*t, c)))
         .filter(|(t, _)| wanted(*t))
         .collect();
@@ -405,9 +407,9 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
                     };
                     let same = |r: &Value| r["surface"] == target.name() && r["id"] == case.id;
                     if args.resume
-                        && shared.lock().unwrap().0.iter().any(|r| same(r) && r["status"] == "PASS")
+                        && shared.lock().unwrap().0.iter().any(|r| same(r) && matches!(r["status"].as_str(), Some("PASS" | "FAIL" | "BLOCKED")))
                     {
-                        logf(&format!("=== {} / {}: PASS in the previous run, kept", target.name(), case.id));
+                        logf(&format!("=== {} / {}: terminal result in the previous run, kept", target.name(), case.id));
                         continue;
                     }
                     logf(&format!("=== {} / {}", target.name(), case.id));

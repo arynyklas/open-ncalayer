@@ -64,8 +64,8 @@ pub struct ProofArgs {
     /// Generate the data and run the reference-generator validation only.
     #[arg(long)]
     pub generate_only: bool,
-    /// Continue a previous run in `--out`: cases that already PASSED in its `report.json`
-    /// are kept and not run again.
+    /// Continue a previous run in `--out`: every terminal case in its `report.json`
+    /// is kept, including FAIL/BLOCKED. Only interrupted or missing cases run.
     #[arg(long)]
     pub resume: bool,
     /// Cases (surface x scenario) to run at the same time. Every measured process is its own

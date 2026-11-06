@@ -426,6 +426,10 @@ pub struct AuditCounts {
 
 /// The CLI's owner-only secret file holding the key password, in a private directory.
 pub fn make_secret(dir: &Path, password: &str) -> anyhow::Result<PathBuf> {
+    if dir.exists() {
+        // a resumed run: the previous run's own private directory, recreated with the new PKI password
+        std::fs::remove_dir_all(dir).context("removing the previous secret directory")?;
+    }
     let private = PrivateDirectory::create(dir).context("secret directory")?;
     private
         .create_file("key.secret")?

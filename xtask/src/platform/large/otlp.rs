@@ -174,6 +174,7 @@ pub fn encode_gauge(name: &str, value: i64) -> Vec<u8> {
 pub struct Collector {
     pub url: String,
     samples: Arc<Mutex<Vec<Sample>>>,
+    error_tokens: Arc<Mutex<std::collections::BTreeSet<String>>>,
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -184,6 +185,8 @@ impl Collector {
         listener.set_nonblocking(true)?;
         let url = format!("http://{}", listener.local_addr()?);
         let samples: Arc<Mutex<Vec<Sample>>> = Arc::default();
+        let error_tokens: Arc<Mutex<std::collections::BTreeSet<String>>> = Arc::default();
+        let tokens = error_tokens.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let (s, st) = (samples.clone(), stop.clone());
         let origin = Instant::now();
@@ -192,8 +195,9 @@ impl Collector {
                 match listener.accept() {
                     Ok((mut conn, _)) => {
                         let s = s.clone();
+                        let tokens = tokens.clone();
                         thread::spawn(move || {
-                            let _ = handle(&mut conn, &s, origin);
+                            let _ = handle(&mut conn, &s, &tokens, origin);
                         });
                     }
                     Err(_) => thread::sleep(Duration::from_millis(20)),
@@ -203,6 +207,7 @@ impl Collector {
         Ok(Self {
             url,
             samples,
+            error_tokens,
             stop,
             join: Some(join),
         })
@@ -210,6 +215,12 @@ impl Collector {
 
     pub fn samples(&self) -> Vec<Sample> {
         self.samples.lock().unwrap().clone()
+    }
+
+    /// Stable error-code strings seen in the real OTLP protobuf payloads. This is a
+    /// bounded token scan, not a decoding of event counts or attribution to one request.
+    pub fn error_tokens(&self) -> Vec<String> {
+        self.error_tokens.lock().unwrap().iter().cloned().collect()
     }
 
     /// Peak of `name` over all exports.
@@ -238,6 +249,7 @@ impl Drop for Collector {
 fn handle(
     conn: &mut std::net::TcpStream,
     samples: &Mutex<Vec<Sample>>,
+    error_tokens: &Mutex<std::collections::BTreeSet<String>>,
     origin: Instant,
 ) -> std::io::Result<()> {
     conn.set_nonblocking(false)?;
@@ -265,6 +277,11 @@ fn handle(
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
+    }
+    for token in ["output_limit", "input_limit", "metadata_limit", "memory_limit", "temp_limit", "deadline_exceeded", "capacity_exceeded", "cancelled"] {
+        if buf[end..].windows(token.len()).any(|bytes| bytes == token.as_bytes()) {
+            error_tokens.lock().unwrap().insert(token.to_owned());
+        }
     }
     let first = head.lines().next().unwrap_or("");
     if first.contains("/v1/metrics")
