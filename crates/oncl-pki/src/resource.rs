@@ -471,6 +471,76 @@ impl ResourceScope {
             .min(representable)
             .min(capacity as u64) as usize)
     }
+    /// Streaming wire intake whose envelope bytes are classified as container
+    /// while they are parsed. Document bytes stay bound by `input_bytes`; only
+    /// bytes the parser later accounts as container may exceed it, and never past
+    /// `container_bytes`. Pair every chunk with [`Self::settle_wire`].
+    pub(crate) fn wire_request(&self, capacity: usize) -> Result<usize, ProcessingError> {
+        let usage = lock(&self.state.usage);
+        if usage.input_terminal || usage.pending_owner.is_some() {
+            return Err(ProcessingError::InputLimit);
+        }
+        let representable = u64::MAX - usage.wire_input;
+        if representable == 0 {
+            return Err(ProcessingError::InputLimit);
+        }
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        let container = self
+            .state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container);
+        Ok((u128::from(document) + u128::from(container) + 1)
+            .saturating_sub(u128::from(usage.pending_wire))
+            .min(u128::from(representable))
+            .min(capacity.max(1) as u128) as usize)
+    }
+    pub(crate) fn consumed_wire(&self, bytes: u64) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        let wire = usage.wire_input.checked_add(bytes);
+        let pending = usage.pending_wire.checked_add(bytes);
+        let (Some(wire), Some(pending)) = (wire, pending) else {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        };
+        usage.wire_input = wire;
+        usage.pending_wire = pending;
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        let container = self
+            .state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container);
+        if u128::from(pending) > u128::from(document) + u128::from(container) {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        }
+        Ok(())
+    }
+    /// Resolve all pending wire: `container` bytes were already accounted via
+    /// `account_container`; the remaining `document` bytes are charged as input.
+    pub(crate) fn settle_wire(&self, document: u64, container: u64) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        if document.checked_add(container) != Some(usage.pending_wire) {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InvalidInput("wire classification extent"));
+        }
+        match usage
+            .input
+            .checked_add(document)
+            .filter(|n| *n <= self.state.limits.input_bytes)
+        {
+            Some(next) => {
+                usage.input = next;
+                usage.pending_wire = 0;
+                Ok(())
+            }
+            None => {
+                usage.input_terminal = true;
+                Err(ProcessingError::InputLimit)
+            }
+        }
+    }
     /// An actually over-consumed format-bound input is terminal for this same
     /// operation, even when the format cap is below the resource-wide cap.
     pub(crate) fn terminate_input_limit(&self) {

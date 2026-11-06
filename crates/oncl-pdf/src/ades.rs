@@ -609,7 +609,7 @@ pub fn verify(
     allowed: &[SigAlg],
     scope: &mut ResourceScope,
 ) -> Result<PadesReport> {
-    let mut frozen = FrozenInput::capture(input, services.temporary, scope)?;
+    let mut frozen = crate::verify::capture_signed(input, services.temporary, limits, scope)?;
     verify_view(
         required,
         PdfSnapshot::input(&mut frozen, scope)?,
@@ -935,7 +935,8 @@ pub fn extend(
 ) -> Result<PadesReport> {
     let mut transaction = PdfSignatureOutput::new(output, scope)?;
     let mut operation = scope.shared_view();
-    let mut frozen = FrozenInput::capture(input, services.temporary, &mut operation)?;
+    let mut frozen =
+        crate::verify::capture_signed(input, services.temporary, limits, &mut operation)?;
     let old = verify_frozen(
         AdesLevel::B,
         &mut frozen,

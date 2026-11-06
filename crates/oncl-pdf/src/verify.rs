@@ -339,6 +339,47 @@ impl PdfDocument<'_, '_> {
         Ok(result)
     }
 }
+/// Intake of a PDF that may be this SDK's own signed result. The wire may exceed
+/// the remaining document allowance only by revision bytes appended after the
+/// first revision, and only up to `container_bytes`; anything else keeps the
+/// ordinary document limit (limit+1 is rejected).
+pub(crate) fn capture_signed(
+    input: Source<'_>,
+    store: &oncl_pki::io::TemporaryStore,
+    limits: &PdfLimits,
+    scope: &mut ResourceScope,
+) -> Result<oncl_pki::io::FrozenInput> {
+    use oncl_pki::io::Region;
+    let allowance = scope.input_remaining();
+    let mut frozen = oncl_pki::io::FrozenInput::capture_signed(input, store, scope)?;
+    if !frozen.is_pending_container() {
+        return Ok(frozen);
+    }
+    let length = frozen.len();
+    let surcharge = length.saturating_sub(allowance);
+    if surcharge != 0 {
+        let mut reader = frozen.reader(
+            &[Region {
+                offset: 0,
+                len: length,
+            }],
+            scope,
+        )?;
+        let first_end = (|| {
+            let doc = PdfDocument::open(reader.source(), limits, scope)?;
+            doc.revision_ends()
+                .next()
+                .ok_or(PdfError::Malformed("no revision"))
+        })();
+        reader.finish()?;
+        drop(reader);
+        if length - surcharge < first_end? {
+            return Err(oncl_pki::resource::ProcessingError::InputLimit.into());
+        }
+    }
+    frozen.settle_container_tail(surcharge, scope)?;
+    Ok(frozen)
+}
 pub fn verify_source(
     input: Source<'_>,
     limits: &PdfLimits,
@@ -347,7 +388,7 @@ pub fn verify_source(
     allowed: &[SigAlg],
     scope: &mut ResourceScope,
 ) -> Result<PdfVerification> {
-    let mut snapshot = oncl_pki::io::FrozenInput::capture(input, store, scope)?;
+    let mut snapshot = capture_signed(input, store, limits, scope)?;
     verify_snapshot(&mut snapshot, limits, validation, allowed, scope)
 }
 pub(crate) fn verify_snapshot(
