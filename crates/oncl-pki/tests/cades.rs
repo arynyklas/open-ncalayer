@@ -824,6 +824,181 @@ mod cades {
         }
     }
     #[test]
+    fn cades_without_signing_time_is_a_profile_finding_and_tampering_is_still_a_failure() {
+        use oncl_pki::{
+            cms::{self, AttrSpec, CertSpec, CoSign, Content, Problem, SignSpec},
+            validation::{CheckStatus, ProfileViolation, ValidationReason},
+        };
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let mut attrs = AttrSpec::cades(NOW);
+        attrs.signing_time = None;
+        let source = cms::sign_spec(
+            &f.doc,
+            &[],
+            &SignSpec {
+                content: Content::Data(DATA),
+                encapsulate: true,
+                cosign: CoSign::Never,
+                econtent_type: None,
+                digest: None,
+                attrs,
+                certificates: CertSpec::Signer,
+            },
+        )
+        .unwrap();
+        cms::verify(&source, None).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let check = |bytes: Vec<u8>| {
+            ades::verify(
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(bytes), None),
+                None,
+                &services,
+                &[SigAlg::RsaSha256],
+                &scope(),
+            )
+            .unwrap()
+        };
+        // EN 319 122-1 clause 5.2.1 wants a signing-time; its absence is a profile finding on
+        // a signature that otherwise verifies, not a malformed or failed signature.
+        let report = check(source.clone());
+        let signer = &report.reports()[0].signers[0];
+        assert_eq!(signer.signature, CheckStatus::Passed);
+        assert!(
+            signer.reasons.contains(&ValidationReason::Profile(
+                ProfileViolation::SigningTimeMissing
+            )),
+            "{:?}",
+            signer.reasons
+        );
+        assert!(
+            signer
+                .reasons
+                .iter()
+                .all(|reason| !matches!(reason, ValidationReason::Signature(_))),
+            "{:?}",
+            signer.reasons
+        );
+        assert_eq!(signer.ades_level, None);
+        assert_eq!(report.verdict, Verdict::Invalid);
+        assert_eq!(report.level(), None);
+        // The same content bytes altered: a real signature failure, reported as one.
+        let mut altered = source.clone();
+        let at = altered.windows(DATA.len()).position(|w| w == DATA).unwrap();
+        altered[at] ^= 1;
+        let report = check(altered);
+        let signer = &report.reports()[0].signers[0];
+        assert_eq!(signer.signature, CheckStatus::Failed);
+        assert!(
+            signer
+                .reasons
+                .contains(&ValidationReason::Signature(Problem::DigestMismatch))
+        );
+        assert_eq!(report.verdict, Verdict::Invalid);
+    }
+    #[test]
+    fn other_baseline_violations_are_profile_findings_with_a_passed_signature() {
+        use oncl_pki::{
+            cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec},
+            validation::{CheckStatus, ProfileViolation, ValidationReason},
+        };
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let not_data = der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
+        let mut without_ess = AttrSpec::cades(NOW);
+        without_ess.signing_certificate_v2 = false;
+        let cases = [
+            (
+                "content type",
+                Some(not_data),
+                AttrSpec::cades(NOW),
+                ProfileViolation::ContentTypeNotData,
+            ),
+            (
+                "signing certificate",
+                None,
+                without_ess,
+                ProfileViolation::SigningCertificateMissing,
+            ),
+        ];
+        for (name, econtent_type, attrs, expected) in cases {
+            let source = cms::sign_spec(
+                &f.doc,
+                &[],
+                &SignSpec {
+                    content: Content::Data(DATA),
+                    encapsulate: true,
+                    cosign: CoSign::Never,
+                    econtent_type,
+                    digest: None,
+                    attrs,
+                    certificates: CertSpec::Signer,
+                },
+            )
+            .unwrap();
+            let report = ades::verify(
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(source.clone()), None),
+                None,
+                &services,
+                &[SigAlg::RsaSha256],
+                &scope(),
+            )
+            .unwrap();
+            let signer = &report.reports()[0].signers[0];
+            assert_eq!(signer.signature, CheckStatus::Passed, "{name}");
+            let profile_reasons: Vec<_> = signer
+                .reasons
+                .iter()
+                .filter(|r| matches!(r, ValidationReason::Profile(_)))
+                .collect();
+            assert_eq!(
+                profile_reasons,
+                vec![&ValidationReason::Profile(expected)],
+                "{name}: {:?}",
+                signer.reasons
+            );
+            assert!(
+                signer
+                    .reasons
+                    .iter()
+                    .all(|r| !matches!(r, ValidationReason::Signature(_))),
+                "{name}: {:?}",
+                signer.reasons
+            );
+            assert_eq!(signer.ades_level, None, "{name}");
+            assert_eq!(report.verdict, Verdict::Invalid, "{name}");
+        }
+    }
+    #[test]
     fn missing_acquisition_configuration_precedes_private_application() {
         use oncl_pki::{
             digest::DigestValue,

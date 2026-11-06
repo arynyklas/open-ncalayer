@@ -24,7 +24,9 @@ use crate::io::{Region, Source, StagedArtifact, TemporaryStore};
 use crate::key::{AppliedState, DigestSigner, HashAlg, SigAlg};
 use crate::resource::{ProcessingError, ResourceReservation, ResourceScope};
 use crate::tsp::{self, TsaSpec};
-use crate::validation::{ValidationContext, ValidationReason, ValidationReport, Verdict};
+use crate::validation::{
+    ProfileViolation, ValidationContext, ValidationReason, ValidationReport, Verdict,
+};
 use der::asn1::{AnyRef, ObjectIdentifier, OctetString};
 use der::{Decode, Encode, Sequence};
 pub use pdf::{
@@ -978,19 +980,28 @@ fn verify_frozen_impl(
             .ok_or(crate::cms::CmsError::CertNotFound(index))?;
         let attrs = signer.signed_attrs()?;
         let seen = signer.check_signed_attrs(attrs, algorithm, Some(certificate_der), false)?;
+        // What the signed attributes prove about the signature itself.
         let source_problem = if seen.digest_matches != Some(true) {
             Some(crate::cms::Problem::DigestMismatch)
         } else if seen.ess_matches == Some(false) {
             Some(crate::cms::Problem::EssCertIdMismatch)
-        } else if data.encap_content_info.e_content_type != crate::oid::DATA
-            || (pdf.is_none() && seen.signing_time.is_none())
-            || (pdf.is_some() && seen.signing_time.is_some())
-            || seen.ess_matches.is_none()
-        {
-            Some(crate::cms::Problem::Malformed)
         } else {
             None
         };
+        // What the requested baseline additionally demands of an intact signature. These
+        // never turn a verifying signature into a failed or malformed one.
+        let profile_findings = [
+            (data.encap_content_info.e_content_type != crate::oid::DATA)
+                .then_some(ProfileViolation::ContentTypeNotData),
+            match (pdf.is_some(), seen.signing_time.is_some()) {
+                (false, false) => Some(ProfileViolation::SigningTimeMissing),
+                (true, true) => Some(ProfileViolation::SigningTimeForbidden),
+                _ => None,
+            },
+            seen.ess_matches
+                .is_none()
+                .then_some(ProfileViolation::SigningCertificateMissing),
+        ];
         let signed = attrs.to_der()?;
         let mut state = HashState::new(algorithm.hash_alg());
         state.update(&signed);
@@ -1297,6 +1308,12 @@ fn verify_frozen_impl(
             report
                 .signers
                 .cades_failure(0, ValidationReason::Signature(problem), scope)?;
+            report.verdict = Verdict::Invalid;
+        }
+        for finding in profile_findings.into_iter().flatten() {
+            report
+                .signers
+                .cades_failure(0, ValidationReason::Profile(finding), scope)?;
             report.verdict = Verdict::Invalid;
         }
         report.signers.cades_level(0, level);

@@ -113,6 +113,16 @@ revocation, timestamp proof and claimed signing time (`CheckStatus::{Passed, Fai
 Unavailable, NotApplicable}`); missing evidence is `Unavailable`/`Indeterminate`, never
 `Valid`. Cancellation, deadline and resource errors are errors, not verdicts.
 
+**Profile findings.** A CAdES/PAdES profile request (`cades-b`, `pades-t`, ...) asks for more
+than integrity. When the signature itself verifies but the CMS misses a baseline requirement,
+the signer keeps `signature = Passed` and carries `ValidationReason::Profile(ProfileViolation)`:
+no signing-time in a CAdES signature, a signing-time in a PAdES one (EN 319 142-1 table 1;
+Kalkan writes one), a content type other than id-data, or no signing-certificate attribute.
+Such a signer is `Invalid` at that profile and claims no `ades_level`. Digest, ESS or
+signature-value problems stay `Signature(..)` failures and are reported alongside, never
+replaced. The generic `pdf`/`cms` profiles do not ask for the baseline and judge the same
+bytes by integrity and trust only.
+
 **AppliedState.** Every failure after a private-key operation may have started carries
 `NotApplied`, `Applied` or `Unknown` (`OperationError::applied_state`). The SDK never promises
 rollback, retry or exactly-once: a time-stamp already issued remotely, or a signature computed
@@ -122,9 +132,10 @@ key was applied reports `Applied`.
 **Errors.** `OperationError` (the typed error) and `ErrorCode` (`OperationError::code`, stable
 machine-readable categories, never inferred from messages) are public. Stability stance for the
 pre-1.0 alphas: hosts must match `ErrorCode` with a wildcard arm. Today neither enum is
-`#[non_exhaustive]`, so adding a variant is a source-breaking change; it is listed in the
-migration notes of the release that makes it. Making both `#[non_exhaustive]` is the intended
-change for the first release that needs a new code; it is deliberately not done inside this
+`#[non_exhaustive]`, nor are `ValidationReason` and `ProfileViolation`; adding a variant
+(as `ValidationReason::Profile` was) is a source-breaking change; it is listed in the
+migration notes of the release that makes it. Making these enums `#[non_exhaustive]` is the
+intended change for the first release that needs a new code; it is deliberately not done inside this
 delivery because it also changes every in-workspace consumer's matches. Variant `Display`
 text is for logs, not for control flow.
 

@@ -1392,6 +1392,214 @@ fn initial_signed_catalog_permissions_are_not_silently_accepted() {
     f.rejected(&bytes);
 }
 
+/// The `/ByteRange` of the only signature of a PAdES file, from an independent parser.
+fn only_byte_range(bytes: &[u8]) -> [usize; 4] {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let signature = doc
+        .objects
+        .values()
+        .filter_map(|value| value.as_dict().ok())
+        .find(|d| {
+            d.get(b"Type")
+                .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Sig"))
+        })
+        .unwrap();
+    let range: Vec<_> = signature
+        .get(b"ByteRange")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as usize)
+        .collect();
+    range.try_into().unwrap()
+}
+
+/// What Kalkan (NCALayer/NCANode `/pdf/sign`) puts into an ETSI.CAdES.detached `/Contents`:
+/// contentType, signingTime, signingCertificateV2 and messageDigest over the ByteRange, no
+/// CMSAlgorithmProtection. The CMS is written over the original reserved space, so the rest
+/// of the file (the covered bytes) is untouched.
+fn with_kalkan_style_cms(f: &Fixture, mut bytes: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+    use oncl_pki::cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec};
+    let range = only_byte_range(&bytes);
+    let mut protected = bytes[..range[1]].to_vec();
+    protected.extend_from_slice(&bytes[range[2]..range[2] + range[3]]);
+    let cms = cms::sign_spec(
+        &f.doc,
+        &[],
+        &SignSpec {
+            content: Content::Data(&protected),
+            encapsulate: false,
+            cosign: CoSign::Never,
+            econtent_type: None,
+            digest: None,
+            attrs: AttrSpec::cades(NOW),
+            certificates: CertSpec::Signer,
+        },
+    )
+    .unwrap();
+    cms::verify(&cms, Some(&protected)).unwrap();
+    assert!(cms.len() * 2 <= range[2] - range[1] - 2, "reserved space");
+    bytes[range[1] + 1..range[2] - 1].fill(b'0');
+    for (index, byte) in cms.iter().enumerate() {
+        bytes[range[1] + 1 + index * 2] = b"0123456789ABCDEF"[(byte >> 4) as usize];
+        bytes[range[1] + 2 + index * 2] = b"0123456789ABCDEF"[(byte & 15) as usize];
+    }
+    (bytes, cms)
+}
+
+fn only_signer(report: &ades::PadesReport) -> &oncl_pki::validation::SignerValidation {
+    assert_eq!(report.signatures().len(), 1);
+    assert_eq!(report.signatures()[0].validation.signers.len(), 1);
+    &report.signatures()[0].validation.signers[0]
+}
+
+#[test]
+fn kalkan_style_signing_time_is_a_profile_finding_not_a_failed_malformed_signature() {
+    use oncl_pki::validation::{CheckStatus, ProfileViolation, ValidationReason};
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (bytes, _) = with_kalkan_style_cms(&f, original);
+    let report = f.inspect(&bytes, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    // The signature value, the ByteRange digest and the signing certificate binding verify
+    // (the `pdf` profile accepts the same bytes: see the next test).
+    assert_eq!(signer.signature, CheckStatus::Passed);
+    assert!(
+        signer
+            .reasons
+            .iter()
+            .all(|reason| !matches!(reason, ValidationReason::Signature(_))),
+        "{:?}",
+        signer.reasons
+    );
+    // EN 319 142-1 table 1: a PAdES baseline CMS carries no signing-time attribute (the
+    // claimed time is the dictionary's /M), so the grade is "not conformant to this profile".
+    assert!(
+        signer.reasons.contains(&ValidationReason::Profile(
+            ProfileViolation::SigningTimeForbidden
+        )),
+        "{:?}",
+        signer.reasons
+    );
+    assert_eq!(signer.ades_level, None);
+    assert_eq!(report.verdict, Verdict::Invalid);
+    assert_eq!(report.level(), None);
+    // Nothing may be extended from a signature that does not meet the profile.
+    f.rejected(&bytes);
+}
+
+#[test]
+fn kalkan_style_pdf_is_accepted_by_the_generic_pdf_profile_with_the_same_signature_verdict() {
+    use oncl_pki::validation::CheckStatus;
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (bytes, _) = with_kalkan_style_cms(&f, original);
+    let report = f.context(NOW, &f.crl, |services| {
+        oncl_pdf::verify_source(
+            Source::sequential(&mut Cursor::new(&bytes), None),
+            &PdfLimits::default(),
+            services.temporary,
+            services.validation,
+            &[SigAlg::RsaSha256],
+            &mut scope(),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        report.signatures[0].validation.signers[0].signature,
+        CheckStatus::Passed
+    );
+}
+
+#[test]
+fn tampered_kalkan_style_pades_still_fails_with_the_cryptographic_reason() {
+    use oncl_pki::{
+        cms::Problem,
+        validation::{CheckStatus, ProfileViolation, ValidationReason},
+    };
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (good, cms) = with_kalkan_style_cms(&f, original);
+    let range = only_byte_range(&good);
+
+    // A covered content byte (a digit of the claimed /M date) no longer matches the
+    // messageDigest.
+    let mut content = good.clone();
+    let m = content[..range[1]]
+        .windows(4)
+        .position(|w| w == b"(D:2")
+        .unwrap()
+        + 10;
+    assert!(content[m].is_ascii_digit());
+    content[m] = if content[m] == b'1' { b'2' } else { b'1' };
+    let report = f.inspect(&content, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    assert_eq!(signer.signature, CheckStatus::Failed);
+    assert!(
+        signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::DigestMismatch)),
+        "{:?}",
+        signer.reasons
+    );
+    assert_ne!(report.verdict, Verdict::Valid);
+
+    // The signature value no longer verifies; the messageDigest still matches the bytes.
+    let mut forged = good.clone();
+    let last = range[1] + 1 + (cms.len() - 1) * 2;
+    forged[last] = if forged[last] == b'0' { b'1' } else { b'0' };
+    let report = f.inspect(&forged, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    assert_eq!(signer.signature, CheckStatus::Failed);
+    assert!(
+        !signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::DigestMismatch)),
+        "{:?}",
+        signer.reasons
+    );
+    assert!(
+        signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::BadSignature)),
+        "{:?}",
+        signer.reasons
+    );
+    assert_ne!(report.verdict, Verdict::Valid);
+    // A profile finding rides along, it never replaces the failure.
+    assert!(signer.reasons.contains(&ValidationReason::Profile(
+        ProfileViolation::SigningTimeForbidden
+    )));
+
+    // A ByteRange that no longer matches /Contents is not a verifiable signature at all.
+    let mut shifted = good.clone();
+    let key = shifted
+        .windows(10)
+        .position(|w| w == b"/ByteRange")
+        .unwrap();
+    // `/ByteRange [<20-digit start> <20-digit first length> ...`
+    let second = key + "/ByteRange [".len() + 21;
+    assert_eq!(
+        std::str::from_utf8(&shifted[second..second + 20])
+            .unwrap()
+            .parse::<usize>()
+            .unwrap(),
+        range[1]
+    );
+    let at = second + 19;
+    assert!(shifted[at].is_ascii_digit());
+    shifted[at] = if shifted[at] == b'9' {
+        b'8'
+    } else {
+        shifted[at] + 1
+    };
+    assert!(
+        !f.inspect(&shifted, AdesLevel::B, NOW, &f.crl)
+            .is_ok_and(|r| r.verdict == Verdict::Valid)
+    );
+}
+
 // Count real allocation work on this test thread only. Other parallel tests
 // never enter this measurement. The existing host OperationControl imposes the
 // finite work admission; no production quota or allocator is changed.

@@ -61,6 +61,8 @@ Trust comes only from the operator: `--root`, `--intermediate`, `--pki-endpoint`
 
 `oncl verify --profile cms --input <signature.p7s> --root <NCA root>` is the only CMS signature checker of the project: it replaced the daemon's `openncalayer cms-verify` (removed, with its `crl/` cache path and its default embedded NCA CA set). The differences are intentional: there is no implicit default trust set (pass the NCA roots you trust with `--root`), the input is DER or BER — or, with the explicit `--pem` flag (CMS profile only, at most 16 MiB of text, exactly one `CMS` or `PKCS7` block and nothing around it, decoded before parsing; the demo page's text area gives PEM, its `.p7s` file DER) — validation is always strict (the NCALayer compatibility policy, `OperationPolicy::ncalayer_compatibility()`, is a choice of an embedding host and has no command-line switch), the report is per check, and an unproven signing time or unavailable revocation data is `Indeterminate` (exit 3).
 
+With `--profile cades-*` or `pades-*` a signature that verifies but misses a baseline rule is reported with a `Profile(SigningTimeForbidden|SigningTimeMissing|ContentTypeNotData|SigningCertificateMissing)` reason: the signature check stays `Passed`, the verdict is `Invalid` (exit 2) and no `ades_level` is claimed. Kalkan's own PAdES carries a signing-time attribute, which EN 319 142-1 table 1 forbids, so it is reported this way under `pades-*` while `--profile pdf` judges the same bytes by integrity and trust only.
+
 ## Reports, exits and output
 
 | Exit | Meaning |
