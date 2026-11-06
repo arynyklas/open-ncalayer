@@ -62,14 +62,17 @@ impl FrozenInput {
     /// wire may exceed the document allowance by a container surcharge. Wire is
     /// bounded by the remaining document allowance plus the remaining
     /// `container_bytes`; the caller MUST then call [`Self::settle_container_tail`]
-    /// to classify the surcharge. Until settled, no further intake is admitted
+    /// to classify the surcharge. `maximum_surcharge` narrows (never widens)
+    /// `container_bytes` for this format, and wire beyond it fails while being
+    /// read, before it is spooled. Until settled, no further intake is admitted
     /// and dropping the capture makes the operation's intake terminal.
     pub fn capture_signed(
         source: Source<'_>,
         store: &TemporaryStore,
         scope: &mut ResourceScope,
+        maximum_surcharge: u64,
     ) -> Result<Self, ProcessingError> {
-        let overhead = scope.limits().container_bytes;
+        let overhead = scope.limits().container_bytes.min(maximum_surcharge);
         Self::capture_limited(source, store, scope, None, Some(overhead), true)
     }
     /// Whether wire accounting is still awaiting [`Self::settle_container_tail`].

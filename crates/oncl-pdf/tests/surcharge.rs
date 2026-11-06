@@ -54,6 +54,13 @@ fn sign(source: &[u8]) -> Vec<u8> {
     v
 }
 fn verify(bytes: &[u8], limits: ResourceLimits) -> (Result<(), PdfError>, ResourceScope) {
+    verify_with(bytes, limits, &PdfLimits::default())
+}
+fn verify_with(
+    bytes: &[u8],
+    limits: ResourceLimits,
+    pdf: &PdfLimits,
+) -> (Result<(), PdfError>, ResourceScope) {
     let mut s = scope(limits);
     let temp = tempfile::tempdir().unwrap();
     let store = TemporaryStore::new(temp.path()).unwrap();
@@ -62,7 +69,7 @@ fn verify(bytes: &[u8], limits: ResourceLimits) -> (Result<(), PdfError>, Resour
     ]);
     let r = verify_source(
         Source::seekable(&mut Cursor::new(bytes), None),
-        &PdfLimits::default(),
+        pdf,
         &store,
         &ValidationContext {
             policy: ValidationPolicy::OfflineReport,
@@ -101,10 +108,43 @@ fn own_signed_pdf_verifies_with_document_exact_input_limit() {
     ));
     // Surcharge beyond the container allowance is not accepted as overhead.
     let (r, _) = verify(&signed, limits(source.len() as u64, surcharge - 1));
-    assert!(matches!(r, Err(PdfError::Processing(_))));
-    // Unsigned hostile bytes one past the document cap never ride the surcharge.
-    let mut padded = source.to_vec();
-    padded.push(b'\n');
-    let (r, _) = verify(&padded, limits(source.len() as u64, 1 << 20));
-    assert!(r.is_err());
+    assert!(matches!(
+        r,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
+    // Tail beyond the format-derived increment bound (4 objects per appended
+    // revision) is rejected even though container_bytes (1 GiB) would allow it.
+    let tiny = PdfLimits {
+        max_revisions: 2,
+        max_object_bytes: (surcharge as usize - 1) / 4,
+        ..PdfLimits::default()
+    };
+    assert!(super_cap(&tiny) < surcharge);
+    let (r, _) = verify_with(&signed, limits(source.len() as u64, 1 << 30), &tiny);
+    assert!(matches!(
+        r,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
+    // Unsigned larger PDFs never ride the surcharge: one byte, and a large
+    // appended junk tail within the cap (no appended revision).
+    for extra in [1usize, 4096] {
+        let mut padded = source.to_vec();
+        padded.resize(source.len() + extra, b'\n');
+        let (r, _) = verify(&padded, limits(source.len() as u64, 1 << 30));
+        assert!(
+            matches!(r, Err(PdfError::Processing(ProcessingError::InputLimit))),
+            "extra {extra}: {r:?}"
+        );
+    }
+    // A document-sized payload is never surcharge: signed PDF + same again.
+    let mut doubled = signed.clone();
+    doubled.extend_from_slice(source);
+    let (r, _) = verify(&doubled, limits(source.len() as u64, 1 << 30));
+    assert!(matches!(
+        r,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
+}
+fn super_cap(l: &PdfLimits) -> u64 {
+    (l.max_revisions as u64 - 1) * 4 * l.max_object_bytes as u64
 }
