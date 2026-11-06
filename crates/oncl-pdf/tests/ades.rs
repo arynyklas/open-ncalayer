@@ -208,6 +208,31 @@ impl Fixture {
         crl: &[u8],
         action: impl FnOnce(&AdesServices<'_>) -> T,
     ) -> T {
+        self.context_limits(
+            now,
+            crl,
+            EvidenceLimits {
+                max_items: 64,
+                max_bytes: 8 << 20,
+                max_item_bytes: 1 << 20,
+                max_crl_bytes: 8 << 20,
+                max_crl_item_bytes: 1 << 20,
+                max_total_bytes: 8 << 20,
+                max_chain_len: 8,
+                max_proofs: 16,
+                max_coverage_parts: 1024,
+                max_coverage_bytes: 10_737_418_240,
+            },
+            action,
+        )
+    }
+    fn context_limits<T>(
+        &self,
+        now: OffsetDateTime,
+        crl: &[u8],
+        limits: EvidenceLimits,
+        action: impl FnOnce(&AdesServices<'_>) -> T,
+    ) -> T {
         let temp = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(temp.path()).unwrap();
         let http = MockTsa::new(self.tsa.clone()).with_gen_time(now);
@@ -234,18 +259,7 @@ impl Fixture {
             host_clock: None,
             network: &network,
             temporary: &store,
-            limits: EvidenceLimits {
-                max_items: 64,
-                max_bytes: 8 << 20,
-                max_item_bytes: 1 << 20,
-                max_crl_bytes: 8 << 20,
-                max_crl_item_bytes: 1 << 20,
-                max_total_bytes: 8 << 20,
-                max_chain_len: 8,
-                max_proofs: 16,
-                max_coverage_parts: 1024,
-                max_coverage_bytes: 10_737_418_240,
-            },
+            limits,
             tsa: None,
             material: ValidationMaterial {
                 certificates: &certs,
@@ -1955,4 +1969,335 @@ fn final_check_rejects_an_old_signature_that_stopped_validating_after_key_use() 
             assert!(!readable);
         }
     }
+}
+
+// ---- DSS evidence streams are recorded as regions (D1) ------------------------------------
+
+fn find_from(hay: &[u8], needle: &[u8], from: usize) -> usize {
+    from + hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("needle")
+}
+
+/// `lt` with the DSS CRL stream whose body is `old_crl` replaced by `header` (the dictionary
+/// and `stream` keyword line) and `body`, the incremental cross-reference stream shifted to
+/// match, so every other object, the xref and `startxref` stay consistent.
+fn replace_crl_stream(lt: &[u8], old_crl: &[u8], header: &str, body: &[u8]) -> Vec<u8> {
+    let body_pos = find_from(lt, old_crl, 0);
+    let old_header = format!("<< /Length {} >>\nstream\n", old_crl.len());
+    let start = body_pos - old_header.len();
+    assert_eq!(&lt[start..body_pos], old_header.as_bytes());
+    let old_end = body_pos + old_crl.len();
+    let mut out = lt[..start].to_vec();
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body);
+    out.extend_from_slice(&lt[old_end..]);
+    let delta = (header.len() + body.len()) as i64 - (old_header.len() + old_crl.len()) as i64;
+    // The last revision's xref is a stream of 11-byte rows: type, 8-byte offset, generation.
+    let xref = find_from(&out, b"/Type /XRef", start);
+    let length_at = find_from(&out, b"/Length ", xref) + 8;
+    let digits = out[length_at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let length: usize = std::str::from_utf8(&out[length_at..length_at + digits])
+        .unwrap()
+        .parse()
+        .unwrap();
+    let rows = find_from(&out, b"stream\n", xref) + 7;
+    for row in 0..length / 11 {
+        let at = rows + row * 11;
+        let offset = u64::from_be_bytes(out[at + 1..at + 9].try_into().unwrap());
+        if out[at] == 1 && offset > start as u64 {
+            out[at + 1..at + 9].copy_from_slice(&((offset as i64 + delta) as u64).to_be_bytes());
+        }
+    }
+    let sx = out.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+    let end = find_from(&out, b"\n", sx);
+    let value: i64 = std::str::from_utf8(&out[sx..end]).unwrap().parse().unwrap();
+    out.splice(sx..end, (value + delta).to_string().bytes());
+    out
+}
+
+fn lt_with_crl(f: &Fixture) -> Vec<u8> {
+    let (t, _) = f.run(None, AdesLevel::T);
+    f.run(Some(&t), AdesLevel::Lt).0
+}
+
+fn wide_limits() -> EvidenceLimits {
+    EvidenceLimits {
+        max_items: 64,
+        max_bytes: 16 << 20,
+        max_item_bytes: 1 << 20,
+        max_crl_bytes: 16 << 20,
+        max_crl_item_bytes: 8 << 20,
+        max_total_bytes: 16 << 20,
+        max_chain_len: 8,
+        max_proofs: 16,
+        max_coverage_parts: 1024,
+        max_coverage_bytes: 10_737_418_240,
+    }
+}
+
+/// A current CRL of the fixture root that is `target` bytes of DER (padded by one unknown
+/// non-critical CRL extension, whose length fields are stable in this size range).
+fn root_crl_of_size(f: &Fixture, target: usize) -> Vec<u8> {
+    use der::asn1::OctetString;
+    use x509_cert::ext::Extension;
+    let build = |pad: usize| {
+        MockCrl::new(f.root.clone())
+            .with_this_update(NOW - time::Duration::MINUTE)
+            .next_update(Some(NOW + time::Duration::HOUR))
+            .extension(Extension {
+                extn_id: "1.2.3.4.5".parse().unwrap(),
+                critical: false,
+                extn_value: OctetString::new(vec![0u8; pad]).unwrap(),
+            })
+            .der()
+    };
+    let first = build(target / 2);
+    let pad = target / 2 + target - first.len();
+    let exact = build(pad);
+    assert_eq!(exact.len(), target);
+    exact
+}
+
+fn verify_lt(f: &Fixture, bytes: &[u8]) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    verify_lt_budget(f, bytes, None)
+}
+
+fn verify_lt_budget(
+    f: &Fixture,
+    bytes: &[u8],
+    memory: Option<u64>,
+) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    f.context_limits(NOW, &[], wide_limits(), |services| {
+        let mut scope = match memory {
+            Some(memory) => scope_with_memory(memory),
+            None => scope(),
+        };
+        ades::verify(
+            AdesLevel::Lt,
+            Source::sequential(&mut Cursor::new(bytes), None),
+            &PdfLimits::default(),
+            services,
+            &[SigAlg::RsaSha256],
+            &mut scope,
+        )
+    })
+}
+
+fn scope_with_memory(memory: u64) -> ResourceScope {
+    let limits = ResourceLimits {
+        memory_bytes: memory,
+        metadata_bytes: 64 << 20,
+        temp_bytes: 256 << 20,
+        ..ResourceLimits::default()
+    };
+    Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Control))
+        .unwrap()
+}
+
+#[test]
+fn dss_crl_stream_over_one_mib_is_a_region_not_a_window() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    // The patcher alone changes nothing.
+    let same = replace_crl_stream(
+        &lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", f.crl.len()),
+        &f.crl,
+    );
+    assert_eq!(same, lt);
+    // A 3 MiB CRL (the reader's old window and decode caps are 1 MiB and 4 MiB) verifies.
+    let big = root_crl_of_size(&f, 3 << 20);
+    let patched = replace_crl_stream(
+        &lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", big.len()),
+        &big,
+    );
+    let report = verify_lt(&f, &patched).unwrap();
+    assert_eq!(report.verdict, Verdict::Valid);
+}
+
+#[test]
+fn dss_crl_stream_length_past_the_end_of_file_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = format!("<< /Length {} >>\nstream\n", lt.len() + 4096);
+    let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+    assert!(matches!(
+        verify_lt(&f, &patched),
+        Err(oncl_pdf::PdfError::Malformed("stream beyond the source"))
+    ));
+}
+
+#[test]
+fn dss_crl_stream_length_off_the_endstream_keyword_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    // One short (lands inside the body) and two long (lands inside the keyword).
+    for length in [f.crl.len() - 1, f.crl.len() + 2] {
+        let header = format!("<< /Length {length} >>\nstream\n");
+        let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+        assert!(
+            matches!(
+                verify_lt(&f, &patched),
+                Err(oncl_pdf::PdfError::Malformed(_))
+            ),
+            "length {length}"
+        );
+    }
+}
+
+#[test]
+fn dss_crl_stream_with_a_filter_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = format!(
+        "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+        f.crl.len()
+    );
+    let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+    assert!(matches!(
+        verify_lt(&f, &patched),
+        Err(oncl_pdf::PdfError::Unsupported("filtered evidence stream"))
+    ));
+}
+
+#[test]
+fn dss_crl_stream_with_an_indirect_length_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = "<< /Length 21 0 R >>\nstream\n";
+    let patched = replace_crl_stream(&lt, &f.crl, header, &f.crl);
+    assert!(verify_lt(&f, &patched).is_err());
+}
+
+fn small_pdf_limits() -> PdfLimits {
+    PdfLimits {
+        max_object_bytes: 1 << 16,
+        max_decoded_bytes: 1 << 18,
+        max_objects: 512,
+        ..PdfLimits::default()
+    }
+}
+
+fn refused_for_memory(result: Result<ades::PadesReport, oncl_pdf::PdfError>) -> bool {
+    matches!(&result, Err(error) if format!("{error:?}").contains("MemoryLimit"))
+}
+
+/// The LT document whose DSS CRL is `crl`.
+fn lt_with_dss_crl(f: &Fixture, lt: &[u8], crl: &[u8]) -> Vec<u8> {
+    replace_crl_stream(
+        lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", crl.len()),
+        crl,
+    )
+}
+
+fn verify_small(
+    f: &Fixture,
+    bytes: &[u8],
+    level: AdesLevel,
+    crl: &[u8],
+    memory: u64,
+) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    f.context_limits(NOW, crl, wide_limits(), |services| {
+        ades::verify(
+            level,
+            Source::sequential(&mut Cursor::new(bytes), None),
+            &small_pdf_limits(),
+            services,
+            &[SigAlg::RsaSha256],
+            &mut scope_with_memory(memory << 20),
+        )
+    })
+}
+
+const AT_LIMIT: usize = oncl_pki::crl::MAX_BER_CRL_LEN;
+
+#[test]
+fn snapshot_charge_applies_the_scan_in_place_rule_only_over_the_ber_limit() {
+    // Same document, same small PDF reader, 64 MiB of RAM: a DSS CRL of exactly the BER limit
+    // may be BER and keeps the amplified charge (refused); one byte more is DER only and is
+    // charged once (admitted).
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let at = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT));
+    let over = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT + 1));
+    assert!(refused_for_memory(verify_small(
+        &f,
+        &at,
+        AdesLevel::Lt,
+        &[],
+        64
+    )));
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 64)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+}
+
+#[test]
+fn snapshot_charge_applies_the_same_rule_to_caller_supplied_crls() {
+    // No DSS: the CRL is operator material (`services.material.crls`).
+    let f = Fixture::new();
+    let (t, _) = f.run(None, AdesLevel::T);
+    let at = root_crl_of_size(&f, AT_LIMIT);
+    let over = root_crl_of_size(&f, AT_LIMIT + 1);
+    assert!(refused_for_memory(verify_small(
+        &f,
+        &t,
+        AdesLevel::B,
+        &at,
+        64
+    )));
+    assert_eq!(
+        verify_small(&f, &t, AdesLevel::B, &over, 64)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+}
+
+#[test]
+fn evidence_readback_charge_applies_the_rule_only_over_the_ber_limit() {
+    // 160 MiB lets the snapshot charge through, so the refusal below is the evidence
+    // readback's: a CRL of exactly the BER limit is read back with amplification.
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let at = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT));
+    let over = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT + 1));
+    let error = verify_small(&f, &at, AdesLevel::Lt, &[], 160).unwrap_err();
+    assert!(format!("{error:?}").contains("Evidence"), "{error:?}");
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 160)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+    // And a CRL over the limit is not amplified at the readback: 24 MiB would refuse a
+    // 32x charge of 1 MiB but admits the single charge.
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 24)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+    let (t, _) = f.run(None, AdesLevel::T);
+    let supplied = root_crl_of_size(&f, AT_LIMIT + 1);
+    assert_eq!(
+        verify_small(&f, &t, AdesLevel::B, &supplied, 24)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
 }

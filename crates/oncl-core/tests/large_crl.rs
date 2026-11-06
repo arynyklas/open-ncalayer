@@ -458,3 +458,64 @@ fn only_a_crl_over_the_ber_limit_gets_the_scan_in_place_charge() {
     }
     assert!(sizes[0] < oncl_pki::crl::MAX_BER_CRL_LEN && sizes[1] > oncl_pki::crl::MAX_BER_CRL_LEN);
 }
+
+/// A revocation set whose complete CRL of the intermediate is exactly `target` DER bytes
+/// (padded by one unknown non-critical CRL extension; length fields are stable in this range).
+fn exact_set(target: usize) -> Vec<u8> {
+    use der::asn1::OctetString;
+    use x509_cert::ext::Extension;
+    let build = |pad: usize| {
+        MockCrl::new(entry("inter-gost2015.key"))
+            .with_this_update(NOW - time::Duration::MINUTE)
+            .next_update(Some(NOW + time::Duration::HOUR))
+            .extension(Extension {
+                extn_id: "1.2.3.4.5".parse().unwrap(),
+                critical: false,
+                extn_value: OctetString::new(vec![0u8; pad]).unwrap(),
+            })
+            .der()
+    };
+    let first = build(target / 2);
+    let exact = build(target / 2 + target - first.len());
+    assert_eq!(exact.len(), target);
+    let root = MockCrl::new(entry("root-gost2015.key"))
+        .with_this_update(NOW - time::Duration::MINUTE)
+        .next_update(Some(NOW + time::Duration::HOUR))
+        .der();
+    tlv(0xa1, &[exact, root].concat())
+}
+
+#[test]
+fn cades_evidence_charge_is_single_only_for_a_crl_over_the_ber_limit() {
+    let _serial = serial();
+    // 8 MiB of RAM, through the CAdES path (embedded CRL -> evidence store -> readback):
+    // a CRL of exactly MAX_BER_CRL_LEN may be BER and keeps the amplified charge (refused),
+    // one byte more must be DER and is charged once, at every stage (admitted).
+    let limits = || ResourceLimits {
+        memory_bytes: 8 << 20,
+        ..ResourceLimits::default()
+    };
+    let request = VerifyRequest::cades(AdesLevel::B, evidence_limits());
+    let at = with_revocation_set(&signer(), &exact_set(oncl_pki::crl::MAX_BER_CRL_LEN));
+    let (result, _) = verify_with(&request, &at, limits());
+    assert!(
+        matches!(
+            result,
+            Err(OperationError::Processing(
+                ProcessingError::MemoryLimit | ProcessingError::MetadataLimit
+            ))
+        ),
+        "{result:?}"
+    );
+    let over = with_revocation_set(&signer(), &exact_set(oncl_pki::crl::MAX_BER_CRL_LEN + 1));
+    let (result, _) = verify_with(&request, &over, limits());
+    assert_eq!(result.unwrap().verdict, Verdict::Valid);
+    // With RAM for the amplified charge the exact-limit CRL is admitted too, so the refusal
+    // above is the charge and not the CRL.
+    let roomy = ResourceLimits {
+        memory_bytes: 256 << 20,
+        ..ResourceLimits::default()
+    };
+    let (result, _) = verify_with(&request, &at, roomy);
+    assert_eq!(result.unwrap().verdict, Verdict::Valid);
+}

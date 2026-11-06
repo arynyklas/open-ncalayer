@@ -201,8 +201,8 @@ struct Parser<'a> {
     skim: bool,
 }
 
-/// Definite-length constructed elements at least this long are skimmed (1 MiB, the
-/// bulk-CRL threshold).
+/// Definite-length constructed elements whose whole encoding is longer than this are
+/// skimmed (1 MiB, the bulk-CRL threshold: a CRL over `MAX_BER_CRL_LEN` must be DER).
 const SKIM_MIN: usize = crate::crl::MAX_BER_CRL_LEN;
 
 impl Parser<'_> {
@@ -254,7 +254,7 @@ impl Parser<'_> {
 
         if self.skim
             && let Length::Definite(len) = length
-            && len >= SKIM_MIN
+            && (self.pos - start).saturating_add(len) > SKIM_MIN
         {
             // A bulk element (a CRL): framing only. Its owner decodes it strictly.
             let range = self.take(len)?;

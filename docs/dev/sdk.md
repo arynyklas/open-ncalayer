@@ -272,8 +272,10 @@ admits an evidence item from base64 text with decoded-size quotas, for XML carri
 Hosts: the CLI admits CRLs up to 32 MiB (16/1 MiB for other evidence, 48 MiB total) and a
 document-sized coverage ceiling. `oncl-server` (2 MiB per CRL) and `oncl-ui` (1 MiB) keep
 the earlier bounds and therefore refuse sign/extend with a complete NCA CRL (about 20 MB);
-a host that wants it sets the `max_crl_*` fields. `PdfLimits::max_evidence_bytes` (the
-container-surcharge branch) should be derived from `max_total_bytes` by the host.
+a host that wants it sets the `max_crl_*` fields. A host that also bounds PDF evidence
+separately should derive that bound from `EvidenceLimits.max_total_bytes`. PDF DSS evidence
+streams are read as regions: they are no longer limited by `PdfLimits::max_object_bytes`,
+only by the scope's container and memory accounting and the evidence quotas.
 
 Scope of D1: offline verification/inspection of CMS/CAdES with an embedded complete CRL.
 Not covered: online CRL download (`crl::fetch_for`, still decoded in full at 128x), operator

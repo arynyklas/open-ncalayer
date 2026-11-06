@@ -13,7 +13,7 @@ pub(crate) struct Metadata {
     bytes: Vec<u8>,
     memory: ResourceReservation,
     metadata: ResourceReservation,
-    /// Bytes of bulk revocation evidence (a CRL of at least [`BULK_MIN`] bytes) that sit
+    /// Bytes of bulk revocation evidence (a CRL encoding over [`BULK_MIN`] bytes) that sit
     /// verbatim inside `bytes`: they are borrowed and scanned, never decoded into a tree,
     /// so consumers charge decode amplification only for the rest.
     bulk: u64,
@@ -466,7 +466,7 @@ impl<'a, 's> Reader<'a, 's> {
         value.normalize(self.scope)
     }
     /// The `[1] IMPLICIT RevocationInfoChoices` set. Its small elements are normalized one
-    /// by one like any metadata; a CRL of at least [`BULK_MIN`] bytes is kept verbatim (it
+    /// by one like any metadata; a CRL encoding over [`BULK_MIN`] bytes is kept verbatim (it
     /// must already be minimal DER, as [`crate::crl::serial_status`] requires) and counted as
     /// bulk, so the normalizer never builds a tree of it and decoders never charge
     /// amplification for it. Capacity is reserved once from the declared length before any
@@ -489,7 +489,7 @@ impl<'a, 's> Reader<'a, 's> {
         while let Some(child) = self.next()? {
             if let Some(len) = child
                 .len
-                .filter(|len| child.tag == 0x30 && *len >= BULK_MIN)
+                .filter(|len| child.tag == 0x30 && child.encoded_len as u64 + *len > BULK_MIN)
             {
                 if child.encoded_len != 1 + encoded_length(len).1 {
                     return Err(malformed("a CRL over the BER limit must be DER"));

@@ -1040,3 +1040,74 @@ fn scan_uses_the_first_crl_reason_even_when_it_is_malformed() {
         }),
     );
 }
+
+#[test]
+fn scan_ignores_a_second_crl_reason_after_a_malformed_first_one() {
+    // Two CRLReason extensions in one entry, the first malformed and the second valid (1):
+    // the first decides, so there is no reason, on both paths.
+    let issuer = entry("inter-gost2015.key");
+    let der = scan_crl()
+        .revoke_with_reason(&[7], SCAN_NOW - time::Duration::DAY, 1)
+        .der();
+    let doubled = resigned(&der, &issuer, |tbs| {
+        // 30 L 06 03 55 1d 15 04 L2 0a 01 01: the whole Extension, found by its id.
+        let id = tbs
+            .windows(5)
+            .position(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x15])
+            .unwrap();
+        let start = id - 2;
+        let extension_len = 2 + tbs[start + 1] as usize;
+        let valid = tbs[start..start + extension_len].to_vec();
+        let mut broken = valid.clone();
+        let value = broken
+            .windows(3)
+            .position(|w| w == [0x0a, 0x01, 0x01])
+            .unwrap();
+        broken[value] = 0x02;
+        // The entry's Extensions SEQUENCE, the entry and every outer length grow by one
+        // Extension: patch the (short-form) lengths on the path to this extension.
+        let grow = extension_len as i64;
+        tbs.splice(start..start + extension_len, [broken, valid].concat());
+        patch_enclosing_lengths(tbs, start, grow);
+    });
+    same_as_full_decode(
+        &doubled,
+        &[7],
+        SCAN_NOW,
+        Ok(CrlStatus::Revoked {
+            time: SCAN_NOW - time::Duration::DAY,
+            reason: None,
+        }),
+    );
+}
+
+/// Adds `grow` to the length of every DER element of `tbs` that encloses offset `at`
+/// (short, one- and two-octet long forms), skipping the element starting at `at` itself.
+fn patch_enclosing_lengths(tbs: &mut [u8], at: usize, grow: i64) {
+    fn walk(tbs: &mut [u8], start: usize, end: usize, at: usize, grow: i64) {
+        let mut pos = start;
+        while pos < end {
+            let (header, length) = match tbs[pos + 1] {
+                n if n < 0x80 => (2, n as usize),
+                0x81 => (3, tbs[pos + 2] as usize),
+                0x82 => (4, u16::from_be_bytes([tbs[pos + 2], tbs[pos + 3]]) as usize),
+                other => panic!("length form {other:#x}"),
+            };
+            let content = pos + header;
+            if pos < at && at < content + length {
+                // Encloses `at` (the grown content): fix this length, then descend.
+                let new = (length as i64 + grow) as usize;
+                match tbs[pos + 1] {
+                    n if n < 0x80 => tbs[pos + 1] = new as u8,
+                    0x81 => tbs[pos + 2] = new as u8,
+                    _ => tbs[pos + 2..pos + 4].copy_from_slice(&(new as u16).to_be_bytes()),
+                }
+                walk(tbs, content, content + new, at, grow);
+                return;
+            }
+            pos = content + length;
+        }
+    }
+    let total = tbs.len();
+    walk(tbs, 0, total, at, grow);
+}
