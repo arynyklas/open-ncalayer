@@ -34,6 +34,10 @@ pub(super) struct StreamFinal {
     pub(super) event: Bytes,
     pub(super) artifacts: Vec<(String, FinishedArtifact)>,
 }
+/// Minimum spacing of progress frames: latest state, not one frame per native checkpoint.
+/// Bound: at most 2 frames/s, i.e. progress output <= 2 * operation deadline (seconds) frames
+/// instead of O(native checkpoints); it is not a replacement for the output cap.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 type WorkFuture = Pin<Box<dyn Future<Output = Result<StreamFinal, ProcessingError>> + Send>>;
 
 /// Which terminal protocol the native work follows.
@@ -226,6 +230,7 @@ pub(super) async fn response(
         artifact: 0,
         offset: 0,
         phase: Phase::Initial,
+        next_progress: tokio::time::Instant::now(),
         handed_terminal: false,
         ids,
     };
@@ -318,6 +323,7 @@ fn execute(
 enum Phase {
     Initial,
     Waiting,
+    Pacing,
     ArtifactHeader,
     ArtifactData,
     ArtifactEnd,
@@ -336,6 +342,7 @@ struct StreamState {
     artifact: usize,
     offset: u64,
     phase: Phase,
+    next_progress: tokio::time::Instant,
     handed_terminal: bool,
     ids: Option<(Arc<[Box<str>]>, ResourceReservation)>,
 }
@@ -365,6 +372,7 @@ impl StreamState {
             value["items"] = serde_json::json!({"total":items.total,"finished":items.finished,"current":current});
         }
         let event = self.root.json_event(&value)?;
+        self.next_progress = tokio::time::Instant::now() + PROGRESS_INTERVAL;
         self.json_part("progress", event)
     }
     async fn next(&mut self) -> Result<Option<Bytes>, ProcessingError> {
@@ -383,8 +391,21 @@ impl StreamState {
                     tokio::select! {
                         result=work=>{self.terminal=Some(result?);self.work=None;self.phase=Phase::ArtifactHeader;},
                         changed=self.receiver.changed()=>{
-                            if changed.is_ok(){self.progress_part()?;}
+                            if changed.is_ok(){self.phase=Phase::Pacing;}
                             else{self.terminal=Some(self.work.take().expect("native result").await?);self.phase=Phase::ArtifactHeader;}
+                        }
+                    }
+                }
+                Phase::Pacing => {
+                    // Latest state wins: wait out the rest of the interval (the work result,
+                    // and the deadline/cancel checkpoint above, still end the wait), then emit
+                    // one frame carrying whatever the producer reached meanwhile.
+                    let work = self.work.as_mut().expect("active native result");
+                    tokio::select! {
+                        result=work=>{self.terminal=Some(result?);self.work=None;self.phase=Phase::ArtifactHeader;},
+                        () = tokio::time::sleep_until(self.next_progress) => {
+                            self.progress_part()?;
+                            self.phase = Phase::Waiting;
                         }
                     }
                 }
