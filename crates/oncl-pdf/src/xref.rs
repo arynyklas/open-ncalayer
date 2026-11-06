@@ -9,7 +9,11 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Entry {
-    Free,
+    /// Free entry: next free object number and the generation to use if reused.
+    Free {
+        next: u64,
+        generation: u32,
+    },
     Direct(u64, u16),
     Compressed(u32, u32),
 }
@@ -297,7 +301,11 @@ impl PdfDocument<'_, '_> {
                     let generation = p.integer()?;
                     let kind = p.word()?;
                     let entry = match kind {
-                        b"f" => Entry::Free,
+                        b"f" => Entry::Free {
+                            next: offset,
+                            generation: u32::try_from(generation)
+                                .map_err(|_| PdfError::Malformed("generation"))?,
+                        },
                         b"n" => Entry::Direct(
                             offset,
                             u16::try_from(generation)
@@ -374,7 +382,19 @@ impl PdfDocument<'_, '_> {
                         field[0] = 1;
                     }
                     let entry = match field[0] {
-                        0 => Entry::Free,
+                        0 => Entry::Free {
+                            next: field[1],
+                            // ISO 32000-1 7.5.8.3 defaults an absent field (W[2] == 0)
+                            // to 0, while the free-list head is 65535. Producers
+                            // such as NCANode omit it, so that tolerated deviation
+                            // is read as the head's 65535; with a real field the
+                            // stored value is used unchanged.
+                            generation: if w[2] == 0 {
+                                65535
+                            } else {
+                                u32::try_from(field[2]).unwrap_or(u32::MAX)
+                            },
+                        },
                         1 => Entry::Direct(
                             field[1],
                             u16::try_from(field[2])
@@ -412,7 +432,7 @@ impl PdfDocument<'_, '_> {
             .copied()
             .ok_or(PdfError::Malformed("unresolved reference"))?;
         match entry {
-            Entry::Free => Err(PdfError::Malformed("free object reference")),
+            Entry::Free { .. } => Err(PdfError::Malformed("free object reference")),
             Entry::Direct(offset, gen_actual) => {
                 if gen_actual != *generation || offset >= self.revisions[revision].end {
                     return Err(PdfError::Malformed("reference generation or revision"));

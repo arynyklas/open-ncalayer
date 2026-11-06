@@ -96,6 +96,18 @@ impl Fixture {
         }
     }
     fn run(&self, old: Option<&[u8]>, level: AdesLevel) -> (Vec<u8>, ades::PadesReport) {
+        self.run_from(
+            old,
+            level,
+            include_bytes!("fixtures/external-multipage.pdf"),
+        )
+    }
+    fn run_from(
+        &self,
+        old: Option<&[u8]>,
+        level: AdesLevel,
+        source: &[u8],
+    ) -> (Vec<u8>, ades::PadesReport) {
         let temp = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(temp.path()).unwrap();
         let http = MockTsa::new(self.tsa.clone()).with_gen_time(NOW);
@@ -150,10 +162,7 @@ impl Fixture {
         } else {
             ades::sign(
                 level,
-                Source::sequential(
-                    &mut Cursor::new(include_bytes!("fixtures/external-multipage.pdf")),
-                    None,
-                ),
+                Source::sequential(&mut Cursor::new(source), None),
                 &PdfSignProfile::default(),
                 &mut self.doc.clone(),
                 &services,
@@ -426,7 +435,7 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Prev {previous} /Root ",
-            doc.max_id + 1
+            doc.max_id + 1,
         )
         .as_bytes(),
     );
@@ -441,6 +450,241 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     }
     result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     result
+}
+/// One classic xref entry: (object, offset-or-next-free, generation, 'n' or 'f').
+type XrefLine = (u32, u64, u32, char);
+/// Appends an object-less increment with a hand-written xref section and a raw
+/// `/ID` trailer value (e.g. `[<aa> <bb>]`), so malformed IDs can be forged.
+fn append_raw(bytes: &[u8], lines: &[XrefLine], id: Option<&str>) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous = std::str::from_utf8(&bytes[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let mut result = bytes.to_vec();
+    result.push(b'\n');
+    let xref = result.len();
+    result.extend_from_slice(b"xref\n");
+    for (id, offset, generation, kind) in lines {
+        result.extend_from_slice(
+            format!("{id} 1\n{offset:010} {generation:05} {kind} \n").as_bytes(),
+        );
+    }
+    result.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Prev {previous} /Root ",
+            doc.max_id + 8,
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut result);
+    if let Ok(value) = doc.trailer.get(b"Info") {
+        result.extend_from_slice(b" /Info ");
+        encode_object(value, &mut result);
+    }
+    if let Some(id) = id {
+        result.extend_from_slice(format!(" /ID {id}").as_bytes());
+    }
+    result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    result
+}
+fn hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02X}")).collect()
+}
+fn id_pair(a: &[u8], b: &[u8]) -> String {
+    format!("[<{}> <{}>]", hex(a), hex(b))
+}
+fn trailer_id(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    doc.trailer
+        .get(b"ID")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_vec())
+        .collect()
+}
+/// `Ok(())` only when the increment passes the augmentation grammar and the
+/// document is then evaluated; otherwise the exact refusal text.
+fn grammar(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
+    match f.inspect(bytes, AdesLevel::B, NOW, &f.crl) {
+        Err(oncl_pdf::PdfError::Unsupported(m)) => Err(m.to_string()),
+        Err(e) => panic!("unexpected non-grammar error: {e:?}"),
+        Ok(report) => {
+            assert_eq!(report.verdict, Verdict::Valid);
+            Ok(())
+        }
+    }
+}
+const TRAILER: &str = "incremental trailer metadata change";
+const FREE: &str = "free or compressed augmentation entry";
+#[test]
+fn update_may_change_trailer_id_instance_and_relist_free_head_only() {
+    let f = Fixture::new();
+    let (lt, _) = f.run(None, AdesLevel::Lt);
+    let ids = trailer_id(&lt);
+    let original = ids[0].clone();
+    let head: XrefLine = (0, 0, 65535, 'f');
+    let new_id = id_pair(&original, &[9, 8, 7, 6]);
+    // The unchanged document is itself Valid; the same bytes plus an ID[1] change
+    // and the object 0 free head stay Valid.
+    assert_eq!(grammar(&f, &lt), Ok(()));
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], Some(&new_id))),
+        Ok(())
+    );
+    // ID[0] substitution.
+    let swapped = id_pair(&vec![1; original.len()], &[9, 8, 7, 6]);
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], Some(&swapped))),
+        Err(TRAILER.into())
+    );
+    // Malformed IDs: wrong length, non-string, indirect, missing.
+    for bad in [
+        format!("[<{}>]", hex(&original)),
+        format!("[<{}> <01> <02>]", hex(&original)),
+        format!("[<{}> 7]", hex(&original)),
+        "[7 <01>]".to_string(),
+        format!("[<{}> 7 0 R]", hex(&original)),
+        "7 0 R".to_string(),
+    ] {
+        assert_eq!(
+            grammar(&f, &append_raw(&lt, &[head], Some(&bad))),
+            Err(TRAILER.into()),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], None)),
+        Err(TRAILER.into())
+    );
+    // Freeing a real object is refused; only the object 0 head is exempt.
+    let doc = lopdf::Document::load_mem(&lt).unwrap();
+    let page = doc.get_pages().values().next().unwrap().0;
+    let deleted = append_raw(&lt, &[head, (page, 0, 1, 'f')], Some(&new_id));
+    assert_eq!(grammar(&f, &deleted), Err(FREE.into()));
+    // Head generation must be 65535.
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[(0, 0, 0, 'f')], Some(&new_id))),
+        Err(FREE.into())
+    );
+    // Head whose next-free link names a live object is refused; a link to another
+    // free entry is accepted.
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(&lt, &[(0, page as u64, 65535, 'f')], Some(&new_id))
+        ),
+        Err(FREE.into())
+    );
+    let spare = doc.max_id + 1;
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(
+                &lt,
+                &[(0, spare as u64, 65535, 'f'), (spare, 0, 1, 'f')],
+                Some(&new_id)
+            )
+        ),
+        Err(FREE.into()),
+        "a new free object is still an object-level change"
+    );
+    // Object 0 reported in use is not a free head: refused by the generic
+    // object rule (it points before the new revision).
+    let in_use = append_raw(&lt, &[(0, 12, 0, 'n')], Some(&new_id));
+    assert_eq!(
+        grammar(&f, &in_use),
+        Err("validation metadata aliases existing source object".into())
+    );
+    // The earlier increment is what trips first in the forgery above; a later
+    // head over it is refused identically.
+    assert_eq!(
+        grammar(&f, &append_raw(&in_use, &[head], Some(&new_id))),
+        Err("validation metadata aliases existing source object".into())
+    );
+}
+#[test]
+fn free_head_is_refused_when_object_zero_was_in_use_before_signing() {
+    let f = Fixture::new();
+    // The unsigned source already carries an increment listing object 0 as in use,
+    // so only the prior-state guard of the head check can refuse the later head.
+    let source = append_raw(
+        include_bytes!("fixtures/external-multipage.pdf"),
+        &[(0, 12, 0, 'n')],
+        None,
+    );
+    let (lt, _) = f.run_from(None, AdesLevel::Lt, &source);
+    let head: XrefLine = (0, 0, 65535, 'f');
+    let doc = lopdf::Document::load_mem(&lt).unwrap();
+    let id = doc.trailer.get(b"ID").ok().map(|_| {
+        let ids = trailer_id(&lt);
+        id_pair(&ids[0], &[9, 8, 7, 6])
+    });
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], id.as_deref())),
+        Err(FREE.into())
+    );
+}
+/// Appends an increment whose cross-reference is an uncompressed xref stream.
+fn append_xref_stream(bytes: &[u8], w2: usize, head_generation: u16, id: &str) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous = std::str::from_utf8(&bytes[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let mut result = bytes.to_vec();
+    result.push(b'\n');
+    let xref = result.len();
+    let own = doc.max_id + 1;
+    let mut data = vec![0, 0, 0, 0];
+    if w2 == 2 {
+        data.extend_from_slice(&head_generation.to_be_bytes());
+    }
+    data.extend_from_slice(&[1, (xref >> 16) as u8, (xref >> 8) as u8, xref as u8]);
+    if w2 == 2 {
+        data.extend_from_slice(&[0, 0]);
+    }
+    result.extend_from_slice(
+        format!(
+            "{own} 0 obj\n<< /Type /XRef /Size {} /W [1 3 {w2}] /Index [0 1 {own} 1] /Prev {previous} /Root ",
+            own + 1
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut result);
+    if let Ok(value) = doc.trailer.get(b"Info") {
+        result.extend_from_slice(b" /Info ");
+        encode_object(value, &mut result);
+    }
+    result.extend_from_slice(format!(" /ID {id} /Length {} >>\nstream\n", data.len()).as_bytes());
+    result.extend_from_slice(&data);
+    result.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    result
+}
+#[test]
+fn xref_stream_free_head_generation_field_is_tolerated_only_when_absent() {
+    let f = Fixture::new();
+    let (lt, _) = f.run(None, AdesLevel::Lt);
+    let original = trailer_id(&lt)[0].clone();
+    let id = id_pair(&original, &[9, 8, 7, 6]);
+    // W[2] == 0 (NCANode shape): head generation is implied.
+    assert_eq!(grammar(&f, &append_xref_stream(&lt, 0, 0, &id)), Ok(()));
+    // An explicit generation field must itself be 65535.
+    assert_eq!(grammar(&f, &append_xref_stream(&lt, 2, 65535, &id)), Ok(()));
+    assert_eq!(
+        grammar(&f, &append_xref_stream(&lt, 2, 0, &id)),
+        Err(FREE.into())
+    );
 }
 #[test]
 fn validation_update_cannot_alias_existing_page_as_acroform() {
