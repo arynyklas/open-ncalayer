@@ -379,6 +379,9 @@ fn freeze_stage_extra(
         None,
         extra,
         true,
+        // The CRLs stay in the frozen source and `Frozen::status`: a second resident
+        // copy inside the parsed metadata would only be charged and never read.
+        false,
     );
     if let Some(error) = reader.error.take() {
         return Err(error.into());
@@ -875,7 +878,8 @@ fn verify_frozen_impl(
     shared: Option<&mut pdf::SharedEvidence<'_>>,
 ) -> Result<AdesReport, AdesError> {
     scope.checkpoint()?;
-    let encoded_size = frozen.parsed.metadata.as_bytes().len() as u64;
+    // Bulk CRLs are borrowed and scanned, never decoded: only the rest amplifies.
+    let encoded_size = frozen.parsed.metadata.decoded_bytes();
     let _working = scope.reserve_memory(
         encoded_size
             .checked_mul(128)
@@ -1472,7 +1476,7 @@ fn extend_frozen(
         .ok_or(ProcessingError::MetadataLimit)?;
     let _working = scope.reserve_memory(
         material_bytes
-            .checked_add(frozen.parsed.metadata.as_bytes().len() as u64)
+            .checked_add(frozen.parsed.metadata.decoded_bytes())
             .and_then(|bytes| bytes.checked_mul(128))
             .ok_or(ProcessingError::MemoryLimit)?,
     )?;

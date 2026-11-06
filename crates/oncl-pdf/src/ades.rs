@@ -9,7 +9,7 @@ use crate::{
     ScopedPdfRows,
     objects::{Value, get, white},
     verify::Candidate,
-    xref::Entry,
+    xref::{Entry, StreamMode},
 };
 use der::Encode;
 use oncl_pki::{
@@ -187,7 +187,7 @@ fn dss(
                     return Err(PdfError::Malformed("DSS duplicate or aliased material"));
                 }
                 result.objects.insert((id, generation));
-                let object = doc.indirect(offset, Some((id, generation)), true)?;
+                let object = doc.indirect(offset, Some((id, generation)), StreamMode::Region)?;
                 if object.end > doc.revisions[revision].end
                     || object
                         .value
@@ -471,7 +471,7 @@ fn permitted(
                         "xref object aliases an existing object",
                     ));
                 }
-                let object = doc.indirect(offset, Some((id, generation)), true)?;
+                let object = doc.indirect(offset, Some((id, generation)), StreamMode::Decode)?;
                 if !get(object.value.dict()?, b"Type")?.name(b"XRef") {
                     return Err(PdfError::Malformed("incremental xref object identity"));
                 }
@@ -501,10 +501,15 @@ fn permitted(
                 let object = doc.indirect(
                     offset,
                     Some((id, generation)),
-                    current
+                    if current
                         .material
                         .iter()
-                        .any(|m| m.reference == (id, generation)),
+                        .any(|m| m.reference == (id, generation))
+                    {
+                        StreamMode::Region
+                    } else {
+                        StreamMode::Reject
+                    },
                 )?;
                 spans.push((offset, object.end));
             }

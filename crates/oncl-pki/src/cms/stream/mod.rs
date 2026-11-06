@@ -193,6 +193,10 @@ pub(super) struct Layout {
     pub status: Option<Region>,
     pub signers: Region,
 }
+/// Encoded size of a TLV with a one-octet tag and a minimal definite length.
+fn tlv_len(body: u64) -> u64 {
+    1 + reader::encoded_length(body).1 as u64 + body
+}
 fn span(start: u64, end: u64) -> Region {
     Region {
         offset: start,
@@ -241,7 +245,7 @@ pub(super) fn parse(
     hashing: bool,
     output: Option<ContentOutput<'_, '_>>,
 ) -> Result<Parsed, StreamError> {
-    parse_with(input, scope, hashing, output, &[], false)
+    parse_with(input, scope, hashing, output, &[], false, true)
 }
 pub(super) fn parse_with(
     input: Source<'_>,
@@ -250,6 +254,7 @@ pub(super) fn parse_with(
     mut output: Option<ContentOutput<'_, '_>>,
     extra: &[SigAlg],
     replay: bool,
+    retain_bulk: bool,
 ) -> Result<Parsed, StreamError> {
     let mut reader = if replay {
         Reader::new_replay(input, scope)?
@@ -272,14 +277,12 @@ pub(super) fn parse_with(
         explicit.len.is_none(),
         signed.len.is_none(),
     ];
-    let mut body = Metadata::new(reader.scope)?;
+    // Parts of the normalized SignedData body, assembled once at the end.
     let version_header = reader.required(2)?;
     let version_start = version_header.start();
     let version = reader.metadata(version_header)?;
     let _version = u8::from_der(version.as_bytes())?;
     let version_region = span(version_start, reader.offset);
-    body.append(version.as_bytes())?;
-    drop(version);
     let algorithms_header = reader.required(0x31)?;
     let algorithms = reader.metadata(algorithms_header)?;
     let algorithms_region = span(
@@ -287,8 +290,6 @@ pub(super) fn parse_with(
         reader.offset - u64::from(algorithms_header.len.is_none()) * 2,
     );
     let mut digests = Digests::new(algorithms.as_bytes(), hashing, extra, reader.scope)?;
-    body.append(algorithms.as_bytes())?;
-    drop(algorithms);
     let encap_start = reader.offset;
     let encap = reader.required(0x30)?;
     reader.enter(encap)?;
@@ -297,8 +298,6 @@ pub(super) fn parse_with(
     let content_type_region = span(content_type_header.start(), reader.offset);
     let _content_type: ObjectIdentifier = ObjectIdentifier::from_der(content_type.as_bytes())?;
     // A bounded metadata-only EncapsulatedContentInfo, with no eContent bytes.
-    body.append_tlv(0x30, content_type.as_bytes())?;
-    drop(content_type);
     let mut inspection = Inspection {
         detached: true,
         content_len: 0,
@@ -333,6 +332,7 @@ pub(super) fn parse_with(
     }
     reader.leave()?;
     let encap_region = span(encap_start, reader.offset);
+    let mut certificates_part = None;
     let mut certificates_region = None;
     let mut status_region = None;
     let mut field = reader
@@ -344,15 +344,16 @@ pub(super) fn parse_with(
             field.value_offset,
             reader.offset - u64::from(field.len.is_none()) * 2,
         ));
-        body.append(certificates.as_bytes())?;
+        certificates_part = Some(certificates);
         field = reader
             .next()?
             .ok_or_else(|| malformed("missing signerInfos after certificates"))?;
     }
+    let mut status_part = None;
     if field.tag == 0xa1 {
-        let status = reader.metadata(field)?;
+        let status = reader.revocation_set(field, retain_bulk)?;
         status_region = Some(span(field.start(), reader.offset));
-        body.append(status.as_bytes())?;
+        status_part = Some(status);
         field = reader
             .next()?
             .ok_or_else(|| malformed("missing signerInfos after revocation info"))?;
@@ -377,25 +378,46 @@ pub(super) fn parse_with(
     if inspection.signer_count == 0 {
         return Err(malformed("no signers"));
     }
-    body.append(signers.as_bytes())?;
-    drop(signers);
     reader.leave()?;
     reader.leave()?;
     reader.leave()?;
     reader.finish()?;
-    let mut signed_data = Metadata::new(reader.scope)?;
-    signed_data.append_tlv(0x30, body.as_bytes())?;
-    drop(body);
-    let mut explicit = Metadata::new(reader.scope)?;
-    explicit.append_tlv(0xa0, signed_data.as_bytes())?;
-    drop(signed_data);
-    let mut ci = Metadata::new(reader.scope)?;
-    ci.append(signed_oid.as_bytes())?;
-    ci.append(explicit.as_bytes())?;
-    drop(signed_oid);
-    drop(explicit);
+    // One exactly sized buffer: headers, then each part moved in and released, so the
+    // peak is the largest part plus the result, never a chain of wrapper copies.
+    let encap_body = {
+        let mut value = Metadata::new(reader.scope)?;
+        value.append_tlv(0x30, content_type.as_bytes())?;
+        value
+    };
+    drop(content_type);
+    let parts = [
+        Some(version),
+        Some(algorithms),
+        Some(encap_body),
+        certificates_part,
+        status_part,
+        Some(signers),
+    ];
+    let body_len: u64 = parts
+        .iter()
+        .flatten()
+        .map(|part| part.as_bytes().len() as u64)
+        .sum();
+    let signed_len = tlv_len(body_len);
+    let explicit_len = tlv_len(signed_len);
+    let ci_len = (signed_oid.as_bytes().len() as u64)
+        .checked_add(explicit_len)
+        .ok_or(ProcessingError::MetadataLimit)?;
     let mut metadata = Metadata::new(reader.scope)?;
-    metadata.append_tlv(0x30, ci.as_bytes())?;
+    metadata.reserve_total(tlv_len(ci_len))?;
+    metadata.append_header(0x30, ci_len)?;
+    metadata.append(signed_oid.as_bytes())?;
+    drop(signed_oid);
+    metadata.append_header(0xa0, signed_len)?;
+    metadata.append_header(0x30, body_len)?;
+    for part in parts.into_iter().flatten() {
+        metadata.append_part(part)?;
+    }
     Ok(Parsed {
         metadata,
         digests,

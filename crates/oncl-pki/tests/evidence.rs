@@ -83,6 +83,9 @@ fn evidence_limits() -> EvidenceLimits {
         max_items: 64,
         max_bytes: 4 * 1024 * 1024,
         max_item_bytes: 1024 * 1024,
+        max_crl_bytes: 4 * 1024 * 1024,
+        max_crl_item_bytes: 1024 * 1024,
+        max_total_bytes: 4 * 1024 * 1024,
         max_chain_len: 8,
         max_proofs: 4,
         max_coverage_parts: 128,
@@ -1186,6 +1189,7 @@ fn unknown_length_evidence_cannot_evade_item_quota() {
     let mut resources = scope();
     let mut cap = evidence_limits();
     cap.max_item_bytes = 100;
+    cap.max_crl_item_bytes = 100;
     let mut store = EvidenceStore::new(
         TemporaryStore::new(parent.path()).unwrap(),
         cap,
@@ -2236,6 +2240,7 @@ fn failed_partial_intake_stays_poisoned_across_infallible_finish() {
     let bytes = fixture.root.cert.to_der().unwrap();
     let mut cap = evidence_limits();
     cap.max_item_bytes = bytes.len() as u64;
+    cap.max_crl_item_bytes = bytes.len() as u64;
     let mut resources = scope();
     let parent = tempfile::tempdir().unwrap();
     let mut store = EvidenceStore::new(
@@ -3580,6 +3585,9 @@ fn evidence_resume_preserves_consumption_owner_and_terminal_poison() {
     let mut cap = evidence_limits();
     cap.max_bytes = 6;
     cap.max_item_bytes = 6;
+    cap.max_crl_bytes = 6;
+    cap.max_crl_item_bytes = 6;
+    cap.max_total_bytes = 6;
     let mut evidence = EvidenceStore::new(store.clone(), cap, &mut resources).unwrap();
     let id = collect(&mut evidence, EvidenceKind::Crl, b"abc");
     let mut resumed = EvidenceStore::resume(evidence.finish());
@@ -3869,5 +3877,154 @@ fn trusted_host_clock_samples_after_genuine_reply_without_relaxing_as_of_or_futu
                 "case {case}"
             );
         }
+    }
+}
+
+fn collect_len(
+    store: &mut EvidenceStore,
+    kind: EvidenceKind,
+    len: usize,
+) -> Result<(), EvidenceError> {
+    let bytes = vec![0u8; len];
+    store
+        .collect(
+            kind,
+            Source::sequential(&mut bytes.as_slice(), Some(len as u64)),
+            EvidenceOrigin::Embedded { label: "boundary" },
+        )
+        .map(|_| ())
+}
+fn crl_store(limits: EvidenceLimits) -> (EvidenceStore, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let mut scope = scope();
+    (EvidenceStore::new(store, limits, &mut scope).unwrap(), dir)
+}
+fn split_limits() -> EvidenceLimits {
+    EvidenceLimits {
+        max_bytes: 1000,
+        max_item_bytes: 600,
+        max_crl_bytes: 5000,
+        max_crl_item_bytes: 4000,
+        max_total_bytes: 5500,
+        ..evidence_limits()
+    }
+}
+
+#[test]
+fn crl_spool_quota_is_separate_but_total_and_other_categories_stay_bounded() {
+    // A CRL over the certificate/OCSP item cap is admitted up to its own item cap.
+    let (mut store, _dir) = crl_store(split_limits());
+    collect_len(&mut store, EvidenceKind::Crl, 4000).unwrap();
+    // The aggregate over all categories still applies: 4000 + 600 + 600 > 5500 is refused
+    // at the second non-CRL item, though each category is inside its own quota.
+    collect_len(&mut store, EvidenceKind::Certificate, 600).unwrap();
+    assert!(matches!(
+        collect_len(&mut store, EvidenceKind::Ocsp, 600),
+        Err(EvidenceError::Limit)
+    ));
+}
+
+#[test]
+fn crl_item_cap_and_non_crl_item_cap_are_enforced_exactly() {
+    let (mut store, _dir) = crl_store(split_limits());
+    collect_len(&mut store, EvidenceKind::Certificate, 600).unwrap();
+    // One byte over the non-CRL item cap fails; the CRL item cap does not relax it.
+    let (mut other, _dir2) = crl_store(split_limits());
+    assert!(matches!(
+        collect_len(&mut other, EvidenceKind::Certificate, 601),
+        Err(EvidenceError::Limit)
+    ));
+    let (mut crl, _dir3) = crl_store(split_limits());
+    collect_len(&mut crl, EvidenceKind::Crl, 4000).unwrap();
+    let (mut over, _dir4) = crl_store(split_limits());
+    assert!(matches!(
+        collect_len(&mut over, EvidenceKind::Crl, 4001),
+        Err(EvidenceError::Limit)
+    ));
+}
+
+#[test]
+fn crl_item_cap_never_exceeds_the_library_maximum_and_a_lying_length_is_stopped() {
+    let limits = EvidenceLimits {
+        max_crl_bytes: u64::MAX / 2,
+        max_crl_item_bytes: u64::MAX / 2,
+        max_total_bytes: u64::MAX / 2,
+        ..evidence_limits()
+    };
+    let (mut store, _dir) = crl_store(limits);
+    // Declared far above MAX_CRL_LEN: refused before any byte is read.
+    struct Never;
+    impl Read for Never {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("read before admission")
+        }
+    }
+    let declared = oncl_pki::crl::MAX_CRL_LEN + 1;
+    assert!(matches!(
+        store.collect(
+            EvidenceKind::Crl,
+            Source::sequential(&mut Never, Some(declared)),
+            EvidenceOrigin::Embedded { label: "hostile" },
+        ),
+        Err(EvidenceError::Limit)
+    ));
+}
+
+fn collect_text(store: &mut EvidenceStore, text: &[u8]) -> Result<EvidenceId, EvidenceError> {
+    store.collect_base64(
+        EvidenceKind::Crl,
+        Source::sequential(&mut &text[..], Some(text.len() as u64)),
+        EvidenceOrigin::Embedded {
+            label: "base64 boundary",
+        },
+    )
+}
+#[test]
+fn base64_crl_is_decoded_as_streamed_text_and_quota_counts_decoded_bytes() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let payload: Vec<u8> = (0..3001u32).map(|n| (n * 7 % 251) as u8).collect();
+    let mut text = STANDARD.encode(&payload).into_bytes();
+    // Line breaks and spaces of a wrapped XML text node are ignored.
+    let wrapped: Vec<u8> = text
+        .chunks(76)
+        .flat_map(|line| line.iter().copied().chain(*b"\r\n "))
+        .collect();
+    text = wrapped;
+    let (mut store, _dir) = crl_store(split_limits());
+    let id = collect_text(&mut store, &text).unwrap();
+    let bundle = store.finish();
+    assert_eq!(bundle.entry(id).unwrap().region().len, payload.len() as u64);
+    // The item cap applies to the decoded size: one byte more is refused.
+    let (mut over, _dir2) = crl_store(EvidenceLimits {
+        max_crl_item_bytes: 3000,
+        ..split_limits()
+    });
+    assert!(matches!(
+        collect_text(&mut over, &text),
+        Err(EvidenceError::Limit)
+    ));
+}
+
+#[test]
+fn malformed_base64_is_invalid_input_not_a_partial_item() {
+    for bad in [
+        &b"AAA"[..],
+        b"AA=A",
+        b"A",
+        b"AAAA=",
+        b"AA==AAAA",
+        b"AA!A",
+        b"A===",
+    ] {
+        let (mut store, _dir) = crl_store(split_limits());
+        assert!(
+            matches!(
+                collect_text(&mut store, bad),
+                Err(EvidenceError::Processing(ProcessingError::InvalidInput(_)))
+            ),
+            "{:?}",
+            std::str::from_utf8(bad)
+        );
     }
 }

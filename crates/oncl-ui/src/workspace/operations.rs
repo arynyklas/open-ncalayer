@@ -439,12 +439,18 @@ impl Document {
     }
 }
 
-/// What the SDK is given as evidence limits: the same bounds as the command line's.
+/// What the SDK is given as evidence limits. These are the pre-D1 bounds: they do NOT admit
+/// a complete NCA-size CRL (about 20 MB) as embedded evidence, unlike the command line's
+/// `max_crl_*` quota (32 MiB), and the coverage ceiling stays 64 MiB, unlike the command
+/// line's document-sized ceiling. Raising them is a host policy decision, not done here.
 pub(crate) fn evidence_limits() -> EvidenceLimits {
     EvidenceLimits {
         max_items: 256,
         max_bytes: 16 * 1024 * 1024,
         max_item_bytes: 1024 * 1024,
+        max_crl_bytes: 16 * 1024 * 1024,
+        max_crl_item_bytes: 1024 * 1024,
+        max_total_bytes: 16 * 1024 * 1024,
         max_chain_len: 16,
         max_proofs: 16,
         max_coverage_parts: 65536,
