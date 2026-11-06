@@ -120,6 +120,35 @@
           "label": "upstream-plugin"
         }
       ]
+    },
+    {
+      "id": "2026-11-06-1.4-f43157e8",
+      "date": "2026-11-06",
+      "observed": "2026-11-06T19:35:39.3237598Z",
+      "version": "1.4",
+      "key8": "f43157e8",
+      "path": "history/2026-11-06-1.4-f43157e8/",
+      "kind": "change",
+      "summary": {
+        "core": [],
+        "plugins": [
+          {
+            "symname": "kz.gov.pki.cms.NLDocSignerModule",
+            "from": "1.2.1",
+            "to": "1.2.2",
+            "change": "changed"
+          }
+        ],
+        "distributions": [],
+        "notes": []
+      },
+      "issues": [
+        {
+          "key": "plugin:kz.gov.pki.cms.NLDocSignerModule:1.2.2",
+          "number": 6,
+          "label": "upstream-plugin"
+        }
+      ]
     }
   ]
 }

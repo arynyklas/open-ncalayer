@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "manifest": {
-    "sha256": "44f4ab47f254cf8d123c7ff4daf772ebf59e72e8f6793e3c3cdef87cb2a1f74f",
-    "size": 33750,
+    "sha256": "4039802fb5cb2ee54c11a30f6d98a4aeca8fb36fc122717cf9bebbb02d675a44",
+    "size": 33776,
     "version": "1.4",
     "info": " NCALayer жоспар бойынша жаңартылады.\nПлановое обновление сертификатов подписи NCALayer.",
     "updurl": "http://crl.pki.gov.kz/updates/ncalayer.der",
@@ -90,7 +90,7 @@
       "not_before": "2024-10-10T06:14:03Z",
       "not_after": "2027-10-10T06:14:03Z"
     },
-    "signing_time": "2026-11-03T05:10:06Z",
+    "signing_time": "2026-11-06T07:41:47Z",
     "extra": {}
   },
   "bundles": {
@@ -448,18 +448,18 @@
     },
     "kz.gov.pki.cms.NLDocSignerModule": {
       "name": "ezSigner",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "required": false,
       "hidden": false,
       "banned": false,
-      "info": "Теперь проверка и подписание доступны только для локальных файлов. Возможность подписания ссылок отключена. Обновление от 28.10.2026",
-      "url": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.1-jar-with-dependencies.jar",
-      "hash": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+      "info": "Теперь проверка и подписание доступны только для локальных файлов. Возможность подписания ссылок отключена. Поддержка macOS. Обновление от 06.11.2026",
+      "url": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.2-jar-with-dependencies.jar",
+      "hash": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6",
       "csernum": "5d7462ee319cd4e1a156fd82472c9204",
       "chash": "df4fc82465b957a1ab255ee8dadcecc08acb50aae386f05783bc6dd33596d400",
       "extra": {},
       "fetch": "ok",
-      "jar": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+      "jar": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6",
       "signer_matches": false
     },
     "kz.gov.pki.eot.SignModule": {
@@ -534226,452 +534226,6 @@
       "keystores": {},
       "embedded_manifests": {}
     },
-    "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec": {
-      "size": 3827737,
-      "symname": "kz.gov.pki.cms.NLDocSignerModule",
-      "version": "1.2.1",
-      "entries": 1667,
-      "content_sha256": "df4eeb08479f1310f87e44139f8ac6357a802018eb1d03d4579a7e69fa4efb33",
-      "manifest_mf": {
-        "Bundle-Activator": "kz.gov.pki.cms.NLDocSignerActivator",
-        "Bundle-Name": "NLDocSignerModule",
-        "Bundle-SymbolicName": "kz.gov.pki.cms.NLDocSignerModule",
-        "Bundle-Version": "1.2.1",
-        "Implementation-Version": "1.2.1",
-        "Import-Package": "org.json,org.w3c.dom,kz.gov.pki.kalkan,kz.gov.pki.kalkan.asn1,kz.gov.pki.kalkan.asn1.x509,kz.gov.pki.kalkan.exception,kz.gov.pki.kalkan.jce.provider,kz.gov.pki.kalkan.jce.provider.cms,kz.gov.pki.kalkan.tsp,kz.gov.pki.kalkan.xmldsig,kz.gov.pki.provider.exception,kz.gov.pki.provider.utils,kz.gov.pki.provider.utils.verifier,kz.gov.pki.provider.utils.model,kz.gov.pki.kalkan.jce.exception,kz.gov.pki.reference,javafx.application,javafx.collections,javafx.fxml,javafx.geometry,javafx.event,javafx.scene,javafx.scene.control,javafx.scene.layout,javafx.scene.paint,javafx.scene.text,javafx.scene.web,javafx.stage,javafx.util,javax.smartcardio,org.osgi.framework,org.osgi.service.log,kz.gov.pki.osgi.layer.api,org.osgi.util.tracker,javafx.scene.image,kz.gov.pki.kalkan.pkix.checker,kz.gov.pki.kalkan.ocsp,kz.gov.pki.kalkan.asn1.ocsp,kz.gov.pki.kalkan.util.encoders,javax.security.auth.x500"
-      },
-      "signers": {
-        "META-INF/CS_KNCA.RSA": {
-          "serial": "01",
-          "sha256": "d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4",
-          "subject": "CN=AAA Certificate Services,O=Comodo CA Limited,L=Salford,ST=Greater Manchester,C=GB"
-        }
-      },
-      "api": {
-        "classes": {
-          "kz.gov.pki.cms.BundleLog": {
-            "kind": "enum",
-            "super_name": "java.lang.Enum",
-            "interfaces": [],
-            "methods": [
-              "debug(Ljava/lang/String;)V",
-              "discoverLogService()V",
-              "error(Ljava/lang/String;Ljava/lang/Throwable;)V",
-              "info(Ljava/lang/String;)V",
-              "log(ILjava/lang/String;)V",
-              "log(ILjava/lang/String;Ljava/lang/Throwable;)V",
-              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/BundleLog;",
-              "values()[Lkz/gov/pki/cms/BundleLog;"
-            ],
-            "fields": [
-              "LOG:Lkz/gov/pki/cms/BundleLog;"
-            ]
-          },
-          "kz.gov.pki.cms.BundleProvider": {
-            "kind": "enum",
-            "super_name": "java.lang.Enum",
-            "interfaces": [],
-            "methods": [
-              "discoverProviderService()V",
-              "getProvider()Ljava/security/Provider;",
-              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/BundleProvider;",
-              "values()[Lkz/gov/pki/cms/BundleProvider;"
-            ],
-            "fields": [
-              "KALKAN:Lkz/gov/pki/cms/BundleProvider;"
-            ]
-          },
-          "kz.gov.pki.cms.CMSSignUtil": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "changeLang(Ljava/lang/String;)V",
-              "getDirectoryPath(Ljava/lang/String;)Ljava/lang/String;",
-              "getFilePath(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-              "getMessage(Ljava/lang/String;)Ljava/lang/String;",
-              "showKeyChooser(Ljava/util/Collection;)Ljava/lang/String;",
-              "signFilePath(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.KNCAOCSPChecker": {
-            "kind": "class",
-            "super_name": "java.security.cert.PKIXCertPathChecker",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/util/Map;)V",
-              "<init>(Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;)V",
-              "check(Ljava/security/cert/Certificate;Ljava/util/Collection;)V",
-              "getBasicOCSPResponse()Lkz/gov/pki/kalkan/ocsp/BasicOCSPResp;",
-              "getSupportedExtensions()Ljava/util/Set;",
-              "init(Z)V",
-              "isForwardCheckingSupported()Z"
-            ],
-            "fields": [
-              "OCSP_ALLOWED_PERIOD_PROP:Ljava/lang/String;",
-              "OCSP_RESPONDER_URL_PROP:Ljava/lang/String;",
-              "REV_REASON:Ljava/lang/String;",
-              "REV_TIME:Ljava/lang/String;"
-            ]
-          },
-          "kz.gov.pki.cms.LocalPathValidator": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "requireLocalPath(Ljava/lang/String;)Ljava/nio/file/Path;"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.NLDocSignerActivator": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [
-              "org.osgi.framework.BundleActivator"
-            ],
-            "methods": [
-              "<init>()V",
-              "start(Lorg/osgi/framework/BundleContext;)V",
-              "stop(Lorg/osgi/framework/BundleContext;)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.exception.ClientException": {
-            "kind": "class",
-            "super_name": "java.lang.Exception",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "<init>(Ljava/lang/String;)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.fx.JavaFXThread": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/util/Locale;)V",
-              "fillStorageInfo(Lkz/gov/pki/cms/type/StorageInfo;)V",
-              "getDirectoryPath(Ljava/lang/String;)Ljava/io/File;",
-              "getFile(Ljava/lang/String;Lkz/gov/pki/cms/type/FileExtension;)Ljava/io/File;",
-              "getFile(Ljava/lang/String;Lkz/gov/pki/cms/type/FileExtension;Ljavafx/stage/Stage;)Ljava/io/File;",
-              "getMessage(Ljava/lang/String;)Ljava/lang/String;",
-              "keyChooser(Ljava/util/Collection;)Ljava/util/Optional;",
-              "setLocale(Ljava/util/Locale;)V",
-              "showEditor(Ljava/lang/String;)Ljava/lang/String;"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.type.FileExtension": {
-            "kind": "enum",
-            "super_name": "java.lang.Enum",
-            "interfaces": [],
-            "methods": [
-              "getDesc()Ljava/lang/String;",
-              "getExts()[Ljava/lang/String;",
-              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/type/FileExtension;",
-              "values()[Lkz/gov/pki/cms/type/FileExtension;"
-            ],
-            "fields": [
-              "all:Lkz/gov/pki/cms/type/FileExtension;",
-              "cert:Lkz/gov/pki/cms/type/FileExtension;",
-              "cms:Lkz/gov/pki/cms/type/FileExtension;",
-              "pkcs12:Lkz/gov/pki/cms/type/FileExtension;"
-            ]
-          },
-          "kz.gov.pki.cms.type.FileInfo": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "<init>(Ljava/lang/String;J)V",
-              "getBytes()[B",
-              "getFiledir()Ljava/lang/String;",
-              "getFilename()Ljava/lang/String;",
-              "getPath()Ljava/lang/String;",
-              "getSize()J",
-              "setBytes([B)V",
-              "setFiledir(Ljava/lang/String;)V",
-              "setFilename(Ljava/lang/String;)V",
-              "setPath(Ljava/lang/String;)V",
-              "setSize(J)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.type.ResponseForJS": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "<init>(Ljava/lang/String;)V",
-              "getCode()Ljava/lang/String;",
-              "getMessage()Ljava/lang/String;",
-              "getResponseObject()Ljava/lang/Object;",
-              "getResponseObjects()[Ljava/lang/Object;",
-              "setCode(Ljava/lang/String;)V",
-              "setMessage(Ljava/lang/String;)V",
-              "setResponseObject(Ljava/lang/Object;)V",
-              "setResponseObjects([Ljava/lang/Object;)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.type.SignerInfo": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "getBin()Ljava/lang/String;",
-              "getCertificateValidityPeriod()Ljava/lang/String;",
-              "getCertificateVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
-              "getIin()Ljava/lang/String;",
-              "getName()Ljava/lang/String;",
-              "getNumber()I",
-              "getOrganizationName()Ljava/lang/String;",
-              "getSerialNumber()Ljava/lang/String;",
-              "getSigantureAlgorithm()Ljava/lang/String;",
-              "getSignatureVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
-              "getTspDate()Ljava/lang/String;",
-              "getTspVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
-              "isPersonCertificate()Z",
-              "isValidSignature()Z",
-              "setBin(Ljava/lang/String;)V",
-              "setCertificateValidityPeriod(Ljava/lang/String;)V",
-              "setCertificateVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
-              "setIin(Ljava/lang/String;)V",
-              "setName(Ljava/lang/String;)V",
-              "setNumber(I)V",
-              "setOrganizationName(Ljava/lang/String;)V",
-              "setPersonCertificate(Z)V",
-              "setSerialNumber(Ljava/lang/String;)V",
-              "setSigantureAlgorithm(Ljava/lang/String;)V",
-              "setSignatureVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
-              "setTspDate(Ljava/lang/String;)V",
-              "setTspVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
-              "setValidSignature(Z)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.type.StorageInfo": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/lang/String;)V",
-              "getAlias()Ljava/lang/String;",
-              "getContainer()Ljava/lang/String;",
-              "getContainers()Ljava/util/List;",
-              "getKeyStore()Ljava/security/KeyStore;",
-              "getPassword()[C",
-              "getStorage()Lkz/gov/pki/kalkan/Storage;",
-              "setAlias(Ljava/lang/String;)V",
-              "setContainer(Ljava/lang/String;)V",
-              "setKeyStore(Ljava/security/KeyStore;)V",
-              "setPassword(Ljava/lang/String;)V",
-              "setStorage(Lkz/gov/pki/kalkan/Storage;)V"
-            ],
-            "fields": []
-          },
-          "kz.gov.pki.cms.type.VerificationResult": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>(Z)V",
-              "<init>(ZLjava/lang/String;)V",
-              "getMessage()Ljava/lang/String;",
-              "isValid()Z",
-              "setMessage(Ljava/lang/String;)V",
-              "setValid(Z)V"
-            ],
-            "fields": []
-          }
-        },
-        "ncalayer_methods": [],
-        "names": [
-          "cert.process.exception",
-          "cert.verification.error",
-          "cms.process.exception",
-          "error.certificate.ca",
-          "error.certificate.ocsp.nonces",
-          "error.certificate.ocsp.not_verified",
-          "error.certificate.ocsp.unknown",
-          "error.certificate.type",
-          "error.nonexistent.filepath",
-          "knca.ocsp.allowedperiod",
-          "kz.gov.pki.cms.CMSSignUtil",
-          "sign.validity.cert.invalid",
-          "tsp.verification.error"
-        ],
-        "error_codes": [],
-        "urls": [],
-        "ports": []
-      },
-      "libraries": {
-        "com.sun": 1458,
-        "org.apache": 123
-      },
-      "natives": {
-        "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib": "70c9af22ba3ce12128881b4654422ce69a6f96fc238333731cf718601b536245",
-        "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib": "69cca8bbe2f0ff3fc412481e73333d5b49fc3a1ba2ff564a0af9495d7e6b531d",
-        "com/sun/jna/dragonflybsd-x86-64/libjnidispatch.so": "c0c6e64b476d726d86e996af1397491bbff9ccadcba1e0c4639a8f1ae5454062",
-        "com/sun/jna/freebsd-aarch64/libjnidispatch.so": "bca4aece4b834fd04301d5896482f657d06d6860e2d03089c0cc78eea65dd492",
-        "com/sun/jna/freebsd-x86-64/libjnidispatch.so": "3c4d14c74bb6798c76b43cad4395b8bdaa9181a7991e160a376f87bb1ab13ced",
-        "com/sun/jna/freebsd-x86/libjnidispatch.so": "784b2a955b1504dec96fa8b87972bcb2815ecfa818fe5c2e57ed9073cab0592c",
-        "com/sun/jna/linux-aarch64/libjnidispatch.so": "f18fa2c973b2b9ea2dfa6d36d397e0bb743aa2aa09876e2a3b8c87a5e67bf8b6",
-        "com/sun/jna/linux-arm/libjnidispatch.so": "b2a32135dea251fde4027f536345420001bc921e21baf82b2e01ce2753da2097",
-        "com/sun/jna/linux-armel/libjnidispatch.so": "d9db010b0336cdbf643c38921c1c04519f811bee0f45824b6872661a25d64ed2",
-        "com/sun/jna/linux-loongarch64/libjnidispatch.so": "6c55d9ec3efaaee1843795648246b3fe52de09d3990984c5b8a580cc803c6bc9",
-        "com/sun/jna/linux-mips64el/libjnidispatch.so": "0025cd4345faec5a7d9fc8c88f187016dbaf4a6ef411cd6c8907e199d952528d",
-        "com/sun/jna/linux-ppc/libjnidispatch.so": "fbde8c5b108934e75c7008562e95b209535bf4996b3bc246ec5e425a0757a903",
-        "com/sun/jna/linux-ppc64le/libjnidispatch.so": "aaa31a2220e270f69259d930540c5682b1bd662a6d774918605e62cd562d5d11",
-        "com/sun/jna/linux-riscv64/libjnidispatch.so": "f817ac611184e31fd84ac2d223ff8f9312300fbc025adfb5cadbfefb8d1a2c13",
-        "com/sun/jna/linux-s390x/libjnidispatch.so": "b31df7050aa22907e5caae2ef81db83e2900b7b6e683080f6f5681373a71e400",
-        "com/sun/jna/linux-x86-64/libjnidispatch.so": "ca07953d595210082339753d9e818a1fdb40509a17a41914d9a2cb0d2df6b6af",
-        "com/sun/jna/linux-x86/libjnidispatch.so": "546ec7cc6548de411cc52a1069295301308437080be014cda2346ccd0f99bf55",
-        "com/sun/jna/openbsd-x86-64/libjnidispatch.so": "ee3b7bfa0887b7388ad598dea98281ae40907bafa8cf56b406427aecd3d2ecdd",
-        "com/sun/jna/sunos-sparc/libjnidispatch.so": "5ae26c1d50dd6836d0bafb1af2a6c39eb4084be42f0a05da0645d31feed1efad",
-        "com/sun/jna/sunos-sparcv9/libjnidispatch.so": "ccd720895968a885d423facf63615c7f16490f94d946ecb5fefdd4951c62297c",
-        "com/sun/jna/sunos-x86-64/libjnidispatch.so": "4a0b0b11369d4f88437700e8ee3557cb518ec017bfe2df3bd49faf82e60e8f8e",
-        "com/sun/jna/sunos-x86/libjnidispatch.so": "fdba3f2f4220fb407c7841b2f49efd4fe1c06dca26c9768513e13461ed1520c5",
-        "com/sun/jna/win32-aarch64/jnidispatch.dll": "b8f98be314234cf12b5b46c29652f70c0f6abb93ae19b63d3fe2692062aa699d",
-        "com/sun/jna/win32-x86-64/jnidispatch.dll": "5a7ff949f6d93d86491eb5b26b1cfc60051168a60622650224b89995ac420023",
-        "com/sun/jna/win32-x86/jnidispatch.dll": "752d597cee7e95cb517327146bf42f124c0d6c0bc48b3ecc3b1b3b0531a52f44"
-      },
-      "keystores": {
-        "cacert.jks": {
-          "trusted": {
-            "pki_gost": {
-              "serial": "020acc875ac8a570b28fd14e324af054d3dc0c9c",
-              "sha256": "9a8d1309acd80cc9711c847e18d47fdcb7b014ed50e5dec514fc0662012a82c0",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
-            },
-            "pki_rsa": {
-              "serial": "126f33b221fdeb36d25be71b605cd42d2a65ef70",
-              "sha256": "aef2f2907554f12292cb3456d5110062e3581d0a05c0f03540f870f25d5b816c",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
-            },
-            "root_gost": {
-              "serial": "561e7a76d760190e6ef8a096715076552413af2e",
-              "sha256": "9ab210e54e6b0343321131202d9edcc2598f598cfdd9ee4ec1056021ab2e9759",
-              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST)"
-            },
-            "root_rsa": {
-              "serial": "54a51869ef8b3f15fdeaadbd47e094816b066a3b",
-              "sha256": "a7064abc5699827f370c67b09f1a1bfd7ad5e1514d471223df209c08300ea972",
-              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
-            },
-            "test_kuc_gost": {
-              "serial": "02c7e4fa323a30dcfd902cd9761e232e28fd6680",
-              "sha256": "7ed01d46b0f77c279dbce24ce64e470981aefb44335976c6e68460ad47f45c3d",
-              "subject": "CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ ТЕСТ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,C=KZ"
-            },
-            "test_kuc_rsa": {
-              "serial": "6c67c15a4c6c8cf08f68f88a9ff556eb35e88bdc",
-              "sha256": "d146473d5cbb46c6f35b8f0d5e935d90122eb3dc066d398fb17b397bb9fcaa91",
-              "subject": "CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ ТЕСТ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,C=KZ"
-            },
-            "test_nuc_rsa": {
-              "serial": "69a6e8f16190d5d1e96f00e20891f855e2dcb9f0",
-              "sha256": "113910af93f9ca8c79e2690d79240db67b0aec7e51f2cf9e76c43de39afb34f7",
-              "subject": "C=KZ,O=Test Ltd,CN=ҰКО (RSA)"
-            }
-          },
-          "private": {}
-        },
-        "cacerts.jks": {
-          "trusted": {
-            "nca-gost-test": {
-              "serial": "1236e8f1619123d1e96f00e56791f855e2dcb457",
-              "sha256": "0307e8bdf77cb708b7c9d9a5799facdc6de7154447cb394af9ac9b528c3d82c7",
-              "subject": "CN=ҰКО 3.0 (GOST TEST),C=KZ"
-            },
-            "nca-gost2015": {
-              "serial": "7e30be9fc890633f1fff5a3c0cb0c85f4c6d1708",
-              "sha256": "32c7d233a42703a327f3025543a05b930e3f39a786c68dfa196baa86d5618524",
-              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
-            },
-            "nca-gost2015-test": {
-              "serial": "7ad24b1ba3a0c961fe1ca8503e6aa2bb450db8a3",
-              "sha256": "beeffc0bdb77cd798c35983eb0715f6ef0051cccb71d7cd05505e8a4fb2c6f4d",
-              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
-            },
-            "nca-rsa-2022": {
-              "serial": "5cae24d749b26480d2de37233c3ea4515db55ac7",
-              "sha256": "84fb799a66140950818c056a5d9730acc2a7622cdd4ef0d47113b132fb892905",
-              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022"
-            },
-            "nca-rsa-test": {
-              "serial": "452a6437611c183fbf1ec5a1ba4920dd72148a9b",
-              "sha256": "7e96a36409dc11e0fc99efae41f8c639e16a495d77c2f2278edb98580f997231",
-              "subject": "CN=ҰКО 3.0 (RSA TEST),C=KZ"
-            },
-            "ncagost": {
-              "serial": "020acc875ac8a570b28fd14e324af054d3dc0c9c",
-              "sha256": "9a8d1309acd80cc9711c847e18d47fdcb7b014ed50e5dec514fc0662012a82c0",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
-            },
-            "ncagost18": {
-              "serial": "46170a97a64bbaf7643c87d90c0fe24071595a8d",
-              "sha256": "908521d0531e5645e64b34d3588374a3a83582c860e5f7293a04c41217e8cc18",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),C=KZ"
-            },
-            "ncarsa": {
-              "serial": "126f33b221fdeb36d25be71b605cd42d2a65ef70",
-              "sha256": "aef2f2907554f12292cb3456d5110062e3581d0a05c0f03540f870f25d5b816c",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
-            },
-            "ncarsa18": {
-              "serial": "3576f5b31b5a6821a16fefab1212c94d938dc7ee",
-              "sha256": "34d1b311a9873191ae3382805df51e0a5da23315c512a8deeb885668ceeb5834",
-              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),C=KZ"
-            },
-            "rcagost": {
-              "serial": "561e7a76d760190e6ef8a096715076552413af2e",
-              "sha256": "9ab210e54e6b0343321131202d9edcc2598f598cfdd9ee4ec1056021ab2e9759",
-              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST)"
-            },
-            "rcarsa": {
-              "serial": "54a51869ef8b3f15fdeaadbd47e094816b066a3b",
-              "sha256": "a7064abc5699827f370c67b09f1a1bfd7ad5e1514d471223df209c08300ea972",
-              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
-            },
-            "root-gost-test": {
-              "serial": "02c7e4fa323a30dcfd902cd9761e232e28fd6680",
-              "sha256": "06021684f52054692a1859686d5af527eda779e6183c2f3cd4fc1278e4067beb",
-              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (GOST)"
-            },
-            "root-gost2015-2022": {
-              "serial": "13b00cfba9629f0a3eb6192a2156a24867d0f3bd",
-              "sha256": "af77725f8328bb24f89d81da3acdf7cee4324248538b7ba2cd2a860517fb9dca",
-              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
-            },
-            "root-gost2015-test": {
-              "serial": "27d3ab7790372e5b698170dde60ccca38bc3a4b2",
-              "sha256": "b995e79e7c07429f8f79e185451e5599ce342ac720000f01b3854fdfa03031a6",
-              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
-            },
-            "root-rsa-2020": {
-              "serial": "54b3b740d45b91707bed4a2be41b7b69f8f6ba50",
-              "sha256": "9ba06354b626641715182e4d07c9dbaa1777720fa795d03174ffc68876535dcd",
-              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
-            },
-            "root-rsa-test": {
-              "serial": "53c77dffaca2f50ec163195baffe727757b23ce2",
-              "sha256": "4d05179bcb02180bfc37618372671357df7dd8b7865973eae77b83213cae717b",
-              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (RSA)"
-            }
-          },
-          "private": {}
-        }
-      },
-      "embedded_manifests": {}
-    },
     "2607e085bca4dc9a580d108cdc73e55649521c93a937cb8b24311ca5d1c27cfe": {
       "size": 5833710,
       "symname": "kz.acbank.business.api.ncalayer.module",
@@ -607769,6 +607323,452 @@
           "verified": true
         }
       }
+    },
+    "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6": {
+      "size": 3830339,
+      "symname": "kz.gov.pki.cms.NLDocSignerModule",
+      "version": "1.2.2",
+      "entries": 1669,
+      "content_sha256": "f34adf083ef4d3e0dce4b6880c350ba3cf888ffca6d2441b4fe2c1ed5099c3da",
+      "manifest_mf": {
+        "Bundle-Activator": "kz.gov.pki.cms.NLDocSignerActivator",
+        "Bundle-Name": "NLDocSignerModule",
+        "Bundle-SymbolicName": "kz.gov.pki.cms.NLDocSignerModule",
+        "Bundle-Version": "1.2.2",
+        "Implementation-Version": "1.2.2",
+        "Import-Package": "org.json,org.w3c.dom,kz.gov.pki.kalkan,kz.gov.pki.kalkan.asn1,kz.gov.pki.kalkan.asn1.x509,kz.gov.pki.kalkan.exception,kz.gov.pki.kalkan.jce.provider,kz.gov.pki.kalkan.jce.provider.cms,kz.gov.pki.kalkan.tsp,kz.gov.pki.kalkan.xmldsig,kz.gov.pki.provider.exception,kz.gov.pki.provider.utils,kz.gov.pki.provider.utils.verifier,kz.gov.pki.provider.utils.model,kz.gov.pki.kalkan.jce.exception,kz.gov.pki.reference,javafx.application,javafx.collections,javafx.fxml,javafx.geometry,javafx.event,javafx.scene,javafx.scene.control,javafx.scene.layout,javafx.scene.paint,javafx.scene.text,javafx.scene.web,javafx.stage,javafx.util,javax.smartcardio,org.osgi.framework,org.osgi.service.log,kz.gov.pki.osgi.layer.api,org.osgi.util.tracker,javafx.scene.image,kz.gov.pki.kalkan.pkix.checker,kz.gov.pki.kalkan.ocsp,kz.gov.pki.kalkan.asn1.ocsp,kz.gov.pki.kalkan.util.encoders,javax.security.auth.x500"
+      },
+      "signers": {
+        "META-INF/CS_KNCA.RSA": {
+          "serial": "01",
+          "sha256": "d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4",
+          "subject": "CN=AAA Certificate Services,O=Comodo CA Limited,L=Salford,ST=Greater Manchester,C=GB"
+        }
+      },
+      "api": {
+        "classes": {
+          "kz.gov.pki.cms.BundleLog": {
+            "kind": "enum",
+            "super_name": "java.lang.Enum",
+            "interfaces": [],
+            "methods": [
+              "debug(Ljava/lang/String;)V",
+              "discoverLogService()V",
+              "error(Ljava/lang/String;Ljava/lang/Throwable;)V",
+              "info(Ljava/lang/String;)V",
+              "log(ILjava/lang/String;)V",
+              "log(ILjava/lang/String;Ljava/lang/Throwable;)V",
+              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/BundleLog;",
+              "values()[Lkz/gov/pki/cms/BundleLog;"
+            ],
+            "fields": [
+              "LOG:Lkz/gov/pki/cms/BundleLog;"
+            ]
+          },
+          "kz.gov.pki.cms.BundleProvider": {
+            "kind": "enum",
+            "super_name": "java.lang.Enum",
+            "interfaces": [],
+            "methods": [
+              "discoverProviderService()V",
+              "getProvider()Ljava/security/Provider;",
+              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/BundleProvider;",
+              "values()[Lkz/gov/pki/cms/BundleProvider;"
+            ],
+            "fields": [
+              "KALKAN:Lkz/gov/pki/cms/BundleProvider;"
+            ]
+          },
+          "kz.gov.pki.cms.CMSSignUtil": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "changeLang(Ljava/lang/String;)V",
+              "getDirectoryPath(Ljava/lang/String;)Ljava/lang/String;",
+              "getFilePath(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+              "getMessage(Ljava/lang/String;)Ljava/lang/String;",
+              "showKeyChooser(Ljava/util/Collection;)Ljava/lang/String;",
+              "signFilePath(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.KNCAOCSPChecker": {
+            "kind": "class",
+            "super_name": "java.security.cert.PKIXCertPathChecker",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/util/Map;)V",
+              "<init>(Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;)V",
+              "check(Ljava/security/cert/Certificate;Ljava/util/Collection;)V",
+              "getBasicOCSPResponse()Lkz/gov/pki/kalkan/ocsp/BasicOCSPResp;",
+              "getSupportedExtensions()Ljava/util/Set;",
+              "init(Z)V",
+              "isForwardCheckingSupported()Z"
+            ],
+            "fields": [
+              "OCSP_ALLOWED_PERIOD_PROP:Ljava/lang/String;",
+              "OCSP_RESPONDER_URL_PROP:Ljava/lang/String;",
+              "REV_REASON:Ljava/lang/String;",
+              "REV_TIME:Ljava/lang/String;"
+            ]
+          },
+          "kz.gov.pki.cms.LocalPathValidator": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "requireLocalPath(Ljava/lang/String;)Ljava/nio/file/Path;"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.NLDocSignerActivator": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [
+              "org.osgi.framework.BundleActivator"
+            ],
+            "methods": [
+              "<init>()V",
+              "start(Lorg/osgi/framework/BundleContext;)V",
+              "stop(Lorg/osgi/framework/BundleContext;)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.exception.ClientException": {
+            "kind": "class",
+            "super_name": "java.lang.Exception",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "<init>(Ljava/lang/String;)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.fx.JavaFXThread": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/util/Locale;)V",
+              "fillStorageInfo(Lkz/gov/pki/cms/type/StorageInfo;)V",
+              "getDirectoryPath(Ljava/lang/String;)Ljava/io/File;",
+              "getFile(Ljava/lang/String;Lkz/gov/pki/cms/type/FileExtension;)Ljava/io/File;",
+              "getFile(Ljava/lang/String;Lkz/gov/pki/cms/type/FileExtension;Ljavafx/stage/Stage;)Ljava/io/File;",
+              "getMessage(Ljava/lang/String;)Ljava/lang/String;",
+              "keyChooser(Ljava/util/Collection;)Ljava/util/Optional;",
+              "setLocale(Ljava/util/Locale;)V",
+              "showEditor(Ljava/lang/String;)Ljava/lang/String;"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.type.FileExtension": {
+            "kind": "enum",
+            "super_name": "java.lang.Enum",
+            "interfaces": [],
+            "methods": [
+              "getDesc()Ljava/lang/String;",
+              "getExts()[Ljava/lang/String;",
+              "valueOf(Ljava/lang/String;)Lkz/gov/pki/cms/type/FileExtension;",
+              "values()[Lkz/gov/pki/cms/type/FileExtension;"
+            ],
+            "fields": [
+              "all:Lkz/gov/pki/cms/type/FileExtension;",
+              "cert:Lkz/gov/pki/cms/type/FileExtension;",
+              "cms:Lkz/gov/pki/cms/type/FileExtension;",
+              "pkcs12:Lkz/gov/pki/cms/type/FileExtension;"
+            ]
+          },
+          "kz.gov.pki.cms.type.FileInfo": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "<init>(Ljava/lang/String;J)V",
+              "getBytes()[B",
+              "getFiledir()Ljava/lang/String;",
+              "getFilename()Ljava/lang/String;",
+              "getPath()Ljava/lang/String;",
+              "getSize()J",
+              "setBytes([B)V",
+              "setFiledir(Ljava/lang/String;)V",
+              "setFilename(Ljava/lang/String;)V",
+              "setPath(Ljava/lang/String;)V",
+              "setSize(J)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.type.ResponseForJS": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "<init>(Ljava/lang/String;)V",
+              "getCode()Ljava/lang/String;",
+              "getMessage()Ljava/lang/String;",
+              "getResponseObject()Ljava/lang/Object;",
+              "getResponseObjects()[Ljava/lang/Object;",
+              "setCode(Ljava/lang/String;)V",
+              "setMessage(Ljava/lang/String;)V",
+              "setResponseObject(Ljava/lang/Object;)V",
+              "setResponseObjects([Ljava/lang/Object;)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.type.SignerInfo": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "getBin()Ljava/lang/String;",
+              "getCertificateValidityPeriod()Ljava/lang/String;",
+              "getCertificateVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
+              "getIin()Ljava/lang/String;",
+              "getName()Ljava/lang/String;",
+              "getNumber()I",
+              "getOrganizationName()Ljava/lang/String;",
+              "getSerialNumber()Ljava/lang/String;",
+              "getSigantureAlgorithm()Ljava/lang/String;",
+              "getSignatureVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
+              "getTspDate()Ljava/lang/String;",
+              "getTspVerificationResult()Lkz/gov/pki/cms/type/VerificationResult;",
+              "isPersonCertificate()Z",
+              "isValidSignature()Z",
+              "setBin(Ljava/lang/String;)V",
+              "setCertificateValidityPeriod(Ljava/lang/String;)V",
+              "setCertificateVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
+              "setIin(Ljava/lang/String;)V",
+              "setName(Ljava/lang/String;)V",
+              "setNumber(I)V",
+              "setOrganizationName(Ljava/lang/String;)V",
+              "setPersonCertificate(Z)V",
+              "setSerialNumber(Ljava/lang/String;)V",
+              "setSigantureAlgorithm(Ljava/lang/String;)V",
+              "setSignatureVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
+              "setTspDate(Ljava/lang/String;)V",
+              "setTspVerificationResult(Lkz/gov/pki/cms/type/VerificationResult;)V",
+              "setValidSignature(Z)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.type.StorageInfo": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/lang/String;)V",
+              "getAlias()Ljava/lang/String;",
+              "getContainer()Ljava/lang/String;",
+              "getContainers()Ljava/util/List;",
+              "getKeyStore()Ljava/security/KeyStore;",
+              "getPassword()[C",
+              "getStorage()Lkz/gov/pki/kalkan/Storage;",
+              "setAlias(Ljava/lang/String;)V",
+              "setContainer(Ljava/lang/String;)V",
+              "setKeyStore(Ljava/security/KeyStore;)V",
+              "setPassword(Ljava/lang/String;)V",
+              "setStorage(Lkz/gov/pki/kalkan/Storage;)V"
+            ],
+            "fields": []
+          },
+          "kz.gov.pki.cms.type.VerificationResult": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>(Z)V",
+              "<init>(ZLjava/lang/String;)V",
+              "getMessage()Ljava/lang/String;",
+              "isValid()Z",
+              "setMessage(Ljava/lang/String;)V",
+              "setValid(Z)V"
+            ],
+            "fields": []
+          }
+        },
+        "ncalayer_methods": [],
+        "names": [
+          "cert.process.exception",
+          "cert.verification.error",
+          "cms.process.exception",
+          "error.certificate.ca",
+          "error.certificate.ocsp.nonces",
+          "error.certificate.ocsp.not_verified",
+          "error.certificate.ocsp.unknown",
+          "error.certificate.type",
+          "error.nonexistent.filepath",
+          "knca.ocsp.allowedperiod",
+          "kz.gov.pki.cms.CMSSignUtil",
+          "sign.validity.cert.invalid",
+          "tsp.verification.error"
+        ],
+        "error_codes": [],
+        "urls": [],
+        "ports": []
+      },
+      "libraries": {
+        "com.sun": 1458,
+        "org.apache": 123
+      },
+      "natives": {
+        "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib": "70c9af22ba3ce12128881b4654422ce69a6f96fc238333731cf718601b536245",
+        "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib": "69cca8bbe2f0ff3fc412481e73333d5b49fc3a1ba2ff564a0af9495d7e6b531d",
+        "com/sun/jna/dragonflybsd-x86-64/libjnidispatch.so": "c0c6e64b476d726d86e996af1397491bbff9ccadcba1e0c4639a8f1ae5454062",
+        "com/sun/jna/freebsd-aarch64/libjnidispatch.so": "bca4aece4b834fd04301d5896482f657d06d6860e2d03089c0cc78eea65dd492",
+        "com/sun/jna/freebsd-x86-64/libjnidispatch.so": "3c4d14c74bb6798c76b43cad4395b8bdaa9181a7991e160a376f87bb1ab13ced",
+        "com/sun/jna/freebsd-x86/libjnidispatch.so": "784b2a955b1504dec96fa8b87972bcb2815ecfa818fe5c2e57ed9073cab0592c",
+        "com/sun/jna/linux-aarch64/libjnidispatch.so": "f18fa2c973b2b9ea2dfa6d36d397e0bb743aa2aa09876e2a3b8c87a5e67bf8b6",
+        "com/sun/jna/linux-arm/libjnidispatch.so": "b2a32135dea251fde4027f536345420001bc921e21baf82b2e01ce2753da2097",
+        "com/sun/jna/linux-armel/libjnidispatch.so": "d9db010b0336cdbf643c38921c1c04519f811bee0f45824b6872661a25d64ed2",
+        "com/sun/jna/linux-loongarch64/libjnidispatch.so": "6c55d9ec3efaaee1843795648246b3fe52de09d3990984c5b8a580cc803c6bc9",
+        "com/sun/jna/linux-mips64el/libjnidispatch.so": "0025cd4345faec5a7d9fc8c88f187016dbaf4a6ef411cd6c8907e199d952528d",
+        "com/sun/jna/linux-ppc/libjnidispatch.so": "fbde8c5b108934e75c7008562e95b209535bf4996b3bc246ec5e425a0757a903",
+        "com/sun/jna/linux-ppc64le/libjnidispatch.so": "aaa31a2220e270f69259d930540c5682b1bd662a6d774918605e62cd562d5d11",
+        "com/sun/jna/linux-riscv64/libjnidispatch.so": "f817ac611184e31fd84ac2d223ff8f9312300fbc025adfb5cadbfefb8d1a2c13",
+        "com/sun/jna/linux-s390x/libjnidispatch.so": "b31df7050aa22907e5caae2ef81db83e2900b7b6e683080f6f5681373a71e400",
+        "com/sun/jna/linux-x86-64/libjnidispatch.so": "ca07953d595210082339753d9e818a1fdb40509a17a41914d9a2cb0d2df6b6af",
+        "com/sun/jna/linux-x86/libjnidispatch.so": "546ec7cc6548de411cc52a1069295301308437080be014cda2346ccd0f99bf55",
+        "com/sun/jna/openbsd-x86-64/libjnidispatch.so": "ee3b7bfa0887b7388ad598dea98281ae40907bafa8cf56b406427aecd3d2ecdd",
+        "com/sun/jna/sunos-sparc/libjnidispatch.so": "5ae26c1d50dd6836d0bafb1af2a6c39eb4084be42f0a05da0645d31feed1efad",
+        "com/sun/jna/sunos-sparcv9/libjnidispatch.so": "ccd720895968a885d423facf63615c7f16490f94d946ecb5fefdd4951c62297c",
+        "com/sun/jna/sunos-x86-64/libjnidispatch.so": "4a0b0b11369d4f88437700e8ee3557cb518ec017bfe2df3bd49faf82e60e8f8e",
+        "com/sun/jna/sunos-x86/libjnidispatch.so": "fdba3f2f4220fb407c7841b2f49efd4fe1c06dca26c9768513e13461ed1520c5",
+        "com/sun/jna/win32-aarch64/jnidispatch.dll": "b8f98be314234cf12b5b46c29652f70c0f6abb93ae19b63d3fe2692062aa699d",
+        "com/sun/jna/win32-x86-64/jnidispatch.dll": "5a7ff949f6d93d86491eb5b26b1cfc60051168a60622650224b89995ac420023",
+        "com/sun/jna/win32-x86/jnidispatch.dll": "752d597cee7e95cb517327146bf42f124c0d6c0bc48b3ecc3b1b3b0531a52f44"
+      },
+      "keystores": {
+        "cacert.jks": {
+          "trusted": {
+            "pki_gost": {
+              "serial": "020acc875ac8a570b28fd14e324af054d3dc0c9c",
+              "sha256": "9a8d1309acd80cc9711c847e18d47fdcb7b014ed50e5dec514fc0662012a82c0",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "pki_rsa": {
+              "serial": "126f33b221fdeb36d25be71b605cd42d2a65ef70",
+              "sha256": "aef2f2907554f12292cb3456d5110062e3581d0a05c0f03540f870f25d5b816c",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "root_gost": {
+              "serial": "561e7a76d760190e6ef8a096715076552413af2e",
+              "sha256": "9ab210e54e6b0343321131202d9edcc2598f598cfdd9ee4ec1056021ab2e9759",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST)"
+            },
+            "root_rsa": {
+              "serial": "54a51869ef8b3f15fdeaadbd47e094816b066a3b",
+              "sha256": "a7064abc5699827f370c67b09f1a1bfd7ad5e1514d471223df209c08300ea972",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+            },
+            "test_kuc_gost": {
+              "serial": "02c7e4fa323a30dcfd902cd9761e232e28fd6680",
+              "sha256": "7ed01d46b0f77c279dbce24ce64e470981aefb44335976c6e68460ad47f45c3d",
+              "subject": "CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ ТЕСТ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,C=KZ"
+            },
+            "test_kuc_rsa": {
+              "serial": "6c67c15a4c6c8cf08f68f88a9ff556eb35e88bdc",
+              "sha256": "d146473d5cbb46c6f35b8f0d5e935d90122eb3dc066d398fb17b397bb9fcaa91",
+              "subject": "CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ ТЕСТ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,C=KZ"
+            },
+            "test_nuc_rsa": {
+              "serial": "69a6e8f16190d5d1e96f00e20891f855e2dcb9f0",
+              "sha256": "113910af93f9ca8c79e2690d79240db67b0aec7e51f2cf9e76c43de39afb34f7",
+              "subject": "C=KZ,O=Test Ltd,CN=ҰКО (RSA)"
+            }
+          },
+          "private": {}
+        },
+        "cacerts.jks": {
+          "trusted": {
+            "nca-gost-test": {
+              "serial": "1236e8f1619123d1e96f00e56791f855e2dcb457",
+              "sha256": "0307e8bdf77cb708b7c9d9a5799facdc6de7154447cb394af9ac9b528c3d82c7",
+              "subject": "CN=ҰКО 3.0 (GOST TEST),C=KZ"
+            },
+            "nca-gost2015": {
+              "serial": "7e30be9fc890633f1fff5a3c0cb0c85f4c6d1708",
+              "sha256": "32c7d233a42703a327f3025543a05b930e3f39a786c68dfa196baa86d5618524",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
+            },
+            "nca-gost2015-test": {
+              "serial": "7ad24b1ba3a0c961fe1ca8503e6aa2bb450db8a3",
+              "sha256": "beeffc0bdb77cd798c35983eb0715f6ef0051cccb71d7cd05505e8a4fb2c6f4d",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
+            },
+            "nca-rsa-2022": {
+              "serial": "5cae24d749b26480d2de37233c3ea4515db55ac7",
+              "sha256": "84fb799a66140950818c056a5d9730acc2a7622cdd4ef0d47113b132fb892905",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022"
+            },
+            "nca-rsa-test": {
+              "serial": "452a6437611c183fbf1ec5a1ba4920dd72148a9b",
+              "sha256": "7e96a36409dc11e0fc99efae41f8c639e16a495d77c2f2278edb98580f997231",
+              "subject": "CN=ҰКО 3.0 (RSA TEST),C=KZ"
+            },
+            "ncagost": {
+              "serial": "020acc875ac8a570b28fd14e324af054d3dc0c9c",
+              "sha256": "9a8d1309acd80cc9711c847e18d47fdcb7b014ed50e5dec514fc0662012a82c0",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "ncagost18": {
+              "serial": "46170a97a64bbaf7643c87d90c0fe24071595a8d",
+              "sha256": "908521d0531e5645e64b34d3588374a3a83582c860e5f7293a04c41217e8cc18",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),C=KZ"
+            },
+            "ncarsa": {
+              "serial": "126f33b221fdeb36d25be71b605cd42d2a65ef70",
+              "sha256": "aef2f2907554f12292cb3456d5110062e3581d0a05c0f03540f870f25d5b816c",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "ncarsa18": {
+              "serial": "3576f5b31b5a6821a16fefab1212c94d938dc7ee",
+              "sha256": "34d1b311a9873191ae3382805df51e0a5da23315c512a8deeb885668ceeb5834",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),C=KZ"
+            },
+            "rcagost": {
+              "serial": "561e7a76d760190e6ef8a096715076552413af2e",
+              "sha256": "9ab210e54e6b0343321131202d9edcc2598f598cfdd9ee4ec1056021ab2e9759",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST)"
+            },
+            "rcarsa": {
+              "serial": "54a51869ef8b3f15fdeaadbd47e094816b066a3b",
+              "sha256": "a7064abc5699827f370c67b09f1a1bfd7ad5e1514d471223df209c08300ea972",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+            },
+            "root-gost-test": {
+              "serial": "02c7e4fa323a30dcfd902cd9761e232e28fd6680",
+              "sha256": "06021684f52054692a1859686d5af527eda779e6183c2f3cd4fc1278e4067beb",
+              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (GOST)"
+            },
+            "root-gost2015-2022": {
+              "serial": "13b00cfba9629f0a3eb6192a2156a24867d0f3bd",
+              "sha256": "af77725f8328bb24f89d81da3acdf7cee4324248538b7ba2cd2a860517fb9dca",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
+            },
+            "root-gost2015-test": {
+              "serial": "27d3ab7790372e5b698170dde60ccca38bc3a4b2",
+              "sha256": "b995e79e7c07429f8f79e185451e5599ce342ac720000f01b3854fdfa03031a6",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
+            },
+            "root-rsa-2020": {
+              "serial": "54b3b740d45b91707bed4a2be41b7b69f8f6ba50",
+              "sha256": "9ba06354b626641715182e4d07c9dbaa1777720fa795d03174ffc68876535dcd",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+            },
+            "root-rsa-test": {
+              "serial": "53c77dffaca2f50ec163195baffe727757b23ce2",
+              "sha256": "4d05179bcb02180bfc37618372671357df7dd8b7865973eae77b83213cae717b",
+              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (RSA)"
+            }
+          },
+          "private": {}
+        }
+      },
+      "embedded_manifests": {}
     },
     "9d71f735b4698da910bc54e60d15f0679df0d067598745e16c383136b8159c5a": {
       "size": 353293,

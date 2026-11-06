@@ -1,0 +1,68 @@
+{
+  "baseline": false,
+  "manifest": {
+    "version": null,
+    "info": null,
+    "updurl": null,
+    "syspkgs": {
+      "added": [],
+      "removed": []
+    },
+    "disturls": [],
+    "signer": null,
+    "extra": {},
+    "resigned_only": false
+  },
+  "core": {},
+  "plugins": {
+    "kz.gov.pki.cms.NLDocSignerModule": {
+      "changed": {
+        "fields": {
+          "hash": {
+            "before": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+            "after": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6"
+          },
+          "info": {
+            "before": "Теперь проверка и подписание доступны только для локальных файлов. Возможность подписания ссылок отключена. Обновление от 28.10.2026",
+            "after": "Теперь проверка и подписание доступны только для локальных файлов. Возможность подписания ссылок отключена. Поддержка macOS. Обновление от 06.11.2026"
+          },
+          "jar": {
+            "before": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+            "after": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6"
+          },
+          "url": {
+            "before": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.1-jar-with-dependencies.jar",
+            "after": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.2-jar-with-dependencies.jar"
+          },
+          "version": {
+            "before": "1.2.1",
+            "after": "1.2.2"
+          }
+        },
+        "api": null,
+        "jar": {
+          "libraries": {},
+          "natives": {
+            "added": [],
+            "removed": []
+          },
+          "keystores": {},
+          "signers": {},
+          "manifest_mf": {
+            "Bundle-Version": {
+              "before": "1.2.1",
+              "after": "1.2.2"
+            },
+            "Implementation-Version": {
+              "before": "1.2.1",
+              "after": "1.2.2"
+            }
+          }
+        },
+        "repack_only": false
+      }
+    }
+  },
+  "distributions": {},
+  "notes": []
+}

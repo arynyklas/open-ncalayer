@@ -1,0 +1,12 @@
+[
+  {
+    "change": "modified",
+    "id": "bundle:kz.gov.pki.cms.NLDocSignerModule",
+    "reason": "manifest_hash"
+  },
+  {
+    "change": "modified",
+    "id": "manifest",
+    "reason": "content"
+  }
+]

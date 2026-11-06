@@ -244,13 +244,13 @@
       "status": "ok"
     },
     "bundle:kz.gov.pki.cms.NLDocSignerModule": {
-      "url": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.1-jar-with-dependencies.jar",
+      "url": "https://ezsigner.kz/updates/NLDocSignerModule-1.2.2-jar-with-dependencies.jar",
       "size": null,
       "etag": null,
       "last_modified": null,
-      "sha256": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+      "sha256": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6",
       "published_sha1": null,
-      "manifest_hash": "2537455f3d9cf49acd191fbaa4af02bda1679448db09571ffefd38dcdae26bec",
+      "manifest_hash": "9ace4f5d91fc988ecbea092829306b5e7ca09a375fe8d78fa03c556cafc919b6",
       "failures": 0,
       "status": "ok"
     },
@@ -586,10 +586,10 @@
     },
     "manifest": {
       "url": "https://crl.pki.gov.kz/updates/ncalayer.der",
-      "size": 33750,
+      "size": 33776,
       "etag": null,
       "last_modified": null,
-      "sha256": "44f4ab47f254cf8d123c7ff4daf772ebf59e72e8f6793e3c3cdef87cb2a1f74f",
+      "sha256": "4039802fb5cb2ee54c11a30f6d98a4aeca8fb36fc122717cf9bebbb02d675a44",
       "published_sha1": null,
       "manifest_hash": null,
       "failures": 0,
