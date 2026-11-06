@@ -366,15 +366,29 @@ fn permitted(
     if !same(&doc.revisions[prior].root, &doc.revisions[revision].root) {
         return Err(PdfError::Unsupported("incremental root substitution"));
     }
-    for key in [b"Info".as_slice(), b"ID"] {
-        match (
-            doc.revisions[prior].trailer.get(key),
-            doc.revisions[revision].trailer.get(key),
-        ) {
-            (Some(a), Some(b)) if same(a, b) => {}
-            (None, None) => {}
-            _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
-        }
+    match (
+        doc.revisions[prior].trailer.get(b"Info".as_slice()),
+        doc.revisions[revision].trailer.get(b"Info".as_slice()),
+    ) {
+        (Some(a), Some(b)) if same(a, b) => {}
+        (None, None) => {}
+        _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
+    }
+    // ISO 32000-1 14.4: ID[0] is the permanent original identifier and MUST
+    // stay; ID[1] identifies the latest revision and legitimately changes.
+    match (
+        doc.revisions[prior].trailer.get(b"ID".as_slice()),
+        doc.revisions[revision].trailer.get(b"ID".as_slice()),
+    ) {
+        (None, None) => {}
+        (Some(Value::Array(a)), Some(Value::Array(b)))
+            if a.len() == 2
+                && b.len() == 2
+                && matches!(&a[1], Value::Bytes(..))
+                && matches!(&b[1], Value::Bytes(..))
+                && matches!(&a[0], Value::Bytes(..))
+                && same(&a[0], &b[0]) => {}
+        _ => return Err(PdfError::Unsupported("incremental trailer metadata change")),
     }
     let root = doc.revisions[revision].root.clone();
     let before = doc.resolve(prior, &root)?;
@@ -494,6 +508,16 @@ fn permitted(
                 )?;
                 spans.push((offset, object.end));
             }
+            // Object 0 is the mandatory head of the free list (ISO 32000-1
+            // 7.5.4); every revision's xref re-lists it. Only that entry,
+            // and only when it was already free, is not an object change.
+            Entry::Free
+                if id == 0
+                    && doc.revisions[..revision]
+                        .iter()
+                        .rev()
+                        .find_map(|r| r.entries.get(&0))
+                        .is_none_or(|e| matches!(e, Entry::Free)) => {}
             _ => {
                 return Err(PdfError::Unsupported(
                     "free or compressed augmentation entry",

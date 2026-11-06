@@ -442,6 +442,93 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     result
 }
+/// Appends an object-less increment with a hand-written xref section and trailer ID.
+fn append_trailer_only(
+    bytes: &[u8],
+    free_entries: &[u32],
+    id: Option<(Vec<u8>, Vec<u8>)>,
+) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous = std::str::from_utf8(&bytes[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let mut result = bytes.to_vec();
+    result.push(b'\n');
+    let xref = result.len();
+    result.extend_from_slice(b"xref\n");
+    for id in free_entries {
+        let line = if *id == 0 {
+            "0 1\n0000000000 65535 f \n".to_string()
+        } else {
+            format!("{id} 1\n0000000000 00001 f \n")
+        };
+        result.extend_from_slice(line.as_bytes());
+    }
+    result.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Prev {previous} /Root ",
+            doc.max_id + 1
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut result);
+    if let Ok(value) = doc.trailer.get(b"Info") {
+        result.extend_from_slice(b" /Info ");
+        encode_object(value, &mut result);
+    }
+    if let Some((a, b)) = id {
+        let hex = |v: Vec<u8>| v.iter().map(|b| format!("{b:02X}")).collect::<String>();
+        result.extend_from_slice(format!(" /ID [<{}> <{}>]", hex(a), hex(b)).as_bytes());
+    }
+    result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    result
+}
+fn trailer_id(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    doc.trailer
+        .get(b"ID")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_vec())
+        .collect()
+}
+fn permitted_or(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
+    match f.inspect(bytes, AdesLevel::B, NOW, &f.crl) {
+        Err(oncl_pdf::PdfError::Unsupported(m)) => Err(m.to_string()),
+        _ => Ok(()),
+    }
+}
+#[test]
+fn update_may_change_trailer_id_instance_and_relist_free_head_only() {
+    let f = Fixture::new();
+    let (lt, _) = f.run(None, AdesLevel::Lt);
+    let ids = trailer_id(&lt);
+    let original = ids[0].clone();
+    // ID[1] changes, ID[0] preserved, object 0 free head re-listed: valid update.
+    let valid = append_trailer_only(&lt, &[0], Some((original.clone(), vec![9, 8, 7, 6])));
+    assert_eq!(permitted_or(&f, &valid), Ok(()));
+    // ID[0] substitution is refused.
+    let swapped = append_trailer_only(&lt, &[0], Some((vec![1; ids[0].len()], vec![9, 8, 7, 6])));
+    assert_eq!(
+        permitted_or(&f, &swapped),
+        Err("incremental trailer metadata change".into())
+    );
+    // Deleting (freeing) a real object is refused; only the object 0 head is exempt.
+    let doc = lopdf::Document::load_mem(&lt).unwrap();
+    let page = doc.get_pages().values().next().unwrap().0;
+    let deleted = append_trailer_only(&lt, &[0, page], Some((original.clone(), vec![9, 8, 7, 6])));
+    assert_eq!(
+        permitted_or(&f, &deleted),
+        Err("free or compressed augmentation entry".into())
+    );
+}
 #[test]
 fn validation_update_cannot_alias_existing_page_as_acroform() {
     let f = Fixture::new();
