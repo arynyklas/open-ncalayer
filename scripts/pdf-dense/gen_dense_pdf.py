@@ -69,14 +69,12 @@ def classic_obj(num, kind, data):
     return b"%d 0 obj\n%s\nendobj\n" % (num, data)
 
 
-def classic_xref(entries, size, prev, root_ref=True):
+def classic_xref(entries, prev):
     """entries: sorted list of (num, offset). One subsection per consecutive run."""
     out = bytearray(b"xref\n")
     if prev is None:
         out += b"0 1\n0000000000 65535 f \n"
-        runs = []
-    else:
-        runs = []
+    runs = []
     run = []
     for num, off in entries:
         if run and num != run[-1][0] + 1:
@@ -113,7 +111,7 @@ def write_classic(path, objects, revisions):
     size = max(body) + 1
     startxref = len(out)
     entries = sorted(offsets.items())
-    out += classic_xref(entries, size, None)
+    out += classic_xref(entries, None)
     out += b"trailer\n<< /Size %d /Root 1 0 R /ID [<%s> <%s>] >>\n" % (
         size,
         b"11" * 16,
@@ -131,7 +129,7 @@ def write_classic(path, objects, revisions):
             % (3 + (rev - 1) // PER_NODE, num + 1),
         )
         sx = len(out)
-        out += classic_xref([(num, off)], size, prev)
+        out += classic_xref([(num, off)], prev)
         out += b"trailer\n<< /Size %d /Root 1 0 R /Prev %d /ID [<%s> <%s>] >>\n" % (
             size,
             prev,

@@ -248,13 +248,8 @@ fn object_graph_bounds_still_refuse_limit_plus_one() {
     };
     assert!(sign(&streamed.bytes, &tiny).is_err());
 }
-/// The charge is the rows themselves, not a flat allowance: the smallest memory budget
-/// that opens a document sits between 16 bytes per entry and the host-side bound.
-#[test]
-fn the_charge_is_the_rows_actually_held() {
-    let doc = classic(200_000, 1);
-    let limits = PdfLimits::default();
-    let (metadata, memory) = budget::reader(&limits).unwrap();
+/// Smallest operation memory budget under which `bytes` opens (bisected).
+fn least_memory(bytes: &[u8], limits: &PdfLimits) -> u64 {
     let (mut refused, mut admitted) = (0u64, 1_000_000_000u64);
     while refused + 1 < admitted {
         let mid = (refused + admitted) / 2;
@@ -262,14 +257,68 @@ fn the_charge_is_the_rows_actually_held() {
             memory_bytes: mid,
             ..ResourceLimits::default()
         });
-        let mut cursor = Cursor::new(&doc.bytes);
-        match PdfDocument::open(Source::seekable(&mut cursor, None), &limits, &mut scope) {
+        let mut cursor = Cursor::new(bytes);
+        match PdfDocument::open(Source::seekable(&mut cursor, None), limits, &mut scope) {
             Ok(_) => admitted = mid,
             Err(PdfError::Processing(ProcessingError::MemoryLimit)) => refused = mid,
             Err(other) => panic!("{other:?}"),
         }
     }
-    let charged = admitted - (metadata + memory);
+    admitted
+}
+/// Every run of consecutive object numbers costs its 32-byte header on top of the rows:
+/// a table of one-entry runs is charged for them (the host bound assumes one per entry).
+#[test]
+fn runs_are_charged_on_top_of_the_rows() {
+    let limits = PdfLimits::default();
+    let (metadata, memory) = budget::reader(&limits).unwrap();
+    let runs = 60_000u64;
+    let mut table = String::new();
+    for n in 0..runs {
+        table.push_str(&format!("{} 1\n{:010} 00000 n \n", n * 2, 9));
+    }
+    let bytes = dense_gen::classic_with_table_size(&table, (runs * 2) as u32);
+    let charged = least_memory(&bytes, &limits) - (metadata + memory);
+    assert!(charged >= runs * (16 + 32), "charged {charged}");
+    assert!(charged <= budget::xref_memory(&limits, runs).unwrap());
+}
+/// Acceptance of a table never depends on where the 64 KiB read chunks fall: entries
+/// padded with long blanks (past the usual refill margin) open at every alignment.
+#[test]
+fn classic_table_acceptance_is_independent_of_chunk_alignment() {
+    let limits = PdfLimits::default();
+    for pad in [70usize, 100, 300, 4000, 40_000] {
+        for shift in 0..9usize {
+            let count = 400_000 / (pad + 20);
+            let mut table = format!("{}0 {count}\n", " ".repeat(shift));
+            for _ in 0..count {
+                table.push_str(&format!("{:010}{}00000 n \n", 9, " ".repeat(pad)));
+            }
+            let bytes = dense_gen::classic_with_table_size(&table, count as u32 + 1);
+            assert!(bytes.len() > 300_000);
+            open(&bytes, &limits).unwrap_or_else(|e| panic!("pad {pad} shift {shift}: {e:?}"));
+        }
+    }
+    // A unit blank for longer than a chunk, with the table running on past the
+    // chunk, is malformed whatever the alignment.
+    for shift in [0usize, 5, 17] {
+        let mut table = format!("{}0 9000\n", " ".repeat(shift));
+        for n in 0..9000 {
+            let pad = if n == 3000 { 70_000 } else { 1 };
+            table.push_str(&format!("{:010}{}00000 n \n", 9, " ".repeat(pad)));
+        }
+        let bytes = dense_gen::classic_with_table_size(&table, 9001);
+        assert!(open(&bytes, &limits).is_err(), "shift {shift}");
+    }
+}
+/// The charge is the rows themselves, not a flat allowance: the smallest memory budget
+/// that opens a document sits between 16 bytes per entry and the host-side bound.
+#[test]
+fn the_charge_is_the_rows_actually_held() {
+    let doc = classic(200_000, 1);
+    let limits = PdfLimits::default();
+    let (metadata, memory) = budget::reader(&limits).unwrap();
+    let charged = least_memory(&doc.bytes, &limits) - (metadata + memory);
     assert!(charged >= doc.entries * 16, "charged {charged}");
     assert!(
         charged <= budget::xref_memory(&limits, doc.entries).unwrap(),

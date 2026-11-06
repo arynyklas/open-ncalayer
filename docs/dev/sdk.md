@@ -308,11 +308,19 @@ paid for:
 | run of consecutive object numbers | 32 bytes (at worst one per entry) |
 | a classic xref table / an xref stream | read in 64 KiB chunks / inflated incrementally (PNG predictor included) straight into rows; the decoded table is never held, `max_object_bytes` and `max_decoded_bytes` no longer apply to it, the inflated size is bounded by the declared rows and `max_decode_work` |
 
-Refused before any row is allocated: a declared count past the remaining budget, a count the
-rest of the file cannot hold, trailing or missing xref-stream data. Past the budget the
+Refused before any row is allocated: a declared count past the remaining budget, and a
+count the rest of the file cannot hold (classic). Trailing or missing xref-stream data is
+detected only after the rows that are present were read and charged (it is a malformed
+document, refused all the same, before key use). Past the budget the
 refusal is `PdfError::Limit("xref entries")` (limit+1 exact, over all revisions); a
 memory quota that cannot hold the rows is `MemoryLimit`; both happen while reading, before
-any private key use (`NotApplied`).
+any private key use (`NotApplied`). A classic table is accepted independently of where the
+64 KiB read chunks fall: a subsection header or entry cut by a chunk end is re-read from a
+fresh chunk, so a unit (blanks included) is accepted when it fits one 64 KiB chunk.
+
+Not charged (bounded transients): the 64 KiB read chunk, the inflate/predictor row buffers
+(`RowReader`, one predictor row of at most `max_object_bytes`), and the copy made while the
+row vector grows (at most one step, 1 MiB, above the charged capacity).
 
 Hosts that pre-flight a PAdES update add the rows with
 `budget::PriorSignatures::xref_entries` → `budget::PlanInputs::xref_entries`

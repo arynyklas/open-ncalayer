@@ -482,8 +482,27 @@ impl PdfDocument<'_, '_> {
     /// row), never by `max_object_bytes`.
     fn classic_xref(&mut self, start: u64) -> Result<XrefSection> {
         const CHUNK: usize = 65_536;
-        // The lenient entry grammar accepts several blanks; refill below this much.
+        // Refill below this much so ordinary entries never straddle a chunk.
         const NEED: usize = 64;
+        // A token error in a unit (subsection header or entry) that does not start at the
+        // chunk start may only be a unit cut by the chunk end: the unit is re-read from a
+        // fresh chunk starting at it, so acceptance never depends on where the 64 KiB
+        // boundaries fall. A unit (with all its blanks) is accepted when it fits one
+        // chunk; a longer one is malformed in every alignment.
+        macro_rules! tok {
+            ($e:expr, $unit:expr, $p:ident, $chunk:ident, $at_end:ident) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(error) => {
+                        if !$at_end && $unit > 0 {
+                            $p.pos = $unit;
+                            break;
+                        }
+                        return Err(error);
+                    }
+                }
+            };
+        }
         let mut entries = Table::new();
         let mut pos = start;
         let (mut next_id, mut remaining) = (0u64, 0u64);
@@ -497,6 +516,7 @@ impl PdfDocument<'_, '_> {
             let at_end = pos + chunk.len() as u64 == self.input.extent;
             let mut p = self.parser(&chunk, pos);
             loop {
+                let unit = p.pos;
                 if !at_end && chunk.len() - p.pos < NEED {
                     break;
                 }
@@ -508,8 +528,8 @@ impl PdfDocument<'_, '_> {
                     if chunk.get(p.pos..p.pos + 7) == Some(b"trailer") {
                         break 'sections pos + p.pos as u64 + 7;
                     }
-                    let first = p.integer()?;
-                    let count = p.integer()?;
+                    let first = tok!(p.integer(), unit, p, chunk, at_end);
+                    let count = tok!(p.integer(), unit, p, chunk, at_end);
                     if count > self.xref_entries_left()
                         || first.checked_add(count).is_none_or(|n| n > u32::MAX as u64)
                     {
@@ -523,9 +543,9 @@ impl PdfDocument<'_, '_> {
                     (next_id, remaining) = (first, count);
                     continue;
                 }
-                let offset = p.integer()?;
-                let generation = p.integer()?;
-                let entry = match p.word()? {
+                let offset = tok!(p.integer(), unit, p, chunk, at_end);
+                let generation = tok!(p.integer(), unit, p, chunk, at_end);
+                let entry = match tok!(p.word(), unit, p, chunk, at_end) {
                     b"f" => Entry::Free {
                         next: offset,
                         generation: u32::try_from(generation)

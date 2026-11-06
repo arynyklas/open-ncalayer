@@ -259,12 +259,15 @@ pub fn streamed(objects: usize, revisions: usize, predictor: bool) -> Dense {
 /// A one-revision classic document whose xref table is exactly `table` (the text between
 /// `xref\n` and `trailer`), for hostile tables.
 pub fn classic_with_table(table: &str) -> Vec<u8> {
+    classic_with_table_size(table, 3)
+}
+pub fn classic_with_table_size(table: &str, size: u32) -> Vec<u8> {
     let mut out = header();
     out.extend(object(1, false, b"<< /Type /Catalog /Pages 2 0 R >>"));
     let startxref = out.len();
     out.extend(
         format!(
-            "xref\n{table}trailer\n<< /Size 3 /Root 1 0 R {ID} >>\nstartxref\n{startxref}\n%%EOF\n"
+            "xref\n{table}trailer\n<< /Size {size} /Root 1 0 R {ID} >>\nstartxref\n{startxref}\n%%EOF\n"
         )
         .into_bytes(),
     );
