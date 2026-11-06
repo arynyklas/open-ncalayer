@@ -168,14 +168,106 @@ fn source_baseline_b_binds_signing_certificate_and_properties_reference() {
     );
 }
 
+type Clock = Arc<dyn Fn() -> time::OffsetDateTime + Send + Sync>;
+/// A responder that stamps its answer with the host clock at the instant of the request.
+struct Live {
+    key: oncl_pki::pkcs12::KeyEntry,
+    tsa: bool,
+    clock: Clock,
+}
+impl oncl_pki::http::HttpTransport for Live {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        let now = (self.clock)();
+        if self.tsa {
+            oncl_pki::tsp::MockTsa::new(self.key.clone())
+                .with_gen_time(now)
+                .send(request)
+        } else {
+            oncl_pki::ocsp::MockOcsp::new(self.key.clone())
+                .with_now(now)
+                .send(request)
+        }
+    }
+}
+/// Operation time that advances only while the operation does work: every checkpoint (taken per
+/// parsed event of every document pass and per evidence step) costs `step`.
+struct Ticking {
+    now: std::sync::Mutex<time::OffsetDateTime>,
+    step: time::Duration,
+}
+impl Ticking {
+    fn new(start: time::OffsetDateTime, step: time::Duration) -> Arc<Self> {
+        Arc::new(Self {
+            now: std::sync::Mutex::new(start),
+            step,
+        })
+    }
+    fn read(&self) -> time::OffsetDateTime {
+        *self.now.lock().unwrap()
+    }
+}
+impl OperationControl for Ticking {
+    fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+        *self.now.lock().unwrap() += self.step;
+        Ok(())
+    }
+}
 struct Pki {
     signer: oncl_pki::pkcs12::KeyEntry,
     anchors: oncl_pki::pkix::CaSet,
     http: oncl_pki::http::RouteTransport,
     tsa: oncl_pki::tsp::TsaSpec,
+    /// Kept to re-route the fixed-clock mock responders (`with_ocsp`).
+    responder: oncl_pki::pkcs12::KeyEntry,
+    tsa_key: oncl_pki::pkcs12::KeyEntry,
+    tsa_now: time::OffsetDateTime,
 }
 impl Pki {
+    /// The same world with the OCSP route answered by `make(responder, tsa key)`.
+    fn with_ocsp(
+        mut self,
+        make: impl FnOnce(
+            oncl_pki::pkcs12::KeyEntry,
+            oncl_pki::pkcs12::KeyEntry,
+        ) -> oncl_pki::ocsp::MockOcsp,
+    ) -> Self {
+        let ocsp = make(self.responder.clone(), self.tsa_key.clone());
+        self.http = oncl_pki::http::RouteTransport::new(vec![
+            (
+                self.tsa.url.clone(),
+                Arc::new(
+                    oncl_pki::tsp::MockTsa::new(self.tsa_key.clone()).with_gen_time(self.tsa_now),
+                ) as Arc<dyn oncl_pki::http::HttpTransport>,
+            ),
+            (
+                "http://ocsp.synthetic.test".into(),
+                Arc::new(ocsp) as Arc<dyn oncl_pki::http::HttpTransport>,
+            ),
+        ]);
+        self
+    }
     fn new(name: &str) -> Self {
+        Self::at(name, time::macros::datetime!(2026-11-02 12:00 UTC))
+    }
+    /// TSA genTime and OCSP thisUpdate as minted by responders at `now`.
+    fn at(name: &str, now: time::OffsetDateTime) -> Self {
+        Self::at_split(name, now, now, None)
+    }
+    /// Responders that answer as of the host clock at the instant of each request.
+    fn live(name: &str, clock: Clock) -> Self {
+        let now = clock();
+        Self::at_split(name, now, now, Some(clock))
+    }
+    /// A TSA whose reply genTime is `tsa_now` while OCSP is minted at `now`.
+    fn at_split(
+        name: &str,
+        now: time::OffsetDateTime,
+        tsa_now: time::OffsetDateTime,
+        live: Option<Clock>,
+    ) -> Self {
         use oncl_pki::{
             http::RouteTransport,
             ocsp::MockOcsp,
@@ -221,25 +313,43 @@ impl Pki {
         tsa_key.cert = issue_cert(&root, spec);
         let mut responder = key("ocsp-gost2015");
         responder.cert = issue_cert(&root, TestCertSpec::from_cert(&responder.cert));
-        let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+        let (responder_key, tsa_key_kept) = (responder.clone(), tsa_key.clone());
         let mut tsa = TsaSpec::from(TsaProfile::basics_default());
         tsa.url = "http://tsa.synthetic.test".into();
-        let http = RouteTransport::new(vec![
+        let (tsa_route, ocsp_route): (
+            Arc<dyn oncl_pki::http::HttpTransport>,
+            Arc<dyn oncl_pki::http::HttpTransport>,
+        ) = if let Some(clock) = live {
             (
-                tsa.url.clone(),
-                Arc::new(MockTsa::new(tsa_key).with_gen_time(now))
-                    as Arc<dyn oncl_pki::http::HttpTransport>,
-            ),
+                Arc::new(Live {
+                    key: tsa_key,
+                    tsa: true,
+                    clock: clock.clone(),
+                }),
+                Arc::new(Live {
+                    key: responder,
+                    tsa: false,
+                    clock,
+                }),
+            )
+        } else {
             (
-                "http://ocsp.synthetic.test".into(),
+                Arc::new(MockTsa::new(tsa_key).with_gen_time(tsa_now)),
                 Arc::new(MockOcsp::new(responder).with_now(now)),
-            ),
+            )
+        };
+        let http = RouteTransport::new(vec![
+            (tsa.url.clone(), tsa_route),
+            ("http://ocsp.synthetic.test".into(), ocsp_route),
         ]);
         Self {
             signer,
             anchors: oncl_pki::pkix::CaSet::new(vec![root.cert]),
             http,
             tsa,
+            responder: responder_key,
+            tsa_key: tsa_key_kept,
+            tsa_now,
         }
     }
 }
@@ -1585,6 +1695,321 @@ fn wsse_embedding_retains_baseline_properties_and_every_carried_proof_check() {
     }
 }
 
+/// A long operation: the validation context and SigningTime are sampled when the operation
+/// starts, the trusted host clock, responders and the final verification are hours later.
+fn delayed_sign(
+    level: oncl_pki::evidence::AdesLevel,
+    host_clock_late: bool,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    let mut pki = Pki::at("user-rsa-sign", late);
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: if host_clock_late { Some(&clock) } else { None },
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn delayed_operation_signs_with_host_clock_and_fails_closed_with_stale_context() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    for level in [AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        let ok = delayed_sign(level, true);
+        eprintln!("{level:?} host-clock: {ok:?}");
+        assert_eq!(ok, Ok(Verdict::Valid), "{level:?}");
+        let stale = delayed_sign(level, false);
+        eprintln!("{level:?} stale-context: {stale:?}");
+        assert!(
+            stale.is_err(),
+            "{level:?} must not succeed with stale context"
+        );
+    }
+}
+
+/// Same long operation through the prepared path the host (`oncl-core`) uses: preparation and
+/// SigningTime at `start`, signing, timestamp and final verification at `late`.
+fn delayed_prepared(
+    level: oncl_pki::evidence::AdesLevel,
+    tsa_hours_before: i64,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    let mut pki = Pki::at_split(
+        "user-rsa-sign",
+        late,
+        late - time::Duration::hours(tsa_hours_before),
+        None,
+    );
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&clock),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut prepared = oncl_xml::xades::prepare_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &store,
+        &mut scope,
+    )
+    .map_err(|e| format!("prepare {e:?}"))?;
+    prepared
+        .verify_existing_with_clock(&context, &network, &clock, &mut scope)
+        .map_err(|e| format!("existing {e:?}"))?;
+    let stage_budget = ResourceLimits::default();
+    let _ = stage_budget;
+    let mut stage = store.stage(&mut scope).map_err(|e| format!("{e:?}"))?;
+    let mut output =
+        oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).map_err(|e| format!("{e:?}"))?;
+    let mut resources = scope.shared_view();
+    oncl_xml::xades::sign_prepared(
+        prepared,
+        level,
+        start,
+        &mut pki.signer,
+        &services,
+        &mut output,
+        &mut resources,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn delayed_prepared_path_signs_with_host_clock() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    for level in [AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        assert_eq!(delayed_prepared(level, 0), Ok(Verdict::Valid), "{level:?}");
+        eprintln!("{level:?} tsa 5h old: {:?}", delayed_prepared(level, 5));
+    }
+}
+
+#[test]
+fn stale_status_after_long_operation_fails_closed_naming_the_check() {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    // The responder answers as of `start` (its answer expired hours ago), the host clock is late.
+    let mut pki = Pki::at("user-rsa-sign", start);
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&clock),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level: oncl_pki::evidence::AdesLevel::T,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    let error = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let text = format!("{error:?}");
+    eprintln!("stale status: {text}");
+    assert!(text.contains("final XAdES validation failed:"), "{text}");
+}
+
+/// Run one signature at `level` where every checkpoint of the operation costs `step_seconds` of
+/// host time, so document passes take (simulated) minutes. Returns verdict or error text.
+fn ticking_sign(
+    level: oncl_pki::evidence::AdesLevel,
+    step_ms: i64,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let ticking = Ticking::new(start, time::Duration::milliseconds(step_ms));
+    let clock: Clock = {
+        let t = ticking.clone();
+        Arc::new(move || t.read())
+    };
+    let mut pki = Pki::live("user-rsa-sign", clock.clone());
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, ticking.clone()).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let host = clock.clone();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&*host),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn long_document_passes_do_not_age_the_status_checked_after_them() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    // Each checkpoint costs 1 s of host time: the carried-proof passes between the context
+    // sample and the status check last several times the 300 s OCSP window (verified RED
+    // without the fresh sample), the evidence steps themselves stay far below it.
+    assert_eq!(ticking_sign(AdesLevel::T, 1000), Ok(Verdict::Valid));
+}
+
 /// D3: NCANode/Kalkan writes `SigningCertificateV2/CertDigest` with the GOST R 34.11-2015
 /// digest for a GOST key. The strict XAdES structure check refused every level of that
 /// real output (`InvalidInput`) although the RSA/SHA-256 shape verified. The pinned
@@ -1641,5 +2066,320 @@ fn ncanode_gost_xades_with_a_gost_certificate_digest_is_structurally_accepted() 
             "{level}: {:?}",
             signers[0].level
         );
+    }
+}
+
+// ---- LT/LTA: embedded status is judged at the proof time, not at the wall clock ----------
+
+const T0: time::OffsetDateTime = time::macros::datetime!(2026-11-02 12:00 UTC);
+
+/// Sign at `level` as of `sign_now` (the proof is minted by the world's TSA at its fixed
+/// genTime), returning the document and the verdict of the signing itself.
+fn lt_sign(
+    pki: &mut Pki,
+    level: oncl_pki::evidence::AdesLevel,
+    sign_now: time::OffsetDateTime,
+) -> Result<(Vec<u8>, oncl_pki::validation::Verdict), String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: sign_now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: None,
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: T0,
+    };
+    let mut bytes = Vec::new();
+    let result = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let verdict = result.verification.validation.verdict;
+    drop(result);
+    Ok((bytes, verdict))
+}
+
+/// Verify a document with the host clock at `now`, offline-capable strict policy.
+fn lt_verify(
+    pki: &Pki,
+    bytes: &[u8],
+    now: time::OffsetDateTime,
+    policy: ValidationPolicy,
+) -> (
+    oncl_pki::validation::Verdict,
+    oncl_pki::validation::CheckStatus,
+    oncl_pki::validation::CheckStatus,
+) {
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy,
+        now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let report = verify_source(
+        Source::sequential(&mut Cursor::new(bytes.to_vec()), None),
+        &XmlVerifyProfile::default(),
+        &store,
+        &context,
+        &network,
+        &mut scope,
+    )
+    .unwrap();
+    let signer = &report.validation.signers[0];
+    (
+        report.validation.verdict,
+        signer.revocation,
+        signer.timestamp,
+    )
+}
+
+#[test]
+fn lt_and_lta_embedded_status_is_judged_at_the_proof_time_not_now() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    for level in [AdesLevel::Lt, AdesLevel::Lta] {
+        let mut pki = Pki::at("user-rsa-sign", T0);
+        let (bytes, signed) = lt_sign(&mut pki, level, T0).unwrap();
+        assert_eq!(signed, Verdict::Valid, "{level:?} at signing");
+        for (label, delta) in [
+            ("+0", time::Duration::ZERO),
+            ("+6m", time::Duration::minutes(6)),
+            ("+1h", time::Duration::HOUR),
+            ("+1d", time::Duration::DAY),
+            ("+400d", time::Duration::days(400)),
+        ] {
+            for policy in [
+                ValidationPolicy::StrictOnline,
+                ValidationPolicy::OfflineReport,
+            ] {
+                let (verdict, revocation, timestamp) = lt_verify(&pki, &bytes, T0 + delta, policy);
+                assert_eq!(
+                    verdict,
+                    Verdict::Valid,
+                    "{level:?} {label} {policy:?}: revocation {revocation:?} timestamp {timestamp:?}"
+                );
+            }
+        }
+    }
+}
+
+fn serial_hex(key: &oncl_pki::pkcs12::KeyEntry) -> String {
+    key.cert
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Every control case must not be Valid at any verification time (signing may itself
+/// already refuse it: then the case is rejected at signing).
+fn lt_control_never_valid(
+    label: &str,
+    pki: &mut Pki,
+    level: oncl_pki::evidence::AdesLevel,
+    sign_now: time::OffsetDateTime,
+) {
+    use oncl_pki::validation::Verdict;
+    let Ok((bytes, signed)) = lt_sign(pki, level, sign_now) else {
+        return;
+    };
+    if signed == Verdict::Valid {
+        // Sign-time evidence is judged as Valid there: it must be judged so only if the
+        // evidence is in order at every later time too, so verify later.
+    }
+    for delta in [
+        time::Duration::ZERO,
+        time::Duration::HOUR,
+        time::Duration::DAY,
+    ] {
+        let (verdict, ..) = lt_verify(pki, &bytes, T0 + delta, ValidationPolicy::StrictOnline);
+        assert_ne!(verdict, Verdict::Valid, "{label} {level:?} +{delta}");
+    }
+}
+
+#[test]
+fn lt_lta_control_cases_stay_rejected_at_proof_time() {
+    use oncl_pki::{
+        evidence::AdesLevel,
+        ocsp::{CertStatus, MockOcsp, OcspTamper},
+    };
+    for level in [AdesLevel::Lt, AdesLevel::Lta] {
+        // Stale at signing: issued two hours before the proof.
+        let mut pki = Pki::at("user-rsa-sign", T0)
+            .with_ocsp(|r, _| MockOcsp::new(r).with_now(T0).tamper(OcspTamper::Stale));
+        lt_control_never_valid("stale", &mut pki, level, T0);
+        // From the future of the verifier: minted two hours after the proof, verified
+        // an hour after it.
+        let mut pki = Pki::at_split("user-rsa-sign", T0 + time::Duration::hours(2), T0, None);
+        let (bytes, signed) = lt_sign(&mut pki, level, T0 + time::Duration::hours(2)).unwrap();
+        assert_eq!(
+            signed,
+            oncl_pki::validation::Verdict::Valid,
+            "future fixture signs"
+        );
+        let (verdict, ..) = lt_verify(
+            &pki,
+            &bytes,
+            T0 + time::Duration::HOUR,
+            ValidationPolicy::StrictOnline,
+        );
+        assert_ne!(
+            verdict,
+            oncl_pki::validation::Verdict::Valid,
+            "future {level:?}"
+        );
+        // Revoked at the proof time (ten minutes before it).
+        let mut pki = Pki::at("user-rsa-sign", T0);
+        let hex = serial_hex(&pki.signer);
+        let mut pki = {
+            pki = pki.with_ocsp(move |r, _| {
+                MockOcsp::new(r).with_now(T0).status(
+                    &hex,
+                    CertStatus::Revoked {
+                        time: T0 - time::Duration::minutes(10),
+                        reason: None,
+                    },
+                )
+            });
+            pki
+        };
+        lt_control_never_valid("revoked at P", &mut pki, level, T0);
+        // The response's signature is wrong, the CertID is another certificate's, the
+        // responder is not an OCSP responder.
+        for (label, tamper) in [
+            ("bad signature", Some(OcspTamper::WrongKey)),
+            ("wrong CertID", Some(OcspTamper::OtherCertId)),
+            ("not authorized", None),
+        ] {
+            let mut pki = Pki::at("user-rsa-sign", T0).with_ocsp(move |r, tsa| match tamper {
+                Some(tamper) => MockOcsp::new(r).with_now(T0).tamper(tamper),
+                None => MockOcsp::new(tsa).with_now(T0),
+            });
+            lt_control_never_valid(label, &mut pki, level, T0);
+        }
+    }
+}
+
+#[test]
+fn xades_lt_with_damaged_embedded_status_is_not_valid_an_hour_later() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    let mut pki = Pki::at("user-rsa-sign", T0);
+    let (bytes, _) = lt_sign(&mut pki, AdesLevel::Lt, T0).unwrap();
+    let hour = T0 + time::Duration::HOUR;
+    assert_eq!(
+        lt_verify(&pki, &bytes, hour, ValidationPolicy::StrictOnline).0,
+        Verdict::Valid
+    );
+    // Damage the responder's SIGNATURE inside the BasicOCSPResponse: the DER still parses, so
+    // the failure is the status one and not a decoding error.
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    fn tlv(der: &[u8], at: usize) -> (u8, usize, usize) {
+        let (tag, first) = (der[at], der[at + 1] as usize);
+        if first < 0x80 {
+            (tag, at + 2, first)
+        } else {
+            let n = first & 0x7f;
+            let len = der[at + 2..at + 2 + n]
+                .iter()
+                .fold(0usize, |acc, b| acc << 8 | *b as usize);
+            (tag, at + 2 + n, len)
+        }
+    }
+    fn signature_last_byte(der: &[u8]) -> usize {
+        let (_, mut body, _) = tlv(der, 0);
+        // An OCSPResponse wraps the Basic response: ENUM, [0] { SEQ { OID, OCTET STRING } }.
+        if der[body] == 0x0a {
+            let (_, after, len) = tlv(der, body);
+            let (_, inner, _) = tlv(der, after + len);
+            let (_, seq_body, _) = tlv(der, inner);
+            let (_, oid_body, oid_len) = tlv(der, seq_body);
+            let (_, octets, _) = tlv(der, oid_body + oid_len);
+            let (_, basic_body, _) = tlv(der, octets);
+            body = basic_body;
+        }
+        let (_, _, tbs_len) = tlv(der, body);
+        let (_, tbs_body, _) = tlv(der, body);
+        let alg = tbs_body + tbs_len;
+        let (_, alg_body, alg_len) = tlv(der, alg);
+        let (tag, sig_body, sig_len) = tlv(der, alg_body + alg_len);
+        assert_eq!(tag, 0x03, "BIT STRING signature");
+        sig_body + sig_len - 1
+    }
+    let mut text = String::from_utf8(bytes).unwrap();
+    let open = "<xades:EncapsulatedOCSPValue>";
+    let start = text.find(open).unwrap() + open.len();
+    let end = start + text[start..].find('<').unwrap();
+    let mut der = STANDARD
+        .decode(text[start..end].split_whitespace().collect::<String>())
+        .unwrap();
+    let at = signature_last_byte(&der);
+    der[at] ^= 1;
+    text.replace_range(start..end, &STANDARD.encode(&der));
+    for now in [T0, hour] {
+        let (verdict, revocation, timestamp) =
+            lt_verify(&pki, text.as_bytes(), now, ValidationPolicy::StrictOnline);
+        assert_ne!(verdict, Verdict::Valid, "{now}");
+        // The first embedded answer is the TSA certificate's: with its signature damaged the
+        // time-stamp's status is unavailable (a completed verification, not a parse error),
+        // and the proof time is lost.
+        assert_eq!(
+            timestamp,
+            oncl_pki::validation::CheckStatus::Unavailable,
+            "{now}: rev {revocation:?}"
+        );
+        // With no proven time the signer's status is judged at the verifier's clock again, so
+        // it holds at signing time and has aged out an hour later.
+        let expected = if now == T0 {
+            oncl_pki::validation::CheckStatus::Passed
+        } else {
+            oncl_pki::validation::CheckStatus::Unavailable
+        };
+        assert_eq!(revocation, expected, "{now}");
     }
 }

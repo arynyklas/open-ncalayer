@@ -659,9 +659,9 @@ impl PreparedXadesSpec<'_> {
             || (services.validation.policy == oncl_pki::validation::ValidationPolicy::StrictOnline
                 && verification.validation.verdict != Verdict::Valid)
         {
-            return Err(crate::XmlSourceError::Malformed(
-                "final bounded XAdES validation failed",
-            ));
+            return Err(crate::XmlSourceError::Malformed(source::final_failure(
+                &verification,
+            )));
         }
         summary.bytes_out = output.len();
         Ok(XadesReport {

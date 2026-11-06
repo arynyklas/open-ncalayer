@@ -24,6 +24,18 @@ pub(crate) fn error(error: XmlSourceError) -> OperationError {
         XmlSourceError::Acquisition(_) | XmlSourceError::Evidence(EvidenceError::Timestamp(_)) => {
             OperationError::ValidationRequired
         }
+        // Keep the exact static reason: a post-key failure of a multi-hour operation must say
+        // which format/evidence check rejected, not collapse into one opaque message.
+        XmlSourceError::Malformed(reason) | XmlSourceError::Unsupported(reason) => {
+            ProcessingError::InvalidInput(reason).into()
+        }
+        XmlSourceError::Xml(oncl_xml::XmlError::TooLarge) => {
+            ProcessingError::InvalidInput("XML input exceeds the XML processing limits").into()
+        }
+        XmlSourceError::Evidence(EvidenceError::InvalidBinding) => ProcessingError::InvalidInput(
+            "invalid evidence owner, coverage graph or timestamp configuration",
+        )
+        .into(),
         _ => {
             ProcessingError::InvalidInput("unsupported or malformed XML signature/evidence").into()
         }

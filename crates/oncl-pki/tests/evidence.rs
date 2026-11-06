@@ -270,13 +270,19 @@ impl Fixture {
             _ => CertStatus::Good,
         };
         let tamper = match status {
-            Status::Stale => OcspTamper::Stale,
             Status::WrongKey => OcspTamper::WrongKey,
             Status::OtherCert => OcspTamper::OtherCertId,
             _ => OcspTamper::None,
         };
+        // Embedded status is judged at the proof time: stale means issued before it
+        // (two hours before PROVEN), not old relative to NOW.
+        let issued = if matches!(status, Status::Stale) {
+            PROVEN - time::Duration::hours(2)
+        } else {
+            NOW
+        };
         let responder = MockOcsp::new(self.responder.clone())
-            .with_now(NOW)
+            .with_now(issued)
             .status(&serial(certificate), answer)
             .tamper(tamper);
         let body = ocsp::request_der(certificate, &self.intermediate.cert);

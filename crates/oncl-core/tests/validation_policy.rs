@@ -1269,13 +1269,14 @@ impl TsaFixture {
         }
         let stale = matches!(status, TsaStatus::Stale);
         let mut crl = MockCrl::new(self.authority.clone())
+            // Embedded status is judged at the proof time: stale is issued before it.
             .with_this_update(if stale {
-                NOW - time::Duration::hours(2)
+                PROVEN - time::Duration::hours(2)
             } else {
                 NOW - time::Duration::MINUTE
             })
             .next_update(Some(if stale {
-                NOW - time::Duration::HOUR
+                PROVEN - time::Duration::HOUR
             } else {
                 NOW + time::Duration::HOUR
             }));
@@ -1873,4 +1874,59 @@ fn compat_time_relaxation_is_narrow_and_never_validates() {
     assert_eq!(signer.time_basis, TimeBasis::Current(NOW), "{signer:?}");
     assert_eq!(signer.timestamp, CheckStatus::Failed);
     assert_ne!(report.verdict, Verdict::Valid);
+}
+#[test]
+fn offline_cms_status_is_judged_at_the_proof_time_not_the_host_clock() {
+    // The plain CMS offline path (not the AdES evidence engine): the same carried material
+    // verified an hour, a day and 400 days later stays Valid; status that was already stale
+    // at the proof does not.
+    let tsa = TsaFixture::new(TSA_OCSP);
+    let input = tsa.stamp(&signed("inter-user-gost2015-sign"));
+    let later = |by: time::Duration| {
+        let now = NOW + by;
+        ValidationServices::new(
+            roots(),
+            vec![cer("inter-gost2015"), tsa.authority.cert.clone()],
+            Arc::new(CountTransport(AtomicUsize::new(0))),
+            NetworkPolicy::only_endpoints([
+                "http://ocsp.synthetic.test",
+                "http://crl.synthetic.test",
+                TSA_OCSP,
+                TSA_CRL,
+            ])
+            .unwrap(),
+            Arc::new(move || now),
+        )
+    };
+    for by in [
+        time::Duration::ZERO,
+        time::Duration::HOUR,
+        time::Duration::DAY,
+        time::Duration::days(400),
+    ] {
+        for (status, valid) in [
+            (TsaStatus::Revoked(PROVEN + time::Duration::SECOND), true),
+            (TsaStatus::Stale, false),
+        ] {
+            let mut values = document_crls(false);
+            values.push(tsa.crl(status).unwrap());
+            let engine = engine(later(by), Duration::from_secs(5));
+            let report = verify(
+                &engine,
+                &carry_crl_values(&input, &values),
+                OperationPolicy::offline_report(),
+            );
+            assert_eq!(
+                report.verdict == Verdict::Valid,
+                valid,
+                "+{by} valid={valid}"
+            );
+            if valid {
+                assert_eq!(
+                    report.signers[0].time_basis,
+                    TimeBasis::VerifiedTimestamp(PROVEN)
+                );
+            }
+        }
+    }
 }

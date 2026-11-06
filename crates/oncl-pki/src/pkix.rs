@@ -143,6 +143,29 @@ impl CaSet {
     }
 }
 
+/// The time against which a status answer's currency is judged.
+///
+/// `Now` is the rule for a signature without a proven time, and for answers fetched online:
+/// the answer must be current at the verifier's clock. `AtProof` is the rule for status
+/// that a signature carries (XAdES/CAdES/PAdES LT and LTA) once a proof time (the control
+/// time of ETSI EN 319 102-1, the genTime of the signature time-stamp) is verified: the
+/// answer must have been issued after `proof` less the clock skew and not in
+/// the verifier's future, and the responder is judged as of the answer's own issuance. How
+/// long ago it was issued, or that its nextUpdate has passed, no longer matters: the
+/// evidence was embedded to be judged long after.
+#[derive(Clone, Copy, Debug)]
+pub enum Currency {
+    /// Current at the verifier's clock.
+    Now(OffsetDateTime),
+    /// Issued after the proof time, not after `now`.
+    AtProof {
+        /// The verified proof (control) time.
+        proof: OffsetDateTime,
+        /// The verifier's clock.
+        now: OffsetDateTime,
+    },
+}
+
 /// Builds and checks the path from `leaf` through `cas` to an anchor of `cas` at time `at`,
 /// returning `[leaf, issuer, …, anchor]`. The anchor is a self-signed CA of `cas`, or the
 /// first CA of the path whose issuer name no CA of `cas` has. A `leaf` that is itself a

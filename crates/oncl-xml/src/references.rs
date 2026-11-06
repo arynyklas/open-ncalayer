@@ -1537,10 +1537,10 @@ pub(crate) fn verify_document_timed(
         });
     }
     scope.checkpoint()?;
-    let final_context = ValidationContext {
-        now: clock.map_or(ctx.now, |clock| clock()),
-        ..*ctx
-    };
+    // One host instant for the whole verification, sampled by the first signer's evidence check
+    // AFTER that signer's document passes (see `ades::check_carried_evidence`), not before them.
+    let final_context = ValidationContext { ..*ctx };
+    let shared_now = std::cell::Cell::new(None);
     scope.checkpoint()?;
     let mut combined: Option<ValidationReport> = None;
     let mut records = Vec::with_capacity(signatures.len());
@@ -1568,6 +1568,7 @@ pub(crate) fn verify_document_timed(
             store,
             prepared.archive_references.as_mut(),
             &final_context,
+            (clock, &shared_now),
             network,
             scope,
             &mut work,

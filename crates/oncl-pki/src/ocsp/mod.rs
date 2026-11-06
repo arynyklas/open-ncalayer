@@ -18,6 +18,11 @@
 //!   with their own clock at the moment they answer and send no nextUpdate, so a strict
 //!   `thisUpdate < now` would fail for any client a second behind them (or whose request
 //!   crosses a second boundary); [`CLOCK_SKEW`] absorbs that.
+//! - Status that a signature carries, once the signature's proof time `P` is verified
+//!   ([`check_embedded_at_proof`], ETSI EN 319 102-1 control time): current means
+//!   `thisUpdate ≤ now + CLOCK_SKEW` and `P < nextUpdate`, or, without nextUpdate,
+//!   `P - CLOCK_SKEW < thisUpdate`, with the responder certificate
+//!   chained as of thisUpdate; nextUpdate and [`ALLOWED_PERIOD`] are not compared with `now`.
 //! - Every failure is an [`OcspError`], never a [`CertStatus`]: callers decide what an
 //!   unchecked certificate means.
 
@@ -37,7 +42,7 @@ use crate::http::{
 };
 use crate::key::{HashAlg, PublicKey, SigAlg};
 use crate::oid;
-use crate::pkix::{CaSet, PathError, build_path};
+use crate::pkix::{CaSet, Currency, PathError, build_path};
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Tag, TagNumber};
 use sha1::{Digest, Sha1};
@@ -553,7 +558,12 @@ fn read_response(
     now: OffsetDateTime,
 ) -> Result<OcspAnswer, OcspError> {
     let basic_der = successful_basic(body)?;
-    read_basic(&basic_der, |_| Ok(requested.clone()), cas, now)
+    read_basic(
+        &basic_der,
+        |_| Ok(requested.clone()),
+        cas,
+        Currency::Now(now),
+    )
 }
 
 /// The DER `BasicOCSPResponse` of a successful DER or BER `OCSPResponse`.
@@ -606,17 +616,58 @@ pub fn check_embedded(
             Ok(RequestedId::with_hash(cert, issuer, hash))
         },
         cas,
-        at,
+        Currency::Now(at),
     )
 }
 
-/// Embedded evidence with the same strict issuer delegation as online status.
+/// Embedded evidence with the same strict issuer delegation as online status, current at
+/// `now`.
 pub fn check_embedded_issuer_bound(
     response: &[u8],
     cert: &Certificate,
     issuer: &Certificate,
     cas: &CaSet,
     now: OffsetDateTime,
+) -> Result<OcspAnswer, OcspError> {
+    check_embedded_bound(response, cert, issuer, cas, Currency::Now(now))
+}
+
+/// [`check_embedded_issuer_bound`] for a signature with a verified proof time `proof` (the
+/// control time of ETSI EN 319 102-1): everything is checked as there, except currency.
+/// The responder certificate must chain at the response's `thisUpdate`, which must not be
+/// after `now + CLOCK_SKEW`. The answer is fresh when `proof` precedes its `nextUpdate`
+/// (EN 319 102-1 5.2.5.4: maximum freshness `nextUpdate - thisUpdate`) or, without
+/// `nextUpdate`, when `thisUpdate` is after `proof` less [`CLOCK_SKEW`]. `nextUpdate` and
+/// [`ALLOWED_PERIOD`] are not compared with `now`: the evidence is embedded to be judged
+/// long after it was issued.
+///
+/// # Errors
+///
+/// The [`OcspError`]s of [`check_embedded_issuer_bound`]; [`OcspError::NextUpdate`] for an
+/// answer issued before the proof time.
+pub fn check_embedded_at_proof(
+    response: &[u8],
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    proof: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<OcspAnswer, OcspError> {
+    check_embedded_bound(
+        response,
+        cert,
+        issuer,
+        cas,
+        Currency::AtProof { proof, now },
+    )
+}
+
+fn check_embedded_bound(
+    response: &[u8],
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    currency: Currency,
 ) -> Result<OcspAnswer, OcspError> {
     let der = ber::to_der(response)?;
     let basic = match asn1::OcspResponse::from_der(&der) {
@@ -635,7 +686,17 @@ pub fn check_embedded_issuer_bound(
         return Err(OcspError::CertIdMismatch);
     }
     check_issuer_binding(&basic, issuer)?;
-    check_embedded(response, cert, issuer, cas, now)
+    read_basic(
+        &basic,
+        |id| {
+            let hash = HashAlg::from_oid(&id.hash_algorithm.oid).ok_or_else(|| {
+                OcspError::Malformed(format!("CertID hash {}", id.hash_algorithm.oid))
+            })?;
+            Ok(RequestedId::with_hash(cert, issuer, hash))
+        },
+        cas,
+        currency,
+    )
 }
 
 fn check_issuer_binding(basic_der: &[u8], issuer: &Certificate) -> Result<(), OcspError> {
@@ -663,7 +724,7 @@ fn read_basic<'c>(
     basic_der: &[u8],
     requested: impl FnOnce(&asn1::CertId<'_>) -> Result<RequestedId<'c>, OcspError>,
     cas: &CaSet,
-    now: OffsetDateTime,
+    currency: Currency,
 ) -> Result<OcspAnswer, OcspError> {
     let basic = asn1::BasicOcspResponse::from_der(basic_der)?;
     let data: asn1::ResponseData<'_> = basic.tbs_response_data.decode_as()?;
@@ -677,7 +738,19 @@ fn read_basic<'c>(
         .iter()
         .find(|c| responder_id.identifies(c))
         .ok_or(OcspError::ResponderNotFound)?;
-    check_responder(responder, cas, now)?;
+    // Judged at the verifier's clock, or, for evidence carried by a signature with a proven
+    // time, as of the answer's own issuance.
+    let responder_time = match currency {
+        Currency::Now(now) => now,
+        Currency::AtProof { .. } => generalized_time(
+            data.responses
+                .first()
+                .ok_or(OcspError::NoSingleResponse)?
+                .this_update
+                .0,
+        )?,
+    };
+    check_responder(responder, cas, responder_time)?;
 
     let oid = basic.signature_algorithm.oid;
     let alg = SigAlg::from_signature_oid(&oid)
@@ -694,6 +767,10 @@ fn read_basic<'c>(
     let single = data.responses.first().ok_or(OcspError::NoSingleResponse)?;
     let requested = requested(&single.cert_id)?;
     let this_update = generalized_time(single.this_update.0)?;
+    let (proof, now) = match currency {
+        Currency::Now(now) => (None, now),
+        Currency::AtProof { proof, now } => (Some(proof), now),
+    };
     if this_update > now + CLOCK_SKEW {
         return Err(OcspError::ThisUpdate);
     }
@@ -701,10 +778,14 @@ fn read_basic<'c>(
         .next_update
         .map(|t| generalized_time(t.0))
         .transpose()?;
-    let current = match next_update {
-        Some(next_update) => now < next_update,
+    let current = match (proof, next_update) {
+        // EN 319 102-1 5.2.5.4: with nextUpdate fresh iff the proof precedes it (maximum
+        // freshness nextUpdate - thisUpdate); without, issued after proof - CLOCK_SKEW.
+        (Some(proof), Some(next_update)) => next_update > proof,
+        (Some(proof), None) => this_update > proof - CLOCK_SKEW,
+        (None, Some(next_update)) => now < next_update,
         // A thisUpdate ahead of now (within the skew) is a negative age: current.
-        None => now - this_update < ALLOWED_PERIOD,
+        (None, None) => now - this_update < ALLOWED_PERIOD,
     };
     if !current {
         return Err(OcspError::NextUpdate);

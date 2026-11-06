@@ -328,6 +328,69 @@ properties to a staged artifact (their canonical form under exclusive C14N equal
 they are generated as, so the archive coverage and its leaf spans need no parse; prove with
 a differential test against `canonical_stream`), and assemble head + staged unsigned + tail.
 
+## Embedded status of LT/LTA is judged at the proof time
+
+Revocation status carried by a signature (OCSP answers, CRLs of CAdES/PAdES/XAdES `LT`
+and `LTA`) is evidence for verifying long after it was issued. It used to be judged against
+the verifier's clock (`nextUpdate`, `ALLOWED_PERIOD`, responder certificate validity at
+`now`), so a document that verified `Valid` at signing turned `Indeterminate` after a few
+minutes, for any size. The rule now lives once in `oncl-pki` (`ocsp::check_embedded_at_proof`,
+`crl::serial_status_at_proof`, selected by `validation::offline_revocation`; `pkix::Currency`
+is the switch) and CAdES, XAdES and PAdES all use it.
+
+**Rule.** When a proof time `P` is verified, an embedded OCSP answer or CRL about a path
+certificate is accepted when everything that was checked before still passes (CertID, issuer
+binding, signature, responder chain and OCSPSigning/no-check, `unknown` is refused, a CRL
+is a complete CRL of the issuer) and:
+
+* fresh at `P` (EN 319 102-1 5.2.5.4: maximum freshness `nextUpdate - thisUpdate` unless a
+  constraint says otherwise): with a `nextUpdate` (every CRL, an OCSP answer that has one)
+  the answer is fresh iff `P < nextUpdate`, so a 35-day CA CRL issued hours before the proof
+  is good; without one (NCA OCSP) iff `P - CLOCK_SKEW < thisUpdate` (300 s, exclusive);
+* `thisUpdate <= now + CLOCK_SKEW` (a CRL: `thisUpdate <= now`): never from the verifier's
+  future;
+* the responder certificate chains **as of `thisUpdate`** (not `now`);
+* `nextUpdate` and `ALLOWED_PERIOD` are not compared with `now`.
+
+`P` is the genTime of the signature time-stamp (`T`, `LT`) — for a PAdES document
+time-stamp that is the first proof — and, for `LTA`, the same signature time-stamp: the
+archive time-stamps protect the evidence but do not move `P` (a status embedded after the
+signature time-stamp and before the archive time-stamp must stay acceptable). A time-stamp
+authority certificate's own embedded status is judged the same way with that token's genTime
+as its `P`. Without a proof time (level `B`, a missing or invalid timestamp) `at` is `now`
+and the old rule is kept; status fetched online is always judged current at `now`.
+
+Unchanged: the signer and chain certificates are judged valid **at `P`** (they already were:
+`certificate_facts` and the anchored path use `P`); revoked at or before `P` is `Invalid`;
+revoked after `P` leaves the signature valid and reports `RevokedAfterProvenTime`.
+
+**Standard basis (ETSI EN 319 102-1 V1.3.1, read from the published text).** 5.2.5.4 (Revocation
+freshness checker): status is fresh when `issuance time > validation time - maximum accepted
+freshness`; 5.5.4 step 6 reruns the checker with the *best-signature-time* when the status
+was not fresh against the current time; 5.5.4 step 4a: a revocation time after the
+best-signature-time does not invalidate the signature, one at or before it is
+`INDETERMINATE/REVOKED_NO_POE`; 5.2.6.4 (X.509 certificate validation) runs the checker with
+the validation time and does not check the issuer's CRL-signing certificate against it. The
+`nextUpdate - thisUpdate` default of 5.2.5.4 step 1 is used for answers that carry a
+`nextUpdate`; for NCA OCSP answers, which carry none, the freshness is the constraint
+`CLOCK_SKEW` (the standard says FAILED without nextUpdate unless a constraint is given).
+
+**Replay window.** The window in which an attacker holding a pre-revocation "good" answer can
+use it is the answer's own validity, `nextUpdate - thisUpdate`: up to 35 days for an NCA CRL
+(300 s for an answer without `nextUpdate`). The archive time-stamp / proof of existence of an
+`LTA` does not narrow it: `P` is the signature time-stamp's genTime, and the archive
+time-stamps only protect what was embedded. This is the standard's default and the old
+rule's window at signing time.
+
+**Not verified / deliberate differences.** (0) No real-PKI proof: the pinned NCANode LT fixtures never reach a proof time here, so the NCA cadence (35-day root CRL issued hours before the timestamp) is tested with the recorded production CRL (`tests/crl.rs`) and a synthetic 35-day CRL, not with a Valid real document; the plain-CMS offline path is covered by `oncl-core` `offline_cms_status_is_judged_at_the_proof_time_not_the_host_clock`; P is the LAST passing signature time-stamp where the standard (5.5.4 step 3b) takes the earliest (conservative, pre-existing). (1) 5.6.2.2.4 step 2a also asks for a proof of
+existence of the revocation information at or before the control time; for `LTA` this is the
+archive time-stamp binding the evidence, which is checked by the evidence graph, for `LT`
+it is not requested (nothing but the signature time-stamp exists), as in 5.5.4. (2) The
+strict `>` and the 300 s freshness are choices within the constraint the standard leaves to
+the validation policy, not values it prescribes. (3) Revoked-at-or-before-`P` is `Invalid`
+here; the standard says `INDETERMINATE/REVOKED_NO_POE` (stricter, unchanged). (4) The standard's
+chain-model rule for key-compromise revocation after `P` of a CA is not modelled.
+
 ## Dense PDFs: the cross-reference budget (D4, D6)
 
 `PdfLimits::max_objects` (default 4096) bounds object-GRAPH walks only: the AcroForm field
