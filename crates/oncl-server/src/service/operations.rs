@@ -164,8 +164,9 @@ impl ServiceHost {
         body: Body,
         route: Route,
     ) -> ResponseFuture {
-        let deadline = Deadline::after(Duration::from_millis(self.config.operation_timeout_ms))
-            .map_err(processing_error);
+        let operation_timeout = Duration::from_millis(self.config.operation_timeout_ms);
+        let admission_wait = Duration::from_millis(self.config.admission_wait_ms);
+        let pace = self.config.upload_pace();
         let cancel = Arc::new(Cancellation::new());
         let principal = self.principal(&metadata);
         let engine = self.engine.clone();
@@ -178,17 +179,23 @@ impl ServiceHost {
         let inline_enabled = self.config.inline_pkcs12;
         let host_policy = self.host_policy.clone();
         Box::pin(async move {
-            let deadline = deadline?;
             let principal = std::sync::Arc::new(principal?);
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let (progress_hub, progress_receiver) = progress::ProgressHub::channel();
-            let mut admission = engine
-                .admit(Arc::new(InvocationControl {
-                    cancel: cancel.clone(),
-                    deadline,
-                    progress: Some(progress_hub.clone()),
-                }))
-                .map_err(core_error)?;
+            // A client that finds every slot taken queues for at most `admission_wait`;
+            // each attempt's deadline starts at its own admission, never at arrival.
+            let (mut admission, deadline) = super::admit_within(admission_wait, || {
+                let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
+                let admission = engine
+                    .admit(Arc::new(InvocationControl {
+                        cancel: cancel.clone(),
+                        deadline,
+                        progress: Some(progress_hub.clone()),
+                    }))
+                    .map_err(core_error)?;
+                Ok((admission, deadline))
+            })
+            .await?;
             let header_bytes = metadata
                 .headers
                 .iter()
@@ -205,6 +212,7 @@ impl ServiceHost {
                 body,
                 &mut admission,
                 deadline,
+                pace,
                 cancel.clone(),
                 &|m| {
                     dispatch::route_precheck(

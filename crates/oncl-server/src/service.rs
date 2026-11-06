@@ -6,6 +6,7 @@ use crate::{
     config::{Exposure, ServerConfig, invalid, normalized_peer},
     executor::{BoundedExecutor, CancelOnDrop, Cancellation},
     keys::{KeyBinding, OperatorKeys},
+    pace::UploadPace,
     telemetry::{Route as ObservedRoute, Telemetry},
 };
 use axum::{
@@ -14,7 +15,6 @@ use axum::{
     http::{HeaderValue, Request},
     response::IntoResponse,
 };
-use http_body_util::BodyExt;
 use oncl_api::{
     dto::HashResponse,
     error::{ApiError, ErrorCode},
@@ -259,33 +259,16 @@ impl ServiceHost {
         key: Option<&str>,
         control: Arc<dyn OperationControl>,
     ) -> Result<(OperationContext, Option<AuditBinding>), ApiError> {
-        if self.audit.health() != AuditHealth::Healthy {
-            return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
-        }
-        let grant = self
-            .policy
-            .authorize(principal, action, key, None)
-            .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
-        let ctx = self
-            .engine
-            .begin(grant, OperationPolicy::strict_online(), control)
-            .map_err(core_error)?;
-        let binding = if matches!(action, Action::Sign | Action::SignDigest) {
-            Some(
-                self.audit
-                    .bind(
-                        &ctx,
-                        principal.audit_label(),
-                        self.keys
-                            .labels()
-                            .filter(|(id, _)| ctx.grant().allows_key(id)),
-                    )
-                    .map_err(|_| ApiError::not_applied(ErrorCode::AuditUnavailable))?,
-            )
-        } else {
-            None
-        };
-        Ok((ctx, binding))
+        begin_operation(
+            &self.engine,
+            &self.policy,
+            &self.audit,
+            &self.keys,
+            principal,
+            action,
+            key,
+            control,
+        )
     }
     pub fn router(self: &Arc<Self>) -> axum::Router {
         oncl_api::server::router(self.clone())
@@ -456,6 +439,67 @@ pub(crate) fn api_code(code: oncl_core::ErrorCode) -> ErrorCode {
         Core::ValidationRequired => ErrorCode::ValidationFailed,
     }
 }
+/// Opens the operation for a hash/sign-family request: audit health, token right, SDK
+/// context and, for private use, the durable audit binding.
+#[allow(clippy::too_many_arguments)]
+fn begin_operation(
+    engine: &Engine,
+    policy: &AccessPolicy,
+    audit: &DurableAuditGuard,
+    keys: &OperatorKeys,
+    principal: &Principal,
+    action: Action,
+    key: Option<&str>,
+    control: Arc<dyn OperationControl>,
+) -> Result<(OperationContext, Option<AuditBinding>), ApiError> {
+    if audit.health() != AuditHealth::Healthy {
+        return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
+    }
+    let grant = policy
+        .authorize(principal, action, key, None)
+        .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+    let ctx = engine
+        .begin(grant, OperationPolicy::strict_online(), control)
+        .map_err(core_error)?;
+    let binding = if matches!(action, Action::Sign | Action::SignDigest) {
+        Some(
+            audit
+                .bind(
+                    &ctx,
+                    principal.audit_label(),
+                    keys.labels().filter(|(id, _)| ctx.grant().allows_key(id)),
+                )
+                .map_err(|_| ApiError::not_applied(ErrorCode::AuditUnavailable))?,
+        )
+    } else {
+        None
+    };
+    Ok((ctx, binding))
+}
+/// How often a request that finds every slot taken looks again.
+const ADMISSION_POLL: Duration = Duration::from_millis(10);
+/// Runs `attempt` until it is admitted. A refusal with `CapacityExceeded` (every
+/// `max_in_flight` slot taken) is retried for at most `wait` (`admission_wait_ms`) before it
+/// is returned; any other result is final. The request holds no slot, spool or body read
+/// while it waits, and dropping the future (client disconnect) ends the wait.
+async fn admit_within<T>(
+    wait: Duration,
+    mut attempt: impl FnMut() -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        match attempt() {
+            Err(refused) if refused.code == ErrorCode::CapacityExceeded => {
+                let now = tokio::time::Instant::now();
+                if now >= end {
+                    return Err(refused);
+                }
+                tokio::time::sleep(ADMISSION_POLL.min(end - now)).await;
+            }
+            result => return result,
+        }
+    }
+}
 fn core_error(error: OperationError) -> ApiError {
     match error {
         OperationError::Processing(error) => processing_error(error),
@@ -466,43 +510,57 @@ fn core_error(error: OperationError) -> ApiError {
 impl ServiceHost {
     fn hash_unobserved(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
         let engine = self.engine.clone();
+        let policy = self.policy.clone();
+        let audit = self.audit.clone();
+        let keys = self.keys.clone();
         let executor = self.executor.clone();
-        let deadline = Deadline::after(Duration::from_millis(self.config.operation_timeout_ms));
+        let operation_timeout = Duration::from_millis(self.config.operation_timeout_ms);
+        let admission_wait = Duration::from_millis(self.config.admission_wait_ms);
+        let pace = self.config.upload_pace();
         let cancel = Arc::new(Cancellation::new());
-        let admitted = deadline.map_err(processing_error).and_then(|deadline| {
-            let principal = self.principal(&metadata)?;
-            let (mut ctx, binding) = self.begin(
-                &principal,
-                Action::Hash,
-                None,
-                Arc::new(InvocationControl {
-                    cancel: cancel.clone(),
-                    deadline,
-                    progress: None,
-                }),
-            )?;
-            if metadata
-                .content_length
-                .is_some_and(|n| n > ctx.resources().limits().input_bytes)
-            {
-                return Err(ApiError::not_applied(ErrorCode::InputLimit));
-            }
-            let header_bytes = metadata
-                .headers
-                .iter()
-                .try_fold(0u64, |n, (k, v)| {
-                    n.checked_add((k.as_str().len() + v.as_bytes().len() + 4) as u64)
-                })
-                .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
-            let metadata_reservation = ctx
-                .resources()
-                .reserve_metadata(header_bytes)
-                .map_err(processing_error)?;
-            Ok((ctx, binding, metadata_reservation, deadline))
-        });
+        let principal = self.principal(&metadata);
         Box::pin(async move {
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
-            let (ctx, binding, metadata_reservation, deadline) = admitted?;
+            let principal = principal?;
+            // A client that finds every slot taken queues for at most `admission_wait`;
+            // each attempt's deadline starts at its own admission, never at arrival.
+            let (ctx, binding, metadata_reservation, deadline) =
+                admit_within(admission_wait, || {
+                    let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
+                    let (mut ctx, binding) = begin_operation(
+                        &engine,
+                        &policy,
+                        &audit,
+                        &keys,
+                        &principal,
+                        Action::Hash,
+                        None,
+                        Arc::new(InvocationControl {
+                            cancel: cancel.clone(),
+                            deadline,
+                            progress: None,
+                        }),
+                    )?;
+                    if metadata
+                        .content_length
+                        .is_some_and(|n| n > ctx.resources().limits().input_bytes)
+                    {
+                        return Err(ApiError::not_applied(ErrorCode::InputLimit));
+                    }
+                    let header_bytes = metadata
+                        .headers
+                        .iter()
+                        .try_fold(0u64, |n, (k, v)| {
+                            n.checked_add((k.as_str().len() + v.as_bytes().len() + 4) as u64)
+                        })
+                        .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
+                    let metadata_reservation = ctx
+                        .resources()
+                        .reserve_metadata(header_bytes)
+                        .map_err(processing_error)?;
+                    Ok((ctx, binding, metadata_reservation, deadline))
+                })
+                .await?;
             let runtime = tokio::runtime::Handle::current();
             let worker_cancel = cancel.clone();
             let work = executor
@@ -512,6 +570,7 @@ impl ServiceHost {
                     let _ingress = ctx.resources().reserve_memory(32_768)?;
                     let mut reader = BodyReader {
                         body,
+                        pace: UploadPace::new(pace),
                         pending: Bytes::new(),
                         runtime,
                         deadline,
@@ -689,6 +748,7 @@ impl axum::body::HttpBody for DeliveryBody {
 }
 struct BodyReader {
     body: Body,
+    pace: UploadPace,
     pending: Bytes,
     runtime: tokio::runtime::Handle,
     deadline: Deadline,
@@ -706,11 +766,17 @@ impl Read for BodyReader {
                 self.pending = self.pending.slice(n..);
                 return Ok(n);
             }
+            let (cancel, pace, body, deadline) =
+                (&self.cancel, &mut self.pace, &mut self.body, self.deadline);
             let frame = self.runtime.block_on(async {
                 tokio::select! {
-                    _ = self.cancel.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted,"cancelled")),
-                    result = tokio::time::timeout(self.deadline.remaining(),self.body.frame()) => match result {
-                        Ok(Some(Ok(frame))) => Ok(Some(frame)), Ok(None) => Ok(None), Ok(Some(Err(_))) => Err(io::Error::new(io::ErrorKind::InvalidData,"invalid request body")), Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut,"deadline exceeded"))
+                    _ = cancel.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted,"cancelled")),
+                    result = pace.frame(body, deadline) => match result {
+                        Ok(Some(Ok(frame))) => Ok(Some(frame)),
+                        Ok(None) => Ok(None),
+                        Ok(Some(Err(_))) => Err(io::Error::new(io::ErrorKind::InvalidData,"invalid request body")),
+                        // Idle, minimum rate or operation deadline: keep the typed refusal.
+                        Err(error) => Err(operations::intake::typed_io(error)),
                     }
                 }
             })?;

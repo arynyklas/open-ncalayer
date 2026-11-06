@@ -39,6 +39,8 @@ blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000
 operation_timeout_ms = 300000
+upload_idle_timeout_ms = 30000
+upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
 input_bytes = 10737418240
@@ -223,6 +225,38 @@ Hyper. Accept/header bounds may shorten, never extend, the operation deadline.
 After headers have been sent, expiry is a transport abort, not a promised new
 JSON error/status. Timers do not make retained Bytes clones/slices or a running
 native operation free: their actual final owners must still release them.
+
+**Waiting for a slot.** `max_in_flight` bounds the operations that run at once. A request
+that arrives while all of them are taken (after authentication, before it reads any of
+its body) waits up to `admission_wait_ms`, polling every 10 ms with no order guarantee
+between waiters, and gets `503 CapacityExceeded`/`NotApplied` only if no slot freed in
+that time. The wait holds no slot, spool or body read, ends when the client disconnects,
+and is not part of the operation deadline, which starts at admission. An admitted
+operation waits for a free native worker for at most the same `admission_wait_ms`; with
+`blocking_workers >= max_in_flight` (the default) that second wait does not normally arise.
+
+**Stalled and crawling uploads.** An upload that stops must not hold its slot, worker and
+spool for the whole `operation_timeout_ms` (default 300 s: two silent clients would block
+a server with `max_in_flight = 2` for five minutes). Every wait for the next body chunk
+(hash body, JSON, multipart metadata and documents, the epilogue) is governed by two rules.
+Only time spent waiting *for the client* counts, never time spent hashing, spooling or
+queueing, so a slow server is never charged to a client.
+
+* `upload_idle_timeout_ms` (default 30 000, 1 000 .. 86 400 000): a wait that delivers no
+  byte for that long ends the request.
+* `upload_min_bytes_per_second` (default 1 024, `0` = off): idle timeout alone would let a
+  client that sends one byte every 29 s keep the slot until the operation deadline. So each
+  idle-timeout-long window of waiting must deliver at least this many bytes per second, or
+  the request ends. 1 KiB/s is about 8 kbit/s, below any link that can legitimately move a
+  document; the rule judges only whole windows, so a client that sends 64 KiB every 25 s
+  passes while one byte per second does not.
+
+Either rule ends the request with the existing `504 DeadlineExceeded`/`NotApplied`: it
+happens during intake, before any private key is used, so no audit `BEGIN` is written, the
+spool is deleted and the slot is free immediately. No new error code exists. Neither rule
+replaces the operation deadline, which still bounds a healthy transfer: a 10 GiB upload
+over a slow link needs `operation_timeout_ms` raised to cover it, not these two values; a
+client that keeps delivering at least the minimum rate is never stopped by them.
 
 
 There are also finite pre-auth connection/header/TLS-handshake limits. HTTP/1

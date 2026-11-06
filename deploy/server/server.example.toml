@@ -36,11 +36,27 @@ scratch_directory = "/var/lib/oncl-server/scratch"
 # (not the process RSS: the HTTP stack, runtime threads and framing are extra, so keep
 # the container/systemd memory limit about twice `total_memory`). The temp limits bound
 # the scratch directory: size its filesystem to `total_temp` or lower these values.
+#
+# Concurrency. `max_in_flight` operations run at once. A request that finds them all taken
+# waits up to `admission_wait_ms` for a slot (an admitted operation waits as long for a
+# native worker) and only then gets the typed `CapacityExceeded` refusal. Each operation has
+# one `operation_timeout_ms` deadline, counted from its admission.
+#
+# Uploads. A client that stops sending must not keep its slot and spool for the whole
+# operation timeout: a body that delivers no byte for `upload_idle_timeout_ms` is ended with
+# `DeadlineExceeded`/`NotApplied`. A client that sends one byte per idle period is caught by
+# the minimum rate: over every idle-timeout window of waiting for the client, at least
+# `upload_min_bytes_per_second` bytes must arrive (0 = idle timeout only). Only time spent
+# waiting for the client counts, never time spent hashing or queueing. Both defaults are far
+# below any real network (30 s of silence, 1 KiB/s); the operation timeout still bounds a
+# legitimate transfer, so raise it (not these) for a very large upload over a slow link.
 max_in_flight = 2
 blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000
 operation_timeout_ms = 300000
+upload_idle_timeout_ms = 30000
+upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
 input_bytes = 10737418240
