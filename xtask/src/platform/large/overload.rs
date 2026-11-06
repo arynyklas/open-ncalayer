@@ -87,7 +87,11 @@ pub fn run(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
     )?;
     let outcome = body(&mut case);
     if let Err(e) = outcome {
-        case.check("the overload case ran to completion", false, format!("{e:#}"));
+        case.check(
+            "the overload case ran to completion",
+            false,
+            format!("{e:#}"),
+        );
     }
     Ok(case.finish())
 }
@@ -102,7 +106,12 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
 
     // the CPU-bound document, with its independent expectations
     let cpu_path = case.work.join("overload-cpu.xml");
-    let (facts, digests) = generate::xml::generate(&cpu_path, cpu_bytes.max(64 * 1024), 0x0A11, generate::xml::XmlKind::Archive)?;
+    let (facts, digests) = generate::xml::generate(
+        &cpu_path,
+        cpu_bytes.max(64 * 1024),
+        0x0A11,
+        generate::xml::XmlKind::Archive,
+    )?;
     let manifest_path = case.work.join("overload-manifest.json");
     std::fs::write(
         &manifest_path,
@@ -153,7 +162,9 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
         let server = case.server.as_ref().unwrap();
         (
             server.address.clone(),
-            std::fs::read_to_string(&server.token_file)?.trim().to_owned(),
+            std::fs::read_to_string(&server.token_file)?
+                .trim()
+                .to_owned(),
             server.scratch.clone(),
         )
     };
@@ -195,7 +206,10 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
-                document: Source::Pattern { byte: 0x6B, len: big },
+                document: Source::Pattern {
+                    byte: 0x6B,
+                    len: big,
+                },
                 chunked: true,
                 expect_continue: true,
                 bytes_per_second: Some(128 * MIB),
@@ -212,7 +226,10 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
-                document: Source::Pattern { byte: 0x6B, len: big },
+                document: Source::Pattern {
+                    byte: 0x6B,
+                    len: big,
+                },
                 chunked: true,
                 expect_continue: true,
                 bytes_per_second: Some(128 * MIB),
@@ -229,7 +246,10 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
-                document: Source::Pattern { byte: 0x6B, len: big },
+                document: Source::Pattern {
+                    byte: 0x6B,
+                    len: big,
+                },
                 chunked: true,
                 expect_continue: true,
                 bytes_per_second: None,
@@ -267,7 +287,12 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let beats = std::sync::Mutex::new(Vec::<(u16, f64)>::new());
     let began = Instant::now();
     thread::scope(|s| {
-        let (stop, tp, fp, sp) = (heartbeat_stop.clone(), temp_peak.clone(), file_peak.clone(), scratch.clone());
+        let (stop, tp, fp, sp) = (
+            heartbeat_stop.clone(),
+            temp_peak.clone(),
+            file_peak.clone(),
+            scratch.clone(),
+        );
         s.spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let (bytes, files) = tree_usage(&sp);
@@ -309,7 +334,11 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let storm_seconds = began.elapsed().as_secs_f64();
     case.note("storm_seconds", json!(storm_seconds));
     let outcomes = outcomes.into_inner().unwrap();
-    case.check("every client got an end (answer or close), none hung", outcomes.len() == total_jobs, format!("{} of {total_jobs}", outcomes.len()));
+    case.check(
+        "every client got an end (answer or close), none hung",
+        outcomes.len() == total_jobs,
+        format!("{} of {total_jobs}", outcomes.len()),
+    );
 
     // ---------------------------------------------------------------- answers
     let mut rows = Vec::new();
@@ -317,8 +346,14 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let mut completed_cpu = Vec::new();
     for o in &outcomes {
         let json = o.reply.json();
-        let code = json.as_ref().and_then(|j| j["code"].as_str()).map(str::to_owned);
-        let applied = json.as_ref().and_then(|j| j["applied"].as_str()).map(str::to_owned);
+        let code = json
+            .as_ref()
+            .and_then(|j| j["code"].as_str())
+            .map(str::to_owned);
+        let applied = json
+            .as_ref()
+            .and_then(|j| j["applied"].as_str())
+            .map(str::to_owned);
         let mut verdict = "other";
         match (o.kind, o.reply.status) {
             (_, 200) => {
@@ -336,8 +371,21 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
                         // must still show a FINAL for every BEGIN (checked when the server stops).
                         verdict = "aborted stream (no terminal record)";
                     } else {
-                        let detail = streamed.as_ref().map(|(f, _)| f.to_string()).unwrap_or_else(|| String::from_utf8_lossy(&o.reply.body[..o.reply.body.len().min(600)]).into_owned());
-                        unexpected.push(format!("{:?}#{} status 200 without a completed final record: {}", o.kind, o.index, detail.chars().take(500).collect::<String>()));
+                        let detail = streamed
+                            .as_ref()
+                            .map(|(f, _)| f.to_string())
+                            .unwrap_or_else(|| {
+                                String::from_utf8_lossy(
+                                    &o.reply.body[..o.reply.body.len().min(600)],
+                                )
+                                .into_owned()
+                            });
+                        unexpected.push(format!(
+                            "{:?}#{} status 200 without a completed final record: {}",
+                            o.kind,
+                            o.index,
+                            detail.chars().take(500).collect::<String>()
+                        ));
                     }
                 }
                 if o.kind == Kind::Cpu
@@ -348,18 +396,35 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
                 if let (Some(expected), Some(j)) = (&o.expected_digest, &json)
                     && j["results"][0]["result"]["digest"].as_str() != Some(expected.as_str())
                 {
-                    unexpected.push(format!("{:?}#{} digest differs from the expected one", o.kind, o.index));
+                    unexpected.push(format!(
+                        "{:?}#{} digest differs from the expected one",
+                        o.kind, o.index
+                    ));
                 }
             }
-            (_, 503) if code.as_deref() == Some("CapacityExceeded") => verdict = "refused: CapacityExceeded",
+            (_, 503) if code.as_deref() == Some("CapacityExceeded") => {
+                verdict = "refused: CapacityExceeded"
+            }
             (_, 413) => verdict = "refused: resource limit",
-            (Kind::Deadline, 504) if code.as_deref() == Some("DeadlineExceeded") => verdict = "deadline: DeadlineExceeded",
+            (Kind::Deadline, 504) if code.as_deref() == Some("DeadlineExceeded") => {
+                verdict = "deadline: DeadlineExceeded"
+            }
             (Kind::Disconnect, 0) => verdict = "client disconnected",
             (_, s) if o.reply.transport_error.is_some() && s == 0 => verdict = "transport closed",
-            (_, s) => unexpected.push(format!("{:?}#{} answered {s} code {:?}", o.kind, o.index, code)),
+            (_, s) => unexpected.push(format!(
+                "{:?}#{} answered {s} code {:?}",
+                o.kind, o.index, code
+            )),
         }
-        if o.reply.status >= 400 && o.reply.status != 0 && json.is_some() && applied.as_deref() != Some("NotApplied") {
-            unexpected.push(format!("{:?}#{} refusal says applied={:?}", o.kind, o.index, applied));
+        if o.reply.status >= 400
+            && o.reply.status != 0
+            && json.is_some()
+            && applied.as_deref() != Some("NotApplied")
+        {
+            unexpected.push(format!(
+                "{:?}#{} refusal says applied={:?}",
+                o.kind, o.index, applied
+            ));
         }
         rows.push(json!({
             "kind": format!("{:?}", o.kind), "index": o.index, "status": o.reply.status, "code": code, "applied": applied,
@@ -369,10 +434,22 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     }
     case.note("clients_detail", Value::Array(rows.clone()));
     case.check("every answer is a completed result or a typed honest refusal (no 500, no untyped close, key never applied on a refusal)", unexpected.is_empty(), unexpected.join("; "));
-    let count = |v: &str| rows.iter().filter(|r| r["verdict"].as_str().is_some_and(|x| x.starts_with(v))).count();
+    let count = |v: &str| {
+        rows.iter()
+            .filter(|r| r["verdict"].as_str().is_some_and(|x| x.starts_with(v)))
+            .count()
+    };
     case.note("answers", json!({"completed": count("completed"), "refused": count("refused"), "deadline": count("deadline"), "disconnected": count("client"), "transport_closed": count("transport")}));
-    case.check("overload produced honest refusals (the budgets bound the work)", count("refused") > 0, format!("{} refusals", count("refused")));
-    case.check("work that was admitted completed", count("completed") > 0, format!("{} completed", count("completed")));
+    case.check(
+        "overload produced honest refusals (the budgets bound the work)",
+        count("refused") > 0,
+        format!("{} refusals", count("refused")),
+    );
+    case.check(
+        "work that was admitted completed",
+        count("completed") > 0,
+        format!("{} completed", count("completed")),
+    );
     let deadline_rows: Vec<&Value> = rows.iter().filter(|r| r["kind"] == "Deadline").collect();
     case.check(
         "a stalled upload is ended by the deadline (504 DeadlineExceeded) or by a refusal, never held beyond it",
@@ -384,12 +461,31 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     if let Some(artifact) = completed_cpu.first() {
         let signed = case.work.join("overload-signed.xml");
         std::fs::write(&signed, artifact)?;
-        match env.oracle(&["xml-signature".as_ref(), signed.as_os_str(), manifest_path.as_os_str(), "overload-xml".as_ref(), "archive-end".as_ref(), "rsa".as_ref()]) {
-            Ok(v) => case.check("a signature produced under load is correct (independent oracle)", v["ok"] == true, v.to_string()),
-            Err(e) => case.check("a signature produced under load is correct (independent oracle)", false, format!("{e:#}")),
+        match env.oracle(&[
+            "xml-signature".as_ref(),
+            signed.as_os_str(),
+            manifest_path.as_os_str(),
+            "overload-xml".as_ref(),
+            "archive-end".as_ref(),
+            "rsa".as_ref(),
+        ]) {
+            Ok(v) => case.check(
+                "a signature produced under load is correct (independent oracle)",
+                v["ok"] == true,
+                v.to_string(),
+            ),
+            Err(e) => case.check(
+                "a signature produced under load is correct (independent oracle)",
+                false,
+                format!("{e:#}"),
+            ),
         }
     } else {
-        case.check("a CPU-bound signature completed under load", false, "none completed");
+        case.check(
+            "a CPU-bound signature completed under load",
+            false,
+            "none completed",
+        );
     }
 
     // ---------------------------------------------------------------- the server's own account
@@ -402,7 +498,14 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
         thread::sleep(Duration::from_millis(500));
     }
     let (bytes, files) = tree_usage(&scratch);
-    case.check("the shared scratch is empty once the storm is over", files == 0, format!("{files} files, {bytes} bytes after {:.0}s", started.elapsed().as_secs_f64()));
+    case.check(
+        "the shared scratch is empty once the storm is over",
+        files == 0,
+        format!(
+            "{files} files, {bytes} bytes after {:.0}s",
+            started.elapsed().as_secs_f64()
+        ),
+    );
     thread::sleep(Duration::from_millis(1500)); // one more export interval
     let running = collector.peak("oncl.executor.running");
     let queued = collector.peak("oncl.executor.queued");
@@ -412,7 +515,11 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
         json!({"executor_running": running, "executor_queued": queued, "requests_in_flight": in_flight,
                "executor_rejected_total": collector.last("oncl.executor.rejected"), "exports": collector.samples().len()}),
     );
-    case.check("the server exported its concurrency gauges", running.is_some() && queued.is_some(), format!("{} samples", collector.samples().len()));
+    case.check(
+        "the server exported its concurrency gauges",
+        running.is_some() && queued.is_some(),
+        format!("{} samples", collector.samples().len()),
+    );
     case.check(
         "peak running native operations never exceeded blocking_workers",
         running.is_some_and(|r| r <= settings.blocking_workers as f64),
@@ -425,7 +532,11 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     );
     let peak_temp = temp_peak.load(Ordering::Relaxed);
     case.note("shared_temp", json!({"peak_bytes": peak_temp, "peak_files": file_peak.load(Ordering::Relaxed), "configured_total_temp": settings.total_temp}));
-    case.check("the shared temporary peak stayed within total_temp", peak_temp <= settings.total_temp, format!("{peak_temp} of {}", settings.total_temp));
+    case.check(
+        "the shared temporary peak stayed within total_temp",
+        peak_temp <= settings.total_temp,
+        format!("{peak_temp} of {}", settings.total_temp),
+    );
     let beats = beats.into_inner().unwrap();
     let mut latencies: Vec<f64> = beats.iter().map(|(_, t)| *t).collect();
     latencies.sort_by(f64::total_cmp);
@@ -434,7 +545,12 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.check(
         "/health stayed answerable under load (every answer 200, none slower than 5 s)",
         !beats.is_empty() && bad.is_empty() && latencies.last().is_some_and(|m| *m < 5.0),
-        format!("{} requests, max {:.3}s, {} not 200", beats.len(), latencies.last().copied().unwrap_or(0.0), bad.len()),
+        format!(
+            "{} requests, max {:.3}s, {} not 200",
+            beats.len(),
+            latencies.last().copied().unwrap_or(0.0),
+            bad.len()
+        ),
     );
     // a fresh request after the storm is served normally
     let fresh = http_raw::send(
@@ -451,7 +567,11 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
             abort_after: None,
         },
     );
-    let digest = fresh.json().and_then(|j| j["results"][0]["result"]["digest"].as_str().map(str::to_owned));
+    let digest = fresh.json().and_then(|j| {
+        j["results"][0]["result"]["digest"]
+            .as_str()
+            .map(str::to_owned)
+    });
     case.check(
         "a request after the storm completes with the right digest",
         fresh.status == 200 && digest.as_deref() == Some(pattern_digest_abc().as_str()),
@@ -478,7 +598,11 @@ pub fn run_token(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         "concurrent private card use on two readers: APDU overlap per device must be 1",
     )?;
     if let Err(e) = token_body(&mut case) {
-        case.check("the token overload case ran to completion", false, format!("{e:#}"));
+        case.check(
+            "the token overload case ran to completion",
+            false,
+            format!("{e:#}"),
+        );
     }
     Ok(case.finish())
 }
@@ -507,16 +631,22 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.ensure_server()?;
     let (address, token) = {
         let s = case.server.as_ref().unwrap();
-        (s.address.clone(), std::fs::read_to_string(&s.token_file)?.trim().to_owned())
+        (
+            s.address.clone(),
+            std::fs::read_to_string(&s.token_file)?.trim().to_owned(),
+        )
     };
-    let document: Vec<u8> = (0..262_144u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    let document: Vec<u8> = (0..262_144u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
     let doc_path = case.work.join("token-document.bin");
     std::fs::write(&doc_path, &document)?;
     let outcomes = std::sync::Mutex::new(Vec::<(usize, Reply)>::new());
     for round in 0..3 {
         thread::scope(|s| {
             for index in 0..16usize {
-                let (a, t, doc, outcomes) = (address.clone(), token.clone(), document.clone(), &outcomes);
+                let (a, t, doc, outcomes) =
+                    (address.clone(), token.clone(), document.clone(), &outcomes);
                 s.spawn(move || {
                     let card = if index % 2 == 0 { "card-a" } else { "card-b" };
                     let metadata = format!(
@@ -562,35 +692,69 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
                         verified += 1;
                     }
                 }
-                other => bad.push(format!("request {n}: 200 without a completed final ({})", other.is_some())),
+                other => bad.push(format!(
+                    "request {n}: 200 without a completed final ({})",
+                    other.is_some()
+                )),
             },
-            503 if reply.json().is_some_and(|j| j["code"] == "CapacityExceeded" && j["applied"] == "NotApplied") => refused += 1,
+            503 if reply.json().is_some_and(|j| {
+                j["code"] == "CapacityExceeded" && j["applied"] == "NotApplied"
+            }) =>
+            {
+                refused += 1
+            }
             s => bad.push(format!("request {n}: status {s} {:?}", reply.json())),
         }
     }
-    case.note("answers", json!({"completed": completed, "refused_capacity": refused, "unexpected": bad.len()}));
-    case.check("every answer is a completed card signature or a typed CapacityExceeded/NotApplied refusal", bad.is_empty(), bad.join("; "));
-    case.check("card signatures were produced", completed > 0, format!("{completed} of {}", outcomes.len()));
-    case.check("signatures from the cards verify with OpenSSL (independent)", verified > 0 && !bad.iter().any(|b| b.contains("OpenSSL")), format!("{verified} checked"));
+    case.note(
+        "answers",
+        json!({"completed": completed, "refused_capacity": refused, "unexpected": bad.len()}),
+    );
+    case.check(
+        "every answer is a completed card signature or a typed CapacityExceeded/NotApplied refusal",
+        bad.is_empty(),
+        bad.join("; "),
+    );
+    case.check(
+        "card signatures were produced",
+        completed > 0,
+        format!("{completed} of {}", outcomes.len()),
+    );
+    case.check(
+        "signatures from the cards verify with OpenSSL (independent)",
+        verified > 0 && !bad.iter().any(|b| b.contains("OpenSSL")),
+        format!("{verified} checked"),
+    );
 
     // stop the host: it writes its overlap statistics at the end
     let mut server = case.server.take().unwrap();
     let measured = server.stop()?;
-    case.record("token-host (service library + counting software card)", "xtask platform-token-host", &measured);
-    let overlap: std::collections::BTreeMap<String, ReaderStats> =
-        serde_json::from_slice(&std::fs::read(server.operator.parent().unwrap().join("token-overlap.json"))?)?;
+    case.record(
+        "token-host (service library + counting software card)",
+        "xtask platform-token-host",
+        &measured,
+    );
+    let overlap: std::collections::BTreeMap<String, ReaderStats> = serde_json::from_slice(
+        &std::fs::read(server.operator.parent().unwrap().join("token-overlap.json"))?,
+    )?;
     case.note("apdu_overlap_per_reader", json!(overlap));
     for reader in token_host::READERS {
         let s = overlap.get(reader).cloned().unwrap_or_default();
         case.check(
             &format!("{reader}: APDU exchanges never overlapped (max simultaneous transmit = 1)"),
             s.transmits > 0 && s.transmit_max == 1,
-            format!("{} transmits, max simultaneous {}", s.transmits, s.transmit_max),
+            format!(
+                "{} transmits, max simultaneous {}",
+                s.transmits, s.transmit_max
+            ),
         );
         case.check(
             &format!("{reader}: card transactions never overlapped (max simultaneous = 1)"),
             s.transactions > 0 && s.transaction_max == 1,
-            format!("{} transactions, max simultaneous {}", s.transactions, s.transaction_max),
+            format!(
+                "{} transactions, max simultaneous {}",
+                s.transactions, s.transaction_max
+            ),
         );
     }
     let audit = server.audit_counts()?;
@@ -601,7 +765,11 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         format!("{audit:?}, {completed} completed"),
     );
     let (bytes, files) = tree_usage(&server.scratch);
-    case.check("the host's scratch is empty afterwards", files == 0, format!("{files} files, {bytes} bytes"));
+    case.check(
+        "the host's scratch is empty afterwards",
+        files == 0,
+        format!("{files} files, {bytes} bytes"),
+    );
     Ok(())
 }
 
@@ -635,7 +803,10 @@ fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.ensure_server()?;
     let (address, token) = {
         let s = case.server.as_ref().unwrap();
-        (s.address.clone(), std::fs::read_to_string(&s.token_file)?.trim().to_owned())
+        (
+            s.address.clone(),
+            std::fs::read_to_string(&s.token_file)?.trim().to_owned(),
+        )
     };
     let reply = http_raw::send(
         &address,
@@ -652,7 +823,11 @@ fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         },
     );
     let marker = b"\"type\":\"progress\"";
-    let frames = reply.body.windows(marker.len()).filter(|w| *w == marker).count();
+    let frames = reply
+        .body
+        .windows(marker.len())
+        .filter(|w| *w == marker)
+        .count();
     let seconds = reply.elapsed.as_secs_f64();
     let limit = 11_878_268_928f64;
     let per_second = reply.body_len as f64 / seconds.max(1e-9);
@@ -673,7 +848,10 @@ fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.check(
         "the HTTP entity completed without a transport abort",
         reply.status == 200 && reply.transport_error.is_none(),
-        format!("status {}, {:?}; {} bytes received", reply.status, reply.transport_error, reply.body_len),
+        format!(
+            "status {}, {:?}; {} bytes received",
+            reply.status, reply.transport_error, reply.body_len
+        ),
     );
     if reply.body_len == reply.body.len() as u64 {
         case.check(
@@ -727,12 +905,18 @@ fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     case.ensure_server()?;
     let (address, token) = {
         let s = case.server.as_ref().unwrap();
-        (s.address.clone(), std::fs::read_to_string(&s.token_file)?.trim().to_owned())
+        (
+            s.address.clone(),
+            std::fs::read_to_string(&s.token_file)?.trim().to_owned(),
+        )
     };
     let stalled = |chunked_bytes: u64| Upload {
         path: "/v1/operations".into(),
         metadata: hash_metadata(),
-        document: Source::Pattern { byte: 0x11, len: GIB },
+        document: Source::Pattern {
+            byte: 0x11,
+            len: GIB,
+        },
         chunked: true,
         expect_continue: true,
         bytes_per_second: None,
@@ -750,14 +934,21 @@ fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         abort_after: None,
     };
     let began = Instant::now();
-    let rows = std::sync::Mutex::new(Vec::<(String, f64, u16, Option<String>, Option<String>)>::new());
+    let rows =
+        std::sync::Mutex::new(Vec::<(String, f64, u16, Option<String>, Option<String>)>::new());
     thread::scope(|s| {
         for n in 0..2 {
             let (a, t, up, rows) = (address.clone(), token.clone(), stalled(MIB), &rows);
             s.spawn(move || {
                 let r = http_raw::send(&a, &t, &up);
                 let code = r.json().and_then(|j| j["code"].as_str().map(str::to_owned));
-                rows.lock().unwrap().push((format!("stalled-{n}"), began.elapsed().as_secs_f64(), r.status, code, r.transport_error.clone()));
+                rows.lock().unwrap().push((
+                    format!("stalled-{n}"),
+                    began.elapsed().as_secs_f64(),
+                    r.status,
+                    code,
+                    r.transport_error.clone(),
+                ));
             });
         }
         thread::sleep(Duration::from_secs(2));
@@ -770,25 +961,46 @@ fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
                 let r = http_raw::send(&a, &t, &up);
                 let done = began.elapsed().as_secs_f64();
                 let code = r.json().and_then(|j| j["code"].as_str().map(str::to_owned));
-                let ok = http_raw::multipart_final(&r).is_some_and(|(f, _)| f["status"] == "completed");
-                rows.lock().unwrap().push((format!("cpu-{n} started {start:.1}s completed={ok}"), done, r.status, code, r.transport_error.clone()));
+                let ok =
+                    http_raw::multipart_final(&r).is_some_and(|(f, _)| f["status"] == "completed");
+                rows.lock().unwrap().push((
+                    format!("cpu-{n} started {start:.1}s completed={ok}"),
+                    done,
+                    r.status,
+                    code,
+                    r.transport_error.clone(),
+                ));
             });
         }
     });
     let mut rows = rows.into_inner().unwrap();
     rows.sort_by(|a, b| a.1.total_cmp(&b.1));
     for r in &rows {
-        eprintln!("[platform-proof]   slot-repro {} ended {:.1}s status {} code {:?} {:?}", r.0, r.1, r.2, r.3, r.4);
+        eprintln!(
+            "[platform-proof]   slot-repro {} ended {:.1}s status {} code {:?} {:?}",
+            r.0, r.1, r.2, r.3, r.4
+        );
     }
     case.note("timeline", json!(rows.iter().map(|r| json!({"client": r.0, "ended_s": r.1, "status": r.2, "code": r.3, "transport": r.4})).collect::<Vec<_>>()));
-    let stalled_end = rows.iter().filter(|r| r.0.starts_with("stalled")).map(|r| r.1).fold(0.0, f64::max);
+    let stalled_end = rows
+        .iter()
+        .filter(|r| r.0.starts_with("stalled"))
+        .map(|r| r.1)
+        .fold(0.0, f64::max);
     case.note("stalled_released_after_s", json!(stalled_end));
     case.check(
         "the stalled uploads were ended at about the operation deadline",
         stalled_end > 0.0 && stalled_end < (deadline_ms as f64 / 1000.0) + 15.0,
         format!("{stalled_end:.1}s for a {}s deadline", deadline_ms / 1000),
     );
-    let completed = rows.iter().filter(|r| r.0.starts_with("cpu") && r.0.contains("completed=true")).count();
-    case.check("CPU clients that arrive after the slots were freed complete", completed > 0, format!("{completed} of 8 completed"));
+    let completed = rows
+        .iter()
+        .filter(|r| r.0.starts_with("cpu") && r.0.contains("completed=true"))
+        .count();
+    case.check(
+        "CPU clients that arrive after the slots were freed complete",
+        completed > 0,
+        format!("{completed} of 8 completed"),
+    );
     Ok(())
 }

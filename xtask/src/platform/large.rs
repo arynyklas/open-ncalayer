@@ -86,7 +86,10 @@ pub fn generate_all(dir: &Path, bytes: u64, log: &mut dyn FnMut(&str)) -> anyhow
         facts: Facts::Blob(facts),
         generate_seconds: seconds,
     });
-    for (name, kind) in [("xml-archive", XmlKind::Archive), ("xml-soap", XmlKind::Soap)] {
+    for (name, kind) in [
+        ("xml-archive", XmlKind::Archive),
+        ("xml-soap", XmlKind::Soap),
+    ] {
         let path = dir.join(format!("{name}.xml"));
         log(&format!("generating {} ({bytes} bytes)", path.display()));
         let ((facts, digests), seconds) =
@@ -99,7 +102,10 @@ pub fn generate_all(dir: &Path, bytes: u64, log: &mut dyn FnMut(&str)) -> anyhow
             generate_seconds: seconds,
         });
     }
-    for (name, profile) in [("pdf-dense", PdfProfile::Dense), ("pdf-compact", PdfProfile::Compact)] {
+    for (name, profile) in [
+        ("pdf-dense", PdfProfile::Dense),
+        ("pdf-compact", PdfProfile::Compact),
+    ] {
         let path = dir.join(format!("{name}.pdf"));
         log(&format!("generating {} ({bytes} bytes)", path.display()));
         let ((facts, digests), seconds) =
@@ -116,7 +122,10 @@ pub fn generate_all(dir: &Path, bytes: u64, log: &mut dyn FnMut(&str)) -> anyhow
         document_bytes: bytes,
         sets,
     };
-    std::fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
     Ok(manifest)
 }
 
@@ -220,33 +229,168 @@ fn plan() -> Vec<Case> {
     use cases::*;
     // Longest first: with `--jobs` the pool finishes sooner.
     vec![
-        Case { id: "xades-levels", surfaces: ALL, run: xades_levels },
-        Case { id: "xml-far-reference", surfaces: ALL, run: xml_far },
-        Case { id: "xml-whole-document", surfaces: ALL, run: xml_whole },
-        Case { id: "wsse-body", surfaces: ALL, run: wsse },
-        Case { id: "xml-far-gost2015", surfaces: ALL, run: xml_gost },
-        Case { id: "xml-unknown-length", surfaces: ALL, run: xml_unknown_length },
-        Case { id: "xml-cancel", surfaces: ALL, run: xml_cancel },
-        Case { id: "xml-temp-quota", surfaces: NOT_CLI, run: xml_temp_limit },
-        Case { id: "pades-levels", surfaces: ALL, run: pades_levels },
-        Case { id: "pdf-dense-sign", surfaces: ALL, run: |e, t| pdf_case(e, t, "pdf-dense", Profile::Pdf, "pdf-dense-sign", "PDF signature of a many-object, three-revision 10 GiB document") },
-        Case { id: "pdf-compact-sign", surfaces: ALL, run: |e, t| pdf_case(e, t, "pdf-compact", Profile::Pdf, "pdf-compact-sign", "PDF signature of a large-page, three-revision 10 GiB document") },
-        Case { id: "pades-b-compact", surfaces: ALL, run: |e, t| pdf_case(e, t, "pdf-compact", Profile::Pades(exec::Level::B), "pades-b-compact", "PAdES-B signature of the large-page 10 GiB document") },
-        Case { id: "cades-levels", surfaces: ALL, run: cades_levels },
-        Case { id: "cms-detached", surfaces: ALL, run: cms_detached },
-        Case { id: "cms-attached", surfaces: ALL, run: cms_attached },
-        Case { id: "cms-gost2015", surfaces: ALL, run: cms_gost },
-        Case { id: "cms-sign-limit-plus-one", surfaces: ALL, run: cms_limit },
-        Case { id: "cms-attached-output-limit", surfaces: &[Target::Sdk, Target::Cli], run: cms_output_limit },
-        Case { id: "hash-u64-boundaries", surfaces: ALL, run: hash_boundaries },
-        Case { id: "hash-limit-plus-one", surfaces: ALL, run: hash_limit },
-        Case { id: "hash-sha256-blob", surfaces: ALL, run: hash_basic },
-        Case { id: "hash-streebog512-blob", surfaces: ALL, run: hash_gost },
-        Case { id: "hash-unknown-length", surfaces: ALL, run: hash_unknown_length },
-        Case { id: "overload-profile", surfaces: &[Target::Http], run: overload::run },
-        Case { id: "overload-token-apdu", surfaces: &[Target::Http], run: overload::run_token },
-        Case { id: "overload-slot-release", surfaces: &[Target::Http], run: overload::run_slot_repro },
-        Case { id: "http-progress-frame-rate", surfaces: &[Target::Http], run: overload::run_progress_rate },
+        Case {
+            id: "xades-levels",
+            surfaces: ALL,
+            run: xades_levels,
+        },
+        Case {
+            id: "xml-far-reference",
+            surfaces: ALL,
+            run: xml_far,
+        },
+        Case {
+            id: "xml-whole-document",
+            surfaces: ALL,
+            run: xml_whole,
+        },
+        Case {
+            id: "wsse-body",
+            surfaces: ALL,
+            run: wsse,
+        },
+        Case {
+            id: "xml-far-gost2015",
+            surfaces: ALL,
+            run: xml_gost,
+        },
+        Case {
+            id: "xml-unknown-length",
+            surfaces: ALL,
+            run: xml_unknown_length,
+        },
+        Case {
+            id: "xml-cancel",
+            surfaces: ALL,
+            run: xml_cancel,
+        },
+        Case {
+            id: "xml-temp-quota",
+            surfaces: NOT_CLI,
+            run: xml_temp_limit,
+        },
+        Case {
+            id: "pades-levels",
+            surfaces: ALL,
+            run: pades_levels,
+        },
+        Case {
+            id: "pdf-dense-sign",
+            surfaces: ALL,
+            run: |e, t| {
+                pdf_case(
+                    e,
+                    t,
+                    "pdf-dense",
+                    Profile::Pdf,
+                    "pdf-dense-sign",
+                    "PDF signature of a many-object, three-revision 10 GiB document",
+                )
+            },
+        },
+        Case {
+            id: "pdf-compact-sign",
+            surfaces: ALL,
+            run: |e, t| {
+                pdf_case(
+                    e,
+                    t,
+                    "pdf-compact",
+                    Profile::Pdf,
+                    "pdf-compact-sign",
+                    "PDF signature of a large-page, three-revision 10 GiB document",
+                )
+            },
+        },
+        Case {
+            id: "pades-b-compact",
+            surfaces: ALL,
+            run: |e, t| {
+                pdf_case(
+                    e,
+                    t,
+                    "pdf-compact",
+                    Profile::Pades(exec::Level::B),
+                    "pades-b-compact",
+                    "PAdES-B signature of the large-page 10 GiB document",
+                )
+            },
+        },
+        Case {
+            id: "cades-levels",
+            surfaces: ALL,
+            run: cades_levels,
+        },
+        Case {
+            id: "cms-detached",
+            surfaces: ALL,
+            run: cms_detached,
+        },
+        Case {
+            id: "cms-attached",
+            surfaces: ALL,
+            run: cms_attached,
+        },
+        Case {
+            id: "cms-gost2015",
+            surfaces: ALL,
+            run: cms_gost,
+        },
+        Case {
+            id: "cms-sign-limit-plus-one",
+            surfaces: ALL,
+            run: cms_limit,
+        },
+        Case {
+            id: "cms-attached-output-limit",
+            surfaces: &[Target::Sdk, Target::Cli],
+            run: cms_output_limit,
+        },
+        Case {
+            id: "hash-u64-boundaries",
+            surfaces: ALL,
+            run: hash_boundaries,
+        },
+        Case {
+            id: "hash-limit-plus-one",
+            surfaces: ALL,
+            run: hash_limit,
+        },
+        Case {
+            id: "hash-sha256-blob",
+            surfaces: ALL,
+            run: hash_basic,
+        },
+        Case {
+            id: "hash-streebog512-blob",
+            surfaces: ALL,
+            run: hash_gost,
+        },
+        Case {
+            id: "hash-unknown-length",
+            surfaces: ALL,
+            run: hash_unknown_length,
+        },
+        Case {
+            id: "overload-profile",
+            surfaces: &[Target::Http],
+            run: overload::run,
+        },
+        Case {
+            id: "overload-token-apdu",
+            surfaces: &[Target::Http],
+            run: overload::run_token,
+        },
+        Case {
+            id: "overload-slot-release",
+            surfaces: &[Target::Http],
+            run: overload::run_slot_repro,
+        },
+        Case {
+            id: "http-progress-frame-rate",
+            surfaces: &[Target::Http],
+            run: overload::run_progress_rate,
+        },
     ]
 }
 
@@ -277,10 +421,14 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
     let mut log = |line: &str| logf(line);
 
     // ---- the stand: drives, scratch preflight ---------------------------------------
-    let scratch_root = args.scratch_dir.clone().map_or_else(|| out.join("scratch"), |p| std::path::absolute(&p).unwrap_or(p));
+    let scratch_root = args.scratch_dir.clone().map_or_else(
+        || out.join("scratch"),
+        |p| std::path::absolute(&p).unwrap_or(p),
+    );
     std::fs::create_dir_all(&scratch_root)?;
     let data_needed = args.document_bytes.saturating_mul(7);
-    let out_storage = measure::preflight_storage(&out, args.scratch_bytes.saturating_add(data_needed))?;
+    let out_storage =
+        measure::preflight_storage(&out, args.scratch_bytes.saturating_add(data_needed))?;
     let scratch_storage = measure::preflight_storage(&scratch_root, args.scratch_bytes)?;
     let machine = measure::machine(&out_storage);
     log(&format!(
@@ -299,16 +447,26 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
     // ---- the independent reference generator is checked first -------------------------
     let python = python(&args)?;
     let tools = std::env::var_os("ONCL_PY_TOOLS").map(PathBuf::from);
-    let reference = validate_reference(&python, tools.as_deref(), &out.join("reference"), &mut log)?;
-    std::fs::write(out.join("reference-validation.json"), serde_json::to_vec_pretty(&reference)?)?;
+    let reference =
+        validate_reference(&python, tools.as_deref(), &out.join("reference"), &mut log)?;
+    std::fs::write(
+        out.join("reference-validation.json"),
+        serde_json::to_vec_pretty(&reference)?,
+    )?;
 
     // ---- data -------------------------------------------------------------------------
     let data_dir = out.join("data");
-    let manifest = match (args.reuse_data, std::fs::read(data_dir.join("manifest.json"))) {
+    let manifest = match (
+        args.reuse_data,
+        std::fs::read(data_dir.join("manifest.json")),
+    ) {
         (true, Ok(bytes)) => {
             let m: Manifest = serde_json::from_slice(&bytes)?;
             if m.document_bytes != args.document_bytes || m.sets.iter().any(|s| !s.path.is_file()) {
-                bail!("--reuse-data: the data of {} does not match --document-bytes", data_dir.display());
+                bail!(
+                    "--reuse-data: the data of {} does not match --document-bytes",
+                    data_dir.display()
+                );
             }
             m
         }
@@ -329,7 +487,6 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
     let env = Env {
         args: args.clone(),
         root,
-        out: out.clone(),
         data_dir,
         work_dir,
         scratch_root,
@@ -354,8 +511,17 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
         .iter()
         .map(|s| json!({"name": s.name, "bytes": s.digests.len, "sha256": s.digests.sha256, "sha512": s.digests.sha512, "generate_seconds": s.generate_seconds, "facts": s.facts}))
         .collect();
-    let toolchain = Command::new("rustc").arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
-    let revision = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&env.root).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+    let toolchain = Command::new("rustc")
+        .arg("-V")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    let revision = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&env.root)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
 
     let results: Vec<Value> = if args.resume {
         std::fs::read(out.join("report.json"))
@@ -408,9 +574,16 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
                     };
                     let same = |r: &Value| r["surface"] == target.name() && r["id"] == case.id;
                     if args.resume
-                        && shared.lock().unwrap().0.iter().any(|r| same(r) && matches!(r["status"].as_str(), Some("PASS" | "FAIL" | "BLOCKED")))
+                        && shared.lock().unwrap().0.iter().any(|r| {
+                            same(r)
+                                && matches!(r["status"].as_str(), Some("PASS" | "FAIL" | "BLOCKED"))
+                        })
                     {
-                        logf(&format!("=== {} / {}: terminal result in the previous run, kept", target.name(), case.id));
+                        logf(&format!(
+                            "=== {} / {}: terminal result in the previous run, kept",
+                            target.name(),
+                            case.id
+                        ));
                         continue;
                     }
                     logf(&format!("=== {} / {}", target.name(), case.id));
@@ -474,7 +647,10 @@ pub fn run(args: ProofArgs) -> anyhow::Result<()> {
     });
     report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
     write_report(&out, &report)?;
-    log(&format!("{status}: {passed} passed, {failed} failed, {blocked} blocked; report {}", out.join("report.json").display()));
+    log(&format!(
+        "{status}: {passed} passed, {failed} failed, {blocked} blocked; report {}",
+        out.join("report.json").display()
+    ));
     if !args.keep_data {
         let _ = std::fs::remove_dir_all(env.work_dir.join("shared"));
     }

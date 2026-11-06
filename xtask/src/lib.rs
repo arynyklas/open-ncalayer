@@ -12,9 +12,9 @@ pub mod interop;
 pub mod licenses;
 pub mod ncanode;
 pub mod package;
+pub mod platform;
 #[path = "platform/interop.rs"]
 pub mod platform_interop;
-pub mod platform;
 pub mod plugin;
 pub mod privacy;
 pub mod registry;

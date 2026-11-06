@@ -45,7 +45,12 @@ pub struct Stats {
 
 impl Stats {
     fn with(&self, reader: &str, f: impl FnOnce(&mut ReaderStats)) {
-        f(self.readers.lock().unwrap().entry(reader.to_owned()).or_default());
+        f(self
+            .readers
+            .lock()
+            .unwrap()
+            .entry(reader.to_owned())
+            .or_default());
     }
 
     pub fn snapshot(&self) -> BTreeMap<String, ReaderStats> {
@@ -139,7 +144,14 @@ pub fn emulator(pki_dir: &Path, password: &str) -> anyhow::Result<(Arc<EmulatorB
             .remove(0);
         alias = entry.alias.clone();
         emu.add_reader(reader);
-        emu.insert(reader, card(CardSpec::new(TokenKind::Kaztoken, PIN, vec![EmuKey { entry }])));
+        emu.insert(
+            reader,
+            card(CardSpec::new(
+                TokenKind::Kaztoken,
+                PIN,
+                vec![EmuKey { entry }],
+            )),
+        );
     }
     Ok((emu, alias))
 }
@@ -159,8 +171,12 @@ pub struct TokenHostArgs {
 
 /// Runs the host until a newline arrives on stdin, like `oncl-server serve --shutdown-stdin`.
 pub fn run(args: TokenHostArgs) -> anyhow::Result<()> {
-    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(args.pki.join("pki.json"))?)?;
-    let password = meta["password"].as_str().context("pki.json password")?.to_owned();
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(args.pki.join("pki.json"))?)?;
+    let password = meta["password"]
+        .as_str()
+        .context("pki.json password")?
+        .to_owned();
     let (emu, alias) = emulator(&args.pki, &password)?;
     println!("alias={alias}");
     let stats = Arc::new(Stats::default());
@@ -171,7 +187,9 @@ pub fn run(args: TokenHostArgs) -> anyhow::Result<()> {
     let mut config = oncl_server::config::ServerConfig::read(&args.config)
         .map_err(|e| anyhow::anyhow!("reading the configuration: {e}"))?;
     config.enabled = true;
-    config.validate().map_err(|e| anyhow::anyhow!("configuration: {e}"))?;
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("configuration: {e}"))?;
     let tls = oncl_server::service::tls_configuration(&config)?;
     let host = oncl_server::service::ServiceHost::with_token_backend(config.clone(), backend)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -200,7 +218,9 @@ pub fn run(args: TokenHostArgs) -> anyhow::Result<()> {
         })
         .await
     })?;
-    control.join().map_err(|_| anyhow::anyhow!("control thread"))?;
+    control
+        .join()
+        .map_err(|_| anyhow::anyhow!("control thread"))?;
     std::fs::write(&args.report, serde_json::to_vec_pretty(&stats.snapshot())?)?;
     println!("stopped: owned listener and workers released");
     if stats.snapshot().is_empty() {

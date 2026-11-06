@@ -61,13 +61,35 @@ pub struct XmlFacts {
 }
 
 const KK: &[&str] = &[
-    "Құжат", "Жазба", "Төлем", "Шот-фактура", "Қазақстан", "Алматы", "Астана", "Қызмет",
-    "Тапсырыс", "Келісімшарт", "Есеп", "Қолхат",
+    "Құжат",
+    "Жазба",
+    "Төлем",
+    "Шот-фактура",
+    "Қазақстан",
+    "Алматы",
+    "Астана",
+    "Қызмет",
+    "Тапсырыс",
+    "Келісімшарт",
+    "Есеп",
+    "Қолхат",
 ];
 const RU: &[&str] = &["Договор", "Счёт", "Платёж", "Накладная", "Акт", "Приказ"];
 const EN: &[&str] = &["Invoice", "Order", "Receipt", "Statement", "Ledger"];
 const SPECIAL: &[&str] = &[
-    "&", "<", ">", "\"", "'", "№", "€", "😀", "\t", "a&b<c>d", "\u{4B0}\u{4B1}", "]]", "]>",
+    "&",
+    "<",
+    ">",
+    "\"",
+    "'",
+    "№",
+    "€",
+    "😀",
+    "\t",
+    "a&b<c>d",
+    "\u{4B0}\u{4B1}",
+    "]]",
+    "]>",
 ];
 const KINDS: &[&str] = &["invoice", "акт", "order", "шот", "note"];
 
@@ -199,7 +221,7 @@ pub fn item(i: u64, rng: &mut Rng, raw: &mut Vec<u8>, canon: &mut Vec<u8>, pi: b
     let kind = KINDS[(i % KINDS.len() as u64) as usize];
     let title = phrase(rng, 3 + i % 4, true);
     let mut note = phrase(rng, 6 + i % 9, true);
-    if i % 97 == 0 {
+    if i.is_multiple_of(97) {
         note.push_str("\r\n line two\ttabbed");
     }
     let target = format!("T{}-{}", i % 10007, rng.below(1_000_000));
@@ -207,7 +229,11 @@ pub fn item(i: u64, rng: &mut Rng, raw: &mut Vec<u8>, canon: &mut Vec<u8>, pi: b
     let mut blob_bytes = [0u8; 48];
     rng.fill(&mut blob_bytes);
     let blob = base64::engine::general_purpose::STANDARD.encode(blob_bytes);
-    let (q1, q2) = if i % 2 == 0 { (b'\'', b'"') } else { (b'"', b'\'') };
+    let (q1, q2) = if i.is_multiple_of(2) {
+        (b'\'', b'"')
+    } else {
+        (b'"', b'\'')
+    };
 
     // --- raw ---
     raw.extend_from_slice(b"\n    <rec:item  seq = ");
@@ -232,7 +258,10 @@ pub fn item(i: u64, rng: &mut Rng, raw: &mut Vec<u8>, canon: &mut Vec<u8>, pi: b
     raw_text(&note, mode + 1, raw);
     raw.extend_from_slice(b"</rec:note>\n      <rec:amount cur=");
     raw_attr("KZT", q1, 0, raw);
-    let _ = write!(raw, ">{amount}</rec:amount>\n      <rec:blob>{blob}</rec:blob>");
+    let _ = write!(
+        raw,
+        ">{amount}</rec:amount>\n      <rec:blob>{blob}</rec:blob>"
+    );
     raw.extend_from_slice(b"\n      <rec:lines>");
     let line_count = 1 + i % 4;
     // --- canonical ---
@@ -257,7 +286,7 @@ pub fn item(i: u64, rng: &mut Rng, raw: &mut Vec<u8>, canon: &mut Vec<u8>, pi: b
     for n in 0..line_count {
         let sku = format!("SKU-{:05}", rng.below(100_000));
         let qty = rng.below(1000);
-        if n == line_count - 1 && i % 3 == 0 {
+        if n == line_count - 1 && i.is_multiple_of(3) {
             // self-closing in raw, start/end pair in canonical
             let _ = write!(raw, "<rec:line n='{n}' sku=\"{sku}\"/>");
             let _ = write!(canon, "<rec:line n=\"{n}\" sku=\"{sku}\"></rec:line>");
@@ -394,21 +423,29 @@ pub fn generate(
     let mut next = 0u64;
     let mut far_tamper: Tamper = None;
     let mut uncovered_tamper: Tamper = None;
-    let far_target;
+    let far_target = match kind {
+        XmlKind::Archive => "section-2",
+        XmlKind::Soap => "body-1",
+    }
+    .to_owned();
     let root_close;
     let prefix_at_close;
-    let suffix;
     let tail_reserve = 2048 + RECORD_BYTES_MAX;
+    let suffix = match kind {
+        XmlKind::Archive => "</ex:archive>\n",
+        XmlKind::Soap => "</soap:Envelope>\n",
+    }
+    .to_owned();
     em.file
         .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
     match kind {
         XmlKind::Archive => {
-            far_target = "section-2".to_owned();
             let root_raw = format!(
                 "<ex:archive xmlns:ex='{NS_EX}' xmlns:rec=\"{NS_REC}\" xmlns:unused='{NS_UNUSED}' Id=\"archive\" generated='2026-11-04' >"
             );
-            let root_canon =
-                format!("<ex:archive xmlns:ex=\"{NS_EX}\" Id=\"archive\" generated=\"2026-11-04\">");
+            let root_canon = format!(
+                "<ex:archive xmlns:ex=\"{NS_EX}\" Id=\"archive\" generated=\"2026-11-04\">"
+            );
             em.put(root_raw.as_bytes(), root_canon.as_bytes())?;
             em.put(b"\n  ", b"\n  ")?;
             let header_alone = format!("<ex:header xmlns:ex=\"{NS_EX}\" Id=\"header\">");
@@ -434,7 +471,14 @@ pub fn generate(
                 em.open(id, raw.as_bytes(), in_doc.as_bytes(), alone.as_bytes())?;
                 let watch = Some(em.file.position() + 1024);
                 match index {
-                    0 => records(&mut em, &mut rng, &mut next, *until, watch, &mut uncovered_tamper)?,
+                    0 => records(
+                        &mut em,
+                        &mut rng,
+                        &mut next,
+                        *until,
+                        watch,
+                        &mut uncovered_tamper,
+                    )?,
                     2 => records(&mut em, &mut rng, &mut next, *until, watch, &mut far_tamper)?,
                     _ => records(&mut em, &mut rng, &mut next, *until, None, &mut None)?,
                 }
@@ -462,10 +506,8 @@ pub fn generate(
             prefix_at_close = em.file.prefix_sha256();
             em.file.write_all(root_tail.as_bytes())?;
             em.whole.update(b"</ex:archive>");
-            suffix = root_tail.to_owned();
         }
         XmlKind::Soap => {
-            far_target = "body-1".to_owned();
             let root_raw = format!(
                 "<soap:Envelope xmlns:soap='{NS_SOAP}' xmlns:wsu=\"{NS_WSU}\" xmlns:rec='{NS_REC}' xmlns:unused=\"{NS_UNUSED}\">"
             );
@@ -485,7 +527,14 @@ pub fn generate(
             )?;
             let ledger_until = (total as f64 * 0.45) as u64;
             let watch = Some(em.file.position() + 1024);
-            records(&mut em, &mut rng, &mut next, ledger_until, watch, &mut uncovered_tamper)?;
+            records(
+                &mut em,
+                &mut rng,
+                &mut next,
+                ledger_until,
+                watch,
+                &mut uncovered_tamper,
+            )?;
             em.close(b"\n    </ex:ledger>")?;
             em.put(b"\n  </soap:Header>\n  ", b"\n  </soap:Header>\n  ")?;
             let body_in_doc = format!("<soap:Body xmlns:wsu=\"{NS_WSU}\" wsu:Id=\"body-1\">");
@@ -527,7 +576,6 @@ pub fn generate(
             prefix_at_close = em.file.prefix_sha256();
             em.file.write_all(root_tail.as_bytes())?;
             em.whole.update(b"</soap:Envelope>");
-            suffix = root_tail.to_owned();
         }
     }
     let (whole_sha, whole_len) = std::mem::take(&mut em.whole).finish();

@@ -123,7 +123,7 @@ struct Writer<'f> {
 impl Writer<'_> {
     fn begin_obj(&mut self, num: u64) -> std::io::Result<u64> {
         let at = self.file.position();
-        write!(self.file, "{num} 0 obj\n")?;
+        writeln!(self.file, "{num} 0 obj")?;
         Ok(at)
     }
 
@@ -135,11 +135,7 @@ impl Writer<'_> {
 
     fn stream(&mut self, num: u64, dict: &str, data: &[u8]) -> std::io::Result<u64> {
         let at = self.begin_obj(num)?;
-        write!(
-            self.file,
-            "<< {dict} /Length {} >>\nstream\n",
-            data.len()
-        )?;
+        write!(self.file, "<< {dict} /Length {} >>\nstream\n", data.len())?;
         self.file.write_all(data)?;
         self.file.write_all(b"\nendstream\nendobj\n")?;
         Ok(at)
@@ -285,7 +281,8 @@ pub fn generate(
         let last = ((g + 1) * GROUP).min(plan.p1);
         let kids: Vec<u64> = (first..last).map(|k| page_base + 3 * k).collect();
         let parent = l1_base + g / GROUP;
-        r1[(l2_base + g) as usize] = w.object(l2_base + g, &pages_node(parent, &kids, last - first))?;
+        r1[(l2_base + g) as usize] =
+            w.object(l2_base + g, &pages_node(parent, &kids, last - first))?;
     }
     for k in 0..plan.p1 {
         let num = page_base + 3 * k;
@@ -294,7 +291,11 @@ pub fn generate(
         rng.fill(&mut image);
         let parent = l2_base + k / GROUP;
         r1[num as usize] = w.object(num, &page_dict(parent, num + 1, num + 2))?;
-        r1[num as usize + 1] = w.stream(num + 1, "", &content_stream(&text, &line2, plan.image_w, plan.image_h))?;
+        r1[num as usize + 1] = w.stream(
+            num + 1,
+            "",
+            &content_stream(&text, &line2, plan.image_w, plan.image_h),
+        )?;
         r1[num as usize + 2] = w.stream(
             num + 2,
             &format!(
@@ -308,9 +309,11 @@ pub fn generate(
         }
     }
     let xref1 = w.file.position();
-    w.file.write_all(format!("xref\n0 {n1}\n0000000000 65535 f \n").as_bytes())?;
+    w.file
+        .write_all(format!("xref\n0 {n1}\n0000000000 65535 f \n").as_bytes())?;
     for offset in &r1[1..] {
-        w.file.write_all(format!("{offset:010} 00000 n \n").as_bytes())?;
+        w.file
+            .write_all(format!("{offset:010} 00000 n \n").as_bytes())?;
     }
     w.file.write_all(
         format!(
@@ -367,7 +370,11 @@ pub fn generate(
         rng.fill(&mut image);
         let parent = l2_base2 + k / GROUP;
         packed.push((num, page_dict(parent, num + 1, num + 2)));
-        let at = w.stream(num + 1, "", &content_stream(&text, &line2, plan.image_w, plan.image_h))?;
+        let at = w.stream(
+            num + 1,
+            "",
+            &content_stream(&text, &line2, plan.image_w, plan.image_h),
+        )?;
         entries.push((num + 1, Entry::Plain(at)));
         let at = w.stream(
             num + 2,
@@ -383,21 +390,28 @@ pub fn generate(
         }
     }
     packed.sort_by_key(|(num, _)| *num);
-    let mut stream_number = stm_base2;
-    let mut written_streams = 0u64;
-    for chunk in packed.chunks(OBJSTM_MAX) {
+    let written_streams = packed.chunks(OBJSTM_MAX).count() as u64;
+    for (written, chunk) in packed.chunks(OBJSTM_MAX).enumerate() {
+        let stream_number = stm_base2 + written as u64;
         let (data, first) = object_stream(chunk);
         let at = w.stream(
             stream_number,
-            &format!("/Type /ObjStm /N {} /First {first} /Filter /FlateDecode", chunk.len()),
+            &format!(
+                "/Type /ObjStm /N {} /First {first} /Filter /FlateDecode",
+                chunk.len()
+            ),
             &data,
         )?;
         entries.push((stream_number, Entry::Plain(at)));
         for (index, (num, _)) in chunk.iter().enumerate() {
-            entries.push((*num, Entry::Packed { stream: stream_number, index: index as u16 }));
+            entries.push((
+                *num,
+                Entry::Packed {
+                    stream: stream_number,
+                    index: index as u16,
+                },
+            ));
         }
-        stream_number += 1;
-        written_streams += 1;
     }
     let xref2 = w.file.position();
     entries.push((xref_obj2, Entry::Plain(xref2)));
@@ -411,7 +425,8 @@ pub fn generate(
         ),
         &data,
     )?;
-    w.file.write_all(format!("startxref\n{xref2}\n%%EOF\n").as_bytes())?;
+    w.file
+        .write_all(format!("startxref\n{xref2}\n%%EOF\n").as_bytes())?;
     revisions.push(RevisionFacts {
         kind: "xref-stream".into(),
         start: r2_start,
@@ -436,7 +451,11 @@ pub fn generate(
         "<< /Type /Filespec /F (proof-payload.bin) /UF (proof-payload.bin) /AFRelationship /Data /EF << /F {embedded} 0 R /UF {embedded} 0 R >> >>"
     );
     // The embedded file is sized last, from the exact length of everything around it.
-    let head = |len: u64| format!("{embedded} 0 obj\n<< /Type /EmbeddedFile /Subtype /application#2Foctet-stream /Params << /Size {len} >> /Length {len} >>\nstream\n");
+    let head = |len: u64| {
+        format!(
+            "{embedded} 0 obj\n<< /Type /EmbeddedFile /Subtype /application#2Foctet-stream /Params << /Size {len} >> /Length {len} >>\nstream\n"
+        )
+    };
     let stream_tail = b"\nendstream\nendobj\n";
     let mut payload_len = 1u64 << 20;
     let tail_for = |payload_len: u64, at: u64| -> std::io::Result<(Vec<u8>, u64)> {
@@ -455,7 +474,13 @@ pub fn generate(
         out.extend_from_slice(b"\nendstream\nendobj\n");
         let xref_at = base + out.len() as u64;
         let entries3 = [
-            (1, Entry::Packed { stream: stm3, index: 0 }),
+            (
+                1,
+                Entry::Packed {
+                    stream: stm3,
+                    index: 0,
+                },
+            ),
             (embedded, Entry::Plain(embedded_at)),
             (filespec, Entry::Plain(filespec_at)),
             (stm3, Entry::Plain(stm_at)),
@@ -477,7 +502,11 @@ pub fn generate(
     let mut stable = false;
     for _ in 0..8 {
         let (tail, _) = tail_for(payload_len, at)?;
-        let used = at + head(payload_len).len() as u64 + payload_len + stream_tail.len() as u64 + tail.len() as u64;
+        let used = at
+            + head(payload_len).len() as u64
+            + payload_len
+            + stream_tail.len() as u64
+            + tail.len() as u64;
         if used == total {
             stable = true;
             break;
@@ -508,7 +537,6 @@ pub fn generate(
         objects_after: n3,
         object_streams: 1,
     });
-    drop(w);
     let digests = file.finish()?;
     assert_eq!(digests.len, total, "the proof PDF must have the exact size");
     Ok((

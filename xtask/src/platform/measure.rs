@@ -76,7 +76,10 @@ pub enum Feed {
     /// The file's bytes in 1 MiB writes, with no length ever declared (unknown-length input).
     File(PathBuf),
     /// `n` bytes of a repeating pattern (limit+1 probes, no file needed).
-    Pattern { byte: u8, len: u64 },
+    Pattern {
+        byte: u8,
+        len: u64,
+    },
 }
 
 pub struct RunOptions {
@@ -138,7 +141,12 @@ impl Watcher {
         let stop = Arc::new(AtomicBool::new(false));
         let peak_bytes = Arc::new(AtomicU64::new(0));
         let peak_files = Arc::new(AtomicU64::new(0));
-        let (s, b, f, r) = (stop.clone(), peak_bytes.clone(), peak_files.clone(), root.clone());
+        let (s, b, f, r) = (
+            stop.clone(),
+            peak_bytes.clone(),
+            peak_files.clone(),
+            root.clone(),
+        );
         let join = thread::spawn(move || {
             while !s.load(Ordering::Relaxed) {
                 let (bytes, files) = tree_usage(&r);
@@ -300,11 +308,7 @@ impl Running {
     pub fn wait_for_line(&mut self, prefix: &str, timeout: Duration) -> anyhow::Result<String> {
         let until = Instant::now() + timeout;
         loop {
-            if let Some(line) = self
-                .stdout_so_far()
-                .lines()
-                .find(|l| l.starts_with(prefix))
-            {
+            if let Some(line) = self.stdout_so_far().lines().find(|l| l.starts_with(prefix)) {
                 return Ok(line.to_owned());
             }
             if let Some(status) = self.child.try_wait()? {
@@ -450,7 +454,10 @@ mod os {
                 if ok == 0 {
                     return (0, 0);
                 }
-                (info.PeakProcessMemoryUsed as u64, info.PeakJobMemoryUsed as u64)
+                (
+                    info.PeakProcessMemoryUsed as u64,
+                    info.PeakJobMemoryUsed as u64,
+                )
             }
         }
     }
@@ -645,7 +652,7 @@ pub fn preflight_storage(dir: &Path, needed: u64) -> anyhow::Result<Storage> {
 pub fn storage_of(dir: &Path) -> anyhow::Result<Storage> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumePathNameW, GetVolumeInformationW,
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
     };
     let absolute = std::path::absolute(dir)?;
     let wide: Vec<u16> = absolute.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -747,8 +754,14 @@ fn physical_memory() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|t| {
-            t.lines()
-                .find_map(|l| l.strip_prefix("MemTotal:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok())
+            t.lines().find_map(|l| {
+                l.strip_prefix("MemTotal:")?
+                    .trim()
+                    .strip_suffix("kB")?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
         })
         .map_or(0, |kb| kb * 1024)
 }

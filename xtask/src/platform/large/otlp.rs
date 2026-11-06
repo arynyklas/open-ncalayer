@@ -41,10 +41,10 @@ fn varint(b: &[u8], i: &mut usize) -> Option<u64> {
 
 #[derive(Debug)]
 enum Field<'a> {
-    Varint(u64),
+    Varint,
     Fixed64(u64),
     Len(&'a [u8]),
-    Fixed32(u32),
+    Fixed32,
 }
 
 fn fields(b: &[u8]) -> Option<Vec<(u32, Field<'_>)>> {
@@ -56,7 +56,10 @@ fn fields(b: &[u8]) -> Option<Vec<(u32, Field<'_>)>> {
         out.push((
             number,
             match key & 7 {
-                0 => Field::Varint(varint(b, &mut i)?),
+                0 => {
+                    varint(b, &mut i)?;
+                    Field::Varint
+                }
                 1 => {
                     let v = u64::from_le_bytes(b.get(i..i + 8)?.try_into().ok()?);
                     i += 8;
@@ -69,9 +72,9 @@ fn fields(b: &[u8]) -> Option<Vec<(u32, Field<'_>)>> {
                     Field::Len(data)
                 }
                 5 => {
-                    let v = u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?);
+                    b.get(i..i + 4)?;
                     i += 4;
-                    Field::Fixed32(v)
+                    Field::Fixed32
                 }
                 _ => return None,
             },
@@ -88,7 +91,9 @@ pub fn decode_metrics(body: &[u8]) -> Option<Vec<(String, f64)>> {
         if n != 1 {
             continue;
         }
-        let Field::Len(resource) = resource else { continue };
+        let Field::Len(resource) = resource else {
+            continue;
+        };
         for (n, scope) in fields(resource)? {
             if n != 2 {
                 continue;
@@ -112,8 +117,12 @@ pub fn decode_metrics(body: &[u8]) -> Option<Vec<(String, f64)>> {
                                 let Field::Len(dp) = dp else { continue };
                                 for (n, v) in fields(dp)? {
                                     match (n, v) {
-                                        (4, Field::Fixed64(bits)) => points.push(f64::from_bits(bits)),
-                                        (6, Field::Fixed64(bits)) => points.push(bits as i64 as f64),
+                                        (4, Field::Fixed64(bits)) => {
+                                            points.push(f64::from_bits(bits))
+                                        }
+                                        (6, Field::Fixed64(bits)) => {
+                                            points.push(bits as i64 as f64)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -233,7 +242,11 @@ impl Collector {
     }
 
     pub fn last(&self, name: &str) -> Option<f64> {
-        self.samples().iter().rev().find(|s| s.name == name).map(|s| s.value)
+        self.samples()
+            .iter()
+            .rev()
+            .find(|s| s.name == name)
+            .map(|s| s.value)
     }
 }
 
@@ -269,7 +282,12 @@ fn handle(
     let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
     let length = head
         .lines()
-        .find_map(|l| l.strip_prefix("content-length:")?.trim().parse::<usize>().ok())
+        .find_map(|l| {
+            l.strip_prefix("content-length:")?
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
         .unwrap_or(0);
     while buf.len() < end + length {
         let n = conn.read(&mut chunk)?;
@@ -278,8 +296,20 @@ fn handle(
         }
         buf.extend_from_slice(&chunk[..n]);
     }
-    for token in ["output_limit", "input_limit", "metadata_limit", "memory_limit", "temp_limit", "deadline_exceeded", "capacity_exceeded", "cancelled"] {
-        if buf[end..].windows(token.len()).any(|bytes| bytes == token.as_bytes()) {
+    for token in [
+        "output_limit",
+        "input_limit",
+        "metadata_limit",
+        "memory_limit",
+        "temp_limit",
+        "deadline_exceeded",
+        "capacity_exceeded",
+        "cancelled",
+    ] {
+        if buf[end..]
+            .windows(token.len())
+            .any(|bytes| bytes == token.as_bytes())
+        {
             error_tokens.lock().unwrap().insert(token.to_owned());
         }
     }

@@ -300,7 +300,11 @@ impl<'e> Case<'e> {
             if ok { "ok  " } else { "FAIL" },
             self.target.name(),
             self.id,
-            if detail.is_empty() { String::new() } else { format!(" ({detail})") }
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({detail})")
+            }
         );
         self.checks.push(Check {
             name: name.to_owned(),
@@ -347,7 +351,11 @@ impl<'e> Case<'e> {
     /// Fails the case unless the scratch holds no file (cleanup after the operation).
     pub fn check_scratch_clean(&mut self, label: &str) {
         let (bytes, files) = crate::platform::measure::tree_usage(&self.scratch);
-        self.check(label, files == 0, format!("{files} files, {bytes} bytes left in the scratch"));
+        self.check(
+            label,
+            files == 0,
+            format!("{files} files, {bytes} bytes left in the scratch"),
+        );
     }
 
     pub fn finish(mut self) -> CaseResult {
@@ -390,7 +398,12 @@ impl<'e> Case<'e> {
             );
         }
         let max_rss = self.env.args.max_rss_bytes;
-        let max = self.procs.iter().map(|p| p.criterion_bytes).max().unwrap_or(0);
+        let max = self
+            .procs
+            .iter()
+            .map(|p| p.criterion_bytes)
+            .max()
+            .unwrap_or(0);
         let over: Vec<_> = self
             .procs
             .iter()
@@ -468,18 +481,23 @@ impl<'e> Case<'e> {
             },
         };
         let watch = Some(self.scratch.clone());
-        let interrupt_when: Option<Box<dyn FnMut() -> bool + Send>> = match (&spec.cancel, self.target) {
-            (Cancel::WhenScratchBytes(bytes), Target::Cli | Target::Http) => {
-                let dir = self.scratch.clone();
-                let bytes = *bytes;
-                Some(Box::new(move || crate::platform::measure::tree_usage(&dir).0 >= bytes))
-            }
-            _ => None,
-        };
+        let interrupt_when: Option<Box<dyn FnMut() -> bool + Send>> =
+            match (&spec.cancel, self.target) {
+                (Cancel::WhenScratchBytes(bytes), Target::Cli | Target::Http) => {
+                    let dir = self.scratch.clone();
+                    let bytes = *bytes;
+                    Some(Box::new(move || {
+                        crate::platform::measure::tree_usage(&dir).0 >= bytes
+                    }))
+                }
+                _ => None,
+            };
         let measured = Running::spawn(
             command,
             RunOptions {
-                timeout: Duration::from_secs(spec.timeout_seconds.unwrap_or(env.timeout_seconds) + 600),
+                timeout: Duration::from_secs(
+                    spec.timeout_seconds.unwrap_or(env.timeout_seconds) + 600,
+                ),
                 feed,
                 watch,
                 interrupt_when,
@@ -535,7 +553,10 @@ fn sdk_command(env: &Env, spec: &Spec, scratch: &Path) -> (Command, String, Stri
         }
     }
     if let Op::Hash(alg) = &spec.op {
-        c.args(["--algorithm", if *alg == "gost" { "streebog512" } else { alg }]);
+        c.args([
+            "--algorithm",
+            if *alg == "gost" { "streebog512" } else { alg },
+        ]);
     }
     if let Some(l) = level_flag(spec) {
         c.args(["--level", l]);
@@ -570,8 +591,17 @@ fn sdk_command(env: &Env, spec: &Spec, scratch: &Path) -> (Command, String, Stri
     if let Cancel::SdkAfterBytes(n) = spec.cancel {
         c.args(["--cancel-after-bytes", &n.to_string()]);
     }
-    c.args(["--timeout-seconds", &spec.timeout_seconds.unwrap_or(env.timeout_seconds).to_string()]);
-    c.arg("--pki").arg(&env.pki.dir).arg("--scratch").arg(scratch);
+    c.args([
+        "--timeout-seconds",
+        &spec
+            .timeout_seconds
+            .unwrap_or(env.timeout_seconds)
+            .to_string(),
+    ]);
+    c.arg("--pki")
+        .arg(&env.pki.dir)
+        .arg("--scratch")
+        .arg(scratch);
     (c, "sdk_probe".into(), format!("sdk_probe large {name}"))
 }
 
@@ -587,19 +617,32 @@ fn cli_command(
     c.args(["--timeout-seconds", &timeout.to_string()]);
     let mut label = String::from("oncl");
     if let Some((endpoint, token)) = remote {
-        c.args(["--endpoint", endpoint]).arg("--token-file").arg(token);
+        c.args(["--endpoint", endpoint])
+            .arg("--token-file")
+            .arg(token);
         label.push_str(" --endpoint");
     } else {
         c.arg("--root").arg(env.pki.dir.join("root.cer"));
         c.args(["--pki-endpoint", &env.pki.meta.origin]);
         c.arg("--temporary-directory").arg(scratch);
-        if matches!(spec.op, Op::Extend(..)) || matches!(&spec.op, Op::Sign(p) if level_of(*p) > Some(Level::B)) {
-            c.args(["--tsa-url", &env.pki.meta.tsa_url, "--tsa-policy", &env.pki.meta.tsa_policy]);
+        if matches!(spec.op, Op::Extend(..))
+            || matches!(&spec.op, Op::Sign(p) if level_of(*p) > Some(Level::B))
+        {
+            c.args([
+                "--tsa-url",
+                &env.pki.meta.tsa_url,
+                "--tsa-policy",
+                &env.pki.meta.tsa_policy,
+            ]);
         }
     }
     if matches!(spec.op, Op::Extend(..)) || spec.with_evidence {
         let dir = &env.pki.dir;
-        let leaf = if spec.gost_key { "leaf-gost.ocsp" } else { "leaf-rsa.ocsp" };
+        let leaf = if spec.gost_key {
+            "leaf-gost.ocsp"
+        } else {
+            "leaf-rsa.ocsp"
+        };
         c.arg("--evidence-certificate").arg(dir.join("root.cer"));
         c.arg("--evidence-certificate").arg(dir.join("tsa.der"));
         c.arg("--evidence-ocsp").arg(dir.join(leaf));
@@ -618,14 +661,19 @@ fn cli_command(
                 "gost" => "gost2015-512",
                 other => other,
             };
-            c.args(["hash", "--algorithm", alg]).arg("--input").arg(&input);
+            c.args(["hash", "--algorithm", alg])
+                .arg("--input")
+                .arg(&input);
         }
         Op::Extract => {
             c.arg("extract").arg("--input").arg(&input);
-            c.arg("--output").arg(spec.output.clone().unwrap_or_default());
+            c.arg("--output")
+                .arg(spec.output.clone().unwrap_or_default());
         }
         Op::Verify(p) => {
-            c.args(["verify", "--profile", &p.cli_name()]).arg("--input").arg(&input);
+            c.args(["verify", "--profile", &p.cli_name()])
+                .arg("--input")
+                .arg(&input);
             if let Some(d) = &spec.detached {
                 c.arg("--detached").arg(d);
             }
@@ -633,14 +681,18 @@ fn cli_command(
         Op::Extend(format, level) => {
             c.args(["extend", "--profile", format, "--level", level.text()]);
             c.arg("--input").arg(&input);
-            c.arg("--output").arg(spec.output.clone().unwrap_or_default());
+            c.arg("--output")
+                .arg(spec.output.clone().unwrap_or_default());
             if let Some(d) = &spec.detached {
                 c.arg("--detached").arg(d);
             }
         }
         Op::Sign(p) => {
-            c.args(["sign", "--profile", &p.cli_name()]).arg("--input").arg(&input);
-            c.arg("--output").arg(spec.output.clone().unwrap_or_default());
+            c.args(["sign", "--profile", &p.cli_name()])
+                .arg("--input")
+                .arg(&input);
+            c.arg("--output")
+                .arg(spec.output.clone().unwrap_or_default());
             if matches!(p, Profile::Cms | Profile::Cades(_)) && !spec.attached {
                 c.arg("--detached");
             }
@@ -712,7 +764,10 @@ fn parse_outcome(target: Target, m: &Measured, spec: &Spec) -> Outcome {
             o.key_begins = j["key_begins"].as_u64();
             o.key_applied = j["key_applied"].as_u64();
             if let Some(refs) = j["xml_references"].as_array() {
-                o.reference_lens = refs.iter().filter_map(|r| r["target_len"].as_u64()).collect();
+                o.reference_lens = refs
+                    .iter()
+                    .filter_map(|r| r["target_len"].as_u64())
+                    .collect();
             }
         }
         return o;
@@ -721,7 +776,11 @@ fn parse_outcome(target: Target, m: &Measured, spec: &Spec) -> Outcome {
         .lines()
         .rev()
         .find_map(|l| serde_json::from_str::<Value>(l).ok());
-    let diag = stderr.lines().rev().find(|l| l.starts_with("oncl: ")).unwrap_or("");
+    let diag = stderr
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("oncl: "))
+        .unwrap_or("");
     o.stderr_line = diag.to_owned();
     if let Some(rest) = diag.strip_prefix("oncl: ") {
         let (code, applied) = rest.split_once("; applied=").unwrap_or((rest, ""));
