@@ -384,12 +384,18 @@ fn prepare(
     token: &[u8],
     archive: Option<&[u8]>,
 ) -> Case {
-    let mut store = EvidenceStore::new(
-        TemporaryStore::new(parent).unwrap(),
-        evidence_limits(),
-        scope,
-    )
-    .unwrap();
+    prepare_limited(scope, parent, payloads, token, archive, evidence_limits())
+}
+fn prepare_limited(
+    scope: &mut ResourceScope,
+    parent: &std::path::Path,
+    payloads: &[(EvidenceKind, Vec<u8>)],
+    token: &[u8],
+    archive: Option<&[u8]>,
+    evidence: EvidenceLimits,
+) -> Case {
+    let mut store =
+        EvidenceStore::new(TemporaryStore::new(parent).unwrap(), evidence, scope).unwrap();
     let mut ids = Vec::new();
     for (kind, bytes) in payloads {
         ids.push(collect(&mut store, *kind, bytes));
@@ -4027,4 +4033,47 @@ fn malformed_base64_is_invalid_input_not_a_partial_item() {
             std::str::from_utf8(bad)
         );
     }
+}
+
+/// The readback of a scanned CRL (DER over 1 MiB) is raw memory, charged as such: it is
+/// not also retained metadata, so it fits a metadata budget smaller than the CRL.
+#[test]
+fn a_scanned_crl_over_one_mib_is_charged_as_memory_not_as_metadata() {
+    let fixture = Fixture::new();
+    let token = fixture.token(&fixture.signature, PROVEN);
+    let mut payloads = fixture.payloads(Status::Good, Status::Good);
+    let mut crl = MockCrl::new(fixture.root.clone())
+        .with_this_update(NOW - time::Duration::MINUTE)
+        .next_update(Some(NOW + time::Duration::HOUR));
+    for index in 0..100_000u32 {
+        crl = crl.revoke(&(0x0100_0000_u32 + index).to_be_bytes(), PROVEN);
+    }
+    payloads.last_mut().unwrap().1 = crl.der();
+    let crl_len = payloads.last().unwrap().1.len() as u64;
+    assert!(crl_len > 2 << 20 && crl_len < 4 << 20, "{crl_len}");
+    let mut cap = limits();
+    cap.metadata_bytes = 2 << 20;
+    let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
+    let mut resources = budget.begin(cap, Arc::new(Control)).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let evidence = EvidenceLimits {
+        max_crl_item_bytes: 4 << 20,
+        ..evidence_limits()
+    };
+    let mut case = prepare_limited(
+        &mut resources,
+        parent.path(),
+        &payloads,
+        &token,
+        None,
+        evidence,
+    );
+    let report = validate(
+        &fixture,
+        &mut case,
+        AdesLevel::T,
+        &resources,
+        &Offline::new(),
+    );
+    assert_eq!(report.signers[0].chain, CheckStatus::Passed);
 }

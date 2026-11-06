@@ -39,9 +39,29 @@ pub(crate) struct Options<'a> {
     pub excluded: &'a [Region],
     pub metadata_limit: Option<u64>,
 }
+/// Canonical text spans of one `Encapsulated*` evidence leaf of the staged element, in
+/// document order: what a timestamp's evidence projection binds to the carried bytes.
+pub(crate) struct LeafGroup {
+    pub kind: oncl_pki::evidence::EvidenceKind,
+    pub spans: Vec<Region>,
+}
+fn leaf_kind(name: &crate::reader::XmlName) -> Option<oncl_pki::evidence::EvidenceKind> {
+    use oncl_pki::evidence::EvidenceKind as K;
+    if name.namespace() != Some(crate::XADES_NS) {
+        return None;
+    }
+    match name.local() {
+        "EncapsulatedTimeStamp" => Some(K::Timestamp),
+        "EncapsulatedX509Certificate" => Some(K::Certificate),
+        "EncapsulatedOCSPValue" => Some(K::Ocsp),
+        "EncapsulatedCRLValue" => Some(K::Crl),
+        _ => None,
+    }
+}
 struct RenderOutput<'a> {
     sink: &'a mut dyn Write,
     projections: Option<&'a mut Vec<Region>>,
+    leaves: Option<&'a mut Vec<LeafGroup>>,
     wsu_id: Option<(&'a str, &'a str)>,
 }
 pub(crate) fn run(
@@ -66,6 +86,7 @@ pub(crate) fn run(
         RenderOutput {
             sink: &mut output,
             projections: None,
+            leaves: None,
             wsu_id: None,
         },
         scope,
@@ -119,6 +140,7 @@ pub(crate) fn hash(
         RenderOutput {
             sink: &mut sink,
             projections: None,
+            leaves: None,
             wsu_id: None,
         },
         scope,
@@ -187,6 +209,7 @@ pub(crate) fn append_with_wsu_id(
         RenderOutput {
             sink: &mut sink,
             projections: None,
+            leaves: None,
             wsu_id,
         },
         scope,
@@ -203,6 +226,26 @@ pub(crate) fn stage(
     scope: &mut ResourceScope,
     work: &mut u64,
 ) -> Result<(oncl_pki::io::StagedArtifact, Vec<Region>)> {
+    let (artifact, projections, _) =
+        stage_with_leaves(source, limits, owner, options, store, scope, work, false)?;
+    Ok((artifact, projections))
+}
+/// [`stage`], also reporting the canonical text spans of every evidence leaf when
+/// `leaves` is set: the staged bytes are streamed once and never parsed again.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One canonical render with the host's source, limits, owner, options, store, scope, work and leaf mode"
+)]
+pub(crate) fn stage_with_leaves(
+    source: &mut dyn CapturedInput,
+    limits: &XmlLimits,
+    owner: &Arc<()>,
+    options: Options<'_>,
+    store: &oncl_pki::io::TemporaryStore,
+    scope: &mut ResourceScope,
+    work: &mut u64,
+    leaves: bool,
+) -> Result<(oncl_pki::io::StagedArtifact, Vec<Region>, Vec<LeafGroup>)> {
     struct Sink<'a> {
         artifact: &'a mut oncl_pki::io::StagedArtifact,
         remaining: u64,
@@ -235,6 +278,7 @@ pub(crate) fn stage(
         error: None,
     };
     let mut projections = Vec::new();
+    let mut groups = Vec::new();
     let result = render(
         source,
         limits,
@@ -243,6 +287,7 @@ pub(crate) fn stage(
         RenderOutput {
             sink: &mut sink,
             projections: Some(&mut projections),
+            leaves: leaves.then_some(&mut groups),
             wsu_id: None,
         },
         scope,
@@ -252,10 +297,10 @@ pub(crate) fn stage(
         return Err(error);
     }
     result?;
-    Ok((artifact, projections))
+    Ok((artifact, projections, groups))
 }
 // Validated lexical references are at most 37 bytes; decoding never grows a span.
-fn entity(bytes: &[u8]) -> Result<char> {
+pub(crate) fn entity(bytes: &[u8]) -> Result<char> {
     Ok(match bytes {
         b"amp" => '&',
         b"lt" => '<',
@@ -396,8 +441,10 @@ fn render(
     let RenderOutput {
         sink,
         mut projections,
+        mut leaves,
         wsu_id,
     } = output;
+    let mut open_leaf: Option<usize> = None;
     let Options {
         target,
         method,
@@ -433,6 +480,7 @@ fn render(
                 }) && !excluded.iter().any(|r| {
                     event.region.offset >= r.offset && event.region.offset < r.offset + r.len
                 });
+                let leaf = event.name.as_ref().and_then(leaf_kind);
                 let mut namespaces = event.take_namespaces();
                 let name = event
                     .name
@@ -463,6 +511,16 @@ fn render(
                         value: AttributeValue::Literal(id.to_owned()),
                     });
                 }
+                if selected && let (Some(kind), Some(groups)) = (leaf, leaves.as_deref_mut()) {
+                    if open_leaf.is_some() || groups.len() == 64 {
+                        return Err(ProcessingError::MetadataLimit);
+                    }
+                    open_leaf = Some(event.depth);
+                    groups.push(LeafGroup {
+                        kind,
+                        spans: Vec::new(),
+                    });
+                }
                 out.start(
                     name,
                     namespaces,
@@ -477,6 +535,9 @@ fn render(
                 )?;
             }
             XmlEventKind::End => {
+                if open_leaf == Some(event.depth) {
+                    open_leaf = None;
+                }
                 out.end()?;
                 if event.depth == 0 {
                     after_root = true;
@@ -502,6 +563,18 @@ fn render(
                         return Err(ProcessingError::MetadataLimit);
                     }
                     projections.push(Region {
+                        offset: before,
+                        len,
+                    });
+                }
+                if len != 0
+                    && open_leaf.is_some_and(|depth| event.depth == depth + 1)
+                    && let Some(group) = leaves.as_deref_mut().and_then(|groups| groups.last_mut())
+                {
+                    if group.spans.len() == 4096 {
+                        return Err(ProcessingError::MetadataLimit);
+                    }
+                    group.spans.push(Region {
                         offset: before,
                         len,
                     });
@@ -592,4 +665,191 @@ fn render(
     }
     *work = out.remaining();
     Ok(())
+}
+
+#[cfg(test)]
+mod leaf_group_tests {
+    //! The evidence-leaf text spans of a canonical property are found while the property
+    //! is rendered, not by parsing the rendered bytes again; both must agree.
+    use super::*;
+    use crate::{C14n, C14nProfile, XmlDocument, XmlLimits};
+    use oncl_pki::{
+        evidence::EvidenceKind,
+        io::{Source, TemporaryStore},
+        resource::{OperationControl, Progress, ResourceLimits, SharedBudget},
+    };
+    struct Control;
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> std::result::Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    /// The full-materialization path the verifier used to take: parse the rendered bytes
+    /// and take the direct text children of every evidence leaf.
+    fn reference(bytes: &[u8]) -> Vec<(EvidenceKind, Vec<Region>)> {
+        let xml = std::str::from_utf8(bytes).unwrap();
+        let parsed = roxmltree::Document::parse(xml).unwrap();
+        let mut groups = Vec::new();
+        for element in parsed.descendants().filter(roxmltree::Node::is_element) {
+            let kind = match (element.tag_name().namespace(), element.tag_name().name()) {
+                (Some(crate::XADES_NS), "EncapsulatedTimeStamp") => EvidenceKind::Timestamp,
+                (Some(crate::XADES_NS), "EncapsulatedX509Certificate") => EvidenceKind::Certificate,
+                (Some(crate::XADES_NS), "EncapsulatedOCSPValue") => EvidenceKind::Ocsp,
+                (Some(crate::XADES_NS), "EncapsulatedCRLValue") => EvidenceKind::Crl,
+                _ => continue,
+            };
+            groups.push((
+                kind,
+                element
+                    .children()
+                    .filter(roxmltree::Node::is_text)
+                    .map(|n| Region {
+                        offset: n.range().start as u64,
+                        len: n.range().len() as u64,
+                    })
+                    .collect(),
+            ));
+        }
+        groups
+    }
+    /// Adjacent spans are one text node to a DOM: merge them for comparison.
+    fn merged(spans: &[Region]) -> Vec<Region> {
+        let mut out: Vec<Region> = Vec::new();
+        for span in spans {
+            match out.last_mut() {
+                Some(last) if last.offset + last.len == span.offset => last.len += span.len,
+                _ => out.push(*span),
+            }
+        }
+        out
+    }
+    fn lines(bytes: usize) -> String {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut text = String::new();
+        for index in 0..bytes {
+            text.push(alphabet[(index * 7 + index / 13) % 64] as char);
+            if index % 76 == 75 {
+                text.push_str("&#13;\n");
+            }
+        }
+        text
+    }
+    fn check(xml: &str, method: C14n) {
+        let limits = ResourceLimits::default();
+        let budget = std::sync::Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget.begin(limits, std::sync::Arc::new(Control)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let mut document = XmlDocument::index(
+            Source::sequential(&mut xml.as_bytes(), Some(xml.len() as u64)),
+            &XmlLimits::default(),
+            &store,
+            &mut scope,
+        )
+        .unwrap();
+        // The staged element: the direct child of the root named `property`.
+        let target = {
+            let mut events = document.events();
+            let mut found = None;
+            while let Some(event) = events.next_event().unwrap() {
+                if event.kind == crate::reader::XmlEventKind::End
+                    && event.name.as_ref().is_some_and(|n| n.local() == "property")
+                {
+                    found = Some(event.region);
+                }
+            }
+            found.unwrap()
+        };
+        let options = || Options {
+            target: Some(target),
+            method,
+            profile: C14nProfile::Standard,
+            prefixes: &[],
+            excluded: &[],
+            metadata_limit: Some(u64::MAX),
+        };
+        let mut work = u64::MAX;
+        let (mut staged, leaves) = document
+            .canonical_proof_leaves(options(), &store, &mut scope, &mut work)
+            .unwrap();
+        let mut bytes = vec![0; staged.len() as usize];
+        let mut at = 0;
+        while at < bytes.len() {
+            let n = staged
+                .read_region(
+                    Region {
+                        offset: at as u64,
+                        len: (bytes.len() - at) as u64,
+                    },
+                    &mut bytes[at..],
+                )
+                .unwrap();
+            assert_ne!(n, 0);
+            at += n;
+        }
+        // Same bytes as the canonical writer streams to any other sink.
+        let mut direct = Vec::new();
+        let node = document.indexed_node(target);
+        document
+            .canonicalize(
+                Some(&node),
+                method,
+                C14nProfile::Standard,
+                &mut direct,
+                &mut scope,
+            )
+            .unwrap();
+        assert_eq!(bytes, direct, "{method:?}: staged bytes");
+        let expected = reference(&bytes);
+        assert_eq!(leaves.len(), expected.len(), "{method:?}: leaf count");
+        for (found, (kind, spans)) in leaves.iter().zip(&expected) {
+            assert_eq!(found.kind, *kind, "{method:?}: leaf kind");
+            assert_eq!(merged(&found.spans), merged(spans), "{method:?}: spans");
+            assert_eq!(
+                found.spans.iter().map(|s| s.len).sum::<u64>(),
+                spans.iter().map(|s| s.len).sum::<u64>()
+            );
+        }
+    }
+    const HEAD: &str = "<r xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\" xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><property xmlns:other=\"urn:o\">";
+    #[test]
+    fn small_properties_agree_with_the_parsed_canonical_bytes() {
+        let big = lines(500);
+        let documents = [
+            // whitespace between elements, two leaves, a timestamp
+            format!(
+                "{HEAD}\n <xades:CertificateValues>\n  <xades:EncapsulatedX509Certificate>{big}</xades:EncapsulatedX509Certificate>\n </xades:CertificateValues>\n <xades:RevocationValues><xades:CRLValues><xades:EncapsulatedCRLValue>{big}</xades:EncapsulatedCRLValue><xades:EncapsulatedCRLValue>QUJD</xades:EncapsulatedCRLValue></xades:CRLValues><xades:OCSPValues><xades:EncapsulatedOCSPValue>RA==</xades:EncapsulatedOCSPValue></xades:OCSPValues></xades:RevocationValues><xades:EncapsulatedTimeStamp>AAAA</xades:EncapsulatedTimeStamp></property></r>"
+            ),
+            // CDATA, comments and character/entity references split the text
+            format!(
+                "{HEAD}<xades:EncapsulatedCRLValue>QU<![CDATA[JD]]><!-- c -->&#32;REVG&amp;<![CDATA[]]>&#x9;</xades:EncapsulatedCRLValue><xades:EncapsulatedCRLValue/><xades:EncapsulatedCRLValue></xades:EncapsulatedCRLValue></property></r>"
+            ),
+            // a foreign element named like a leaf, and a leaf in another namespace
+            format!(
+                "{HEAD}<other:EncapsulatedCRLValue>QUJD</other:EncapsulatedCRLValue><xades:Foreign><xades:EncapsulatedCRLValue>QUJD</xades:EncapsulatedCRLValue></xades:Foreign></property></r>"
+            ),
+            // redeclared and default namespaces
+            format!(
+                "{HEAD}<x xmlns=\"http://uri.etsi.org/01903/v1.3.2#\"><EncapsulatedCRLValue>QUJD</EncapsulatedCRLValue></x></property></r>"
+            ),
+        ];
+        for xml in &documents {
+            for method in [
+                C14n::Inclusive,
+                C14n::InclusiveWithComments,
+                C14n::Exclusive,
+                C14n::ExclusiveWithComments,
+            ] {
+                check(xml, method);
+            }
+        }
+    }
+    #[test]
+    fn a_mid_size_leaf_agrees_with_the_parsed_canonical_bytes() {
+        let text = lines(3 << 20);
+        let xml = format!(
+            "{HEAD}<xades:RevocationValues><xades:CRLValues><xades:EncapsulatedCRLValue>{text}</xades:EncapsulatedCRLValue></xades:CRLValues></xades:RevocationValues></property></r>"
+        );
+        check(&xml, C14n::Exclusive);
+    }
 }

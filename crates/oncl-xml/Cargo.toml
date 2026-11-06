@@ -33,6 +33,10 @@ x509-cert.workspace = true
 name = "xades"
 required-features = ["testing"]
 
+[[test]]
+name = "xades_large_crl"
+required-features = ["testing"]
+
 [[example]]
 name = "indexed_xml_probe"
 required-features = ["testing"]

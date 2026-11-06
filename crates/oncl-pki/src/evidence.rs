@@ -1078,10 +1078,12 @@ impl ParsedEvidence {
                 .and_then(|n| n.checked_add(headers))
                 .ok_or(EvidenceError::Limit)?,
         )?;
+        // The readback of a scanned CRL is raw memory (charged above), not retained
+        // metadata: counting it here too would make a 20 MB NCA CRL plus the XML index
+        // admission exceed the default metadata budget.
         let metadata = bundle.scope.reserve_metadata(
             decoded
                 .checked_mul(4)
-                .and_then(|n| n.checked_add(crl_bytes))
                 .and_then(|n| n.checked_add(headers))
                 .ok_or(EvidenceError::Limit)?,
         )?;
