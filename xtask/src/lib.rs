@@ -14,6 +14,7 @@ pub mod ncanode;
 pub mod package;
 #[path = "platform/interop.rs"]
 pub mod platform_interop;
+pub mod platform;
 pub mod plugin;
 pub mod privacy;
 pub mod registry;

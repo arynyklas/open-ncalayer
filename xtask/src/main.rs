@@ -194,6 +194,14 @@ enum Command {
         #[command(subcommand)]
         command: BuiltinsCommand,
     },
+    /// The acceptance gate of the 10 GiB / 1 GiB profile (docs/dev/platform-acceptance.md):
+    /// generates meaningful XML/WSSE/PDF/byte-stream documents with an independent reference
+    /// generator, runs the real SDK probe, `oncl` and `oncl-server` as separate processes on
+    /// them and measures each process's OS peak memory. Takes hours at the full size.
+    PlatformProof(xtask::platform::ProofArgs),
+    /// Internal to `platform-proof`: the service library over a counting software card.
+    #[command(hide = true)]
+    PlatformTokenHost(xtask::platform::token_host::TokenHostArgs),
 }
 
 #[derive(Subcommand)]
@@ -1133,6 +1141,8 @@ fn main() -> anyhow::Result<()> {
             let dir = dir.unwrap_or_else(|| root.join(xtask::builtins::DEFAULT_OUT));
             xtask::builtins::check(&bin, &dir)
         }
+        Command::PlatformProof(args) => xtask::platform::run(args),
+        Command::PlatformTokenHost(args) => xtask::platform::token_host::run(args),
     }
 }
 
