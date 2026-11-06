@@ -211,6 +211,12 @@ pub struct PdfLimits {
     pub max_signatures: usize,
     pub max_read_work: u64,
     pub max_decode_work: u64,
+    /// Total evidence (CRL/OCSP/certificate DSS streams) allowance across all
+    /// appended revisions when reading back a signed PDF whose wire exceeds the document
+    /// allowance. Together with four `max_object_bytes` per appended revision it
+    /// bounds the container surcharge; see `ResourceLimits` (`container_bytes`).
+    /// Wire past `container_bytes` or this bound is `InputLimit`.
+    pub max_evidence_bytes: u64,
 }
 impl Default for PdfLimits {
     fn default() -> Self {
@@ -224,6 +230,9 @@ impl Default for PdfLimits {
             max_signatures: 64,
             max_read_work: 1_073_741_824,
             max_decode_work: 268_435_456,
+            // A 20-27 MB CRL re-embedded by 3 LT/LTA revisions plus slack; default
+            // surcharge ~188 MiB (<2% of the 10 GiB document cap).
+            max_evidence_bytes: 128 * 1024 * 1024,
         }
     }
 }

@@ -120,6 +120,7 @@ pub(super) struct Reader<'a, 's> {
     frames: [Frame; MAX_DEPTH],
     depth: usize,
     replay: bool,
+    chunk_container: u64,
 }
 impl<'a, 's> Reader<'a, 's> {
     pub fn new(source: Source<'a>, scope: &'s mut ResourceScope) -> Result<Self, StreamError> {
@@ -140,9 +141,11 @@ impl<'a, 's> Reader<'a, 's> {
         scope.checkpoint()?;
         scope.check_input()?;
         if !replay
-            && source
-                .known_len()
-                .is_some_and(|len| len > scope.input_remaining())
+            && source.known_len().is_some_and(|len| {
+                len > scope
+                    .input_remaining()
+                    .saturating_add(scope.container_remaining())
+            })
         {
             return Err(ProcessingError::InputLimit.into());
         }
@@ -178,18 +181,26 @@ impl<'a, 's> Reader<'a, 's> {
                 ended: false,
             }; MAX_DEPTH],
             depth: 0,
+            chunk_container: 0,
         })
     }
     fn fill(&mut self) -> Result<bool, StreamError> {
         if self.start != self.available {
             return Ok(true);
         }
+        if !self.replay && self.available != 0 {
+            let container = std::mem::take(&mut self.chunk_container);
+            self.scope
+                .settle_wire(self.available as u64 - container, container)?;
+            self.available = 0;
+            self.start = 0;
+        }
         loop {
             self.scope.checkpoint()?;
             let request = if self.replay {
                 self.buffer.len()
             } else {
-                self.scope.input_request(self.buffer.len())?
+                self.scope.wire_request(self.buffer.len())?
             };
             let n = match self.source.read(&mut self.buffer[..request]) {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -199,7 +210,7 @@ impl<'a, 's> Reader<'a, 's> {
                 return Err(malformed("reader exceeded supplied buffer"));
             }
             if !self.replay {
-                self.scope.consumed_input(n as u64)?;
+                self.scope.consumed_wire(n as u64)?;
             }
             self.scope.checkpoint()?;
             self.start = 0;
@@ -225,6 +236,7 @@ impl<'a, 's> Reader<'a, 's> {
             .checked_add(1)
             .ok_or_else(|| malformed("CMS offset overflows u64"))?;
         self.scope.account_container(1)?;
+        self.chunk_container += 1;
         self.scope.account_framing(1)?;
         Ok(value)
     }
@@ -318,7 +330,12 @@ impl<'a, 's> Reader<'a, 's> {
                     .known_len()
                     .ok_or_else(|| malformed("internal replay requires a bounded source"))?
             } else {
-                self.scope.limits().input_bytes
+                // Document plus container surcharge; actual bytes are classified
+                // and bounded separately by the scope while they are consumed.
+                self.scope
+                    .limits()
+                    .input_bytes
+                    .saturating_add(self.scope.limits().container_bytes)
             };
             if end > wire_limit {
                 return Err(ProcessingError::InputLimit.into());
@@ -385,6 +402,7 @@ impl<'a, 's> Reader<'a, 's> {
             let count = remaining.min((self.available - self.start) as u64) as usize;
             if !content {
                 self.scope.account_container(count as u64)?;
+                self.chunk_container += count as u64;
             }
             consume(&self.buffer[self.start..self.start + count], self.scope)?;
             self.start += count;
