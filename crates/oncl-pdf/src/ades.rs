@@ -456,72 +456,78 @@ fn permitted(
             ));
         }
     }
-    let entries = doc.revisions[revision].entries.clone();
     let start = doc.revisions[prior].end;
     let xref = doc.revisions[revision].xref;
     let mut spans = Vec::new();
-    for (id, entry) in entries {
-        match entry {
-            Entry::Direct(offset, generation) if offset == xref => {
-                if doc.revisions[..revision]
-                    .iter()
-                    .any(|r| r.entries.contains_key(&id))
-                {
-                    return Err(PdfError::Unsupported(
-                        "xref object aliases an existing object",
-                    ));
-                }
-                let object = doc.indirect(offset, Some((id, generation)), StreamMode::Decode)?;
-                if !get(object.value.dict()?, b"Type")?.name(b"XRef") {
-                    return Err(PdfError::Malformed("incremental xref object identity"));
-                }
-            }
-            Entry::Direct(offset, generation) => {
-                let previous = doc.revisions[..revision]
-                    .iter()
-                    .rev()
-                    .find_map(|r| r.entries.get(&id));
-                if matches!(previous, Some(Entry::Direct(old,old_gen)) if *old==offset && *old_gen==generation)
-                {
-                    continue;
-                }
-                if previous.is_some() && !prior_roles.contains(&(id, generation)) {
-                    return Err(PdfError::Unsupported(
-                        "validation metadata aliases existing source object",
-                    ));
-                }
-                if offset < start || !allowed.contains(&(id, generation)) {
-                    return Err(PdfError::Unsupported(
-                        "non-validation incremental object change",
-                    ));
-                }
-                if old.material.iter().any(|m| m.reference.0 == id) {
-                    return Err(PdfError::Unsupported("old evidence object redefinition"));
-                }
-                let object = doc.indirect(
-                    offset,
-                    Some((id, generation)),
-                    if current
-                        .material
+    for section in 0..doc.revisions[revision].entries.section_count() {
+        for row in 0..doc.revisions[revision].entries.section(section).1.len() {
+            let (first, rows) = doc.revisions[revision].entries.section(section);
+            let (id, entry) = (first + row as u32, rows[row]);
+            match entry {
+                Entry::Direct(offset, generation) if offset == xref => {
+                    if doc.revisions[..revision]
                         .iter()
-                        .any(|m| m.reference == (id, generation))
+                        .any(|r| r.entries.contains_key(&id))
                     {
-                        StreamMode::Region
-                    } else {
-                        StreamMode::Reject
-                    },
-                )?;
-                spans.push((offset, object.end));
-            }
-            // Object 0 is the mandatory head of the free list (ISO 32000-1
-            // 7.5.4); every revision's xref re-lists it. Only that entry,
-            // and only when it was already free, is not an object change.
-            Entry::Free { next, generation }
-                if id == 0 && generation == 65535 && free_head_unchanged(doc, revision, next) => {}
-            _ => {
-                return Err(PdfError::Unsupported(
-                    "free or compressed augmentation entry",
-                ));
+                        return Err(PdfError::Unsupported(
+                            "xref object aliases an existing object",
+                        ));
+                    }
+                    let object =
+                        doc.indirect(offset, Some((id, generation)), StreamMode::Decode)?;
+                    if !get(object.value.dict()?, b"Type")?.name(b"XRef") {
+                        return Err(PdfError::Malformed("incremental xref object identity"));
+                    }
+                }
+                Entry::Direct(offset, generation) => {
+                    let previous = doc.revisions[..revision]
+                        .iter()
+                        .rev()
+                        .find_map(|r| r.entries.get(&id));
+                    if matches!(previous, Some(Entry::Direct(old,old_gen)) if *old==offset && *old_gen==generation)
+                    {
+                        continue;
+                    }
+                    if previous.is_some() && !prior_roles.contains(&(id, generation)) {
+                        return Err(PdfError::Unsupported(
+                            "validation metadata aliases existing source object",
+                        ));
+                    }
+                    if offset < start || !allowed.contains(&(id, generation)) {
+                        return Err(PdfError::Unsupported(
+                            "non-validation incremental object change",
+                        ));
+                    }
+                    if old.material.iter().any(|m| m.reference.0 == id) {
+                        return Err(PdfError::Unsupported("old evidence object redefinition"));
+                    }
+                    let object = doc.indirect(
+                        offset,
+                        Some((id, generation)),
+                        if current
+                            .material
+                            .iter()
+                            .any(|m| m.reference == (id, generation))
+                        {
+                            StreamMode::Region
+                        } else {
+                            StreamMode::Reject
+                        },
+                    )?;
+                    spans.push((offset, object.end));
+                }
+                // Object 0 is the mandatory head of the free list (ISO 32000-1
+                // 7.5.4); every revision's xref re-lists it. Only that entry,
+                // and only when it was already free, is not an object change.
+                Entry::Free { next, generation }
+                    if id == 0
+                        && generation == 65535
+                        && free_head_unchanged(doc, revision, next) => {}
+                _ => {
+                    return Err(PdfError::Unsupported(
+                        "free or compressed augmentation entry",
+                    ));
+                }
             }
         }
     }
@@ -582,6 +588,7 @@ pub(crate) fn prior_signature_contents(
         count: seen.len() as u64,
         contents_sum: sum,
         contents_max: largest,
+        xref_entries: doc.xref_entries,
     })
 }
 fn parse(

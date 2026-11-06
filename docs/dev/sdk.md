@@ -293,3 +293,34 @@ Not covered: online CRL download (`crl::fetch_for`, still decoded in full at 128
 CRL files (`--evidence-crl` is limited to 256 KiB per file), PAdES-LT of real NCANode files
 (separate structural guards in `oncl-pdf`), XAdES-LT (XML element cap and DOM
 materialization of `EncapsulatedCRLValue`).
+
+## Dense PDFs: the cross-reference budget (D4, D6)
+
+`PdfLimits::max_objects` (default 4096) bounds object-GRAPH walks only: the AcroForm field
+count, DSS evidence items, the members of one object stream, the signature-view traversal.
+It is no longer a document size ceiling. A document's size in objects is bounded by
+`PdfLimits::max_xref_entries` (default 4 Mi entries over ALL revisions), and every entry is
+paid for:
+
+| What | Cost |
+|---|---|
+| cross-reference row (any revision) | 16 bytes of operation memory, reserved as the row is read (steps of at most 65 536 rows), never up front |
+| run of consecutive object numbers | 32 bytes (at worst one per entry) |
+| a classic xref table / an xref stream | read in 64 KiB chunks / inflated incrementally (PNG predictor included) straight into rows; the decoded table is never held, `max_object_bytes` and `max_decoded_bytes` no longer apply to it, the inflated size is bounded by the declared rows and `max_decode_work` |
+
+Refused before any row is allocated: a declared count past the remaining budget, a count the
+rest of the file cannot hold, trailing or missing xref-stream data. Past the budget the
+refusal is `PdfError::Limit("xref entries")` (limit+1 exact, over all revisions); a
+memory quota that cannot hold the rows is `MemoryLimit`; both happen while reading, before
+any private key use (`NotApplied`).
+
+Hosts that pre-flight a PAdES update add the rows with
+`budget::PriorSignatures::xref_entries` → `budget::PlanInputs::xref_entries`
+(`budget::xref_memory` is the upper bound used by `plan_memory`); the server does so.
+`budget::reader` no longer scales with `max_revisions`.
+
+Measured (debug build, real `oncl` process, `scripts/pdf-dense/gen_dense_pdf.py`, three
+revisions, cross-checked with pyHanko; its signature of the signed output is intact over the
+entire file): 1 M objects classic xref (123 MB) signs in 3.2 s at a peak working set of
+43 MB; 1 M objects as object streams + Flate/PNG xref streams (58 MB) 1.9 s at 44 MB; 4 M
+objects (the default ceiling) 13.5 s at 135 MB.
