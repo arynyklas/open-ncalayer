@@ -535,7 +535,7 @@ fn free_head_unchanged(doc: &PdfDocument<'_, '_>, revision: usize, next: u64) ->
         doc.revisions[..=revision]
             .iter()
             .rev()
-            .find_map(|r| r.entries.get(&(id as u32)))
+            .find_map(|r| r.entries.get(&u32::try_from(id).ok()?))
     };
     doc.revisions[..revision].iter().all(|r| {
         !matches!(

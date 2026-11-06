@@ -384,9 +384,16 @@ impl PdfDocument<'_, '_> {
                     let entry = match field[0] {
                         0 => Entry::Free {
                             next: field[1],
-                            // An absent generation field (W[2] == 0) leaves the
-                            // free-list head's 65535 implied, not a real 0.
-                            generation: if w[2] == 0 { 65535 } else { field[2] as u32 },
+                            // ISO 32000-1 7.5.8.3 defaults an absent field (W[2] == 0)
+                            // to 0, while the free-list head is 65535. Producers
+                            // such as NCANode omit it, so that tolerated deviation
+                            // is read as the head's 65535; with a real field the
+                            // stored value is used unchanged.
+                            generation: if w[2] == 0 {
+                                65535
+                            } else {
+                                u32::try_from(field[2]).unwrap_or(u32::MAX)
+                            },
                         },
                         1 => Entry::Direct(
                             field[1],
