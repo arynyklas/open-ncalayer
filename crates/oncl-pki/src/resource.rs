@@ -18,7 +18,12 @@ pub const IO_CHUNK_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug)]
 pub struct ResourceLimits {
     pub max_in_flight: u64,
+    /// Document allowance. Hostile input one byte past it is rejected.
     pub input_bytes: u64,
+    /// Signature/envelope bytes. Own signed results (CMS, PDF) may exceed
+    /// `input_bytes` by classified container bytes only, never past this value;
+    /// formats may narrow it further (PDF: appended revisions, `PdfLimits`).
+    /// `output_bytes` should cover input + container + framing.
     pub container_bytes: u64,
     pub framing_bytes: u64,
     pub output_bytes: u64,
@@ -206,6 +211,7 @@ impl SharedBudget {
                 root: OperationLease(Arc::new(LeaseInner {
                     budget: self.clone(),
                     deadline,
+                    guard: std::sync::OnceLock::new(),
                 })),
                 limits,
                 deadline,
@@ -284,6 +290,8 @@ impl Drop for ConfigurationReservation {
 struct LeaseInner {
     budget: Arc<SharedBudget>,
     deadline: Deadline,
+    /// Dropped with the lease, i.e. when the last owner of the operation lets go.
+    guard: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
 }
 impl Drop for LeaseInner {
     fn drop(&mut self) {
@@ -301,6 +309,14 @@ pub struct OperationLease(Arc<LeaseInner>);
 impl OperationLease {
     pub fn deadline(&self) -> Deadline {
         self.0.deadline
+    }
+    /// Ties `guard` to the operation: it is dropped when the last owner of this lease (the
+    /// context, a worker that outlives it, a pending response or artifact) lets go, not
+    /// earlier. A host uses it to count the operation as running until native work has really
+    /// returned. Only the first guard is kept; `false` (and `guard` dropped at once) if one
+    /// is set already. Without a guard nothing changes.
+    pub fn attach_guard(&self, guard: Box<dyn std::any::Any + Send + Sync>) -> bool {
+        self.0.guard.set(guard).is_ok()
     }
     /// Non-owning identity probe. It keeps no permit, buffer or authority alive
     /// and cannot be upgraded back into a lease.
@@ -459,6 +475,76 @@ impl ResourceScope {
             .saturating_add(1)
             .min(representable)
             .min(capacity as u64) as usize)
+    }
+    /// Streaming wire intake whose envelope bytes are classified as container
+    /// while they are parsed. Document bytes stay bound by `input_bytes`; only
+    /// bytes the parser later accounts as container may exceed it, and never past
+    /// `container_bytes`. Pair every chunk with [`Self::settle_wire`].
+    pub(crate) fn wire_request(&self, capacity: usize) -> Result<usize, ProcessingError> {
+        let usage = lock(&self.state.usage);
+        if usage.input_terminal || usage.pending_owner.is_some() {
+            return Err(ProcessingError::InputLimit);
+        }
+        let representable = u64::MAX - usage.wire_input;
+        if representable == 0 {
+            return Err(ProcessingError::InputLimit);
+        }
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        let container = self
+            .state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container);
+        Ok((u128::from(document) + u128::from(container) + 1)
+            .saturating_sub(u128::from(usage.pending_wire))
+            .min(u128::from(representable))
+            .min(capacity.max(1) as u128) as usize)
+    }
+    pub(crate) fn consumed_wire(&self, bytes: u64) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        let wire = usage.wire_input.checked_add(bytes);
+        let pending = usage.pending_wire.checked_add(bytes);
+        let (Some(wire), Some(pending)) = (wire, pending) else {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        };
+        usage.wire_input = wire;
+        usage.pending_wire = pending;
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        let container = self
+            .state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container);
+        if u128::from(pending) > u128::from(document) + u128::from(container) {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        }
+        Ok(())
+    }
+    /// Resolve all pending wire: `container` bytes were already accounted via
+    /// `account_container`; the remaining `document` bytes are charged as input.
+    pub(crate) fn settle_wire(&self, document: u64, container: u64) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        if document.checked_add(container) != Some(usage.pending_wire) {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InvalidInput("wire classification extent"));
+        }
+        match usage
+            .input
+            .checked_add(document)
+            .filter(|n| *n <= self.state.limits.input_bytes)
+        {
+            Some(next) => {
+                usage.input = next;
+                usage.pending_wire = 0;
+                Ok(())
+            }
+            None => {
+                usage.input_terminal = true;
+                Err(ProcessingError::InputLimit)
+            }
+        }
     }
     /// An actually over-consumed format-bound input is terminal for this same
     /// operation, even when the format cap is below the resource-wide cap.
@@ -849,5 +935,46 @@ impl ResourceReservation {
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
         let _ = self.shrink(self.bytes);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Flag(Arc<AtomicBool>);
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_guard_lives_until_the_last_owner_of_the_lease_lets_go() {
+        let budget = Arc::new(SharedBudget::new(ResourceLimits::default()).unwrap());
+        struct C;
+        impl OperationControl for C {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                Ok(())
+            }
+        }
+        let scope = budget
+            .begin(ResourceLimits::default(), Arc::new(C))
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let lease = scope.lease();
+        assert!(lease.attach_guard(Box::new(Flag(Arc::clone(&dropped)))));
+        assert!(
+            !lease.attach_guard(Box::new(())),
+            "only the first guard is kept"
+        );
+        drop(scope);
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "a worker still owns the lease"
+        );
+        drop(lease);
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

@@ -64,6 +64,26 @@ fn address(data_dir: &Path, sid: &str, session: u32) -> Address {
     }
 }
 
+/// The management address of the current user and session for the absolute `data_dir`: the
+/// pipe a maintainer (an installer) asks the running program to hold still on.
+pub(crate) fn management_endpoint(data_dir: &Path) -> io::Result<Address> {
+    Ok(management_address(
+        data_dir,
+        &current_user_sid()?,
+        current_session()?,
+    ))
+}
+
+/// [`address`] of the management endpoint.
+fn management_address(data_dir: &Path, sid: &str, session: u32) -> Address {
+    Address {
+        name: format!(
+            r"\\.\pipe\OpenNCALayer-maintenance-{}",
+            hex16(&format!("{sid}|{session}|maintenance|"), data_dir)
+        ),
+    }
+}
+
 /// The current pipe instance waiting for a client, and what it takes to create the next.
 #[derive(Debug)]
 pub(crate) struct Listener {

@@ -451,6 +451,49 @@ def pdf_pyhanko(path):
         print(json.dumps({"ok": bool(status.intact and status.valid), "signatures": len(sigs), "intact": bool(status.intact), "valid": bool(status.valid), "touched_after_signed": bool(status.modification_level is not None and str(status.modification_level) != "ModificationLevel.NONE")}))
 
 
+
+def cms_attached_check(path, original_sha256):
+    """Attached CMS of any size without OpenSSL: the encapsulated content's sha256 (hashlib)
+    equals the original and the signed messageDigest; the RSA signature over signedAttrs
+    verifies with the embedded certificate (asn1crypto + cryptography)."""
+    from asn1crypto import cms
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography import x509
+
+    with open(path, "rb") as f:
+        info = cms.ContentInfo.load(f.read())
+    sd = info["content"]
+    signer = sd["signer_infos"][0]
+    content = sd["encap_content_info"]["content"].native
+    alg = signer["digest_algorithm"]["algorithm"].native
+    digest = hashlib.new(alg, content).hexdigest()
+    attrs = signer["signed_attrs"]
+    md = next(a["values"][0].native for a in attrs if a["type"].native == "message_digest").hex()
+    problems = []
+    if digest != md:
+        problems.append("messageDigest differs from the digest of the content")
+    if alg == "sha256" and digest != original_sha256:
+        problems.append("content is not the original document")
+    cert = next(c.chosen for c in sd["certificates"])
+    public = x509.load_der_x509_certificate(cert.dump()).public_key()
+    result = {"content_len": len(content), "digest_algorithm": alg, "content_sha256": digest, "message_digest": md}
+    if isinstance(public, rsa.RSAPublicKey):
+        signed = b"\x31" + attrs.dump()[1:]
+        hash_cls = {"sha256": hashes.SHA256, "sha512": hashes.SHA512, "sha1": hashes.SHA1}[alg]
+        try:
+            public.verify(signer["signature"].native, signed, padding.PKCS1v15(), hash_cls())
+            result["signature_value"] = "verified (RSA PKCS#1 v1.5 over signedAttrs, cryptography)"
+        except Exception as error:  # noqa: BLE001
+            problems.append("signature value")
+            result["signature_value"] = f"INVALID: {error}"
+    else:
+        result["signature_value"] = "no independent oracle (GOST)"
+    result["ok"] = not problems
+    result["problems"] = problems
+    print(json.dumps(result))
+    sys.exit(0 if not problems else 1)
+
 def hash_file(path, algorithm):
     h = hashlib.new(algorithm)
     n = 0
@@ -479,6 +522,8 @@ def main():
         pdf_signature(*args)
     elif command == "pdf-pyhanko":
         pdf_pyhanko(*args)
+    elif command == "cms-attached-check":
+        cms_attached_check(*args)
     elif command == "hash":
         hash_file(*args)
     else:

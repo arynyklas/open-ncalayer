@@ -2,6 +2,7 @@
 // a hardware token and its PIN.
 
 import { AboutSlint, Button, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, NameText, StatusArea, Tone } from "common.slint";
 
 // A storage in the list.
 export struct StorageRow {
@@ -42,6 +43,12 @@ export component StorageDialog inherits Window {
     // The readers are being searched for: «Refresh» waits.
     in property <bool> scanning;
 
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+
+    // How tall the origin line is, for the tests.
+    out property <length> origin-lines: origin-line.height;
+
     callback browse();
     callback open();
     callback cancel();
@@ -53,12 +60,15 @@ export component StorageDialog inherits Window {
     private property <bool> is-token: root.selected >= 0 && root.selected < root.storages.length && root.storages[root.selected].token;
     private property <bool> can-open: root.selected >= 0 && (root.is-token ? root.reader-index >= 0 && root.reader-index < root.readers.length : !root.path.is-empty);
 
+    EscapeScope {
+        escape => {
+            root.cancel();
+        }
     VerticalBox {
         HorizontalLayout {
             spacing: 8px;
-            Text {
+            origin-line := NameText {
                 text: @tr("Request from: {}", root.origin);
-                wrap: word-wrap;
                 horizontal-stretch: 1;
                 vertical-alignment: center;
             }
@@ -75,9 +85,13 @@ export component StorageDialog inherits Window {
             font-weight: 700;
         }
 
-        if !root.detail.is-empty: Text {
-            text: root.detail;
-            wrap: word-wrap;
+        if !root.detail.is-empty: DialogScroll {
+            vertical-stretch: 0;
+            max-height: 80px;
+            Text {
+                text: root.detail;
+                wrap: char-wrap;
+            }
         }
 
         Text {
@@ -88,6 +102,8 @@ export component StorageDialog inherits Window {
             for row[i] in root.storages: Rectangle {
                 height: 28px;
                 border-radius: 4px;
+                border-width: row-focus.has-focus ? 2px : 0px;
+                border-color: Palette.accent-background;
                 background: i == root.selected ? Palette.selection-background : transparent;
                 accessible-role: list-item;
                 accessible-label: row.label;
@@ -102,6 +118,20 @@ export component StorageDialog inherits Window {
                         root.storage-chosen(i);
                     }
                 }
+                // The keyboard reaches the row (Tab) and chooses it (Enter or Space); a row
+                // that is not supported is skipped.
+                row-focus := FocusScope {
+                    enabled: row.supported;
+                    key-pressed(event) => {
+                        if event.text == Key.Return || event.text == " " {
+                            root.selected = i;
+                            root.storage-chosen(i);
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
                 TouchArea {
                     enabled: row.supported;
                     mouse-cursor: row.supported ? pointer : default;
@@ -118,14 +148,14 @@ export component StorageDialog inherits Window {
                     Text {
                         text: row.label;
                         vertical-alignment: center;
-                        color: !row.supported ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.supported ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     if !row.supported: Text {
                         text: @tr("not supported yet");
                         vertical-alignment: center;
                         font-italic: true;
-                        color: #888888;
+                        color: Tone.quiet();
                     }
                     Rectangle {
                         horizontal-stretch: 1;
@@ -142,6 +172,7 @@ export component StorageDialog inherits Window {
             spacing: 8px;
             LineEdit {
                 text <=> root.path;
+                accessible-label: @tr("Key store file");
                 horizontal-stretch: 1;
             }
 
@@ -163,6 +194,7 @@ export component StorageDialog inherits Window {
                 horizontal-stretch: 1;
                 enabled: root.readers.length > 0;
                 model: root.readers;
+                accessible-label: @tr("Reader");
                 current-index <=> root.reader-index;
             }
 
@@ -184,7 +216,7 @@ export component StorageDialog inherits Window {
             text: @tr("Token support is experimental: checked on an emulator only");
             wrap: word-wrap;
             font-italic: true;
-            color: #888888;
+            color: Tone.quiet();
         }
 
         Text {
@@ -193,6 +225,7 @@ export component StorageDialog inherits Window {
 
         password-input := LineEdit {
             text <=> root.password;
+            accessible-label: root.is-token ? @tr("PIN code") : @tr("Password");
             input-type: show-password.checked ? InputType.text : InputType.password;
             accepted => {
                 if (root.can-open) {
@@ -205,15 +238,12 @@ export component StorageDialog inherits Window {
             text: @tr("Show password");
         }
 
-        if !root.error.is-empty: Text {
-            text: root.error;
-            wrap: word-wrap;
-            color: #c42b1c;
+        if !root.error.is-empty: StatusArea {
+            message: root.error;
+            error: true;
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
+        actions := ActionBar {
             Button {
                 text: @tr("Open");
                 primary: true;
@@ -230,6 +260,8 @@ export component StorageDialog inherits Window {
                 }
             }
         }
+    }
+
     }
 
     about := PopupWindow {

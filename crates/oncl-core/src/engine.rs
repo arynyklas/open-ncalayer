@@ -99,6 +99,7 @@ pub struct Engine {
     pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
     #[cfg(feature = "plugins")]
     pub(crate) plugins: Option<crate::plugins::PluginRegistry>,
+    activity: Option<Arc<crate::activity::ActivityGate>>,
 }
 
 /// One original invocation root admitted for bounded metadata intake, without
@@ -148,7 +149,16 @@ impl Engine {
             inspection_limits: services.inspection_limits,
             #[cfg(feature = "plugins")]
             plugins: services.plugins,
+            activity: None,
         })
+    }
+    /// Counts every operation of this engine in `gate` from its admission to the end of its
+    /// context, so a maintainer holding the gate sees it and a held gate makes a new one
+    /// wait (see [`crate::activity`]). Without a gate operations are never held back.
+    #[must_use]
+    pub fn with_activity(mut self, gate: Arc<crate::activity::ActivityGate>) -> Self {
+        self.activity = Some(gate);
+        self
     }
     pub fn begin(
         &self,
@@ -167,7 +177,18 @@ impl Engine {
         &self,
         control: Arc<dyn OperationControl>,
     ) -> Result<OperationAdmission, OperationError> {
+        // Waits first if a maintainer holds the gate: the operation does not exist yet, so it
+        // holds no resource while it waits.
+        let activity = self
+            .activity
+            .as_ref()
+            .map(crate::activity::ActivityGate::begin);
         let scope = self.budget.begin(self.limits.clone(), control)?;
+        // Counted until the LAST owner of the operation lets go: the context, but also a
+        // native worker that outlives it, a pending response or an artifact.
+        if let Some(activity) = activity {
+            scope.lease().attach_guard(Box::new(activity));
+        }
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))

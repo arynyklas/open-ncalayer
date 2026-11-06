@@ -395,6 +395,50 @@ jobs:
           github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
           wait-for-completion: true
           output-artifact-directory: packaged
+      # The WinGet installer entry (win-x64 and win-x86 only: WinGet needs Windows 10 1809+):
+      # the small program of `oncl-winget-setup`, built without its test harness, carrying the
+      # FINAL Setup.exe (signed above if signing is on) as its payload. It is made after the
+      # payload is final because Authenticode of the entry must cover it; then it is signed,
+      # and exactly those bytes are published and hashed for the WinGet manifest.
+      - name: Build the WinGet installer entry
+        if: runner.os == 'Windows' && !matrix.win7
+        shell: bash
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} \
+            -p oncl-winget-setup --no-default-features --bin oncl-winget-setup
+          cargo xtask package winget-setup --flavor "$FLAVOR" --version "$VERSION" \
+            --entry "target/${{ matrix.target }}/release/oncl-winget-setup.exe" \
+            --setup "packaged/openncalayer-$VERSION-$FLAVOR-setup.exe" --dist winget-unsigned
+      - name: Keep the unsigned WinGet installer entry for SignPath
+        id: unsigned-winget
+        if: runner.os == 'Windows' && !matrix.win7 && env.SIGNPATH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signpath-unsigned-winget-setup-${{ matrix.flavor }}
+          path: winget-unsigned/*-winget-setup.exe
+          if-no-files-found: error
+      - name: Sign the WinGet installer entry (Authenticode, SignPath)
+        if: runner.os == 'Windows' && !matrix.win7 && env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-winget.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: winget-signed
+      # Signed bytes if SignPath ran, otherwise the unsigned entry, said so in the log: no
+      # signature is invented.
+      - name: Put the WinGet installer entry into the release files
+        if: runner.os == 'Windows' && !matrix.win7
+        shell: bash
+        run: |
+          if [ "$SIGNPATH" = true ]; then src=winget-signed; else
+            src=winget-unsigned
+            echo "::notice::SignPath is not configured: the $FLAVOR WinGet installer entry is NOT signed"
+          fi
+          cp "$src/openncalayer-$VERSION-$FLAVOR-winget-setup.exe" packaged/
       - uses: actions/upload-artifact@v4
         with:
           name: release-packages-${{ matrix.flavor }}

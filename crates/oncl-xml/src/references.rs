@@ -156,10 +156,46 @@ impl std::fmt::Debug for XmlVerificationFacts {
     }
 }
 pub(crate) type BoundMetadata = (Region, Vec<(String, String)>);
+/// Lexical extent of the text of one base64 evidence leaf: a Text event, or the
+/// content of a CDATA section (`cdata`, entity references are not decoded in it).
+#[derive(Clone, Copy)]
+struct Span {
+    region: Region,
+    cdata: bool,
+}
+/// Structure of one unsigned signature property, recorded while scanning so the layout
+/// is checked without materialising the property (it may carry a multi-megabyte CRL).
+struct Shape {
+    namespace: Option<String>,
+    local: String,
+    id: Option<Region>,
+    uri: Option<Region>,
+    children: Vec<(Option<String>, String)>,
+}
 struct ExtraMetadata {
     bound: BoundMetadata,
+    /// Text of an evidence leaf (certificate, OCSP answer, CRL), only for such a leaf.
+    texts: Vec<Span>,
+    /// Bytes of evidence-leaf text inside `bound.0`: base64 payload, never markup. The
+    /// metadata cap bounds `bound.0.len - payload`; the evidence quotas bound the payload.
+    payload: u64,
+    shape: Option<Shape>,
     _metadata: ResourceReservation,
 }
+struct Leaf {
+    depth: usize,
+    texts: Vec<Span>,
+    payload: u64,
+}
+struct PendingProperty {
+    depth: usize,
+    payload_before: u64,
+    shape: Shape,
+}
+/// Most text events of one evidence leaf (comments between them are markup, so this
+/// only matters to a hostile leaf cut into thousands of pieces).
+const MAX_LEAF_TEXTS: usize = 4096;
+const MAX_SHAPE_CHILDREN: usize = 64;
 struct Metadata {
     signature: Region,
     info: Region,
@@ -208,14 +244,42 @@ fn extra(
     profile: &XmlVerifyProfile,
     scope: &ResourceScope,
 ) -> Result<ExtraMetadata> {
-    if event.region.len > profile.max_metadata_bytes as u64 {
+    extra_carrying(event, profile, scope, Vec::new(), 0, None)
+}
+/// `payload` bytes of the region are evidence base64 text: only the rest is markup.
+fn extra_carrying(
+    event: &crate::XmlEvent,
+    profile: &XmlVerifyProfile,
+    scope: &ResourceScope,
+    texts: Vec<Span>,
+    payload: u64,
+    shape: Option<Shape>,
+) -> Result<ExtraMetadata> {
+    let markup = event
+        .region
+        .len
+        .checked_sub(payload)
+        .ok_or_else(|| invalid("evidence payload extent"))?;
+    if markup > profile.max_metadata_bytes as u64 {
         return Err(ProcessingError::MetadataLimit.into());
     }
+    let shape_bytes = shape.as_ref().map_or(0, |shape| {
+        shape.namespace.as_ref().map_or(0, String::len)
+            + shape.local.len()
+            + shape
+                .children
+                .iter()
+                .map(|(ns, local)| ns.as_ref().map_or(0, String::len) + local.len() + 64)
+                .sum::<usize>()
+            + 128
+    }) as u64;
     let bytes = event
         .namespaces()
         .map(|(p, u)| p.len() + u.len() + 96)
         .sum::<usize>() as u64
-        + 256;
+        + 256
+        + texts.len() as u64 * std::mem::size_of::<Span>() as u64
+        + shape_bytes;
     let metadata = scope.reserve_metadata(bytes)?;
     Ok(ExtraMetadata {
         bound: (
@@ -225,6 +289,9 @@ fn extra(
                 .map(|(p, u)| (p.to_owned(), u.to_owned()))
                 .collect(),
         ),
+        texts,
+        payload,
+        shape,
         _metadata: metadata,
     })
 }
@@ -258,8 +325,37 @@ fn scan_optional(
     let mut path: Vec<(u8, String)> = Vec::with_capacity(profile.xml.max_depth);
     let mut proof_count = 0;
     let mut evidence_count = 0;
+    let mut leaf: Option<Leaf> = None;
+    let mut property: Option<PendingProperty> = None;
+    let mut payload_total = 0u64;
     while let Some(event) = events.next_event()? {
         scope.checkpoint()?;
+        if matches!(event.kind, XmlEventKind::Text | XmlEventKind::Cdata) {
+            if let Some(leaf) = leaf.as_mut() {
+                let cdata = event.kind == XmlEventKind::Cdata;
+                let region = if cdata {
+                    Region {
+                        offset: event.region.offset + 9,
+                        len: event
+                            .region
+                            .len
+                            .checked_sub(12)
+                            .ok_or_else(|| invalid("CDATA extent"))?,
+                    }
+                } else {
+                    event.region
+                };
+                if leaf.texts.len() == MAX_LEAF_TEXTS {
+                    return Err(ProcessingError::MetadataLimit.into());
+                }
+                leaf.texts.push(Span { region, cdata });
+                leaf.payload = leaf
+                    .payload
+                    .checked_add(event.region.len)
+                    .ok_or(ProcessingError::MetadataLimit)?;
+            }
+            continue;
+        }
         if !matches!(event.kind, XmlEventKind::Start | XmlEventKind::End) {
             continue;
         }
@@ -284,6 +380,19 @@ fn scan_optional(
             return Err(XmlSourceError::Unsupported("XAdES namespace/version"));
         }
         if event.kind == XmlEventKind::Start {
+            if leaf.is_some() {
+                return Err(invalid("nested base64 signature metadata"));
+            }
+            if let Some(open) = property.as_mut()
+                && event.depth == open.depth + 1
+            {
+                if open.shape.children.len() == MAX_SHAPE_CHILDREN {
+                    return Err(ProcessingError::MetadataLimit.into());
+                }
+                open.shape
+                    .children
+                    .push((name.namespace().map(str::to_owned), name.local().to_owned()));
+            }
             if xades14 {
                 let pending = current
                     .as_ref()
@@ -375,6 +484,52 @@ fn scan_optional(
                         && !matches!(name.local(), "SignatureTimeStamp" | "EncapsulatedTimeStamp")))
             {
                 return Err(XmlSourceError::Unsupported("XAdES archive/proof coverage"));
+            }
+            if current.is_some()
+                && property.is_none()
+                && suffix(
+                    &path,
+                    &[
+                        (1, "Object"),
+                        (2, "QualifyingProperties"),
+                        (2, "UnsignedProperties"),
+                        (2, "UnsignedSignatureProperties"),
+                    ],
+                )
+            {
+                let attribute = |wanted: &str| {
+                    event
+                        .attributes
+                        .iter()
+                        .find(|a| a.name.namespace().is_none() && a.name.local() == wanted)
+                        .map(|a| a.value_region())
+                };
+                property = Some(PendingProperty {
+                    depth: event.depth,
+                    payload_before: payload_total,
+                    shape: Shape {
+                        namespace: name.namespace().map(str::to_owned),
+                        local: name.local().to_owned(),
+                        id: attribute("Id"),
+                        uri: attribute("URI"),
+                        children: Vec::new(),
+                    },
+                });
+            }
+            if current.is_some()
+                && xades
+                && matches!(
+                    name.local(),
+                    "EncapsulatedX509Certificate"
+                        | "EncapsulatedOCSPValue"
+                        | "EncapsulatedCRLValue"
+                )
+            {
+                leaf = Some(Leaf {
+                    depth: event.depth,
+                    texts: Vec::new(),
+                    payload: 0,
+                });
             }
             path.push((
                 if ds {
@@ -504,7 +659,16 @@ fn scan_optional(
                     if evidence_count > 16 {
                         return Err(ProcessingError::MetadataLimit.into());
                     }
-                    pending.evidence.push((kind, extra(event, profile, scope)?));
+                    let finished = leaf.take().filter(|l| l.depth == event.depth);
+                    let (texts, payload) =
+                        finished.map_or((Vec::new(), 0), |l| (l.texts, l.payload));
+                    payload_total = payload_total
+                        .checked_add(payload)
+                        .ok_or(ProcessingError::MetadataLimit)?;
+                    pending.evidence.push((
+                        kind,
+                        extra_carrying(event, profile, scope, texts, payload, None)?,
+                    ));
                 }
                 if ds && name.local() == "KeyInfo" && event.depth == pending.depth + 1 {
                     unique(&mut pending.key_info, extra(event, profile, scope)?)?;
@@ -554,7 +718,18 @@ fn scan_optional(
                     if pending.unsigned.len() == 64 {
                         return Err(ProcessingError::MetadataLimit.into());
                     }
-                    pending.unsigned.push(extra(event, profile, scope)?);
+                    let open = property.take().filter(|p| p.depth == event.depth);
+                    let (payload, shape) = open.map_or((0, None), |p| {
+                        (payload_total - p.payload_before, Some(p.shape))
+                    });
+                    pending.unsigned.push(extra_carrying(
+                        event,
+                        profile,
+                        scope,
+                        Vec::new(),
+                        payload,
+                        shape,
+                    )?);
                 }
                 if ds
                     && name.local() == "Object"
@@ -842,6 +1017,75 @@ fn decode_id(uri: &str) -> Result<String> {
     }
     String::from_utf8(bytes).map_err(|_| invalid("URI fragment UTF-8"))
 }
+/// Resolves a `Reference/@URI` to `(target, missing, drop_comments)`: `None` is the
+/// whole document. Shared by verification and by the key-independent preflight of an
+/// Add, so both read a reference identically.
+fn resolve_reference_uri(
+    document: &mut XmlDocument,
+    reference: Node<'_, '_>,
+    work: &mut u64,
+    scope: &ResourceScope,
+) -> Result<(Option<Region>, bool, bool)> {
+    let uri = reference
+        .attribute("URI")
+        .ok_or_else(|| invalid("Reference without URI"))?;
+    if uri.is_empty() {
+        return Ok((None, false, true));
+    }
+    let fragment = decode_id(uri)?;
+    let Some(expression) = fragment
+        .strip_prefix("xpointer(")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        let target = document
+            .lookup_id(&fragment)?
+            .map(|n| document.node_region(&n))
+            .transpose()?;
+        return Ok((target, target.is_none(), true));
+    };
+    if expression == "/" {
+        return Ok((None, false, false));
+    }
+    let node = if let Some(literal) = expression
+        .strip_prefix("id(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let quote = literal
+            .as_bytes()
+            .first()
+            .copied()
+            .ok_or_else(|| invalid("xpointer id"))?;
+        if !matches!(quote, b'\'' | b'"')
+            || literal.len() < 2
+            || literal.as_bytes().last() != Some(&quote)
+            || literal.as_bytes()[1..literal.len() - 1].contains(&quote)
+        {
+            return Err(invalid("xpointer id literal"));
+        }
+        let identity = &literal[1..literal.len() - 1];
+        if identity.is_empty()
+            || identity
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            return Err(XmlSourceError::Unsupported(
+                "empty or multi-ID XPointer id()",
+            ));
+        }
+        document.lookup_id(identity)?
+    } else {
+        *work = work
+            .checked_sub(document.len())
+            .ok_or(ProcessingError::InvalidInput("reference work limit"))?;
+        let namespaces: Vec<_> = reference
+            .namespaces()
+            .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
+            .collect();
+        document.select_xpath_unique(expression, &namespaces, scope)?
+    };
+    let target = node.map(|n| document.node_region(&n)).transpose()?;
+    Ok((target, target.is_none(), false))
+}
 struct ReferenceVerifier<'a> {
     document: &'a mut XmlDocument,
     profile: &'a XmlVerifyProfile,
@@ -890,71 +1134,8 @@ impl ReferenceVerifier<'_> {
         if *self.count > self.profile.max_references {
             return Err(ProcessingError::MetadataLimit.into());
         }
-        let uri = reference
-            .attribute("URI")
-            .ok_or_else(|| invalid("Reference without URI"))?;
-        let (target, missing, drop_comments) = if uri.is_empty() {
-            (None, false, true)
-        } else {
-            let fragment = decode_id(uri)?;
-            if let Some(expression) = fragment
-                .strip_prefix("xpointer(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                if expression == "/" {
-                    (None, false, false)
-                } else {
-                    let node = if let Some(literal) = expression
-                        .strip_prefix("id(")
-                        .and_then(|s| s.strip_suffix(')'))
-                    {
-                        let quote = literal
-                            .as_bytes()
-                            .first()
-                            .copied()
-                            .ok_or_else(|| invalid("xpointer id"))?;
-                        if !matches!(quote, b'\'' | b'"')
-                            || literal.len() < 2
-                            || literal.as_bytes().last() != Some(&quote)
-                            || literal.as_bytes()[1..literal.len() - 1].contains(&quote)
-                        {
-                            return Err(invalid("xpointer id literal"));
-                        }
-                        let identity = &literal[1..literal.len() - 1];
-                        if identity.is_empty()
-                            || identity
-                                .bytes()
-                                .any(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-                        {
-                            return Err(XmlSourceError::Unsupported(
-                                "empty or multi-ID XPointer id()",
-                            ));
-                        }
-                        self.document.lookup_id(identity)?
-                    } else {
-                        *self.work = self
-                            .work
-                            .checked_sub(self.document.len())
-                            .ok_or(ProcessingError::InvalidInput("reference work limit"))?;
-                        let namespaces: Vec<_> = reference
-                            .namespaces()
-                            .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
-                            .collect();
-                        self.document
-                            .select_xpath_unique(expression, &namespaces, self.scope)?
-                    };
-                    let target = node.map(|n| self.document.node_region(&n)).transpose()?;
-                    (target, target.is_none(), false)
-                }
-            } else {
-                let target = self
-                    .document
-                    .lookup_id(&fragment)?
-                    .map(|n| self.document.node_region(&n))
-                    .transpose()?;
-                (target, target.is_none(), true)
-            }
-        };
+        let (target, missing, drop_comments) =
+            resolve_reference_uri(self.document, reference, self.work, self.scope)?;
         let mut method = C14n::Inclusive;
         let mut inclusive = Vec::new();
         let mut enveloped = false;
@@ -1356,10 +1537,10 @@ pub(crate) fn verify_document_timed(
         });
     }
     scope.checkpoint()?;
-    let final_context = ValidationContext {
-        now: clock.map_or(ctx.now, |clock| clock()),
-        ..*ctx
-    };
+    // One host instant for the whole verification, sampled by the first signer's evidence check
+    // AFTER that signer's document passes (see `ades::check_carried_evidence`), not before them.
+    let final_context = ValidationContext { ..*ctx };
+    let shared_now = std::cell::Cell::new(None);
     scope.checkpoint()?;
     let mut combined: Option<ValidationReport> = None;
     let mut records = Vec::with_capacity(signatures.len());
@@ -1387,6 +1568,7 @@ pub(crate) fn verify_document_timed(
             store,
             prepared.archive_references.as_mut(),
             &final_context,
+            (clock, &shared_now),
             network,
             scope,
             &mut work,

@@ -177,10 +177,10 @@ impl VerifyProfile {
             Self::CadesT => R::cades(L::T, evidence_limits()),
             Self::CadesLt => R::cades(L::Lt, evidence_limits()),
             Self::CadesLta => R::cades(L::Lta, evidence_limits()),
-            Self::XadesB => R::xades(L::B),
-            Self::XadesT => R::xades(L::T),
-            Self::XadesLt => R::xades(L::Lt),
-            Self::XadesLta => R::xades(L::Lta),
+            Self::XadesB => R::xades_with_limits(L::B, evidence_limits()),
+            Self::XadesT => R::xades_with_limits(L::T, evidence_limits()),
+            Self::XadesLt => R::xades_with_limits(L::Lt, evidence_limits()),
+            Self::XadesLta => R::xades_with_limits(L::Lta, evidence_limits()),
             Self::PadesB => R::pades(L::B, evidence_limits()),
             Self::PadesT => R::pades(L::T, evidence_limits()),
             Self::PadesLt => R::pades(L::Lt, evidence_limits()),
@@ -578,14 +578,26 @@ impl Cli {
         }
     }
 }
+/// Disk-backed evidence admission. Large CRLs have their own aggregate spool quota;
+/// certificate, OCSP and timestamp limits, and RAM/metadata limits, remain unchanged.
 pub fn evidence_limits() -> oncl_pki::evidence::EvidenceLimits {
     oncl_pki::evidence::EvidenceLimits {
         max_items: 256,
         max_bytes: 16 * 1024 * 1024,
         max_item_bytes: 1024 * 1024,
+        max_crl_bytes: 32 * 1024 * 1024,
+        max_crl_item_bytes: 32 * 1024 * 1024,
+        max_total_bytes: 48 * 1024 * 1024,
         max_chain_len: 16,
         max_proofs: 16,
         max_coverage_parts: 65536,
-        max_coverage_bytes: 64 * 1024 * 1024,
+        max_coverage_bytes: coverage_bytes(),
     }
+}
+/// Timestamp/proof coverage hashes the signed document and the evidence/container it
+/// carries, so it is bounded by the same ceiling as the operation output (the 10 GiB
+/// document plus the container surcharge), not by a small constant: a 64 MiB cap refused
+/// PAdES LTA of a 64 MiB document. Finite, and never above the output ceiling.
+fn coverage_bytes() -> u64 {
+    oncl_pki::resource::ResourceLimits::default().output_bytes
 }

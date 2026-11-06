@@ -85,6 +85,75 @@ pub fn setup_name(version: &Version, flavor: &WindowsFlavor) -> String {
     format!("openncalayer-{version}-{}-setup.exe", flavor.name)
 }
 
+/// The published installer entry for WinGet: `openncalayer-<version>-<flavor>-winget-setup.exe`
+/// (flavors `win-x64` and `win-x86`; see [`winget_setup`]).
+pub fn winget_setup_name(version: &Version, flavor: &WindowsFlavor) -> String {
+    format!("openncalayer-{version}-{}-winget-setup.exe", flavor.name)
+}
+
+/// Makes the WinGet installer entry of `flavor` in `dist` ([`winget_setup_name`]): the
+/// program `entry` (built from `oncl-winget-setup` for the flavor's target, without a
+/// payload) with the final `setup` (the published `Setup.exe`, already signed if Authenticode
+/// is on) written into it, for `version`. Returns the entry's path.
+///
+/// The entry is made once the payload is final, because Authenticode of the entry must cover
+/// it: sign the returned file (it is unsigned here) and publish exactly those bytes. The
+/// payload is the unchanged `Setup.exe`; WinGet is a target of Windows 10 1809 and newer
+/// only, so the Windows 7 flavors have none and keep their ordinary installers.
+///
+/// # Errors
+///
+/// The flavor is a Windows 7 one; a file cannot be read or written; `entry` or `setup` is
+/// not a program of the flavor's architecture, `entry` already carries a payload or a
+/// signature, or either needs the Visual C++ Redistributable; the file written does not
+/// read back as the payload.
+pub fn winget_setup(
+    entry: &Path,
+    setup: &Path,
+    version: &Version,
+    flavor: &WindowsFlavor,
+    dist: &Path,
+) -> anyhow::Result<PathBuf> {
+    use oncl_winget_setup::payload::{self, Arch};
+
+    if flavor.win7 {
+        bail!(
+            "{} has no WinGet installer: WinGet needs Windows 10 1809 or later; the Windows 7 \
+             installers stay as they are",
+            flavor.name
+        );
+    }
+    let arch = match flavor.architecture {
+        "x64" => Arch::X64,
+        "x86" => Arch::X86,
+        other => bail!("{} has the architecture {other:?}", flavor.name),
+    };
+    // The programs this one carries and is made of: neither may need the Visual C++
+    // Redistributable, which a clean Windows 10 or 11 does not have.
+    no_redistributable([entry.to_path_buf(), setup.to_path_buf()])?;
+    let entry_bytes = fs::read(entry).with_context(|| format!("reading {}", entry.display()))?;
+    let setup_bytes = fs::read(setup).with_context(|| format!("reading {}", setup.display()))?;
+    let image = payload::append(&entry_bytes, &setup_bytes, version, arch)
+        .with_context(|| format!("making the WinGet installer of {}", flavor.name))?;
+
+    fs::create_dir_all(dist).with_context(|| format!("creating {}", dist.display()))?;
+    let out = dist.join(winget_setup_name(version, flavor));
+    fs::write(&out, &image).with_context(|| format!("writing {}", out.display()))?;
+
+    // What was written is what a user will run: read it back the way the installer does.
+    let written = fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
+    let embedded =
+        payload::read(&written).with_context(|| format!("{} does not read back", out.display()))?;
+    if embedded.setup != setup_bytes || embedded.version != *version || embedded.arch != arch {
+        bail!(
+            "{} does not carry the Setup it was made from",
+            out.display()
+        );
+    }
+    no_redistributable([out.clone()])?;
+    Ok(out)
+}
+
 /// The executables of the package next to the daemon.
 const PROGRAMS: [&str; 2] = ["openncalayer.exe", "nmhost.exe"];
 

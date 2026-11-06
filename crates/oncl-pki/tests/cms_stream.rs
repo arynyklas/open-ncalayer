@@ -622,6 +622,7 @@ fn cancelled_expired_and_known_oversize_operations_do_not_read() {
     ));
     let mut small = scope(ResourceLimits {
         input_bytes: 3,
+        container_bytes: 0,
         ..ResourceLimits::default()
     });
     assert!(matches!(
@@ -668,6 +669,7 @@ fn unknown_source_quota_failure_is_terminal_and_bytes_are_not_forgotten() {
     let mut cursor = Cursor::new(&der);
     let mut resources = scope(ResourceLimits {
         input_bytes: 1,
+        container_bytes: 0,
         ..ResourceLimits::default()
     });
     assert!(matches!(
@@ -1415,4 +1417,46 @@ fn final_delivery_control_transition_is_failure_even_after_complete_prefix() {
     };
     assert!(stage.copy_to(&mut writer).is_err());
     assert_eq!(writer.bytes, DATA);
+}
+
+// Own attached result: document allowance is the payload, the envelope is
+// container surcharge and must not consume the document allowance.
+#[test]
+fn own_attached_result_reads_back_with_document_exact_input_limit() {
+    let der = signed("user-rsa-sign", DATA, true, false);
+    assert!(der.len() > DATA.len());
+    let limits = |input_bytes| ResourceLimits {
+        input_bytes,
+        ..ResourceLimits::default()
+    };
+    let mut output = vec![];
+    stream::extract(
+        Source::sequential(&mut Cursor::new(&der), None),
+        &mut output,
+        &mut scope(limits(DATA.len() as u64)),
+    )
+    .unwrap();
+    assert_eq!(output, DATA);
+    // limit+1 of document is still rejected.
+    assert!(matches!(
+        stream::extract(
+            Source::sequential(&mut Cursor::new(&der), None),
+            &mut vec![],
+            &mut scope(limits(DATA.len() as u64 - 1)),
+        ),
+        Err(StreamError::Processing(ProcessingError::InputLimit))
+    ));
+    // Wire beyond document + container_bytes is rejected as intake overflow.
+    assert!(matches!(
+        stream::extract(
+            Source::sequential(&mut Cursor::new(&der), None),
+            &mut vec![],
+            &mut scope(ResourceLimits {
+                input_bytes: DATA.len() as u64,
+                container_bytes: 16,
+                ..ResourceLimits::default()
+            }),
+        ),
+        Err(StreamError::Processing(ProcessingError::InputLimit))
+    ));
 }

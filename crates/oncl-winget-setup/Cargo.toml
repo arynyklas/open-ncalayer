@@ -1,0 +1,59 @@
+[package]
+name = "oncl-winget-setup"
+description = "The installer entry WinGet runs for OpenNCALayer: holds the running program idle through its management endpoint, runs the unchanged Velopack Setup it carries, and proves what it installed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["harness"]
+# `oncl-winget-harness`: a fake desktop (the real activity gate behind the real management
+# endpoint) and a fake Setup, for the tests that need real processes. Never shipped: the
+# release builds the installer with `--no-default-features --bin oncl-winget-setup`.
+harness = ["dep:oncl-core"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oncl-winget-setup"
+path = "src/main.rs"
+
+[[bin]]
+name = "oncl-winget-harness"
+path = "src/bin/harness.rs"
+required-features = ["harness"]
+
+[[test]]
+name = "maintenance"
+required-features = ["harness"]
+
+[dependencies]
+oncl-ipc.workspace = true
+# The program's own registry entry (`HKCU` Apps & Features) that the install is checked against.
+oncl-registry.workspace = true
+semver.workspace = true
+sha2.workspace = true
+# The private directory the payload is copied to: a name nobody can guess, made exclusively.
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+oncl-core = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Velopack's locator, as the installed program itself finds its installation.
+velopack.workspace = true
+# The user's token (elevation), the processes of the installation, the user's folders.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+oncl-registry = { workspace = true, features = ["testing"] }

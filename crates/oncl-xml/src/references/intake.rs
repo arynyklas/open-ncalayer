@@ -119,6 +119,143 @@ pub(crate) fn index_signed(
     drop(framing);
     Ok(document)
 }
+/// Key-independent check for an Add: inserting a new `ds:Signature` at `at` changes the
+/// bytes of every reference of an existing signature that covers that offset (the whole
+/// document, or an element around it) unless the reference drops all signatures (the
+/// XPath filter) or, under `KalkanLegacy`, the new signature is later in document order
+/// than the existing one (the legacy filter excludes later signatures). Such a
+/// signature would fail verification, so the Add is refused BEFORE the key is used.
+/// Manifest members are followed with the verifier's resolution and its depth, cycle,
+/// count and work limits. No trust or algorithm decision is made here.
+pub(crate) fn check_insertion_keeps_existing_references(
+    document: &mut XmlDocument,
+    at: u64,
+    profile: &XmlVerifyProfile,
+    scope: &ResourceScope,
+) -> Result<()> {
+    let signatures = scan_optional(document, profile, scope)?;
+    let mut work = profile.max_work;
+    let mut count = 0usize;
+    for signature in &signatures {
+        scope.checkpoint()?;
+        let xml = metadata(
+            document,
+            signature.info,
+            &signature.info_namespaces,
+            profile.max_metadata_bytes,
+        )?;
+        let _parsed = parse_guards(scope, xml.len())?;
+        let parsed =
+            roxmltree::Document::parse(&xml).map_err(|_| invalid("SignedInfo metadata"))?;
+        let info = parsed
+            .root_element()
+            .first_element_child()
+            .ok_or_else(|| invalid("SignedInfo"))?;
+        let later_is_excluded = profile.canonicalization == C14nProfile::KalkanLegacy
+            && signature.signature.offset < at;
+        let mut active = Vec::new();
+        insertion_container(
+            document,
+            info,
+            at,
+            later_is_excluded,
+            0,
+            &mut active,
+            &mut count,
+            &mut work,
+            profile,
+            scope,
+        )?;
+    }
+    Ok(())
+}
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the verifier's explicit state"
+)]
+fn insertion_container(
+    document: &mut XmlDocument,
+    container: Node<'_, '_>,
+    at: u64,
+    later_is_excluded: bool,
+    depth: usize,
+    active: &mut Vec<Region>,
+    count: &mut usize,
+    work: &mut u64,
+    profile: &XmlVerifyProfile,
+    scope: &ResourceScope,
+) -> Result<()> {
+    for reference in container
+        .children()
+        .filter(|n| crate::is_ds(*n, "Reference"))
+    {
+        scope.checkpoint()?;
+        *count += 1;
+        if *count > profile.max_references {
+            return Err(ProcessingError::MetadataLimit.into());
+        }
+        let drops_signatures = later_is_excluded
+            || reference
+                .children()
+                .filter(|n| crate::is_ds(*n, "Transforms"))
+                .flat_map(|transforms| transforms.children().filter(Node::is_element))
+                .any(|transform| {
+                    algorithm(transform)
+                        .is_ok_and(|uri| uri == "http://www.w3.org/TR/1999/REC-xpath-19991116")
+                });
+        let (target, missing, _) = resolve_reference_uri(document, reference, work, scope)?;
+        if missing {
+            continue;
+        }
+        let covers = match target {
+            None => true,
+            Some(region) => region.offset < at && at < region.end()?,
+        };
+        if covers && !drops_signatures {
+            return Err(XmlSourceError::Unsupported(
+                "Add would change the bytes an existing signature reference covers",
+            ));
+        }
+        if reference.attribute("Type") == Some("http://www.w3.org/2000/09/xmldsig#Manifest") {
+            let target = target.ok_or_else(|| invalid("Manifest reference is not an element"))?;
+            if depth >= profile.max_manifest_depth || active.contains(&target) {
+                return Err(ProcessingError::InvalidInput("Manifest recursion/cycle limit").into());
+            }
+            *work = work
+                .checked_sub(document.len())
+                .ok_or(ProcessingError::InvalidInput("reference work limit"))?;
+            let node = document.indexed_node(target);
+            let namespaces = document.node_namespaces(&node, scope)?;
+            let xml = metadata(document, target, &namespaces, profile.max_metadata_bytes)?;
+            let _parsed = parse_guards(scope, xml.len())?;
+            let parsed =
+                roxmltree::Document::parse(&xml).map_err(|_| invalid("Manifest metadata"))?;
+            let manifest = parsed
+                .root_element()
+                .first_element_child()
+                .ok_or_else(|| invalid("Manifest target"))?;
+            if !crate::is_ds(manifest, "Manifest") {
+                return Err(invalid("Manifest reference targets a different element"));
+            }
+            active.push(target);
+            let result = insertion_container(
+                document,
+                manifest,
+                at,
+                later_is_excluded,
+                depth + 1,
+                active,
+                count,
+                work,
+                profile,
+                scope,
+            );
+            active.pop();
+            result?;
+        }
+    }
+    Ok(())
+}
 fn metadata_shape(
     document: &mut XmlDocument,
     signature: &Metadata,

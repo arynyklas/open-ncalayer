@@ -1,0 +1,89 @@
+// The report of a tool: a headline that says how the whole batch ended, then a row for every
+// document and, under it, for every signer and every check. The tone of a row is decided in
+// Rust from what the SDK reported ([`crate::reports`]); only a verdict that is Valid is
+// styled as success. Colour is never the only carrier of the state: every row's text names it.
+
+import { Palette } from "std-widgets.slint";
+
+export struct ReportRow {
+    // How far the row is indented: 0 a document, 1 a signer or a fact, 2 a check.
+    depth: int,
+    // 0: success, 1: caution (not proven either way), 2: failure, 3: neutral.
+    tone: int,
+    text: string,
+    // The facts behind the text, quieter.
+    detail: string,
+}
+
+// The colour of a tone, in light and dark.
+export global ReportColors {
+    public pure function tone-color(tone: int) -> color {
+        if tone == 0 {
+            return Palette.color-scheme == ColorScheme.dark ? #81c784 : #2e7d32;
+        }
+        if tone == 1 {
+            return Palette.color-scheme == ColorScheme.dark ? #ffb74d : #8a4b00;
+        }
+        if tone == 2 {
+            return Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
+        }
+        return Palette.border;
+    }
+}
+
+export component ReportView inherits VerticalLayout {
+    in property <string> headline;
+    in property <int> tone: 3;
+    in property <[ReportRow]> rows;
+    spacing: 4px;
+
+    if root.headline != "": Rectangle {
+        border-width: 1px;
+        border-radius: 4px;
+        border-color: ReportColors.tone-color(root.tone);
+        background: Palette.alternate-background;
+        accessible-role: text;
+        accessible-label: root.headline;
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                width: 6px;
+                background: ReportColors.tone-color(root.tone);
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                font-weight: 600;
+                text: root.headline;
+            }
+        }
+    }
+    for row in root.rows: HorizontalLayout {
+        spacing: 8px;
+        padding-left: row.depth * 20px;
+        accessible-role: text;
+        accessible-label: row.detail == "" ? row.text : row.text + ". " + row.detail;
+        Rectangle {
+            width: 4px;
+            background: ReportColors.tone-color(row.tone);
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Text {
+                wrap: word-wrap;
+                text: row.text;
+                font-weight: row.depth == 0 ? 600 : 400;
+            }
+
+            if row.detail != "": Text {
+                wrap: word-wrap;
+                text: row.detail;
+                font-size: 12px;
+                color: Palette.foreground.with-alpha(0.75);
+            }
+        }
+    }
+}

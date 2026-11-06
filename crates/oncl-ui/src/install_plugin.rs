@@ -342,6 +342,7 @@ mod tests {
             about: AboutInfo::default(),
             tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
             plugins: Box::new(FakePlugins::default()),
+            scale: oncl_desktop::UiScale::default(),
             on_saved: Box::new(|_: &oncl_desktop::Settings| {}),
         });
     }

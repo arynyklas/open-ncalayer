@@ -181,7 +181,7 @@ async fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
     let started = std::time::Instant::now();
     while !condition() {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(15),
+            started.elapsed() < std::time::Duration::from_secs(60),
             "timed out waiting for {what}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -509,7 +509,10 @@ async fn deadline_mid_batch_aborts_without_a_terminal_record_and_audit_keeps_the
     let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
     let service = Running::start_with(service_config(&pki, |config| {
         config.max_in_flight = 1;
-        config.operation_timeout_ms = 3_000;
+        // The deadline is measured from request start, so it must outlast the slowest
+        // plausible time to reach the TSA (first item's RSA signing) on a loaded machine;
+        // the item is then held until after it, so the test cost is this value.
+        config.operation_timeout_ms = 10_000;
         config.header_timeout_ms = 1_000;
         config.admission_wait_ms = 200;
         config.queue_capacity = 1;

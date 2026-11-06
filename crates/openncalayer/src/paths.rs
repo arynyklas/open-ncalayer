@@ -2,12 +2,9 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use oncl_tls::TlsFiles;
-
-/// Overrides the data directory (tests and development runs).
-pub const DATA_DIR_VAR: &str = "ONCL_DATA_DIR";
 
 /// Locations of OpenNCALayer's files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,39 +47,18 @@ impl Paths {
     }
 }
 
-/// The data directory from the environment `var`.
+/// The data directory from the environment `var`: the rule the relay and the installer
+/// share ([`oncl_ipc::data_dir_from`]).
 fn data_dir(var: impl Fn(&str) -> Option<OsString>) -> io::Result<PathBuf> {
-    let set = |name: &str| var(name).filter(|v| !v.is_empty());
-    if let Some(dir) = set(DATA_DIR_VAR) {
-        return Ok(dir.into());
-    }
-    let missing = |name: &str| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{name} is not set; set {DATA_DIR_VAR} to choose the data directory"),
-        )
-    };
-    if cfg!(windows) {
-        let app_data = set("APPDATA").ok_or_else(|| missing("APPDATA"))?;
-        Ok(Path::new(&app_data).join("OpenNCALayer"))
-    } else if cfg!(target_os = "macos") {
-        let home = set("HOME").ok_or_else(|| missing("HOME"))?;
-        Ok(Path::new(&home).join("Library/Application Support/OpenNCALayer"))
-    } else {
-        // The XDG Base Directory spec ignores relative values.
-        let data_home = match set("XDG_DATA_HOME").map(PathBuf::from) {
-            Some(dir) if dir.is_absolute() => dir,
-            _ => {
-                let home = set("HOME").ok_or_else(|| missing("HOME"))?;
-                Path::new(&home).join(".local/share")
-            }
-        };
-        Ok(data_home.join("openncalayer"))
-    }
+    oncl_ipc::data_dir_from(var)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use oncl_ipc::DATA_DIR_VAR;
+
     use super::*;
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {

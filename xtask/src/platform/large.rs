@@ -245,6 +245,7 @@ fn plan() -> Vec<Case> {
         Case { id: "hash-unknown-length", surfaces: ALL, run: hash_unknown_length },
         Case { id: "overload-profile", surfaces: &[Target::Http], run: overload::run },
         Case { id: "overload-token-apdu", surfaces: &[Target::Http], run: overload::run_token },
+        Case { id: "overload-slot-release", surfaces: &[Target::Http], run: overload::run_slot_repro },
         Case { id: "http-progress-frame-rate", surfaces: &[Target::Http], run: overload::run_progress_rate },
     ]
 }

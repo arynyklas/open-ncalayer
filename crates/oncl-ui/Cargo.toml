@@ -10,13 +10,19 @@ publish.workspace = true
 
 [dependencies]
 der.workspace = true
-oncl-core.workspace = true
+# The manual tools reach every family of the SDK that needs neither a token nor a plugin
+# runtime: XML/XAdES/WS-Security, PDF/PAdES and JOSE. `oncl-xml` is in the daemon already
+# (through `oncl-plugin`); `oncl-pdf` is a workspace crate whose dependencies the daemon has
+# already: the closure of `openncalayer` grows by that crate alone and by no third-party one.
+oncl-core = { workspace = true, features = ["xml", "pdf", "jose"] }
 oncl-flows.workspace = true
 oncl-desktop.workspace = true
+oncl-pdf.workspace = true
 oncl-pki.workspace = true
 oncl-tls.workspace = true
 oncl-token.workspace = true
 oncl-trust.workspace = true
+oncl-xml.workspace = true
 png.workspace = true
 rfd.workspace = true
 # `raw-window-handle-06`: the file and folder pickers are owned by (and stay above) their dialog,
@@ -58,6 +64,8 @@ oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 # A fake mkcert CA in the TLS wizard's tests.
 rcgen.workspace = true
+# The command line's JSON reports, read by the parity tests.
+serde_json.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 x509-cert.workspace = true

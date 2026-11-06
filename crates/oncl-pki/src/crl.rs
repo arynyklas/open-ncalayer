@@ -33,7 +33,7 @@ use crate::cert::Certificate;
 use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, NetKind};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
-use crate::pkix::time_of;
+use crate::pkix::{Currency, time_of};
 use der::asn1::{BitStringRef, IntRef, ObjectIdentifier};
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Reader, SliceReader};
@@ -261,6 +261,29 @@ fn verify_any_crl(
     now: OffsetDateTime,
     delta: bool,
 ) -> Result<CertificateList, CrlError> {
+    let der = authenticated(crl_der, issuer)?;
+    let crl = CertificateList::from_der(&der)?;
+    let tbs = &crl.tbs_cert_list;
+    let mut indicated = false;
+    for extension in tbs.crl_extensions.iter().flatten() {
+        check_extension(extension, delta, &mut indicated)?;
+    }
+    if delta && !indicated {
+        return Err(CrlError::Malformed(
+            "a delta CRL without deltaCRLIndicator".to_owned(),
+        ));
+    }
+    check_times(
+        &tbs.this_update,
+        tbs.next_update.as_ref(),
+        Currency::Now(now),
+    )?;
+    Ok(crl)
+}
+
+/// The CRL as DER (a BER one of at most [`MAX_BER_CRL_LEN`] bytes is normalized) once its
+/// issuer name and signature are checked, before anything of it is decoded.
+fn authenticated<'a>(crl_der: &'a [u8], issuer: &Certificate) -> Result<Cow<'a, [u8]>, CrlError> {
     let strict = crl_der.len() > MAX_BER_CRL_LEN;
     let der: Cow<'_, [u8]> = if strict {
         Cow::Borrowed(crl_der)
@@ -297,40 +320,224 @@ fn verify_any_crl(
         .ok_or_else(|| CrlError::Malformed("signature BIT STRING has unused bits".to_owned()))?;
     key.verify(alg, signed.tbs, signature)
         .map_err(|e| CrlError::BadSignature(e.to_string()))?;
+    Ok(der)
+}
 
-    let crl = CertificateList::from_der(&der)?;
-    let tbs = &crl.tbs_cert_list;
-    let mut indicated = false;
-    for extension in tbs.crl_extensions.iter().flatten() {
-        let id = extension.extn_id;
-        if delta && id == oid::DELTA_CRL_INDICATOR {
-            indicated = true;
-            continue;
-        }
-        if REFUSED_CRL_EXTENSIONS.contains(&id) {
-            return Err(CrlError::Malformed(format!(
-                "unsupported CRL extension {id}"
-            )));
-        }
-        if extension.critical && !KNOWN_CRL_EXTENSIONS.contains(&id) {
-            return Err(CrlError::Malformed(format!(
-                "unsupported critical CRL extension {id}"
-            )));
-        }
-    }
-    if delta && !indicated {
-        return Err(CrlError::Malformed(
-            "a delta CRL without deltaCRLIndicator".to_owned(),
-        ));
-    }
+fn check_extension(
+    extension: &x509_cert::ext::Extension,
+    delta: bool,
+    indicated: &mut bool,
+) -> Result<(), CrlError> {
+    check_extension_id(extension.extn_id, extension.critical, delta, indicated)
+}
 
-    if time_of(&tbs.this_update) > now {
-        return Err(CrlError::NotYetValid);
+fn check_extension_id(
+    id: ObjectIdentifier,
+    critical: bool,
+    delta: bool,
+    indicated: &mut bool,
+) -> Result<(), CrlError> {
+    if delta && id == oid::DELTA_CRL_INDICATOR {
+        *indicated = true;
+        return Ok(());
     }
-    if tbs.next_update.is_some_and(|next| now >= time_of(&next)) {
-        return Err(CrlError::Outdated);
+    if REFUSED_CRL_EXTENSIONS.contains(&id) {
+        return Err(CrlError::Malformed(format!(
+            "unsupported CRL extension {id}"
+        )));
     }
-    Ok(crl)
+    if critical && !KNOWN_CRL_EXTENSIONS.contains(&id) {
+        return Err(CrlError::Malformed(format!(
+            "unsupported critical CRL extension {id}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an Extensions sequence without retaining a list or copying extnValue.
+fn scan_extensions<'a>(
+    bytes: &'a [u8],
+    mut visit: impl FnMut(ObjectIdentifier, bool, &'a [u8]) -> der::Result<()>,
+) -> der::Result<()> {
+    use der::asn1::OctetStringRef;
+    let mut reader = SliceReader::new(bytes)?;
+    reader.sequence(|extensions| {
+        while !extensions.is_finished() {
+            extensions.sequence(|extension| {
+                let id: ObjectIdentifier = extension.decode()?;
+                let critical: Option<bool> = extension.decode()?;
+                let value: &OctetStringRef = extension.decode()?;
+                visit(id, critical.unwrap_or(false), value.as_bytes())
+            })?;
+        }
+        Ok::<_, der::Error>(())
+    })?;
+    reader.finish()
+}
+
+fn check_times(
+    this_update: &x509_cert::time::Time,
+    next_update: Option<&x509_cert::time::Time>,
+    currency: Currency,
+) -> Result<(), CrlError> {
+    match currency {
+        Currency::Now(now) => {
+            if time_of(this_update) > now {
+                return Err(CrlError::NotYetValid);
+            }
+            if next_update.is_some_and(|next| now >= time_of(next)) {
+                return Err(CrlError::Outdated);
+            }
+        }
+        Currency::AtProof { proof, now } => {
+            // EN 319 102-1 5.2.5.4 with the proof time as validation time. nextUpdate is not
+            // compared with the verifier's clock.
+            if time_of(this_update) > now {
+                return Err(CrlError::NotYetValid);
+            }
+            // With nextUpdate the maximum freshness is nextUpdate - thisUpdate (5.2.5.4
+            // step 1 default), i.e. fresh iff the proof precedes nextUpdate: a 35-day CA CRL
+            // issued hours before the proof is fine. Without it the skew is the freshness.
+            let stale = match next_update {
+                Some(next) => time_of(next) <= proof,
+                None => time_of(this_update) <= proof - crate::ocsp::CLOCK_SKEW,
+            };
+            if stale {
+                return Err(CrlError::Outdated);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Status of `serial` in a complete CRL of `issuer` at `now`, without decoding the list of
+/// revoked certificates into memory. The issuer name and the signature are checked first,
+/// exactly as [`verify_crl`] does; then the revoked list is walked once over the borrowed
+/// DER, each entry's serial number and date decoded and only the entry of `serial` (the
+/// first) kept. Every entry's extensions are structurally validated as borrowed DER,
+/// including entries that do not match; none is retained. A CRL over
+/// [`MAX_BER_CRL_LEN`] bytes must be DER. The CRL extensions and times are judged
+/// as [`verify_crl`] does.
+///
+/// # Errors
+///
+/// The errors of [`verify_crl`].
+pub fn serial_status(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    serial_status_at(crl_der, issuer, serial, Currency::Now(now))
+}
+
+/// [`serial_status`] for a CRL a signature carries, once the signature's proof time (the
+/// control time of ETSI EN 319 102-1) is verified: everything is checked as there except
+/// currency. thisUpdate must not be before `proof` less [`crate::ocsp::CLOCK_SKEW`]
+/// ([`CrlError::Outdated`]) nor after `now` ([`CrlError::NotYetValid`]); nextUpdate is not
+/// compared with `now`.
+///
+/// # Errors
+///
+/// The errors of [`serial_status`].
+pub fn serial_status_at_proof(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    proof: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    serial_status_at(crl_der, issuer, serial, Currency::AtProof { proof, now })
+}
+
+fn serial_status_at(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    currency: Currency,
+) -> Result<CrlStatus, CrlError> {
+    use der::Tagged;
+    use x509_cert::certificate::Version;
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Time;
+
+    let der = authenticated(crl_der, issuer)?;
+    let serial = unsigned(serial);
+    let mut reader = SliceReader::new(&der)?;
+    let tbs = reader.sequence(|r| {
+        let tbs = r.tlv_bytes()?;
+        r.read_slice(r.remaining_len())?;
+        Ok::<_, der::Error>(tbs)
+    })?;
+    let mut found = None;
+    let mut reader = SliceReader::new(tbs)?;
+    let (this_update, next_update, extensions) = reader.sequence(|r| {
+        // Required, as in the full decode: a CRL without a version field is refused.
+        let _version: Version = r.decode()?;
+        let _signature: AlgorithmIdentifierRef<'_> = r.decode()?;
+        let _issuer = r.tlv_bytes()?;
+        let this_update: Time = r.decode()?;
+        let next_update: Option<Time> = r.decode()?;
+        if der::Tag::peek(r).is_ok_and(|tag| tag == der::Tag::Sequence) {
+            r.sequence(|entries| {
+                while !entries.is_finished() {
+                    entries.sequence(|entry| {
+                        let number: SerialNumber = entry.decode()?;
+                        let date: Time = entry.decode()?;
+                        let rest = entry.read_slice(entry.remaining_len())?;
+                        let mut reason = None;
+                        let mut seen_reason = false;
+                        if !rest.is_empty() {
+                            scan_extensions(rest, |id, _, value| {
+                                // The first CrlReason decides, malformed or not.
+                                if !seen_reason && id == CrlReason::OID {
+                                    seen_reason = true;
+                                    reason = Enumerated::from_der(value).ok().map(|v| v.0);
+                                }
+                                Ok(())
+                            })?;
+                        }
+                        if found.is_none() && unsigned(number.as_bytes()) == serial {
+                            found = Some(CrlStatus::Revoked {
+                                time: time_of(&date),
+                                reason,
+                            });
+                        }
+                        Ok::<_, der::Error>(())
+                    })?;
+                }
+                Ok::<_, der::Error>(())
+            })?;
+        }
+        let extensions = if r.is_finished() {
+            None
+        } else {
+            Some(r.tlv_bytes()?)
+        };
+        Ok::<_, der::Error>((this_update, next_update, extensions))
+    })?;
+    reader.finish()?;
+    if let Some(extensions) = extensions {
+        let mut reader = SliceReader::new(extensions)?;
+        let outer: der::asn1::ContextSpecific<der::asn1::AnyRef<'_>> = reader.decode()?;
+        reader.finish()?;
+        if outer.tag_number != der::TagNumber(0) || outer.value.tag() != der::Tag::Sequence {
+            return Err(CrlError::Malformed("CRL extensions tag".to_owned()));
+        }
+        let mut error = None;
+        let wrapped = der::asn1::AnyRef::from_der(extensions)?;
+        scan_extensions(wrapped.value(), |id, critical, _| {
+            if error.is_none() {
+                error = check_extension_id(id, critical, false, &mut false).err();
+            }
+            Ok(())
+        })?;
+        if let Some(error) = error {
+            return Err(error);
+        }
+    }
+    check_times(&this_update, next_update.as_ref(), currency)?;
+    Ok(found.unwrap_or(CrlStatus::Good))
 }
 
 /// Status of the serial number `serial` (unsigned big-endian bytes; leading zeros do not

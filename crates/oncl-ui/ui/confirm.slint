@@ -1,11 +1,13 @@
 // A plugin's yes/no question: who asks and the question (plain text, not markup).
 
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading } from "common.slint";
 
 export component ConfirmDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 420px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
     max-width: 640px;
     forward-focus: no-button;
 
@@ -17,43 +19,50 @@ export component ConfirmDialog inherits Window {
     in property <string> text;
     // The translated header line.
     out property <string> requester: @tr("Request from: {}", root.origin);
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
+    // How far the text is scrolled (zero or negative).
+    out property <length> body-y: body.content-y;
 
     callback answer(bool);
     callback cancel();
 
-    VerticalBox {
-        Text {
-            text: root.requester;
-            wrap: word-wrap;
+    EscapeScope {
+        escape => {
+            root.cancel();
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            body := DialogScroll {
+                NameText {
+                    text: root.requester;
+                }
 
-        Text {
-            text: @tr("Plugin: {}", root.source);
-            wrap: word-wrap;
-        }
+                NameText {
+                    text: @tr("Plugin: {}", root.source);
+                }
 
-        Text {
-            text: root.text;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            Button {
-                text: @tr("Yes");
-                clicked => {
-                    root.answer(true);
+                Subheading {
+                    text: root.text;
                 }
             }
 
-            // The default: a question answered by Enter alone is not a yes.
-            no-button := Button {
-                text: @tr("No");
-                primary: true;
-                clicked => {
-                    root.answer(false);
+            actions := ActionBar {
+                Button {
+                    text: @tr("Yes");
+                    clicked => {
+                        root.answer(true);
+                    }
+                }
+
+                // The default: a question answered by Enter alone is not a yes.
+                no-button := Button {
+                    text: @tr("No");
+                    primary: true;
+                    clicked => {
+                        root.answer(false);
+                    }
                 }
             }
         }

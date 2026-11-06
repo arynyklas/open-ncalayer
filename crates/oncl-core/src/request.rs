@@ -42,6 +42,21 @@ impl VerifyRequest {
             wsse: None,
         }
     }
+    /// [`Self::xades`] with the host's evidence quotas. Without them the quotas are the
+    /// small defaults scaled from the XML metadata cap; a host that must admit a
+    /// complete CA CRL (NCANode/Kalkan XAdES-LT carries about 20 MB of it) names its
+    /// `max_crl_*` and `max_total_bytes` here, as it does for CAdES and PAdES.
+    #[cfg(feature = "xml")]
+    pub const fn xades_with_limits(
+        required: oncl_pki::evidence::AdesLevel,
+        limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            profile: VerifyProfile::Xades(required),
+            limits: Some(limits),
+            wsse: None,
+        }
+    }
     #[cfg(feature = "xml")]
     pub const fn xml() -> Self {
         Self {

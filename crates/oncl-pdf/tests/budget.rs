@@ -44,9 +44,16 @@ const UNSIGNED: &[u8] = include_bytes!("fixtures/external-multipage.pdf");
 fn prior_signature_contents_reads_real_signed_fixtures() {
     let none = prior(UNSIGNED).unwrap();
     assert_eq!(
-        none,
+        PriorSignatures {
+            xref_entries: 0,
+            ..none
+        },
         PriorSignatures::default(),
         "an unsigned PDF has no prior signatures"
+    );
+    assert!(
+        none.xref_entries > 0,
+        "it still lists its objects: {none:?}"
     );
     let one = prior(SIGNED).unwrap();
     assert_eq!(one.count, 1);
@@ -74,11 +81,11 @@ fn plan_memory_and_metadata_are_pinned_and_monotonic_in_every_input() {
     let memory = budget::plan_memory(&limits, &none).unwrap();
     let metadata = budget::plan_metadata(&limits, &none).unwrap();
     assert_eq!(
-        memory, 397_541_376,
+        memory, 392_167_424,
         "plan_memory with no inputs (default limits)"
     );
     assert_eq!(
-        metadata, 57_802_752,
+        metadata, 51_904_512,
         "plan_metadata with no inputs (default limits)"
     );
     // Components are the documented reservation functions.
@@ -114,6 +121,14 @@ fn plan_memory_and_metadata_are_pinned_and_monotonic_in_every_input() {
         let (m, md) = grow(inputs);
         assert!(m > memory && md > metadata, "{inputs:?}: {m} {md}");
     }
+    // Cross-reference rows are memory (16 bytes a row, charged by the reader), never
+    // metadata: a dense document must not eat the small-item metadata quota.
+    let (m, md) = grow(PlanInputs {
+        xref_entries: 1 << 20,
+        ..none
+    });
+    assert!(m - memory >= 2 * (1 << 20) * 16, "{m}");
+    assert_eq!(md, metadata);
     // Evidence costs the documented factor per byte (the measured coefficient).
     let (m, _) = grow(PlanInputs {
         evidence_bytes: 1 << 20,

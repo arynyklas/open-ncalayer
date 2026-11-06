@@ -684,3 +684,111 @@ fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ------------------------------------------------------------------------------------------
+// Slot-release reproduction: do stalled uploads hold every in-flight slot, and when is a slot
+// offered to a waiting CPU-bound client?
+
+pub fn run_slot_repro(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
+    let mut case = Case::new(
+        env,
+        target,
+        "overload-slot-release",
+        "two stalled uploads against max_in_flight=2, then CPU clients: slot release at the deadline",
+    )?;
+    if let Err(e) = slot_body(&mut case) {
+        case.check("the repro ran to completion", false, format!("{e:#}"));
+    }
+    Ok(case.finish())
+}
+
+fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
+    let env = case.env;
+    let cpu_path = case.work.join("slot-cpu.xml");
+    generate::xml::generate(&cpu_path, 8 * MIB, 0x5107, generate::xml::XmlKind::Archive)?;
+    let deadline_ms = 30_000u64;
+    case.server_settings = ServerSettings {
+        max_in_flight: 2,
+        blocking_workers: 2,
+        queue_capacity: 2,
+        admission_wait_ms: 3000,
+        operation_timeout_ms: deadline_ms,
+        memory_per_operation: 268_435_456,
+        total_memory: 536_870_912,
+        temp_per_operation: GIB,
+        total_temp: 4 * GIB,
+        input_bytes: 10_737_418_240,
+        tsa: false,
+        max_connections: 64,
+        telemetry_endpoint: None,
+        token_alias: None,
+    };
+    let _ = env;
+    case.ensure_server()?;
+    let (address, token) = {
+        let s = case.server.as_ref().unwrap();
+        (s.address.clone(), std::fs::read_to_string(&s.token_file)?.trim().to_owned())
+    };
+    let stalled = |chunked_bytes: u64| Upload {
+        path: "/v1/operations".into(),
+        metadata: hash_metadata(),
+        document: Source::Pattern { byte: 0x11, len: GIB },
+        chunked: true,
+        expect_continue: true,
+        bytes_per_second: None,
+        stall_after: Some((chunked_bytes, Duration::from_secs(deadline_ms / 1000 + 20))),
+        abort_after: None,
+    };
+    let cpu = || Upload {
+        path: "/v1/operations".into(),
+        metadata: sign_metadata(),
+        document: Source::File(cpu_path.clone()),
+        chunked: false,
+        expect_continue: true,
+        bytes_per_second: None,
+        stall_after: None,
+        abort_after: None,
+    };
+    let began = Instant::now();
+    let rows = std::sync::Mutex::new(Vec::<(String, f64, u16, Option<String>, Option<String>)>::new());
+    thread::scope(|s| {
+        for n in 0..2 {
+            let (a, t, up, rows) = (address.clone(), token.clone(), stalled(MIB), &rows);
+            s.spawn(move || {
+                let r = http_raw::send(&a, &t, &up);
+                let code = r.json().and_then(|j| j["code"].as_str().map(str::to_owned));
+                rows.lock().unwrap().push((format!("stalled-{n}"), began.elapsed().as_secs_f64(), r.status, code, r.transport_error.clone()));
+            });
+        }
+        thread::sleep(Duration::from_secs(2));
+        // CPU clients arrive while both slots are held, then keep arriving every 5 s
+        for n in 0..8u64 {
+            let (a, t, up, rows) = (address.clone(), token.clone(), cpu(), &rows);
+            s.spawn(move || {
+                thread::sleep(Duration::from_secs(n * 5));
+                let start = began.elapsed().as_secs_f64();
+                let r = http_raw::send(&a, &t, &up);
+                let done = began.elapsed().as_secs_f64();
+                let code = r.json().and_then(|j| j["code"].as_str().map(str::to_owned));
+                let ok = http_raw::multipart_final(&r).is_some_and(|(f, _)| f["status"] == "completed");
+                rows.lock().unwrap().push((format!("cpu-{n} started {start:.1}s completed={ok}"), done, r.status, code, r.transport_error.clone()));
+            });
+        }
+    });
+    let mut rows = rows.into_inner().unwrap();
+    rows.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for r in &rows {
+        eprintln!("[platform-proof]   slot-repro {} ended {:.1}s status {} code {:?} {:?}", r.0, r.1, r.2, r.3, r.4);
+    }
+    case.note("timeline", json!(rows.iter().map(|r| json!({"client": r.0, "ended_s": r.1, "status": r.2, "code": r.3, "transport": r.4})).collect::<Vec<_>>()));
+    let stalled_end = rows.iter().filter(|r| r.0.starts_with("stalled")).map(|r| r.1).fold(0.0, f64::max);
+    case.note("stalled_released_after_s", json!(stalled_end));
+    case.check(
+        "the stalled uploads were ended at about the operation deadline",
+        stalled_end > 0.0 && stalled_end < (deadline_ms as f64 / 1000.0) + 15.0,
+        format!("{stalled_end:.1}s for a {}s deadline", deadline_ms / 1000),
+    );
+    let completed = rows.iter().filter(|r| r.0.starts_with("cpu") && r.0.contains("completed=true")).count();
+    case.check("CPU clients that arrive after the slots were freed complete", completed > 0, format!("{completed} of 8 completed"));
+    Ok(())
+}

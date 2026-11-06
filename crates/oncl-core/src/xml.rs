@@ -24,6 +24,18 @@ pub(crate) fn error(error: XmlSourceError) -> OperationError {
         XmlSourceError::Acquisition(_) | XmlSourceError::Evidence(EvidenceError::Timestamp(_)) => {
             OperationError::ValidationRequired
         }
+        // Keep the exact static reason: a post-key failure of a multi-hour operation must say
+        // which format/evidence check rejected, not collapse into one opaque message.
+        XmlSourceError::Malformed(reason) | XmlSourceError::Unsupported(reason) => {
+            ProcessingError::InvalidInput(reason).into()
+        }
+        XmlSourceError::Xml(oncl_xml::XmlError::TooLarge) => {
+            ProcessingError::InvalidInput("XML input exceeds the XML processing limits").into()
+        }
+        XmlSourceError::Evidence(EvidenceError::InvalidBinding) => ProcessingError::InvalidInput(
+            "invalid evidence owner, coverage graph or timestamp configuration",
+        )
+        .into(),
         _ => {
             ProcessingError::InvalidInput("unsupported or malformed XML signature/evidence").into()
         }
@@ -759,6 +771,9 @@ pub(crate) fn intersect_evidence_limits(
             max_items: a.max_items.min(b.max_items),
             max_bytes: a.max_bytes.min(b.max_bytes),
             max_item_bytes: a.max_item_bytes.min(b.max_item_bytes),
+            max_crl_bytes: a.max_crl_bytes.min(b.max_crl_bytes),
+            max_crl_item_bytes: a.max_crl_item_bytes.min(b.max_crl_item_bytes),
+            max_total_bytes: a.max_total_bytes.min(b.max_total_bytes),
             max_chain_len: a.max_chain_len.min(b.max_chain_len),
             max_proofs: a.max_proofs.min(b.max_proofs),
             max_coverage_parts: a.max_coverage_parts.min(b.max_coverage_parts),

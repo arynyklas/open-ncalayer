@@ -325,14 +325,29 @@ pub fn cms_attached(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let (sha, len) = sha256_file(&extracted)?;
         c.check("the extracted content is the original document", sha == blob.digests.sha256 && len == d(env), format!("{sha} {len}"));
         let _ = std::fs::remove_file(&extracted);
-        let oracle_out = c.work.join("oracle-content.bin");
-        let ok = openssl_cms_signature(&p7m, None, &oracle_out)?;
-        c.check("OpenSSL verifies the attached signature (independent)", ok, "");
-        if ok {
-            let (sha, len) = sha256_file(&oracle_out)?;
-            c.check("OpenSSL's content is the original document", sha == blob.digests.sha256 && len == d(env), format!("{sha}"));
+        if size_of(&p7m)? < i32::MAX as u64 {
+            let oracle_out = c.work.join("oracle-content.bin");
+            let ok = openssl_cms_signature(&p7m, None, &oracle_out)?;
+            c.check("OpenSSL verifies the attached signature (independent)", ok, "");
+            if ok {
+                let (sha, len) = sha256_file(&oracle_out)?;
+                c.check("OpenSSL's content is the original document", sha == blob.digests.sha256 && len == d(env), format!("{sha}"));
+            }
+            let _ = std::fs::remove_file(&oracle_out);
+        } else {
+            // OpenSSL 3.5.4 `cms -verify` refuses a DER container of 2 GiB or more
+            // ("asn1_d2i_read_bio: too long", crypto/asn1/a_d2i_fp.c: length above INT_MAX).
+            // The independent check is decomposed: the content digest (hashlib) equals the
+            // signed messageDigest and the RSA signature over the signedAttrs verifies
+            // (asn1crypto + cryptography).
+            match c.env.oracle(&["cms-attached-check".as_ref(), p7m.as_os_str(), blob.digests.sha256.as_ref()]) {
+                Ok(v) => {
+                    c.check("decomposed independent check: content digest = signed messageDigest = original, RSA signature verifies (hashlib + asn1crypto + cryptography; OpenSSL cannot read >= 2 GiB DER)", v["ok"] == true, v.to_string());
+                    c.note("independent_cms_attached", v);
+                }
+                Err(e) => c.check("decomposed independent CMS check", false, format!("{e:#}")),
+            }
         }
-        let _ = std::fs::remove_file(&oracle_out);
         c.check_scratch_clean("scratch is empty afterwards");
         Ok(())
     }))

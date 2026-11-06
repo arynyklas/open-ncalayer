@@ -436,6 +436,21 @@ jobs:
           version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
           cargo xtask package windows --flavor ${{ matrix.flavor }} --bin "$BIN" --version "$version" \
             --packages packages --dist packaged
+      # The WinGet installer entry as release.yml builds it (without its test harness), with
+      # this job's Setup.exe as payload: the import / no-redistributable gate of
+      # `cargo xtask package winget-setup`, and its real-process behaviour tests.
+      - name: WinGet installer entry (as release.yml, unsigned)
+        shell: bash
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          cargo build --locked --release --target ${{ matrix.target }} \
+            -p oncl-winget-setup --no-default-features --bin oncl-winget-setup
+          cargo xtask package winget-setup --flavor ${{ matrix.flavor }} --version "$version" \
+            --entry "$BIN/oncl-winget-setup.exe" \
+            --setup "packaged/openncalayer-$version-${{ matrix.flavor }}-setup.exe" --dist winget
+      - name: WinGet installer entry tests (real processes)
+        if: matrix.flavor == 'win-x64'
+        run: cargo test --locked -p oncl-winget-setup --test maintenance
 
   # The macOS installer and update package as the release makes them (release.yml, flavor
   # osx, `cargo xtask package macos`): both architectures joined by lipo, packed by the pinned

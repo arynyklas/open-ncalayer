@@ -159,6 +159,9 @@ mod cades {
             max_items: 64,
             max_bytes: 8 << 20,
             max_item_bytes: 1 << 20,
+            max_crl_bytes: 8 << 20,
+            max_crl_item_bytes: 1 << 20,
+            max_total_bytes: 8 << 20,
             max_chain_len: 8,
             max_proofs: 8,
             max_coverage_parts: 1024,
@@ -821,6 +824,181 @@ mod cades {
             .unwrap();
             assert_eq!(report.verdict, Verdict::Invalid);
             assert_eq!(report.level(), None);
+        }
+    }
+    #[test]
+    fn cades_without_signing_time_is_a_profile_finding_and_tampering_is_still_a_failure() {
+        use oncl_pki::{
+            cms::{self, AttrSpec, CertSpec, CoSign, Content, Problem, SignSpec},
+            validation::{CheckStatus, ProfileViolation, ValidationReason},
+        };
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let mut attrs = AttrSpec::cades(NOW);
+        attrs.signing_time = None;
+        let source = cms::sign_spec(
+            &f.doc,
+            &[],
+            &SignSpec {
+                content: Content::Data(DATA),
+                encapsulate: true,
+                cosign: CoSign::Never,
+                econtent_type: None,
+                digest: None,
+                attrs,
+                certificates: CertSpec::Signer,
+            },
+        )
+        .unwrap();
+        cms::verify(&source, None).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let check = |bytes: Vec<u8>| {
+            ades::verify(
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(bytes), None),
+                None,
+                &services,
+                &[SigAlg::RsaSha256],
+                &scope(),
+            )
+            .unwrap()
+        };
+        // EN 319 122-1 clause 5.2.1 wants a signing-time; its absence is a profile finding on
+        // a signature that otherwise verifies, not a malformed or failed signature.
+        let report = check(source.clone());
+        let signer = &report.reports()[0].signers[0];
+        assert_eq!(signer.signature, CheckStatus::Passed);
+        assert!(
+            signer.reasons.contains(&ValidationReason::Profile(
+                ProfileViolation::SigningTimeMissing
+            )),
+            "{:?}",
+            signer.reasons
+        );
+        assert!(
+            signer
+                .reasons
+                .iter()
+                .all(|reason| !matches!(reason, ValidationReason::Signature(_))),
+            "{:?}",
+            signer.reasons
+        );
+        assert_eq!(signer.ades_level, None);
+        assert_eq!(report.verdict, Verdict::Invalid);
+        assert_eq!(report.level(), None);
+        // The same content bytes altered: a real signature failure, reported as one.
+        let mut altered = source.clone();
+        let at = altered.windows(DATA.len()).position(|w| w == DATA).unwrap();
+        altered[at] ^= 1;
+        let report = check(altered);
+        let signer = &report.reports()[0].signers[0];
+        assert_eq!(signer.signature, CheckStatus::Failed);
+        assert!(
+            signer
+                .reasons
+                .contains(&ValidationReason::Signature(Problem::DigestMismatch))
+        );
+        assert_eq!(report.verdict, Verdict::Invalid);
+    }
+    #[test]
+    fn other_baseline_violations_are_profile_findings_with_a_passed_signature() {
+        use oncl_pki::{
+            cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec},
+            validation::{CheckStatus, ProfileViolation, ValidationReason},
+        };
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let not_data = der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
+        let mut without_ess = AttrSpec::cades(NOW);
+        without_ess.signing_certificate_v2 = false;
+        let cases = [
+            (
+                "content type",
+                Some(not_data),
+                AttrSpec::cades(NOW),
+                ProfileViolation::ContentTypeNotData,
+            ),
+            (
+                "signing certificate",
+                None,
+                without_ess,
+                ProfileViolation::SigningCertificateMissing,
+            ),
+        ];
+        for (name, econtent_type, attrs, expected) in cases {
+            let source = cms::sign_spec(
+                &f.doc,
+                &[],
+                &SignSpec {
+                    content: Content::Data(DATA),
+                    encapsulate: true,
+                    cosign: CoSign::Never,
+                    econtent_type,
+                    digest: None,
+                    attrs,
+                    certificates: CertSpec::Signer,
+                },
+            )
+            .unwrap();
+            let report = ades::verify(
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(source.clone()), None),
+                None,
+                &services,
+                &[SigAlg::RsaSha256],
+                &scope(),
+            )
+            .unwrap();
+            let signer = &report.reports()[0].signers[0];
+            assert_eq!(signer.signature, CheckStatus::Passed, "{name}");
+            let profile_reasons: Vec<_> = signer
+                .reasons
+                .iter()
+                .filter(|r| matches!(r, ValidationReason::Profile(_)))
+                .collect();
+            assert_eq!(
+                profile_reasons,
+                vec![&ValidationReason::Profile(expected)],
+                "{name}: {:?}",
+                signer.reasons
+            );
+            assert!(
+                signer
+                    .reasons
+                    .iter()
+                    .all(|r| !matches!(r, ValidationReason::Signature(_))),
+                "{name}: {:?}",
+                signer.reasons
+            );
+            assert_eq!(signer.ades_level, None, "{name}");
+            assert_eq!(report.verdict, Verdict::Invalid, "{name}");
         }
     }
     #[test]
@@ -1526,5 +1704,210 @@ mod cades {
         let ci = wire_children(&added);
         let sd = wire_children(&wire_children(&ci[1])[0]);
         assert_eq!(&wire_children(&sd[2])[0][..3], &[6, 0x81, 9]);
+    }
+
+    fn extend_with(
+        f: &Fixture,
+        input: &[u8],
+        sign_now: OffsetDateTime,
+        tsa_time: OffsetDateTime,
+        target: AdesLevel,
+    ) -> Result<(Vec<u8>, Verdict), String> {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(tsa_time);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: sign_now,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let mut output = Vec::new();
+        let report = ades::extend(
+            target,
+            Source::sequential(&mut Cursor::new(input), Some(input.len() as u64)),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &mut output,
+            &scope(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        Ok((output, report.verdict))
+    }
+    fn verify_later(f: &Fixture, signed: &[u8], now: OffsetDateTime) -> Verdict {
+        verify_report(f, signed, now).verdict
+    }
+    fn verify_report(f: &Fixture, signed: &[u8], now: OffsetDateTime) -> ades::AdesReport {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        ades::verify(
+            AdesLevel::Lt,
+            Source::sequential(&mut Cursor::new(signed), None),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &scope(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn lt_crl_is_judged_at_the_proof_time_not_now() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+        let (lt, verdict) = extend_with(&f, &baseline, NOW, NOW, AdesLevel::Lt).unwrap();
+        assert_eq!(verdict, Verdict::Valid);
+        for (label, delta) in [
+            ("+0", time::Duration::ZERO),
+            ("+6m", time::Duration::minutes(6)),
+            ("+1h", time::Duration::HOUR),
+            ("+1d", time::Duration::DAY),
+            ("+400d", time::Duration::days(400)),
+        ] {
+            assert_eq!(
+                verify_later(&f, &lt, NOW + delta),
+                Verdict::Valid,
+                "{label}"
+            );
+        }
+    }
+    #[test]
+    fn lt_crl_control_cases_are_never_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let hour = time::Duration::HOUR;
+        let mut worlds: Vec<(&str, Fixture, OffsetDateTime, &[time::Duration])> = Vec::new();
+        let all = [time::Duration::ZERO, hour, time::Duration::DAY];
+        // Stale: issued two hours before the proof.
+        let mut f = Fixture::new();
+        f.crl = MockCrl::new(f.root.clone())
+            .with_this_update(NOW - 2 * hour)
+            .next_update(Some(NOW - hour))
+            .der();
+        worlds.push(("stale", f, NOW, &all));
+        // From the future: minted two hours after the proof; verified an hour after it.
+        let mut f = Fixture::new();
+        f.crl = MockCrl::new(f.root.clone())
+            .with_this_update(NOW + 2 * hour)
+            .next_update(Some(NOW + 3 * hour))
+            .der();
+        worlds.push(("future", f, NOW + 2 * hour, &all[..2]));
+        // Revoked ten minutes before the proof.
+        let mut f = Fixture::new();
+        f.crl = MockCrl::new(f.root.clone())
+            .with_this_update(NOW - time::Duration::MINUTE)
+            .next_update(Some(NOW + hour))
+            .revoke(&[0x63, 0x03, 2], NOW - time::Duration::minutes(10))
+            .der();
+        worlds.push(("revoked at P", f, NOW, &all));
+        // The CRL's signature is damaged.
+        let mut f = Fixture::new();
+        let last = f.crl.len() - 1;
+        f.crl[last] ^= 1;
+        worlds.push(("bad signature", f, NOW, &all));
+        for (label, f, sign_now, deltas) in worlds {
+            let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+            let Ok((lt, verdict)) = extend_with(&f, &baseline, sign_now, NOW, AdesLevel::Lt) else {
+                continue;
+            };
+            if label != "future" {
+                assert_ne!(verdict, Verdict::Valid, "{label} at signing");
+            }
+            for &delta in deltas {
+                assert_ne!(
+                    verify_later(&f, &lt, NOW + delta),
+                    Verdict::Valid,
+                    "{label} +{delta}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lt_document_with_damaged_embedded_crl_is_not_valid_an_hour_later() {
+        // Unlike the sign-time controls, this one is built in a good world, signed Valid,
+        // and only then verified (at +0 and +1h) with the embedded CRL's bytes damaged.
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+        let (lt, verdict) = extend_with(&f, &baseline, NOW, NOW, AdesLevel::Lt).unwrap();
+        assert_eq!(verdict, Verdict::Valid);
+        assert_eq!(
+            verify_later(&f, &lt, NOW + time::Duration::HOUR),
+            Verdict::Valid
+        );
+        let at = lt
+            .windows(f.crl.len())
+            .position(|window| window == f.crl.as_slice())
+            .expect("the CRL is embedded verbatim");
+        let mut damaged = lt.clone();
+        damaged[at + f.crl.len() - 1] ^= 1;
+        for delta in [time::Duration::ZERO, time::Duration::HOUR] {
+            // The damaged signature leaves no usable status: the failure is the status
+            // one, reached by a completed verification (not a parse error).
+            let report = verify_report(&f, &damaged, NOW + delta);
+            let signer = &report.reports()[0].signers[0];
+            assert_ne!(report.verdict, Verdict::Valid, "+{delta}");
+            assert_eq!(
+                signer.revocation,
+                oncl_pki::validation::CheckStatus::Unavailable,
+                "+{delta}"
+            );
+            assert!(
+                signer
+                    .reasons
+                    .contains(&oncl_pki::validation::ValidationReason::RevocationUnavailable),
+                "+{delta}: {:?}",
+                signer.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn lt_with_a_35_day_ca_crl_issued_hours_before_the_proof_stays_valid() {
+        // NCA shape: the CRL is issued hours before the timestamp and lives 35 days.
+        let mut f = Fixture::new();
+        f.crl = MockCrl::new(f.root.clone())
+            .with_this_update(NOW - time::Duration::hours(6))
+            .next_update(Some(NOW + time::Duration::days(35)))
+            .der();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+        let (lt, verdict) = extend_with(&f, &baseline, NOW, NOW, AdesLevel::Lt).unwrap();
+        assert_eq!(verdict, Verdict::Valid);
+        for delta in [
+            time::Duration::ZERO,
+            time::Duration::DAY,
+            time::Duration::days(400),
+        ] {
+            assert_eq!(
+                verify_later(&f, &lt, NOW + delta),
+                Verdict::Valid,
+                "+{delta}"
+            );
+        }
     }
 }

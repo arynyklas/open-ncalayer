@@ -1,0 +1,243 @@
+//! Public validation material the LT and LTA levels of CAdES and PAdES are built from: the
+//! certificates of the chains and the OCSP responses and CRLs that prove their status. The SDK
+//! does not fetch it for these formats (it checks what the host hands over and fails when it is
+//! not enough, after the key was applied); the desktop therefore asks the user for the files
+//! and refuses before any key is used when they are not there, as the command line does.
+//! XAdES fetches its own evidence and needs none of this.
+//!
+//! The files are read here, bounded, once, before anything is frozen or signed. They are
+//! public data: nothing in them is trusted, the engine checks every path, status and
+//! signature again.
+
+use std::path::PathBuf;
+
+use oncl_pki::cert::Certificate;
+
+use super::controller::{JobError, MissingField};
+use super::operations::{evidence_limits, read_limited};
+
+/// The files the user named, by kind.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Evidence {
+    pub(crate) certificates: Vec<PathBuf>,
+    pub(crate) ocsp: Vec<PathBuf>,
+    pub(crate) crls: Vec<PathBuf>,
+}
+
+/// `a.der; "b c.der"` → the paths: separated by `;`, surrounding spaces and quotes dropped,
+/// empty entries skipped.
+pub(crate) fn parse_list(text: &str) -> Vec<PathBuf> {
+    text.split(';')
+        .map(|p| p.trim().trim_matches('"').trim())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+impl Evidence {
+    /// What the three fields of a page hold.
+    pub(crate) fn from_fields(certificates: &str, ocsp: &str, crls: &str) -> Evidence {
+        Evidence {
+            certificates: parse_list(certificates),
+            ocsp: parse_list(ocsp),
+            crls: parse_list(crls),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.certificates.is_empty() && self.ocsp.is_empty() && self.crls.is_empty()
+    }
+
+    /// The material as one label, which the consent binds: each path and the SHA-256 of what is
+    /// in it now. The runner does NOT call this again: it compares the label of the bytes it
+    /// actually loaded and froze ([`Loaded::label`]), so a file swapped after the confirmation
+    /// (even swapped back) cannot be the material that was agreed to.
+    pub(crate) fn label(&self) -> String {
+        let digests = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| {
+                    read_limited(
+                        p,
+                        usize::try_from(evidence_limits().max_item_bytes).unwrap_or(usize::MAX),
+                    )
+                    .map_or_else(|_| "unreadable".to_owned(), |bytes| sha256_hex(&bytes))
+                })
+                .collect()
+        };
+        self.label_with(
+            &digests(&self.certificates),
+            &digests(&self.ocsp),
+            &digests(&self.crls),
+        )
+    }
+
+    fn label_with(&self, certs: &[String], ocsp: &[String], crls: &[String]) -> String {
+        let join = |paths: &[PathBuf], digests: &[String]| {
+            paths
+                .iter()
+                .zip(digests)
+                .map(|(p, d)| format!("{}#{d}", p.display()))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        format!(
+            "cert={};ocsp={};crl={}",
+            join(&self.certificates, certs),
+            join(&self.ocsp, ocsp),
+            join(&self.crls, crls)
+        )
+    }
+
+    /// Evidence cannot be built from nothing: the chain certificates and at least one OCSP
+    /// response or CRL are needed. Checked before any file is read and before any key is used.
+    pub(crate) fn require(&self) -> Result<(), JobError> {
+        if self.certificates.is_empty() || (self.ocsp.is_empty() && self.crls.is_empty()) {
+            return Err(JobError::Input(MissingField::Evidence));
+        }
+        Ok(())
+    }
+
+    /// Reads the files, within the SDK's own evidence bounds.
+    pub(crate) fn load(&self) -> Result<Loaded, JobError> {
+        let limits = evidence_limits();
+        let count = self.certificates.len() + self.ocsp.len() + self.crls.len();
+        if count > limits.max_items {
+            return Err(JobError::Operation(oncl_core::ErrorCode::InputLimit));
+        }
+        let item_limit = usize::try_from(limits.max_item_bytes).unwrap_or(usize::MAX);
+        let mut total = 0u64;
+        let mut read = |path: &PathBuf| -> Result<Vec<u8>, JobError> {
+            let bytes = read_limited(path, item_limit)?;
+            total = total.saturating_add(bytes.len() as u64);
+            if total > limits.max_bytes {
+                return Err(JobError::Operation(oncl_core::ErrorCode::InputLimit));
+            }
+            Ok(bytes)
+        };
+        let mut loaded = Loaded::default();
+        let (mut cd, mut od, mut rd) = (Vec::new(), Vec::new(), Vec::new());
+        for path in &self.certificates {
+            let bytes = read(path)?;
+            cd.push(sha256_hex(&bytes));
+            loaded.certificates.push(
+                oncl_pki::cert::parse(&bytes)
+                    .map_err(|_| JobError::Operation(oncl_core::ErrorCode::InvalidInput))?,
+            );
+        }
+        for path in &self.ocsp {
+            let bytes = read(path)?;
+            od.push(sha256_hex(&bytes));
+            loaded.ocsp.push(bytes);
+        }
+        for path in &self.crls {
+            let bytes = read(path)?;
+            rd.push(sha256_hex(&bytes));
+            loaded.crls.push(bytes);
+        }
+        loaded.label = self.label_with(&cd, &od, &rd);
+        Ok(loaded)
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    oncl_pki::key::HashAlg::Sha256
+        .digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The material as bytes.
+#[derive(Default)]
+pub(crate) struct Loaded {
+    pub(crate) certificates: Vec<Certificate>,
+    ocsp: Vec<Vec<u8>>,
+    crls: Vec<Vec<u8>>,
+    /// The label of THESE bytes: what the consent is compared with.
+    pub(crate) label: String,
+}
+
+impl Loaded {
+    pub(crate) fn ocsp_slices(&self) -> Vec<&[u8]> {
+        self.ocsp.iter().map(Vec::as_slice).collect()
+    }
+
+    pub(crate) fn crl_slices(&self) -> Vec<&[u8]> {
+        self.crls.iter().map(Vec::as_slice).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_list_of_paths_is_split_on_semicolons_and_trimmed() {
+        assert_eq!(
+            parse_list(r#" a.der ; "b c.der" ;; "#),
+            vec![PathBuf::from("a.der"), PathBuf::from("b c.der")]
+        );
+        assert!(parse_list("  ;  ").is_empty());
+    }
+
+    /// Evidence needs the chain and a status: certificates alone, or a status alone, is
+    /// refused before any file is read.
+    #[test]
+    fn evidence_needs_certificates_and_a_status() {
+        let e = |c: &str, o: &str, r: &str| Evidence::from_fields(c, o, r);
+        for incomplete in [
+            e("", "", ""),
+            e("a", "", ""),
+            e("", "o", ""),
+            e("", "", "r"),
+        ] {
+            assert_eq!(
+                incomplete.require(),
+                Err(JobError::Input(MissingField::Evidence)),
+                "{incomplete:?}"
+            );
+        }
+        assert_eq!(e("a", "o", "").require(), Ok(()));
+        assert_eq!(e("a", "", "r").require(), Ok(()));
+    }
+
+    #[test]
+    fn a_missing_or_unparsable_file_is_refused_when_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.der");
+        std::fs::write(&junk, b"not a certificate").unwrap();
+        let missing = Evidence {
+            certificates: vec![dir.path().join("nope.der")],
+            ..Evidence::default()
+        };
+        assert!(matches!(missing.load(), Err(JobError::Io(_))));
+        let unparsable = Evidence {
+            certificates: vec![junk],
+            ..Evidence::default()
+        };
+        assert!(matches!(
+            unparsable.load(),
+            Err(JobError::Operation(oncl_core::ErrorCode::InvalidInput))
+        ));
+    }
+
+    /// The consent label binds what is IN the evidence files: changing a byte, or a file
+    /// that cannot be read, changes it.
+    #[test]
+    fn the_label_binds_the_contents_of_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("c.der");
+        std::fs::write(&file, b"one").unwrap();
+        let evidence = Evidence {
+            certificates: vec![file.clone()],
+            ..Evidence::default()
+        };
+        let before = evidence.label();
+        assert_eq!(before, evidence.label());
+        std::fs::write(&file, b"two").unwrap();
+        assert_ne!(before, evidence.label(), "another content is another label");
+        std::fs::remove_file(&file).unwrap();
+        assert!(evidence.label().contains("#unreadable"));
+    }
+}

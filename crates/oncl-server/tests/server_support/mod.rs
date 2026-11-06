@@ -46,7 +46,7 @@ impl Process {
         let token = Zeroizing::new(std::fs::read_to_string(operator_path.join("token")).unwrap());
         let audit = directory.path().join("audit");
         let config = format!(
-            "enabled = true\nbind = '{bind}'\naudit_directory = {}\n{}\n[[tokens]]\nid = 'synthetic-actor'\nverifier = '{}'\nactions = ['hash']\n",
+            "enabled = true\nbind = '{bind}'\naudit_directory = {}\n{}\n[[tokens]]\nid = 'synthetic-actor'\nverifier = '{}'\nactions = ['hash', 'batch']\n",
             toml_path(&audit),
             extra,
             verifier

@@ -288,6 +288,7 @@ pub(super) fn metadata_region(
     scope: &ResourceScope,
 ) -> Result<Metadata, StreamError> {
     let mut result = Metadata::new(scope)?;
+    result.reserve_total(region.len)?;
     let mut at = 0;
     let mut buffer = [0; 4096];
     let _memory = scope.reserve_memory(buffer.len() as u64)?;
@@ -524,6 +525,7 @@ fn sign_impl(
                 true,
                 None,
                 &needed,
+                true,
                 true,
             );
             if let Some(error) = reader.error.take() {

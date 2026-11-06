@@ -40,8 +40,8 @@ use openncalayer::update::{
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
     JsonSettings, LiveProxyTransport, NoPlugins, Paths, Plugins, ServerConfig, WorkspaceOpener,
-    about_bundles, build_registry_from, builtin_modules, builtins, desktop, hold_requests,
-    listen_port, load_settings, release_requests, requests_idle, serve, serve_ipc,
+    about_bundles, build_registry_from, builtin_modules, builtins, desktop, hold_requests_unless,
+    listen_port, load_settings, release_requests, requests_held, requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -208,6 +208,7 @@ fn signing_trust() -> (
                     oncl_ui::ExtraTrust {
                         anchors,
                         origins: vec![origin.to_owned()],
+                        ..oncl_ui::ExtraTrust::default()
                     },
                     Arc::new(move || now),
                 );
@@ -326,7 +327,9 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
         Arc::clone(&clock),
     ) {
         Ok((engine, guard)) => oncl_ui::DesktopEngineServices {
-            engine: Arc::new(engine),
+            // Every operation of the tools window counts in the activity the updater and an
+            // installer wait for.
+            engine: Arc::new(engine.with_activity(openncalayer::activity())),
             guard,
             tokens: Arc::clone(&tokens),
             clock,
@@ -423,6 +426,7 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
         oncl_ui::set_desktop_windows(desktop_windows(
             &daemon.paths,
             locale,
+            settings.ui.scale,
             on_settings_saved(
                 http,
                 tokens,
@@ -462,6 +466,17 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
         });
     }
     let served = Flag::set(Arc::clone(&serving));
+    // The installer's way to hold the program (WinGet upgrade): the same decision as the
+    // updater's, on an endpoint of its own.
+    #[cfg(windows)]
+    serve_maintenance(
+        &runtime,
+        &daemon.paths.data,
+        DaemonHost {
+            stop: Arc::clone(&stop),
+            loop_runs: Arc::clone(&loop_runs),
+        },
+    );
     let at_stop = updates.clone();
     let server = thread::Builder::new().name("server".into()).spawn(move || {
         let _served = served;
@@ -737,6 +752,7 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
+    scale: oncl_desktop::UiScale,
     on_saved: Box<dyn Fn(&Settings)>,
     reports: Arc<SelftestReports>,
     wss: Arc<Wss>,
@@ -755,6 +771,7 @@ fn desktop_windows(
     let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
+        scale,
         settings: desktop::settings_services(paths, executables, wss.port(), Box::new(updates)),
         about: AboutInfo {
             commit: env!("ONCL_GIT_COMMIT").to_owned(),
@@ -880,18 +897,14 @@ impl DaemonHost {
 
 impl Host for DaemonHost {
     fn busy(&self) -> bool {
-        !requests_idle(update::QUIET) || self.window_open()
+        // A request being answered, one that ended within the quiet time, a window that is
+        // open, or another maintainer (an installer) that holds the program.
+        !requests_idle(update::QUIET) || requests_held() || self.window_open()
     }
 
     fn hold(&self) -> bool {
-        if !hold_requests(update::QUIET) {
-            return false;
-        }
-        if self.window_open() {
-            release_requests();
-            return false;
-        }
-        true
+        // The window is looked at only once the requests are held back.
+        hold_requests_unless(update::QUIET, || self.window_open())
     }
 
     fn release(&self) {
@@ -917,6 +930,41 @@ fn window_open() -> bool {
         return false;
     }
     rx.recv_timeout(WINDOW_ASK).unwrap_or(true)
+}
+
+/// Serves the management endpoint of the data directory `data` on `runtime` for as long as
+/// it runs: a maintainer (the installer WinGet runs) holds the daemon there with the decision
+/// of `host`, the updater's. If the endpoint cannot be bound it is logged and the daemon runs
+/// without it: an installer then finds a running program it cannot ask and refuses to
+/// replace it.
+#[cfg(windows)]
+fn serve_maintenance(runtime: &Runtime, data: &Path, host: DaemonHost) {
+    let endpoint = match oncl_ipc::maintenance::endpoint(data) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            tracing::warn!(error = %e, "no management endpoint: an installer cannot hold this program");
+            return;
+        }
+    };
+    let listener = match runtime.block_on(oncl_ipc::bind(&endpoint)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::warn!(%endpoint, error = %e, "cannot serve the management endpoint: an installer cannot hold this program");
+            return;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let host = Arc::new(openncalayer::maintenance::Maintenance::new(
+        Arc::new(host),
+        openncalayer::maintenance::restart_args(&args),
+    ));
+    runtime.spawn(async move {
+        let served =
+            oncl_ipc::maintenance::serve(listener, host, oncl_ipc::maintenance::MAX_LEASE).await;
+        if let Err(e) = served {
+            tracing::warn!(error = %e, "the management endpoint stopped");
+        }
+    });
 }
 
 /// The updater's part of the start ([`cli::AtStart`]): once this process is the only

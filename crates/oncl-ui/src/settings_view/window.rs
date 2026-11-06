@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::LocalKey;
 
-use oncl_desktop::{Settings, UpdateSettings};
+use oncl_desktop::{Settings, UiScale, UpdateSettings};
 use oncl_flows::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
 
@@ -171,6 +171,8 @@ fn saved(
             let l = settings.ui_locale();
             desktop.locale.set(l);
             select_desktop_language(l);
+            // Every open window, and the ones opened later, take the scale at once.
+            crate::scale::set(settings.ui.scale);
             (desktop.on_saved)(settings);
         }
         Err(e) => tracing::warn!(error = ?e, "settings window: cannot save"),
@@ -298,6 +300,7 @@ fn show_form(ui: &SettingsWindow, form: &SettingsForm) {
     ui.set_updates_enabled(form.updates_enabled);
     ui.set_update_channel(index_of(&CHANNELS, &form.update_channel));
     ui.set_tokens_enabled(form.tokens_enabled);
+    ui.set_scale(index_of(&UiScale::ALL, &form.scale));
 }
 
 fn form_of(ui: &SettingsWindow) -> SettingsForm {
@@ -309,6 +312,7 @@ fn form_of(ui: &SettingsWindow) -> SettingsForm {
         updates_enabled: ui.get_updates_enabled(),
         update_channel: item(&CHANNELS, ui.get_update_channel()),
         tokens_enabled: ui.get_tokens_enabled(),
+        scale: item(&UiScale::ALL, ui.get_scale()),
     }
 }
 
@@ -342,6 +346,7 @@ mod tests {
     use crate::windows::{DesktopWindows, set_desktop_windows};
     use crate::{AboutInfo, offscreen};
     use oncl_desktop::ProxySetting;
+    use slint::PhysicalSize;
     use std::cell::RefCell;
 
     /// The windows on a sandbox under `root`; the proxies `on_saved` got.
@@ -356,6 +361,7 @@ mod tests {
             about: AboutInfo::default(),
             tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
             plugins: Box::new(crate::plugins_view::fakes::FakePlugins::default()),
+            scale: oncl_desktop::UiScale::default(),
             on_saved: Box::new(move |s: &Settings| record.borrow_mut().push(s.proxy.clone())),
         });
         (crate::windows::desktop().unwrap(), applied)
@@ -423,6 +429,7 @@ mod tests {
             updates_enabled: true,
             update_channel: oncl_desktop::settings::Channel::Stable,
             tokens_enabled: false,
+            scale: UiScale::P100,
         };
         let result = (desktop.settings.save(&form), desktop.settings.states());
         worker::finish::<Open, _>(id, Ok(result), saved);
@@ -456,6 +463,74 @@ mod tests {
         assert_eq!(form_of(&window.ui), form);
         window.ui.set_tokens_enabled(false);
         assert!(!form_of(&window.ui).tokens_enabled);
+    }
+
+    #[test]
+    fn the_scale_box_shows_and_gives_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = desktop(dir.path());
+        open(&crate::windows::desktop().unwrap());
+        let window = the_window();
+        assert_eq!(
+            window.ui.get_scale(),
+            index_of(&UiScale::ALL, &UiScale::P100),
+            "the system's size by default"
+        );
+        for step in UiScale::ALL {
+            let form = SettingsForm {
+                scale: step,
+                ..form_of(&window.ui)
+            };
+            show_form(&window.ui, &form);
+            assert_eq!(form_of(&window.ui).scale, step);
+        }
+    }
+
+    #[test]
+    fn a_saved_scale_resizes_the_open_windows_and_a_failed_save_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (desktop, _) = desktop(dir.path());
+        open(&desktop);
+        let window = the_window();
+        window.ui.window().set_size(PhysicalSize::new(600, 800));
+        worker::finish::<Open, _>(window.id, Ok(()), |_, _, ()| {});
+
+        let form = SettingsForm {
+            scale: UiScale::P200,
+            ..form_of(&window.ui)
+        };
+        let result = (desktop.settings.save(&form), desktop.settings.states());
+        worker::finish::<Open, _>(window.id, Ok(result), saved);
+        assert_eq!(crate::scale::current(), UiScale::P200);
+        assert_eq!(window.ui.window().scale_factor(), 2.0);
+        assert_eq!(window.ui.window().size(), PhysicalSize::new(1200, 1600));
+        assert!(!window.ui.get_message_is_error());
+
+        // A save that fails (a proxy that is not an HTTP one) keeps the scale as it was.
+        let bad = SettingsForm {
+            scale: UiScale::P125,
+            proxy_mode: ProxyMode::Manual,
+            proxy_url: "socks5://proxy.test:1080".to_owned(),
+            ..form_of(&window.ui)
+        };
+        let result = (desktop.settings.save(&bad), desktop.settings.states());
+        worker::finish::<Open, _>(window.id, Ok(result), saved);
+        assert_eq!(crate::scale::current(), UiScale::P200);
+        assert_eq!(window.ui.window().scale_factor(), 2.0);
+        assert!(window.ui.get_message_is_error());
+        crate::scale::set(UiScale::P100);
+    }
+
+    #[test]
+    fn a_window_opened_after_the_choice_starts_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (desktop, _) = desktop(dir.path());
+        crate::scale::set(UiScale::P150);
+        open(&desktop);
+        let window = the_window();
+        assert_eq!(window.ui.window().scale_factor(), 1.5);
+        crate::scale::set(UiScale::P100);
+        assert_eq!(window.ui.window().scale_factor(), 1.0);
     }
 
     #[test]

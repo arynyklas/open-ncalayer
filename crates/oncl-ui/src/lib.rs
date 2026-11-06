@@ -19,8 +19,12 @@ mod foreground;
 mod install_plugin;
 #[cfg(test)]
 mod offscreen;
+#[cfg(test)]
+mod pages;
 pub mod plugins_view;
 mod prompter;
+mod reports;
+mod scale;
 #[cfg(test)]
 mod screenshots;
 pub mod settings_view;
@@ -50,7 +54,9 @@ pub use tray::{
 pub use windows::{
     DesktopWindow, DesktopWindows, any_window_open, open_window, set_desktop_windows,
 };
-pub use workspace::{DesktopEngineServices, desktop_limits, open_workspace};
+#[doc(hidden)]
+pub use workspace::progress;
+pub use workspace::{DesktopEngineServices, JobControl, desktop_limits, open_workspace};
 
 mod ui {
     slint::include_modules!();
