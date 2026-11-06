@@ -484,15 +484,23 @@ impl PdfDocument<'_, '_> {
         const CHUNK: usize = 65_536;
         // Refill below this much so ordinary entries never straddle a chunk.
         const NEED: usize = 64;
-        // A token error in a unit (subsection header or entry) that does not start at the
-        // chunk start may only be a unit cut by the chunk end: the unit is re-read from a
-        // fresh chunk starting at it, so acceptance never depends on where the 64 KiB
-        // boundaries fall. A unit (with all its blanks) is accepted when it fits one
-        // chunk; a longer one is malformed in every alignment.
+        // A unit (subsection header or entry) that does not start at the chunk start and
+        // fails to parse, or whose last token reaches the chunk end (it may be cut there:
+        // `12` of `123`), is re-read from a fresh chunk starting at it, so acceptance
+        // never depends on where the 64 KiB boundaries fall. A unit starting at the
+        // chunk start is final: it is accepted when it ends before the chunk does (with
+        // all its blanks) and refused otherwise, in every alignment.
         macro_rules! tok {
             ($e:expr, $unit:expr, $p:ident, $chunk:ident, $at_end:ident) => {
                 match $e {
-                    Ok(v) => v,
+                    Ok(v) if $at_end || $p.pos < $chunk.len() => v,
+                    Ok(_) if $unit == 0 => {
+                        return Err(PdfError::Malformed("xref entry longer than a chunk"));
+                    }
+                    Ok(_) => {
+                        $p.pos = $unit;
+                        break;
+                    }
                     Err(error) => {
                         if !$at_end && $unit > 0 {
                             $p.pos = $unit;

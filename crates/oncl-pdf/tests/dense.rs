@@ -311,6 +311,26 @@ fn classic_table_acceptance_is_independent_of_chunk_alignment() {
         assert!(open(&bytes, &limits).is_err(), "shift {shift}");
     }
 }
+/// A subsection header `first<blanks>count` (and an entry) whose digits are cut by the
+/// chunk end must not be read as the truncated number: sweep the padding that moves the
+/// second header's tokens across the 64 KiB boundary, for several header paddings.
+#[test]
+fn tokens_cut_by_the_chunk_end_are_reread_not_truncated() {
+    let limits = PdfLimits::default();
+    let count = 1234usize;
+    for entry_pad in (65_536 - 220)..=(65_536 - 20) {
+        for header_pad in [70usize, 100, 130] {
+            let mut table = format!("0 1\n{:010}{}00000 n \n", 9, " ".repeat(entry_pad - 31));
+            table.push_str(&format!("1{}{count}\n", " ".repeat(header_pad)));
+            for _ in 0..count {
+                table.push_str(&format!("{:010} 00000 n \n", 9));
+            }
+            let bytes = dense_gen::classic_with_table_size(&table, count as u32 + 2);
+            open(&bytes, &limits)
+                .unwrap_or_else(|e| panic!("pad {entry_pad} header {header_pad}: {e:?}"));
+        }
+    }
+}
 /// The charge is the rows themselves, not a flat allowance: the smallest memory budget
 /// that opens a document sits between 16 bytes per entry and the host-side bound.
 #[test]
