@@ -53,11 +53,12 @@ fn no_capability_is_left_without_cases() {
     );
 }
 
-/// Defect-marked reds are not absent coverage: each references an explicit reproduction,
-/// and every row (including blocked profiles) has a nonempty expected grade. This checks
-/// completeness of the matrix, not success of a live oracle run.
+/// A defect row states the DESIRED outcome as `expected` (a concrete grade of the same
+/// shape as a passing row, never the buggy output and never prose) and the documented buggy
+/// outcome as `defect_observed`; the runner then tells a still-reproducing defect (DEFECT)
+/// from a fixed one (FIXED: the marker must go) and from a different failure (CHANGED).
 #[test]
-fn defect_markers_reference_reproductions_and_grades_are_defined() {
+fn defect_rows_have_a_concrete_desired_grade_and_a_distinct_documented_observation() {
     let coverage = Coverage::load().unwrap();
     for row in &coverage.case {
         assert!(
@@ -65,20 +66,40 @@ fn defect_markers_reference_reproductions_and_grades_are_defined() {
             "row {} has no expected grade",
             row.id
         );
-        if let Some(defect) = &row.defect {
-            let description = coverage
-                .defect
-                .iter()
-                .find(|d| &d.id == defect)
-                .unwrap_or_else(|| panic!("row {} names unknown defect {defect}", row.id));
-            assert!(!description.reproduction.is_empty());
-            assert!(!description.expected.is_empty());
-        } else {
+        assert!(
+            !row.expected.starts_with('(') && !row.expected.contains("after the fix"),
+            "row {}: expected is a placeholder, not a grade: {}",
+            row.id,
+            row.expected
+        );
+        let Some(defect) = &row.defect else {
             assert!(
-                !row.expected.starts_with("(desired grade"),
-                "row {} has an unrecorded defect",
+                row.defect_observed.is_none(),
+                "row {} has no defect marker",
                 row.id
             );
-        }
+            continue;
+        };
+        let description = coverage
+            .defect
+            .iter()
+            .find(|d| &d.id == defect)
+            .unwrap_or_else(|| panic!("row {} names unknown defect {defect}", row.id));
+        assert!(!description.reproduction.is_empty() && !description.observed.is_empty());
+        let observed = row
+            .defect_observed
+            .as_deref()
+            .unwrap_or_else(|| panic!("defect row {} documents no observation", row.id));
+        assert!(!observed.trim().is_empty());
+        assert!(
+            !row.expected.contains(observed),
+            "defect row {}: the desired grade must not contain the buggy observation `{observed}`",
+            row.id
+        );
+        assert!(
+            row.expected.contains('=') && row.expected.len() > 20,
+            "defect row {}: the desired outcome is not a grade of a passing row's shape",
+            row.id
+        );
     }
 }

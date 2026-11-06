@@ -20,7 +20,9 @@ pub fn cases() -> Vec<Case> {
     vec![
         Case::new("large-cms-detached-rsa", large_cms),
         Case::new("large-xml-enveloped-rsa", large_xml),
-        Case::new("large-pdf-signature-rsa", |ctx| large_pdf(ctx, 16_300, ctx.large_bytes)),
+        Case::new("large-pdf-signature-rsa", |ctx| {
+            large_pdf(ctx, 16_300, ctx.large_bytes)
+        }),
         // The cheap reproduction of D6: 128 MiB, about 8000 pages with 16 KiB streams.
         Case::new("pdf-many-pages-128mib-rsa", |ctx| {
             large_pdf(ctx, 16_300, 134_217_728)

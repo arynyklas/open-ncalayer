@@ -1055,14 +1055,26 @@ fn judge_oracle_cades(
         ours.summary()
     );
     let (status, grades, _, answer) = nc_verify(ctx, cms, None)?;
+    // NCANode answers HTTP 500 to /cms/verify of its own 20 MB LT (it embeds the complete
+    // NCA CRL): an oracle limitation, recorded in the grade, never a verdict on the CMS.
+    let oracle_gave_up = status == 500 && level == "lt";
     ensure!(
-        status == 200 && grades.len() == 1,
+        oracle_gave_up || (status == 200 && grades.len() == 1),
         "NCANode: HTTP {status} {grades:?} {answer}"
     );
-    let nc_level = answer["signers"][0]["adesLevel"]
-        .as_str()
-        .unwrap_or("none")
-        .to_owned();
+    let nc_level = if oracle_gave_up {
+        "none".to_owned()
+    } else {
+        answer["signers"][0]["adesLevel"]
+            .as_str()
+            .unwrap_or("none")
+            .to_owned()
+    };
+    let nc_grade = if oracle_gave_up {
+        "HTTP500/cannot-verify-own-LT".to_owned()
+    } else {
+        format!("{}/level={nc_level}", grades[0])
+    };
     let mut verdicts = vec![
         ("crypto", "ok".to_owned()),
         (
@@ -1075,7 +1087,7 @@ fn judge_oracle_cades(
                 ours.report["ades_level"].as_str().unwrap_or("none")
             ),
         ),
-        ("ncanode", format!("{}/level={nc_level}", grades[0])),
+        ("ncanode", nc_grade.clone()),
     ];
     if profile == Profile::Rsa {
         let python = python_verify(ctx, sig, None)?;
@@ -1085,7 +1097,7 @@ fn judge_oracle_cades(
     Ok(Observed {
         grade: grade(&verdicts),
         ours: ours.summary(),
-        oracle: format!("NCANode {} level {nc_level}", grades[0]),
+        oracle: format!("NCANode {nc_grade}"),
         detail: String::new(),
     })
 }
