@@ -333,11 +333,11 @@ pub(crate) fn acquire(
     let transport = DeadlineTransport::new(services.validation.http, services.network, scope);
     let mut values = Vec::new();
     let result = (|| {
-        for cert in path
-            .iter()
-            .skip(1)
-            .filter(|c| !services.validation.anchors.certs().contains(c))
-        {
+        // EN 319 132-1 §5.4.2: the values are the signing certificate path's CA
+        // certificates AND the trust anchor's certificate when one exists (the
+        // signing certificate itself is already in ds:KeyInfo). Dropping a
+        // trust-anchor issuer left a validly LT signature with no CertificateValues.
+        for cert in path.iter().skip(1) {
             values.push((EvidenceKind::Certificate, crate::cert_der(cert)?));
         }
         for pair in path.windows(2) {

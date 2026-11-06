@@ -340,8 +340,10 @@ fn root(document: &mut XmlDocument) -> Result<Region> {
 }
 /// Sign the actual source using the leaf/key algorithm selected by DigestSigner.
 /// Reference hashing is internal work, and output is charged before each external write.
-/// Existing signatures survive Add byte-for-byte. Whole-document references may be
-/// invalidated by a later Add; use stable ID targets for independently preserved signatures.
+/// Existing signatures survive Add byte-for-byte. A reference that covers the insertion
+/// point (a whole-document reference, or an enclosing element) cannot survive an Add:
+/// `prepare_source` refuses it before any key use; use stable ID targets (or the
+/// all-signatures XPath filter) for independently preserved signatures.
 pub(crate) trait SignatureOutput {
     fn write_chunk(&mut self, bytes: &[u8], scope: &ResourceScope) -> Result<()>;
 }
@@ -550,6 +552,23 @@ pub fn prepare_source<'a>(
         ));
     }
     let place = placement(&mut document, parent, profile.max_metadata_bytes, scope)?;
+    if profile.mode == XmlSignMode::Add {
+        // Decided from the existing signatures alone, before any provider is opened.
+        crate::references::intake::check_insertion_keeps_existing_references(
+            &mut document,
+            place.at,
+            &crate::XmlVerifyProfile {
+                xml: profile.xml.clone(),
+                canonicalization: profile.canonicalization,
+                allowed_signature_algorithms: profile.allowed_signature_algorithms,
+                max_metadata_bytes: profile.max_metadata_bytes,
+                max_work: profile.max_work,
+                evidence_limits: profile.evidence_limits,
+                ..Default::default()
+            },
+            scope,
+        )?;
+    }
     let output_plan = output_plan(&mut document, profile.output, scope)?;
     // Canonicalization and its actual octet work are key-independent. Retain
     // admitted source-role bytes, not a detached digest or a trusted flag.
