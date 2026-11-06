@@ -135,8 +135,8 @@ pub(crate) fn plan(doc: &mut PdfDocument<'_, '_>, pades: bool) -> Result<Plan> {
                 extras.insert(k.to_vec(), v.clone());
             }
         }
-        for key in r.entries.keys() {
-            next = next.max(u64::from(*key) + 1);
+        if let Some(highest) = r.entries.max_id() {
+            next = next.max(u64::from(highest) + 1);
         }
     }
     let next = u32::try_from(next).map_err(|_| PdfError::Limit("object identifiers"))?;

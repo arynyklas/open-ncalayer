@@ -42,9 +42,11 @@ pub mod budget {
     use oncl_pki::resource::ProcessingError;
     /// `(metadata, memory)` reserved by one document reader.
     pub fn reader(limits: &PdfLimits) -> Result<(u64, u64), ProcessingError> {
+        // Object-graph bookkeeping only: the cross-reference rows are NOT in this term.
+        // They are charged per row, as they are read, against `max_xref_entries`
+        // (see `xref_memory`), so a dense document pays for what it holds.
         let metadata = (limits.max_objects as u64)
-            .checked_mul(limits.max_revisions as u64)
-            .and_then(|n| n.checked_mul(96))
+            .checked_mul(96)
             .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(32)?))
             .ok_or(ProcessingError::MetadataLimit)?;
         let memory = metadata
@@ -56,6 +58,29 @@ pub mod budget {
             .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(96)?))
             .ok_or(ProcessingError::MemoryLimit)?;
         Ok((metadata, memory))
+    }
+    /// Upper bound of the memory the reader charges for the cross-reference rows of a
+    /// document of `entries` entries over all its revisions. Rows cost 16 bytes each
+    /// and are allocated in steps of `clamp(rows, 1024, 65 536)`, so one revision's
+    /// unused capacity is below `max(1024, min(rows, 65 536))`; every run of consecutive
+    /// object numbers costs a 32-byte header, at worst one per entry. The reader charges
+    /// the real, smaller figure per row as it reads; hosts add this bound from
+    /// [`PriorSignatures::xref_entries`] so a dense document is admitted, or refused
+    /// before key use, by its size. Entries past `PdfLimits::max_xref_entries` are
+    /// refused by the reader itself.
+    pub fn xref_memory(limits: &PdfLimits, entries: u64) -> Result<u64, ProcessingError> {
+        let revisions = limits.max_revisions as u64;
+        let slack = revisions
+            .checked_mul(1024)
+            .and_then(|n| {
+                n.checked_add(entries.min(revisions.checked_mul(crate::xref::GROW_ROWS as u64)?))
+            })
+            .ok_or(ProcessingError::MemoryLimit)?;
+        entries
+            .checked_add(slack)
+            .and_then(|rows| rows.checked_mul(crate::xref::ROW_BYTES))
+            .and_then(|n| n.checked_add(entries.checked_mul(crate::xref::SECTION_BYTES)?))
+            .ok_or(ProcessingError::MemoryLimit)
     }
     /// Memory reserved by the PAdES update plan itself (before its nested reader).
     pub fn plan_reservation(limits: &PdfLimits) -> Result<u64, ProcessingError> {
@@ -81,6 +106,10 @@ pub mod budget {
     /// Inputs known BEFORE key use that size the update's reservations.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct PlanInputs {
+        /// Cross-reference entries of the document, all revisions
+        /// ([`PriorSignatures::xref_entries`]); the update plan and the signer each read
+        /// the whole table once.
+        pub xref_entries: u64,
         /// Sum of the existing signatures' `/Contents` bytes (`update_plan` reserves 4x).
         pub prior_contents_sum: u64,
         /// Largest single `/Contents` (decoded with a 128x working reservation).
@@ -115,6 +144,9 @@ pub mod budget {
             inputs
                 .prior_contents_sum
                 .checked_mul(4)
+                .ok_or(ProcessingError::MemoryLimit)?,
+            xref_memory(limits, inputs.xref_entries)?
+                .checked_mul(2)
                 .ok_or(ProcessingError::MemoryLimit)?,
             inputs
                 .prior_contents_max
@@ -188,6 +220,8 @@ pub mod budget {
         pub contents_sum: u64,
         /// The largest single `/Contents` length.
         pub contents_max: u64,
+        /// Cross-reference entries over all revisions (what the reader holds).
+        pub xref_entries: u64,
     }
     /// Read [`PriorSignatures`] from `source`. An unreadable/malformed PDF is an error
     /// the caller must surface (a predictable refusal), never a zero default.
@@ -210,6 +244,12 @@ pub struct PdfLimits {
     pub max_depth: usize,
     pub max_signatures: usize,
     pub max_read_work: u64,
+    /// Cross-reference entries over ALL revisions of one document: the ceiling of the
+    /// compact row table (16 bytes per entry plus run headers, charged per row to the
+    /// operation's memory budget as it is read; the default 4 Mi entries is at most
+    /// about 64 MiB). Distinct from `max_objects`, which bounds object-graph walks
+    /// (fields, DSS material, an object stream's members), not the document size.
+    pub max_xref_entries: usize,
     pub max_decode_work: u64,
     /// Total evidence (CRL/OCSP/certificate DSS streams) allowance across all
     /// appended revisions when reading back a signed PDF whose wire exceeds the document
@@ -224,6 +264,7 @@ impl Default for PdfLimits {
             max_object_bytes: 1_048_576,
             max_decoded_bytes: 4_194_304,
             max_objects: 4096,
+            max_xref_entries: 4_194_304,
             max_revisions: 16,
             max_nodes: 16_384,
             max_depth: 64,
@@ -245,6 +286,7 @@ pub struct PdfDocument<'a, 's> {
     pub(crate) revisions: Vec<xref::Revision>,
     pub(crate) work: u64,
     pub(crate) decoded: u64,
+    pub(crate) xref_entries: u64,
     // One-entry cache: bounded by max_decoded_bytes, invalidated by revision.
     pub(crate) object_stream_cache: Option<(usize, u32, objects::Value, Vec<u8>)>,
     _memory: ResourceReservation,
@@ -259,6 +301,7 @@ impl<'a, 's> PdfDocument<'a, 's> {
         if limits.max_object_bytes < 32
             || limits.max_decoded_bytes == 0
             || limits.max_objects == 0
+            || limits.max_xref_entries == 0
             || limits.max_revisions == 0
             || limits.max_depth == 0
             || limits.max_depth > 128
@@ -278,6 +321,7 @@ impl<'a, 's> PdfDocument<'a, 's> {
             limits: limits.clone(),
             revisions: Vec::new(),
             work: 0,
+            xref_entries: 0,
             decoded: 0,
             object_stream_cache: None,
             _memory: memory_reservation,
