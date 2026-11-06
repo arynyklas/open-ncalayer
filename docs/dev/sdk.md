@@ -341,6 +341,13 @@ the validation time and does not check the issuer's CRL-signing certificate agai
 `nextUpdate`; for NCA OCSP answers, which carry none, the freshness is the constraint
 `CLOCK_SKEW` (the standard says FAILED without nextUpdate unless a constraint is given).
 
+**Replay window.** The window in which an attacker holding a pre-revocation "good" answer can
+use it is the answer's own validity, `nextUpdate - thisUpdate`: up to 35 days for an NCA CRL
+(300 s for an answer without `nextUpdate`). The archive time-stamp / proof of existence of an
+`LTA` does not narrow it: `P` is the signature time-stamp's genTime, and the archive
+time-stamps only protect what was embedded. This is the standard's default and the old
+rule's window at signing time.
+
 **Not verified / deliberate differences.** (0) No real-PKI proof: the pinned NCANode LT fixtures never reach a proof time here, so the NCA cadence (35-day root CRL issued hours before the timestamp) is tested with the recorded production CRL (`tests/crl.rs`) and a synthetic 35-day CRL, not with a Valid real document; the plain-CMS offline path is covered by `oncl-core` `offline_cms_status_is_judged_at_the_proof_time_not_the_host_clock`; P is the LAST passing signature time-stamp where the standard (5.5.4 step 3b) takes the earliest (conservative, pre-existing). (1) 5.6.2.2.4 step 2a also asks for a proof of
 existence of the revocation information at or before the control time; for `LTA` this is the
 archive time-stamp binding the evidence, which is checked by the evidence graph, for `LT`

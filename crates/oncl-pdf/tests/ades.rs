@@ -2855,7 +2855,21 @@ fn lt_pdf_with_damaged_embedded_crl_is_not_valid_an_hour_later() {
     let mut damaged = signed.clone();
     damaged[at + f.crl.len() - 1] ^= 1;
     for now in [NOW, hour] {
-        let verdict = f.inspect(&damaged, AdesLevel::Lt, now, &[]);
-        assert!(verdict.is_ok_and(|r| r.verdict != Verdict::Valid), "{now}");
+        // A completed verification whose failure is the status one, not a parse error.
+        let report = f.inspect(&damaged, AdesLevel::Lt, now, &[]).unwrap();
+        let signer = &report.signatures()[0].validation.signers[0];
+        assert_ne!(report.verdict, Verdict::Valid, "{now}");
+        assert_eq!(
+            signer.revocation,
+            oncl_pki::validation::CheckStatus::Unavailable,
+            "{now}"
+        );
+        assert!(
+            signer
+                .reasons
+                .contains(&oncl_pki::validation::ValidationReason::RevocationUnavailable),
+            "{now}: {:?}",
+            signer.reasons
+        );
     }
 }

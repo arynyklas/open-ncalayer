@@ -1742,6 +1742,9 @@ mod cades {
         Ok((output, report.verdict))
     }
     fn verify_later(f: &Fixture, signed: &[u8], now: OffsetDateTime) -> Verdict {
+        verify_report(f, signed, now).verdict
+    }
+    fn verify_report(f: &Fixture, signed: &[u8], now: OffsetDateTime) -> ades::AdesReport {
         let dir = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(dir.path()).unwrap();
         let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
@@ -1766,7 +1769,6 @@ mod cades {
             &scope(),
         )
         .unwrap()
-        .verdict
     }
     #[test]
     fn lt_crl_is_judged_at_the_proof_time_not_now() {
@@ -1863,10 +1865,22 @@ mod cades {
         let mut damaged = lt.clone();
         damaged[at + f.crl.len() - 1] ^= 1;
         for delta in [time::Duration::ZERO, time::Duration::HOUR] {
-            assert_ne!(
-                verify_later(&f, &damaged, NOW + delta),
-                Verdict::Valid,
+            // The damaged signature leaves no usable status: the failure is the status
+            // one, reached by a completed verification (not a parse error).
+            let report = verify_report(&f, &damaged, NOW + delta);
+            let signer = &report.reports()[0].signers[0];
+            assert_ne!(report.verdict, Verdict::Valid, "+{delta}");
+            assert_eq!(
+                signer.revocation,
+                oncl_pki::validation::CheckStatus::Unavailable,
                 "+{delta}"
+            );
+            assert!(
+                signer
+                    .reasons
+                    .contains(&oncl_pki::validation::ValidationReason::RevocationUnavailable),
+                "+{delta}: {:?}",
+                signer.reasons
             );
         }
     }

@@ -2316,17 +2316,70 @@ fn xades_lt_with_damaged_embedded_status_is_not_valid_an_hour_later() {
         lt_verify(&pki, &bytes, hour, ValidationPolicy::StrictOnline).0,
         Verdict::Valid
     );
+    // Damage the responder's SIGNATURE inside the BasicOCSPResponse: the DER still parses, so
+    // the failure is the status one and not a decoding error.
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    fn tlv(der: &[u8], at: usize) -> (u8, usize, usize) {
+        let (tag, first) = (der[at], der[at + 1] as usize);
+        if first < 0x80 {
+            (tag, at + 2, first)
+        } else {
+            let n = first & 0x7f;
+            let len = der[at + 2..at + 2 + n]
+                .iter()
+                .fold(0usize, |acc, b| acc << 8 | *b as usize);
+            (tag, at + 2 + n, len)
+        }
+    }
+    fn signature_last_byte(der: &[u8]) -> usize {
+        let (_, mut body, _) = tlv(der, 0);
+        // An OCSPResponse wraps the Basic response: ENUM, [0] { SEQ { OID, OCTET STRING } }.
+        if der[body] == 0x0a {
+            let (_, after, len) = tlv(der, body);
+            let (_, inner, _) = tlv(der, after + len);
+            let (_, seq_body, _) = tlv(der, inner);
+            let (_, oid_body, oid_len) = tlv(der, seq_body);
+            let (_, octets, _) = tlv(der, oid_body + oid_len);
+            let (_, basic_body, _) = tlv(der, octets);
+            body = basic_body;
+        }
+        let (_, _, tbs_len) = tlv(der, body);
+        let (_, tbs_body, _) = tlv(der, body);
+        let alg = tbs_body + tbs_len;
+        let (_, alg_body, alg_len) = tlv(der, alg);
+        let (tag, sig_body, sig_len) = tlv(der, alg_body + alg_len);
+        assert_eq!(tag, 0x03, "BIT STRING signature");
+        sig_body + sig_len - 1
+    }
     let mut text = String::from_utf8(bytes).unwrap();
-    let start =
-        text.find("<xades:EncapsulatedOCSPValue>").unwrap() + "<xades:EncapsulatedOCSPValue>".len();
-    let byte = if &text[start..start + 1] == "A" {
-        "B"
-    } else {
-        "A"
-    };
-    text.replace_range(start..start + 1, byte);
+    let open = "<xades:EncapsulatedOCSPValue>";
+    let start = text.find(open).unwrap() + open.len();
+    let end = start + text[start..].find('<').unwrap();
+    let mut der = STANDARD
+        .decode(text[start..end].split_whitespace().collect::<String>())
+        .unwrap();
+    let at = signature_last_byte(&der);
+    der[at] ^= 1;
+    text.replace_range(start..end, &STANDARD.encode(&der));
     for now in [T0, hour] {
-        let (verdict, ..) = lt_verify(&pki, text.as_bytes(), now, ValidationPolicy::StrictOnline);
+        let (verdict, revocation, timestamp) =
+            lt_verify(&pki, text.as_bytes(), now, ValidationPolicy::StrictOnline);
         assert_ne!(verdict, Verdict::Valid, "{now}");
+        // The first embedded answer is the TSA certificate's: with its signature damaged the
+        // time-stamp's status is unavailable (a completed verification, not a parse error),
+        // and the proof time is lost.
+        assert_eq!(
+            timestamp,
+            oncl_pki::validation::CheckStatus::Unavailable,
+            "{now}: rev {revocation:?}"
+        );
+        // With no proven time the signer's status is judged at the verifier's clock again, so
+        // it holds at signing time and has aged out an hour later.
+        let expected = if now == T0 {
+            oncl_pki::validation::CheckStatus::Passed
+        } else {
+            oncl_pki::validation::CheckStatus::Unavailable
+        };
+        assert_eq!(revocation, expected, "{now}");
     }
 }
