@@ -578,14 +578,40 @@ impl Cli {
         }
     }
 }
+/// Disk-backed evidence admission. Large CRLs have their own aggregate spool quota;
+/// certificate, OCSP and timestamp limits, and RAM/metadata limits, remain unchanged.
 pub fn evidence_limits() -> oncl_pki::evidence::EvidenceLimits {
     oncl_pki::evidence::EvidenceLimits {
         max_items: 256,
         max_bytes: 16 * 1024 * 1024,
         max_item_bytes: 1024 * 1024,
+        max_crl_bytes: 32 * 1024 * 1024,
+        max_crl_item_bytes: 32 * 1024 * 1024,
+        max_total_bytes: 48 * 1024 * 1024,
         max_chain_len: 16,
         max_proofs: 16,
         max_coverage_parts: 65536,
-        max_coverage_bytes: 64 * 1024 * 1024,
+        max_coverage_bytes: coverage_bytes(),
+    }
+}
+/// Timestamp/proof coverage hashes the signed document and the evidence/container it
+/// carries, so it is bounded by the same ceiling as the operation output (the 10 GiB
+/// document plus the container surcharge), not by a small constant: a 64 MiB cap refused
+/// PAdES LTA of a 64 MiB document. Finite, and never above the output ceiling.
+fn coverage_bytes() -> u64 {
+    oncl_pki::resource::ResourceLimits::default().output_bytes
+}
+
+#[cfg(test)]
+mod evidence_limit_tests {
+    use super::*;
+    #[test]
+    fn coverage_admits_the_document_ceiling_and_stays_finite() {
+        let limits = evidence_limits();
+        let resources = oncl_pki::resource::ResourceLimits::default();
+        assert!(limits.max_coverage_bytes >= resources.input_bytes);
+        assert!(limits.max_coverage_bytes <= resources.output_bytes);
+        assert!(limits.max_crl_bytes <= limits.max_total_bytes);
+        assert!(limits.max_item_bytes <= 1024 * 1024);
     }
 }

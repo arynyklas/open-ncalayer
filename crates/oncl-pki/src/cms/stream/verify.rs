@@ -71,6 +71,7 @@ pub fn verify_snapshot_detached(
         None,
         &[],
         true,
+        true,
     )?;
     if !parsed.inspection.detached {
         return Err(malformed("embedded signature must use detached CMS"));
@@ -98,7 +99,8 @@ pub(super) fn verify_parsed(
     // Charge decoded certificate/attribute trees, candidate clones, crypto
     // scratch and ephemeral Judge reports before the existing code allocates.
     // Content was excluded from this representation by the streaming reader.
-    let mut encoded_bytes = parsed.metadata.as_bytes().len() as u64;
+    // Bulk CRLs are borrowed and scanned, never decoded: only the rest amplifies.
+    let mut encoded_bytes = parsed.metadata.decoded_bytes();
     for certificate in validation.intermediates {
         let length: u32 = certificate.encoded_len()?.into();
         encoded_bytes = encoded_bytes

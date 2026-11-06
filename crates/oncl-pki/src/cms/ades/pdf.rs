@@ -562,7 +562,12 @@ pub fn verify_snapshot_pades(
     let mut bytes = signatures
         .iter()
         .map(|source| source.metadata.as_bytes())
-        .chain(material.iter().map(|item| item.value.as_bytes()))
+        .chain(
+            material
+                .iter()
+                .filter(|item| item.kind != EvidenceKind::Crl)
+                .map(|item| item.value.as_bytes()),
+        )
         .chain(documents.iter().map(|item| item.token.as_bytes()))
         .try_fold(0u64, |sum, value| {
             sum.checked_add(value.len() as u64)
@@ -575,7 +580,7 @@ pub fn verify_snapshot_pades(
                 .checked_add(u64::from(length))
                 .ok_or(ProcessingError::MetadataLimit)?;
         }
-        for status in services.material.ocsp.iter().chain(services.material.crls) {
+        for status in services.material.ocsp {
             bytes = bytes
                 .checked_add(status.len() as u64)
                 .ok_or(ProcessingError::MetadataLimit)?;

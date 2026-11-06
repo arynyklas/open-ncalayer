@@ -930,15 +930,16 @@ pub(crate) fn offline_revocation<'a>(
         }
         if status.is_none() {
             for bytes in crls {
-                if let Ok(crl) = crl::verify_crl(bytes, issuer, now) {
-                    status = Some(
-                        match crl::lookup(&crl, cert.tbs_certificate().serial_number().as_bytes()) {
-                            CrlStatus::Good => CertStatus::Good,
-                            CrlStatus::Revoked { time, reason } => {
-                                CertStatus::Revoked { time, reason }
-                            }
-                        },
-                    );
+                if let Ok(found) = crl::serial_status(
+                    bytes,
+                    issuer,
+                    cert.tbs_certificate().serial_number().as_bytes(),
+                    now,
+                ) {
+                    status = Some(match found {
+                        CrlStatus::Good => CertStatus::Good,
+                        CrlStatus::Revoked { time, reason } => CertStatus::Revoked { time, reason },
+                    });
                     break;
                 }
             }

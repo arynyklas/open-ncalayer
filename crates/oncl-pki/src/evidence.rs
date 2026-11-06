@@ -57,6 +57,13 @@ pub struct EvidenceLimits {
     pub max_items: usize,
     pub max_bytes: u64,
     pub max_item_bytes: u64,
+    /// Aggregate CRL spool admission, separate from decoded certificate/OCSP/token
+    /// limits. Every retained readback is still charged before allocation.
+    pub max_crl_bytes: u64,
+    /// Per-CRL spool admission, never exceeding MAX_CRL_LEN.
+    pub max_crl_item_bytes: u64,
+    /// Aggregate admission across CRLs and every other evidence category.
+    pub max_total_bytes: u64,
     pub max_chain_len: usize,
     pub max_proofs: usize,
     pub max_coverage_parts: usize,
@@ -129,6 +136,7 @@ pub struct EvidenceBundle {
     scope: ResourceScope,
     limits: EvidenceLimits,
     intake_bytes: u64,
+    crl_intake_bytes: u64,
     poisoned: bool,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
@@ -177,6 +185,7 @@ impl EvidenceStore {
                 scope: scope.retain(),
                 limits,
                 intake_bytes: 0,
+                crl_intake_bytes: 0,
                 poisoned: false,
                 _memory: memory,
                 _metadata: metadata,
@@ -191,11 +200,34 @@ impl EvidenceStore {
     ) -> Result<EvidenceId, EvidenceError> {
         let bundle = &mut self.bundle;
         bundle.checkpoint()?;
-        let remaining = bundle.limits.max_bytes.saturating_sub(bundle.intake_bytes);
+        let crl = kind == EvidenceKind::Crl;
+        let maximum = if crl {
+            bundle.limits.max_crl_bytes
+        } else {
+            bundle.limits.max_bytes
+        };
+        let item_maximum = if crl {
+            bundle
+                .limits
+                .max_crl_item_bytes
+                .min(crate::crl::MAX_CRL_LEN)
+        } else {
+            bundle.limits.max_item_bytes
+        };
+        let consumed = if crl {
+            bundle.crl_intake_bytes
+        } else {
+            bundle.intake_bytes
+        };
+        let total_remaining = bundle
+            .limits
+            .max_total_bytes
+            .saturating_sub(bundle.intake_bytes.saturating_add(bundle.crl_intake_bytes));
+        let remaining = maximum.saturating_sub(consumed).min(total_remaining);
         if bundle.entries.len() >= bundle.limits.max_items
             || source
                 .known_len()
-                .is_some_and(|n| n > remaining || n > bundle.limits.max_item_bytes)
+                .is_some_and(|n| n > remaining || n > item_maximum)
         {
             return Err(EvidenceError::Limit);
         }
@@ -218,11 +250,17 @@ impl EvidenceStore {
             let mut length = 0u64;
             loop {
                 bundle.checkpoint()?;
-                let allowance = bundle
-                    .limits
-                    .max_item_bytes
+                let consumed = if crl {
+                    bundle.crl_intake_bytes
+                } else {
+                    bundle.intake_bytes
+                };
+                let allowance = item_maximum
                     .saturating_sub(length)
-                    .min(bundle.limits.max_bytes.saturating_sub(bundle.intake_bytes));
+                    .min(maximum.saturating_sub(consumed))
+                    .min(bundle.limits.max_total_bytes.saturating_sub(
+                        bundle.intake_bytes.saturating_add(bundle.crl_intake_bytes),
+                    ));
                 let request = allowance.saturating_add(1).min(buffer.bytes.len() as u64) as usize;
                 let n = match source.read(&mut buffer.bytes[..request]) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -234,15 +272,20 @@ impl EvidenceStore {
                     );
                 }
                 // Irrevocable consumption is retained even if quota/checkpoint/write fails.
-                bundle.intake_bytes = bundle
-                    .intake_bytes
-                    .checked_add(n as u64)
-                    .ok_or(EvidenceError::Limit)?;
+                let consumed = if crl {
+                    &mut bundle.crl_intake_bytes
+                } else {
+                    &mut bundle.intake_bytes
+                };
+                *consumed = consumed.checked_add(n as u64).ok_or(EvidenceError::Limit)?;
+                let total = *consumed;
                 length = length.checked_add(n as u64).ok_or(EvidenceError::Limit)?;
                 bundle.scope.account_container(n as u64)?;
                 bundle.checkpoint()?;
-                if length > bundle.limits.max_item_bytes
-                    || bundle.intake_bytes > bundle.limits.max_bytes
+                if length > item_maximum
+                    || total > maximum
+                    || bundle.intake_bytes.saturating_add(bundle.crl_intake_bytes)
+                        > bundle.limits.max_total_bytes
                 {
                     return Err(EvidenceError::Limit);
                 }
@@ -277,6 +320,32 @@ impl EvidenceStore {
             _metadata: source_metadata,
         });
         Ok(id)
+    }
+    /// [`Self::collect`] of the DER that `encoded` carries as base64 text (ASCII whitespace
+    /// ignored, padding only at the end): the text is decoded as it is read and only the
+    /// decoded bytes are admitted, spooled and counted against the same item, aggregate
+    /// and total quotas, so an encoded CRL is never materialised. The working buffers
+    /// (16 KiB) are charged before they are allocated. Invalid text is
+    /// `InvalidInput`, a quota breach is `Limit`, as for [`Self::collect`].
+    pub fn collect_base64(
+        &mut self,
+        kind: EvidenceKind,
+        encoded: Source<'_>,
+        origin: EvidenceOrigin<'_>,
+    ) -> Result<EvidenceId, EvidenceError> {
+        let _memory = self
+            .bundle
+            .scope
+            .reserve_memory(Base64Reader::<'_, Source<'_>>::WORKING)?;
+        let failed = std::cell::Cell::new(false);
+        let mut reader = Base64Reader::new(encoded, &failed);
+        let result = self.collect(kind, Source::sequential(&mut reader, None), origin);
+        match result {
+            Err(EvidenceError::Processing(ProcessingError::Io(_))) if failed.get() => Err(
+                EvidenceError::Processing(ProcessingError::InvalidInput("invalid base64 evidence")),
+            ),
+            other => other,
+        }
     }
     /// Request only a bounded imprint. A collected token is NOT a trusted proof.
     pub fn request_timestamp(
@@ -989,15 +1058,26 @@ impl ParsedEvidence {
             .ok_or(EvidenceError::Limit)? as u64;
         resources.checkpoint()?;
         bundle.scope.checkpoint()?;
+        // CRLs are loaded as raw bytes and only scanned (never decoded into a tree):
+        // retained once. Certificates, tokens and OCSP answers decode and amplify.
+        let crl_bytes = bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EvidenceKind::Crl)
+            .try_fold(0u64, |sum, entry| sum.checked_add(entry.region.len))
+            .ok_or(EvidenceError::Limit)?;
+        let decoded = bytes.saturating_sub(crl_bytes);
         let memory = bundle.scope.reserve_memory(
-            bytes
+            decoded
                 .checked_mul(32)
+                .and_then(|n| n.checked_add(crl_bytes))
                 .and_then(|n| n.checked_add(headers))
                 .ok_or(EvidenceError::Limit)?,
         )?;
         let metadata = bundle.scope.reserve_metadata(
-            bytes
+            decoded
                 .checked_mul(4)
+                .and_then(|n| n.checked_add(crl_bytes))
                 .and_then(|n| n.checked_add(headers))
                 .ok_or(EvidenceError::Limit)?,
         )?;
@@ -1826,7 +1906,12 @@ fn check_current_tsa_tail(
             }),
             EvidenceKind::Crl => path.windows(2).any(|pair| {
                 matches!(
-                    crate::crl::verify_crl(&item.bytes, &pair[1], now),
+                    crate::crl::serial_status(
+                        &item.bytes,
+                        &pair[1],
+                        pair[0].tbs_certificate().serial_number().as_bytes(),
+                        now
+                    ),
                     Ok(_) | Err(crate::crl::CrlError::NotYetValid | crate::crl::CrlError::Outdated)
                 )
             }),
@@ -1863,4 +1948,106 @@ pub fn validate_timestamp_configuration(
         return Err(EvidenceError::InvalidBinding);
     }
     Ok(())
+}
+
+/// Streaming strict base64 decoder over a bounded text window: whitespace is skipped,
+/// padding may only end the text, and nothing is retained beyond its two fixed buffers.
+struct Base64Reader<'a, R: Read> {
+    inner: R,
+    failed: &'a std::cell::Cell<bool>,
+    text: [u8; 4096],
+    text_len: usize,
+    text_pos: usize,
+    group: [u8; 4],
+    group_len: usize,
+    out: [u8; 3 * 1024],
+    out_len: usize,
+    out_pos: usize,
+    padded: bool,
+    eof: bool,
+}
+impl<'a, R: Read> Base64Reader<'a, R> {
+    const WORKING: u64 = std::mem::size_of::<Self>() as u64 + 4096;
+    fn new(inner: R, failed: &'a std::cell::Cell<bool>) -> Self {
+        Self {
+            inner,
+            failed,
+            text: [0; 4096],
+            text_len: 0,
+            text_pos: 0,
+            group: [0; 4],
+            group_len: 0,
+            out: [0; 3 * 1024],
+            out_len: 0,
+            out_pos: 0,
+            padded: false,
+            eof: false,
+        }
+    }
+    fn invalid(&self) -> io::Error {
+        self.failed.set(true);
+        io::Error::new(io::ErrorKind::InvalidData, "invalid base64 evidence")
+    }
+    fn decode_group(&mut self) -> io::Result<()> {
+        use base64::Engine as _;
+        let mut decoded = [0u8; 3];
+        let count = base64::engine::general_purpose::STANDARD
+            .decode_slice(self.group, &mut decoded)
+            .map_err(|_| self.invalid())?;
+        self.out[self.out_len..self.out_len + count].copy_from_slice(&decoded[..count]);
+        self.out_len += count;
+        self.group_len = 0;
+        Ok(())
+    }
+}
+impl<R: Read> Read for Base64Reader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        while self.out_pos == self.out_len {
+            self.out_pos = 0;
+            self.out_len = 0;
+            if self.text_pos == self.text_len {
+                if self.eof {
+                    return if self.group_len == 0 {
+                        Ok(0)
+                    } else {
+                        Err(self.invalid())
+                    };
+                }
+                self.text_pos = 0;
+                self.text_len = loop {
+                    match self.inner.read(&mut self.text) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        other => break other?,
+                    }
+                };
+                if self.text_len == 0 {
+                    self.eof = true;
+                    continue;
+                }
+            }
+            while self.text_pos < self.text_len && self.out_len + 3 <= self.out.len() {
+                let byte = self.text[self.text_pos];
+                self.text_pos += 1;
+                if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+                    continue;
+                }
+                if self.padded && (byte != b'=' || self.group_len == 0) {
+                    return Err(self.invalid());
+                }
+                self.padded |= byte == b'=';
+                self.group[self.group_len] = byte;
+                self.group_len += 1;
+                if self.group_len == 4 {
+                    self.decode_group()?;
+                }
+            }
+        }
+        let count = buffer.len().min(self.out_len - self.out_pos);
+        buffer[..count].copy_from_slice(&self.out[self.out_pos..self.out_pos + count]);
+        self.out_pos += count;
+        Ok(count)
+    }
 }

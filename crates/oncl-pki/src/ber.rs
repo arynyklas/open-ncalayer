@@ -54,7 +54,11 @@ pub enum BerError {
 /// [`BerError`] if the input is empty, truncated, malformed, nested too deep, or has bytes
 /// after its single top-level element.
 pub fn to_der(input: &[u8]) -> Result<Vec<u8>, BerError> {
-    let mut parser = Parser { input, pos: 0 };
+    let mut parser = Parser {
+        input,
+        pos: 0,
+        skim: false,
+    };
     let node = parser.element(0)?;
     if parser.pos != input.len() {
         return Err(BerError::TrailingData { offset: parser.pos });
@@ -68,7 +72,11 @@ pub fn to_der(input: &[u8]) -> Result<Vec<u8>, BerError> {
 /// Exact encoded children for bounded format metadata. Unlike normalization,
 /// this retains the received length octets and signed/unsigned field bytes.
 pub(crate) fn raw_children(input: &[u8]) -> Result<Vec<&[u8]>, BerError> {
-    let mut parser = Parser { input, pos: 0 };
+    let mut parser = Parser {
+        input,
+        pos: 0,
+        skim: true,
+    };
     let tag = parser.byte()?;
     if tag & CONSTRUCTED == 0 || tag & 0x1f == 0x1f {
         return Err(BerError::Invalid {
@@ -110,7 +118,11 @@ pub(crate) fn raw_children(input: &[u8]) -> Result<Vec<&[u8]>, BerError> {
 }
 
 pub(crate) fn raw_elements(input: &[u8]) -> Result<Vec<&[u8]>, BerError> {
-    let mut parser = Parser { input, pos: 0 };
+    let mut parser = Parser {
+        input,
+        pos: 0,
+        skim: true,
+    };
     let mut values = Vec::new();
     while parser.pos < input.len() {
         let start = parser.pos;
@@ -184,7 +196,14 @@ enum Length {
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Do not descend into bulk definite-length constructed elements; only for callers
+    /// that return slices of the input and never the normalized tree.
+    skim: bool,
 }
+
+/// Definite-length constructed elements at least this long are skimmed (1 MiB, the
+/// bulk-CRL threshold).
+const SKIM_MIN: usize = 1 << 20;
 
 impl Parser<'_> {
     fn byte(&mut self) -> Result<u8, BerError> {
@@ -233,6 +252,18 @@ impl Parser<'_> {
             });
         }
 
+        if self.skim
+            && let Length::Definite(len) = length
+            && len >= SKIM_MIN
+        {
+            // A bulk element (a CRL): framing only. Its owner decodes it strictly.
+            let range = self.take(len)?;
+            return Ok(Node {
+                tag,
+                body: Body::Primitive(range),
+                content_len: len,
+            });
+        }
         let mut children = Vec::new();
         match length {
             Length::Definite(len) => {
