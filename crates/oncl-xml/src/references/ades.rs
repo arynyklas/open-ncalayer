@@ -3,6 +3,8 @@ use super::*;
 use oncl_pki::evidence::*;
 #[path = "extension.rs"]
 mod extension;
+#[path = "text.rs"]
+mod text;
 pub(crate) use extension::{extend_staged, extend_transaction};
 struct EvidenceRow {
     source: Region,
@@ -89,6 +91,10 @@ pub(super) fn check_carried_evidence(
     store: &TemporaryStore,
     reference_stream: Option<&mut oncl_pki::io::StagedArtifact>,
     ctx: &ValidationContext<'_>,
+    (clock, shared_now): (
+        Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
+        &std::cell::Cell<Option<time::OffsetDateTime>>,
+    ),
     network: &NetworkPolicy,
     scope: &mut ResourceScope,
     work: &mut u64,
@@ -293,7 +299,25 @@ pub(super) fn check_carried_evidence(
         .required_level
         .unwrap_or(AdesLevel::B)
         .max(evidence_level);
-    let report = validate_evidence(&signer, &mut bundle, &proofs, required, ctx, network, scope)?;
+    // The document passes above (canonicalization of carried proofs and archive coverage re-read
+    // the source from its start) can take hours on a large input. Status and time-stamp freshness
+    // is judged at the moment the evidence is checked, never at the sample taken before them;
+    // the window itself is unchanged and never earlier than the original context time.
+    let now = shared_now.get().unwrap_or_else(|| {
+        let now = clock.map_or(ctx.now, |clock| clock().max(ctx.now));
+        shared_now.set(Some(now));
+        now
+    });
+    let current = ValidationContext { now, ..*ctx };
+    let report = validate_evidence(
+        &signer,
+        &mut bundle,
+        &proofs,
+        required,
+        &current,
+        network,
+        scope,
+    )?;
     Ok((report, level))
 }
 /// Whether every certificate of the signing path above the signing certificate
@@ -452,39 +476,24 @@ fn archive_representation(
         .iter()
         .filter(|p| p.bound.0.offset < cutoff.offset)
     {
-        let (mut canonical, _) = document.canonical_proof(
+        // The metadata cap bounds markup; the evidence text it carries is bounded by the
+        // evidence quotas that admitted it.
+        let (mut canonical, leaves) = document.canonical_proof_leaves(
             Options {
                 target: Some(property.bound.0),
                 method,
                 profile: profile.canonicalization,
                 prefixes,
                 excluded: &[],
-                metadata_limit: Some(profile.max_metadata_bytes as u64),
+                metadata_limit: Some(
+                    (profile.max_metadata_bytes as u64).saturating_add(property.payload),
+                ),
             },
             store,
             scope,
             work,
         )?;
         let at = archive.len();
-        let mut bytes = vec![0; canonical.len() as usize];
-        // read_region deliberately caps one read to the common I/O chunk.
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let n = canonical.read_region(
-                Region {
-                    offset: offset as u64,
-                    len: bytes.len() as u64 - offset as u64,
-                },
-                &mut bytes[offset..],
-            )?;
-            if n == 0 {
-                return Err(invalid("canonical property extent"));
-            }
-            offset += n;
-        }
-        let xml = std::str::from_utf8(&bytes).map_err(|_| invalid("canonical property UTF8"))?;
-        let parsed =
-            roxmltree::Document::parse(xml).map_err(|_| invalid("canonical property XML"))?;
         let ids: Vec<_> = rows
             .iter()
             .filter(|row| {
@@ -495,37 +504,25 @@ fn archive_representation(
                         .is_ok_and(|end| end <= property.bound.0.offset + property.bound.0.len)
             })
             .collect();
-        let mut index = 0;
-        for element in parsed.descendants().filter(Node::is_element) {
-            let kind = match (element.tag_name().namespace(), element.tag_name().name()) {
-                (Some(crate::XADES_NS), "EncapsulatedTimeStamp") => Some(EvidenceKind::Timestamp),
-                (Some(crate::XADES_NS), "EncapsulatedX509Certificate") => {
-                    Some(EvidenceKind::Certificate)
-                }
-                (Some(crate::XADES_NS), "EncapsulatedOCSPValue") => Some(EvidenceKind::Ocsp),
-                (Some(crate::XADES_NS), "EncapsulatedCRLValue") => Some(EvidenceKind::Crl),
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                let row = ids
-                    .get(index)
-                    .ok_or_else(|| invalid("archive evidence association"))?;
-                if row.kind != kind {
-                    return Err(invalid("archive evidence kind/order"));
-                }
-                let spans = element
-                    .children()
-                    .filter(Node::is_text)
-                    .map(|n| Region {
-                        offset: at + n.range().start as u64,
-                        len: n.range().len() as u64,
-                    })
-                    .collect::<Vec<_>>();
-                groups.push((row.id, spans));
-                index += 1;
+        for (index, leaf) in leaves.iter().enumerate() {
+            let row = ids
+                .get(index)
+                .ok_or_else(|| invalid("archive evidence association"))?;
+            if row.kind != leaf.kind {
+                return Err(invalid("archive evidence kind/order"));
             }
+            groups.push((
+                row.id,
+                leaf.spans
+                    .iter()
+                    .map(|span| Region {
+                        offset: at + span.offset,
+                        len: span.len,
+                    })
+                    .collect::<Vec<_>>(),
+            ));
         }
-        if index != ids.len() {
+        if leaves.len() != ids.len() {
             return Err(invalid("archive omitted prior evidence"));
         }
         copy_stage(&mut canonical, &mut archive, scope, work)?;
@@ -649,45 +646,59 @@ fn collect_carried<'a>(
     let mut rows = Vec::new();
     let mut carried = Vec::new();
     for (_, kind, meta, proof_kind) in intake {
-        let (bytes, canonical) = if let Some(proof_kind) = proof_kind {
+        let id = if let Some(proof_kind) = proof_kind {
             let (bytes, method, prefixes) = proof_metadata(document, meta, profile)?;
-            (bytes, Some((proof_kind, method, prefixes)))
-        } else {
-            let xml = metadata(
-                document,
-                meta.bound.0,
-                &meta.bound.1,
-                profile.max_metadata_bytes,
+            let id = evidence.collect(
+                kind,
+                Source::sequential(&mut bytes.as_slice(), Some(bytes.len() as u64)),
+                EvidenceOrigin::Embedded {
+                    label: "XML carried evidence",
+                },
             )?;
-            let parsed =
-                roxmltree::Document::parse(&xml).map_err(|_| invalid("embedded evidence XML"))?;
-            (
-                base64(
-                    parsed
-                        .root_element()
-                        .first_element_child()
-                        .ok_or_else(|| invalid("embedded evidence"))?,
-                )?,
-                None,
-            )
+            carried.push((id, proof_kind, meta, method, prefixes));
+            id
+        } else {
+            collect_leaf(document, &mut evidence, kind, meta, scope)?
         };
-        let id = evidence.collect(
-            kind,
-            Source::sequential(&mut bytes.as_slice(), Some(bytes.len() as u64)),
-            EvidenceOrigin::Embedded {
-                label: "XML carried evidence",
-            },
-        )?;
         rows.push(EvidenceRow {
             source: meta.bound.0,
             id,
             kind,
         });
-        if let Some((kind, method, prefixes)) = canonical {
-            carried.push((id, kind, meta, method, prefixes));
-        }
     }
     Ok((evidence.finish(), rows, carried))
+}
+/// One evidence leaf: its base64 text streams from the source extents into the evidence
+/// store, decoded and charged to the item and aggregate quotas as it goes.
+fn collect_leaf(
+    document: &mut XmlDocument,
+    evidence: &mut EvidenceStore,
+    kind: EvidenceKind,
+    meta: &ExtraMetadata,
+    scope: &ResourceScope,
+) -> Result<EvidenceId> {
+    let mut text = text::EvidenceText::new(document, &meta.texts, scope)?;
+    let result = evidence.collect_base64(
+        kind,
+        Source::sequential(&mut text, None),
+        EvidenceOrigin::Embedded {
+            label: "XML carried evidence",
+        },
+    );
+    result.map_err(|error| {
+        if let Some(failure) = text.error.take() {
+            failure.into()
+        } else if text.invalid
+            || matches!(
+                &error,
+                EvidenceError::Processing(ProcessingError::InvalidInput("invalid base64 evidence"))
+            )
+        {
+            invalid("base64 signature metadata")
+        } else {
+            error.into()
+        }
+    })
 }
 
 fn validate_unsigned_layout(
@@ -695,52 +706,47 @@ fn validate_unsigned_layout(
     signature: &Metadata,
     profile: &XmlVerifyProfile,
 ) -> Result<()> {
+    // Decided from the structure recorded by the scan: no unsigned property (which may
+    // carry a multi-megabyte CRL) is materialised.
+    let shape = |region: Region| {
+        signature
+            .unsigned
+            .iter()
+            .find(|p| p.bound.0 == region)
+            .and_then(|p| p.shape.as_ref())
+    };
     let mut proofs = Vec::new();
     for (kind, meta) in &signature.proofs {
-        let xml = metadata(
-            document,
-            meta.bound.0,
-            &meta.bound.1,
-            profile.max_metadata_bytes,
-        )?;
-        let parsed =
-            roxmltree::Document::parse(&xml).map_err(|_| invalid("timestamp identity XML"))?;
-        let node = parsed
-            .root_element()
-            .first_element_child()
-            .ok_or_else(|| invalid("timestamp identity"))?;
-        proofs.push((*kind, meta.bound.0, node.attribute("Id").map(str::to_owned)));
+        let shape = shape(meta.bound.0).ok_or_else(|| invalid("timestamp identity"))?;
+        let id = shape
+            .id
+            .map(|id| attribute_value(document, id, profile.max_metadata_bytes))
+            .transpose()?;
+        proofs.push((*kind, meta.bound.0, id));
     }
     let last_archive = proofs
         .iter()
         .rfind(|(kind, _, _)| *kind == ProofKind::Archive);
     let mut after_archive = 0;
     for property in &signature.unsigned {
-        let xml = metadata(
-            document,
-            property.bound.0,
-            &property.bound.1,
-            profile.max_metadata_bytes,
-        )?;
-        let parsed =
-            roxmltree::Document::parse(&xml).map_err(|_| invalid("unsigned property XML"))?;
-        let node = parsed
-            .root_element()
-            .first_element_child()
+        let node = property
+            .shape
+            .as_ref()
             .ok_or_else(|| invalid("unsigned property"))?;
-        let tsvd = node.tag_name().namespace() == Some("http://uri.etsi.org/01903/v1.4.1#")
-            && node.tag_name().name() == "TimeStampValidationData";
+        let uri = node
+            .uri
+            .map(|uri| attribute_value(document, uri, profile.max_metadata_bytes))
+            .transpose()?;
+        let tsvd = node.namespace.as_deref() == Some("http://uri.etsi.org/01903/v1.4.1#")
+            && node.local == "TimeStampValidationData";
         if tsvd {
-            if node.children().filter(Node::is_element).any(|n| {
-                n.tag_name().namespace() != Some(crate::XADES_NS)
-                    || !matches!(
-                        n.tag_name().name(),
-                        "CertificateValues" | "RevocationValues"
-                    )
+            if node.children.iter().any(|(namespace, local)| {
+                namespace.as_deref() != Some(crate::XADES_NS)
+                    || !matches!(local.as_str(), "CertificateValues" | "RevocationValues")
             }) {
                 return Err(invalid("timestamp validation-data children"));
             }
-            if let Some(uri) = node.attribute("URI") {
+            if let Some(uri) = &uri {
                 let id = decode_id(uri)?;
                 if !proofs
                     .iter()
@@ -770,7 +776,7 @@ fn validate_unsigned_layout(
             let expected = id
                 .as_deref()
                 .ok_or_else(|| invalid("current archive needs Id for trailing TSVD"))?;
-            if node.attribute("URI").map(decode_id).transpose()?.as_deref() != Some(expected) {
+            if uri.as_deref().map(decode_id).transpose()?.as_deref() != Some(expected) {
                 return Err(invalid("current archive TSVD URI mismatch"));
             }
         }

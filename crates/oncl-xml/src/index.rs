@@ -593,6 +593,27 @@ impl XmlDocument {
             work,
         )
     }
+    /// [`Self::canonical_proof`], also reporting the canonical text spans of every
+    /// evidence leaf of the staged element.
+    pub(crate) fn canonical_proof_leaves(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        work: &mut u64,
+    ) -> Result<(StagedArtifact, Vec<crate::canonical_stream::LeafGroup>)> {
+        let (artifact, _, leaves) = crate::canonical_stream::stage_with_leaves(
+            self.source.readable(),
+            &self.limits,
+            &self.owner,
+            options,
+            store,
+            scope,
+            work,
+            true,
+        )?;
+        Ok((artifact, leaves))
+    }
     pub(crate) fn canonical_append_wsu_id(
         &mut self,
         options: crate::canonical_stream::Options<'_>,

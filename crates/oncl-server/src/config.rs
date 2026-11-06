@@ -348,8 +348,18 @@ pub struct ServerConfig {
     pub metadata_bytes: u64,
     pub blocking_workers: usize,
     pub queue_capacity: usize,
+    /// How long a request that arrives while `max_in_flight` operations run waits for a
+    /// slot, and how long an admitted operation waits for a native worker, before the
+    /// typed `CapacityExceeded` refusal.
     pub admission_wait_ms: u64,
     pub operation_timeout_ms: u64,
+    /// An upload body that delivers no byte for this long is ended with
+    /// `DeadlineExceeded`/`NotApplied`, releasing its slot and spool. Also the length of
+    /// the window in which `upload_min_bytes_per_second` is judged.
+    pub upload_idle_timeout_ms: u64,
+    /// Minimum average upload throughput over each idle-timeout window of waiting for the
+    /// client; 0 disables the rule (idle timeout only).
+    pub upload_min_bytes_per_second: u64,
     pub audit_directory: PathBuf,
     /// Explicit operator-owned namespace for transient public documents only.
     pub scratch_directory: PathBuf,
@@ -384,6 +394,8 @@ impl Default for ServerConfig {
             blocking_workers: 2,
             queue_capacity: 2,
             admission_wait_ms: 1000,
+            upload_idle_timeout_ms: 30_000,
+            upload_min_bytes_per_second: 1024,
             operation_timeout_ms: 300_000,
             audit_directory: PathBuf::new(),
             scratch_directory: PathBuf::new(),
@@ -434,6 +446,9 @@ impl ServerConfig {
             || self.admission_wait_ms > self.operation_timeout_ms
             || self.header_timeout_ms == 0
             || self.header_timeout_ms > self.operation_timeout_ms
+            || self.upload_idle_timeout_ms < 1000
+            || self.upload_idle_timeout_ms > 86_400_000
+            || self.upload_min_bytes_per_second > 1_073_741_824
             || self.metadata_bytes < 32_768
             || self.memory_per_operation < 65_536
             || self.total_memory < self.memory_per_operation
@@ -521,6 +536,12 @@ impl ServerConfig {
             blocking_workers: self.blocking_workers,
             queue_capacity: self.queue_capacity,
             admission_wait: Duration::from_millis(self.admission_wait_ms),
+        }
+    }
+    pub(crate) fn upload_pace(&self) -> crate::pace::PaceConfig {
+        crate::pace::PaceConfig {
+            idle: Duration::from_millis(self.upload_idle_timeout_ms),
+            min_rate: self.upload_min_bytes_per_second,
         }
     }
 }

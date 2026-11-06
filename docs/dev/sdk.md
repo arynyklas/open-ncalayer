@@ -288,8 +288,144 @@ separately should derive that bound from `EvidenceLimits.max_total_bytes`. PDF D
 streams are read as regions: they are no longer limited by `PdfLimits::max_object_bytes`,
 only by the scope's container and memory accounting and the evidence quotas.
 
-Scope of D1: offline verification/inspection of CMS/CAdES with an embedded complete CRL.
-Not covered: online CRL download (`crl::fetch_for`, still decoded in full at 128x), operator
-CRL files (`--evidence-crl` is limited to 256 KiB per file), PAdES-LT of real NCANode files
-(separate structural guards in `oncl-pdf`), XAdES-LT (XML element cap and DOM
-materialization of `EncapsulatedCRLValue`).
+Scope of D1: offline verification of CMS/CAdES and, with the XML slice below, of XAdES with
+an embedded complete CRL. Not covered: online CRL download (`crl::fetch_for`, still decoded
+in full at 128x), operator CRL files (`--evidence-crl` is limited to 256 KiB per file),
+PAdES-LT online fetch, and the SIGN side of XAdES (below). The structural PAdES guards
+(trailer `/ID`, object-0 free head) are fixed; PAdES-LT verification of real NCANode files is
+bounded by the DSS region reading and the surcharge cap described above.
+
+### XAdES with a complete CRL (verify side)
+
+NCANode/Kalkan XAdES-LT writes the complete NCA CRL (about 20 MB, 27 MB of base64 with `&#13;`
+line ends) into `xades:EncapsulatedCRLValue`. `XmlVerifyProfile::max_metadata_bytes` now bounds
+structural markup only: the text of `EncapsulatedX509Certificate/OCSPValue/CRLValue` leaves is
+recorded as source extents by the scan, subtracted from the property it sits in, and streamed
+through `EvidenceStore::collect_base64` (entity references and CDATA decoded on the fly, 16 KiB
+buffers) so the decoded bytes are charged to `max_crl_item_bytes`/`max_crl_bytes`/
+`max_total_bytes` before they are stored. No `String`, DOM or base64 `Vec` of a leaf exists.
+`validate_unsigned_layout` decides from structure recorded by the scan, and the archive
+timestamp representation takes the canonical text spans of each leaf from the canonical
+renderer (`canonical_stream::stage_with_leaves`), not from parsing the rendered bytes. The text
+of a valid leaf is bounded by the evidence quotas on its decoded bytes only: a leaf made of
+whitespace decodes to nothing and is bounded just by the input size (it is streamed, never
+held). WSSE-embedded XAdES keeps the old extent bound (`70 x max_metadata_bytes` per
+`Signature`), so a CRL over about 17 MB inside a SOAP envelope is still refused.
+
+Host-visible changes: host-configured `EvidenceLimits` are no longer clipped by the metadata
+cap (`effective_limits`: the cap only scales the defaults of a host that configured nothing,
+so the same holds on the sign and extend paths (`effective_limits` is shared); an unconfigured SDK host still refuses a CRL over 256 KiB with `EvidenceError::Limit`);
+`VerifyRequest::xades_with_limits` is the XAdES counterpart of `cades`/`pades`, and the CLI
+uses it with its 32 MiB CRL quota; the readback of a scanned (DER, over 1 MiB) CRL is charged
+as memory only, not also as metadata (the XML index admission is 56 MiB of the 64 MiB default
+metadata budget). `oncl-server` and `oncl-ui` pass no XAdES limits and keep refusing.
+
+Not covered (SIGN side): `xades::source::material_xml`/`complete_signature`, `sign.rs`,
+`xades.rs` and `references/extension.rs` still build the unsigned properties as `String`s
+bounded by `max_metadata_bytes`, so signing or extending a XAdES-LT/LTA with a CRL over
+256 KiB is refused with `MetadataLimit`. The design that remains: write the generated
+properties to a staged artifact (their canonical form under exclusive C14N equals the text
+they are generated as, so the archive coverage and its leaf spans need no parse; prove with
+a differential test against `canonical_stream`), and assemble head + staged unsigned + tail.
+
+## Embedded status of LT/LTA is judged at the proof time
+
+Revocation status carried by a signature (OCSP answers, CRLs of CAdES/PAdES/XAdES `LT`
+and `LTA`) is evidence for verifying long after it was issued. It used to be judged against
+the verifier's clock (`nextUpdate`, `ALLOWED_PERIOD`, responder certificate validity at
+`now`), so a document that verified `Valid` at signing turned `Indeterminate` after a few
+minutes, for any size. The rule now lives once in `oncl-pki` (`ocsp::check_embedded_at_proof`,
+`crl::serial_status_at_proof`, selected by `validation::offline_revocation`; `pkix::Currency`
+is the switch) and CAdES, XAdES and PAdES all use it.
+
+**Rule.** When a proof time `P` is verified, an embedded OCSP answer or CRL about a path
+certificate is accepted when everything that was checked before still passes (CertID, issuer
+binding, signature, responder chain and OCSPSigning/no-check, `unknown` is refused, a CRL
+is a complete CRL of the issuer) and:
+
+* fresh at `P` (EN 319 102-1 5.2.5.4: maximum freshness `nextUpdate - thisUpdate` unless a
+  constraint says otherwise): with a `nextUpdate` (every CRL, an OCSP answer that has one)
+  the answer is fresh iff `P < nextUpdate`, so a 35-day CA CRL issued hours before the proof
+  is good; without one (NCA OCSP) iff `P - CLOCK_SKEW < thisUpdate` (300 s, exclusive);
+* `thisUpdate <= now + CLOCK_SKEW` (a CRL: `thisUpdate <= now`): never from the verifier's
+  future;
+* the responder certificate chains **as of `thisUpdate`** (not `now`);
+* `nextUpdate` and `ALLOWED_PERIOD` are not compared with `now`.
+
+`P` is the genTime of the signature time-stamp (`T`, `LT`) — for a PAdES document
+time-stamp that is the first proof — and, for `LTA`, the same signature time-stamp: the
+archive time-stamps protect the evidence but do not move `P` (a status embedded after the
+signature time-stamp and before the archive time-stamp must stay acceptable). A time-stamp
+authority certificate's own embedded status is judged the same way with that token's genTime
+as its `P`. Without a proof time (level `B`, a missing or invalid timestamp) `at` is `now`
+and the old rule is kept; status fetched online is always judged current at `now`.
+
+Unchanged: the signer and chain certificates are judged valid **at `P`** (they already were:
+`certificate_facts` and the anchored path use `P`); revoked at or before `P` is `Invalid`;
+revoked after `P` leaves the signature valid and reports `RevokedAfterProvenTime`.
+
+**Standard basis (ETSI EN 319 102-1 V1.3.1, read from the published text).** 5.2.5.4 (Revocation
+freshness checker): status is fresh when `issuance time > validation time - maximum accepted
+freshness`; 5.5.4 step 6 reruns the checker with the *best-signature-time* when the status
+was not fresh against the current time; 5.5.4 step 4a: a revocation time after the
+best-signature-time does not invalidate the signature, one at or before it is
+`INDETERMINATE/REVOKED_NO_POE`; 5.2.6.4 (X.509 certificate validation) runs the checker with
+the validation time and does not check the issuer's CRL-signing certificate against it. The
+`nextUpdate - thisUpdate` default of 5.2.5.4 step 1 is used for answers that carry a
+`nextUpdate`; for NCA OCSP answers, which carry none, the freshness is the constraint
+`CLOCK_SKEW` (the standard says FAILED without nextUpdate unless a constraint is given).
+
+**Replay window.** The window in which an attacker holding a pre-revocation "good" answer can
+use it is the answer's own validity, `nextUpdate - thisUpdate`: up to 35 days for an NCA CRL
+(300 s for an answer without `nextUpdate`). The archive time-stamp / proof of existence of an
+`LTA` does not narrow it: `P` is the signature time-stamp's genTime, and the archive
+time-stamps only protect what was embedded. This is the standard's default and the old
+rule's window at signing time.
+
+**Not verified / deliberate differences.** (0) No real-PKI proof: the pinned NCANode LT fixtures never reach a proof time here, so the NCA cadence (35-day root CRL issued hours before the timestamp) is tested with the recorded production CRL (`tests/crl.rs`) and a synthetic 35-day CRL, not with a Valid real document; the plain-CMS offline path is covered by `oncl-core` `offline_cms_status_is_judged_at_the_proof_time_not_the_host_clock`; P is the LAST passing signature time-stamp where the standard (5.5.4 step 3b) takes the earliest (conservative, pre-existing). (1) 5.6.2.2.4 step 2a also asks for a proof of
+existence of the revocation information at or before the control time; for `LTA` this is the
+archive time-stamp binding the evidence, which is checked by the evidence graph, for `LT`
+it is not requested (nothing but the signature time-stamp exists), as in 5.5.4. (2) The
+strict `>` and the 300 s freshness are choices within the constraint the standard leaves to
+the validation policy, not values it prescribes. (3) Revoked-at-or-before-`P` is `Invalid`
+here; the standard says `INDETERMINATE/REVOKED_NO_POE` (stricter, unchanged). (4) The standard's
+chain-model rule for key-compromise revocation after `P` of a CA is not modelled.
+
+## Dense PDFs: the cross-reference budget (D4, D6)
+
+`PdfLimits::max_objects` (default 4096) bounds object-GRAPH walks only: the AcroForm field
+count, DSS evidence items, the members of one object stream, the signature-view traversal.
+It is no longer a document size ceiling. A document's size in objects is bounded by
+`PdfLimits::max_xref_entries` (default 4 Mi entries over ALL revisions), and every entry is
+paid for:
+
+| What | Cost |
+|---|---|
+| cross-reference row (any revision) | 16 bytes of operation memory, reserved as the row is read (steps of at most 65 536 rows), never up front |
+| run of consecutive object numbers | 32 bytes (at worst one per entry) |
+| a classic xref table / an xref stream | read in 64 KiB chunks / inflated incrementally (PNG predictor included) straight into rows; the decoded table is never held, `max_object_bytes` and `max_decoded_bytes` no longer apply to it, the inflated size is bounded by the declared rows and `max_decode_work` |
+
+Refused before any row is allocated: a declared count past the remaining budget, and a
+count the rest of the file cannot hold (classic). Trailing or missing xref-stream data is
+detected only after the rows that are present were read and charged (it is a malformed
+document, refused all the same, before key use). Past the budget the
+refusal is `PdfError::Limit("xref entries")` (limit+1 exact, over all revisions); a
+memory quota that cannot hold the rows is `MemoryLimit`; both happen while reading, before
+any private key use (`NotApplied`). A classic table is accepted independently of where the
+64 KiB read chunks fall: a subsection header or entry cut by a chunk end is re-read from a
+fresh chunk (also when its last token reaches the chunk end, where a number may be cut), so acceptance of ordinary entries does not depend on the alignment; a unit starting at a chunk start is accepted when it ends before that 64 KiB chunk does, and refused otherwise. A subsection header surrounded by more than a chunk of blanks can still be refused depending on the alignment (it fails closed; not a real-world layout).
+
+Not charged (bounded transients): the 64 KiB read chunk, the inflate/predictor row buffers
+(`RowReader`, one predictor row of at most `max_object_bytes`), and the copy made while the
+row vector grows (at most one step, 1 MiB, above the charged capacity).
+
+Hosts that pre-flight a PAdES update add the rows with
+`budget::PriorSignatures::xref_entries` → `budget::PlanInputs::xref_entries`
+(`budget::xref_memory` is the upper bound used by `plan_memory`); the server does so.
+`budget::reader` no longer scales with `max_revisions`.
+
+Measured (debug build, real `oncl` process, `scripts/pdf-dense/gen_dense_pdf.py`, three
+revisions, cross-checked with pyHanko; its signature of the signed output is intact over the
+entire file): 1 M objects classic xref (123 MB) signs in 3.2 s at a peak working set of
+43 MB; 1 M objects as object streams + Flate/PNG xref streams (58 MB) 1.9 s at 44 MB; 4 M
+objects (the default ceiling) 13.5 s at 135 MB.

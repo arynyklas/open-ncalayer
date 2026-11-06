@@ -1,4 +1,5 @@
 use super::*;
+use crate::pace::{PaceConfig, UploadPace};
 use futures_util::stream;
 use oncl_api::multipart::BoundedMultipart;
 use oncl_core::OperationAdmission;
@@ -180,6 +181,11 @@ impl std::error::Error for SharedFatal {
         Some(self.0.as_ref())
     }
 }
+/// An I/O error whose first cause is the typed `error`, for a `Read` bridge that must keep
+/// the stable refusal code through the SDK's own error wrapping.
+pub(in crate::service) fn typed_io(error: ProcessingError) -> io::Error {
+    io::Error::other(SharedFatal(Arc::new(error)))
+}
 pub(in crate::service) fn first_cause(mut error: &ProcessingError) -> &ProcessingError {
     while let ProcessingError::Io(carrier) = error {
         match carrier
@@ -240,6 +246,7 @@ pub(super) enum Payload {
 }
 pub(super) struct Wire {
     body: Body,
+    pace: UploadPace,
     total: u64,
     limit: u64,
     scope: ResourceScope,
@@ -257,24 +264,37 @@ async fn frame(
     }
     let result = async {
         wire.scope.checkpoint()?;
-        let result = tokio::select! {
-            _=cancel.cancelled()=>return Err(ProcessingError::Cancelled),
-            result=tokio::time::timeout(deadline.remaining(),wire.body.frame())=>result.map_err(|_|ProcessingError::DeadlineExceeded)?,
+        let result = {
+            let Wire { body, pace, .. } = &mut *wire;
+            tokio::select! {
+                _=cancel.cancelled()=>return Err(ProcessingError::Cancelled),
+                result=pace.frame(body,deadline)=>result?,
+            }
         };
-        let Some(result) = result else { return Ok(None); };
-        let data = result.map_err(|_| ProcessingError::InvalidInput("invalid body frame"))?
-            .into_data().map_err(|_| ProcessingError::InvalidInput("trailers unsupported"))?;
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let data = result
+            .map_err(|_| ProcessingError::InvalidInput("invalid body frame"))?
+            .into_data()
+            .map_err(|_| ProcessingError::InvalidInput("trailers unsupported"))?;
         // Record every successful actual read, including the offending over-limit
         // read, before quota refusal or a post-read cancellation/deadline.
-        wire.total = wire.total.checked_add(data.len() as u64).ok_or(ProcessingError::FramingLimit)?;
-        if wire.total > wire.limit { return Err(ProcessingError::FramingLimit); }
+        wire.total = wire
+            .total
+            .checked_add(data.len() as u64)
+            .ok_or(ProcessingError::FramingLimit)?;
+        if wire.total > wire.limit {
+            return Err(ProcessingError::FramingLimit);
+        }
         if let Some(ledger) = &wire.tail_ledger {
             multer::FramingObserver::observe(ledger.as_ref(), data.len() as u64)
                 .map_err(|_| ProcessingError::InvalidInput("epilogue admission failed"))?;
         }
         wire.scope.checkpoint()?;
         Ok(Some(data))
-    }.await;
+    }
+    .await;
     result.map_err(|error| {
         wire.failure.record(error);
         ProcessingError::InvalidInput("intake failed")
@@ -288,6 +308,7 @@ pub(super) async fn prepare(
     body: Body,
     admission: &mut OperationAdmission,
     deadline: Deadline,
+    pace: PaceConfig,
     cancel: Arc<Cancellation>,
     precheck: &(dyn Fn(&OperationMetadata) -> Result<(), ApiError> + Sync),
 ) -> Result<Prepared, ApiError> {
@@ -319,6 +340,7 @@ pub(super) async fn prepare(
         }
         let wire = Arc::new(tokio::sync::Mutex::new(Wire {
             body,
+            pace: UploadPace::new(pace),
             total: 0,
             limit: JSON_BYTES,
             scope,
@@ -392,6 +414,7 @@ pub(super) async fn prepare(
     }
     let wire = Arc::new(tokio::sync::Mutex::new(Wire {
         body,
+        pace: UploadPace::new(pace),
         total: 0,
         limit: maximum_wire,
         scope: scope.shared_view(),

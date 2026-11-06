@@ -788,6 +788,7 @@ pub(super) fn memory_preflight(
         };
         signature_count_fits(prior.count, limits.max_signatures)?;
         let inputs = oncl_pdf::budget::PlanInputs {
+            xref_entries: prior.xref_entries,
             prior_contents_sum: prior.contents_sum,
             prior_contents_max: prior.contents_max,
             evidence_bytes,

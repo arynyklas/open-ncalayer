@@ -240,6 +240,176 @@ fn xades_lt_carries_the_trust_anchor_and_the_verifier_does_not_claim_lt_without_
     assert_eq!(report["ades_level"], "T", "{report}");
 }
 
+/// D1: NCANode/Kalkan XAdES-LT carries the complete CA CRL (about 20 MB) as base64 in
+/// `EncapsulatedCRLValue`; `oncl verify` refused it with `MetadataLimit` and no report.
+/// The metadata cap bounds markup only; the text is decoded as it streams into the
+/// evidence quotas. A genuine oncl XAdES-LT gets a multi-megabyte CRL spliced over its
+/// signer's OCSP answer (revocation data lies outside every signed byte), then goes
+/// through the real binary: a good CRL verifies, a CRL listing the signer revokes it,
+/// a CRL not issued by the root gives no status at all. Independent oracle: lxml +
+/// cryptography parse the embedded CRL and check its signature and the listed serial.
+#[test]
+fn xades_lt_with_a_multi_megabyte_crl_is_verified_not_refused() {
+    use base64::Engine as _;
+    let w = world();
+    let tsa = format!("{}/tsa", w.origin);
+    let doc = w.dir.path().join("doc.xml");
+    std::fs::write(&doc, b"<r><p>lt</p></r>").unwrap();
+    let signed = w.dir.path().join("lt.xml");
+    let mut args = sign_args(&w, "xades-lt", &doc, &signed);
+    args.extend([
+        "--tsa-url",
+        &tsa,
+        "--tsa-policy",
+        "1.2.398.3.3.2.6.2",
+        "--signature-id",
+        "sig-1",
+    ]);
+    let result = run(&args, b"");
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+    let text = std::fs::read_to_string(&signed).unwrap();
+    let signer_serial = w
+        .pki
+        .rsa
+        .cert
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .to_vec();
+
+    let crl = |entries: u32, list_signer: bool, wrong_key: bool| {
+        let mut crl = oncl_pki::crl::MockCrl::new(w.pki.root.clone())
+            .with_this_update(now() - time::Duration::MINUTE)
+            .next_update(Some(now() + time::Duration::HOUR));
+        if wrong_key {
+            crl = crl.wrong_key();
+        }
+        for index in 0..entries {
+            if list_signer && index == entries / 2 {
+                crl = crl.revoke_with_reason(&signer_serial, now() - time::Duration::DAY, 1);
+            }
+            crl = crl.revoke(
+                &(0x0200_0000_u32 + index).to_be_bytes(),
+                now() - time::Duration::DAY,
+            );
+        }
+        crl.der()
+    };
+    // The signer's own OCSP answer is the last one: the TSA's precedes it.
+    let with_crl = |der: &[u8]| {
+        let start = text
+            .rfind("<xades:OCSPValues>")
+            .expect("signer OCSP values");
+        let end = start
+            + text[start..].find("</xades:OCSPValues>").unwrap()
+            + "</xades:OCSPValues>".len();
+        let lines = base64::engine::general_purpose::STANDARD
+            .encode(der)
+            .as_bytes()
+            .chunks(76)
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect::<Vec<_>>()
+            .join("&#13;\n");
+        format!(
+            "{}<xades:CRLValues><xades:EncapsulatedCRLValue>{lines}</xades:EncapsulatedCRLValue></xades:CRLValues>{}",
+            &text[..start],
+            &text[end..]
+        )
+    };
+    let python = python();
+    let root_der = w.dir.path().join("oracle-root.der");
+    std::fs::write(&root_der, w.pki.root.cert.to_der().unwrap()).unwrap();
+    let serial_hex = signer_serial
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let oracle = |file: &Path| -> Option<String> {
+        let python = python?;
+        let script = w.dir.path().join("crl_oracle.py");
+        std::fs::write(
+            &script,
+            "import sys,base64\n\
+             from lxml import etree\n\
+             from cryptography import x509\n\
+             X='{http://uri.etsi.org/01903/v1.3.2#}'\n\
+             root=x509.load_der_x509_certificate(open(sys.argv[2],'rb').read())\n\
+             serial=int(sys.argv[3],16)\n\
+             for e in etree.parse(sys.argv[1]).iter(X+'EncapsulatedCRLValue'):\n\
+             \tcrl=x509.load_der_x509_crl(base64.b64decode(e.text))\n\
+             \tlisted=crl.get_revoked_certificate_by_serial_number(serial) is not None\n\
+             \tprint('SIGNED_BY_ROOT=%s LISTED=%s ENTRIES=%d'%(crl.is_signature_valid(root.public_key()),listed,len(crl)))\n",
+        )
+        .unwrap();
+        let out = Command::new(python)
+            .args([path(&script), path(file), path(&root_der), &serial_hex])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "oracle: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(String::from_utf8(out.stdout).unwrap())
+    };
+
+    let cases = [
+        (
+            "good",
+            crl(150_000, false, false),
+            Some(0),
+            "Passed",
+            "SIGNED_BY_ROOT=True LISTED=False",
+        ),
+        (
+            "revoked signer",
+            crl(150_000, true, false),
+            Some(2),
+            "Failed",
+            "SIGNED_BY_ROOT=True LISTED=True",
+        ),
+        (
+            "wrong key",
+            crl(20_000, true, true),
+            None,
+            "",
+            "SIGNED_BY_ROOT=False LISTED=True",
+        ),
+    ];
+    for (name, der, exit, revocation, facts) in cases {
+        assert!(
+            name == "wrong key" || der.len() > 2 << 20,
+            "{name}: {}",
+            der.len()
+        );
+        let file = w
+            .dir
+            .path()
+            .join(format!("lt-crl-{}.xml", name.replace(' ', "-")));
+        std::fs::write(&file, with_crl(&der)).unwrap();
+        if let Some(proof) = oracle(&file) {
+            assert!(proof.contains(facts), "{name}: oracle says {proof}");
+        }
+        let (code, report) = verify_json(&w, "xades-lt", &file);
+        let signer = &report["signers"][0];
+        assert_eq!(signer["signature"], "Passed", "{name}: {report}");
+        match exit {
+            Some(exit) => {
+                assert_eq!(code, Some(exit), "{name}: {report}");
+                assert_eq!(signer["revocation"], revocation, "{name}: {report}");
+                if exit == 0 {
+                    assert_eq!(report["ades_level"], "Lt", "{name}: {report}");
+                }
+            }
+            None => {
+                // A CRL its issuer did not sign says nothing, even about a listed serial.
+                assert_ne!(code, Some(0), "{name}: {report}");
+                assert_ne!(signer["revocation"], "Passed", "{name}: {report}");
+                assert_ne!(signer["revocation"], "Failed", "{name}: {report}");
+            }
+        }
+    }
+}
+
 /// D3 negative controls: the certificate digest is really compared and only known
 /// digest algorithms are admitted. A flipped digest value, a SHA-1 digest URI and an
 /// unknown URI in an otherwise genuine oncl XAdES-B each get a typed refusal
