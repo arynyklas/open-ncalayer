@@ -334,3 +334,121 @@ fn the_upload_knobs_have_safe_defaults_and_bounded_ranges() {
     };
     off.validate().expect("0 switches the rate rule off");
 }
+
+/// A small `hash` request of the given body kind for `/v1/operations` or `/v1/batch`.
+fn small_operation(process: &support::Process, path: &str) -> Reply {
+    let body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\nabc\r\n--b--\r\n"
+    );
+    let mut stream = TcpStream::connect(process.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let started = Instant::now();
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        process.address,
+        process.token.as_str(),
+        body.len()
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    Reply {
+        status: text
+            .strip_prefix("HTTP/1.1 ")
+            .and_then(|r| r.get(..3))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0),
+        body: text,
+        elapsed: started.elapsed(),
+    }
+}
+
+/// The slot wait also applies to `/v1/operations` and `/v1/batch`: queued, then admitted
+/// when the stalls end; and refused only after the wait when they last longer.
+#[test]
+fn operations_and_batch_clients_queue_for_a_slot_too() {
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config(
+            root,
+            "admission_wait_ms = 6000\noperation_timeout_ms = 10000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
+        )
+    });
+    for path in ["/v1/operations", "/v1/batch"] {
+        let hold_a = stalled(&process, Route::Hash);
+        let hold_b = stalled(&process, Route::Hash);
+        sleep(Duration::from_millis(300));
+        let waited = small_operation(&process, path);
+        assert_eq!(waited.status, 200, "{path}: {}", waited.body);
+        assert!(
+            waited.elapsed >= Duration::from_millis(900),
+            "{path}: queued until the stalls ended, took {:?}",
+            waited.elapsed
+        );
+        for held in [hold_a, hold_b] {
+            assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
+        }
+    }
+    process.stop();
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config(
+            root,
+            "admission_wait_ms = 500\noperation_timeout_ms = 8000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 3000\n",
+        )
+    });
+    let hold_a = stalled(&process, Route::Hash);
+    let hold_b = stalled(&process, Route::Hash);
+    sleep(Duration::from_millis(300));
+    for path in ["/v1/operations", "/v1/batch"] {
+        let refused = small_operation(&process, path);
+        assert_typed_refusal(&refused, 503, "CapacityExceeded");
+        assert!(
+            refused.elapsed >= Duration::from_millis(450),
+            "{path}: {:?}",
+            refused.elapsed
+        );
+    }
+    for held in [hold_a, hold_b] {
+        assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
+    }
+    process.stop();
+}
+
+/// The JSON body path is paced as well: a stalled `application/json` upload is ended at
+/// the idle timeout, not at the operation deadline.
+#[test]
+fn a_stalled_json_body_is_ended_by_the_idle_timeout() {
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config(
+            root,
+            "admission_wait_ms = 600\noperation_timeout_ms = 8000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
+        )
+    });
+    let mut stream = TcpStream::connect(process.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let started = Instant::now();
+    write!(
+        stream,
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{{\"metadata\":",
+        process.address,
+        process.token.as_str()
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 504"), "{text}");
+    assert!(text.contains("\"code\":\"DeadlineExceeded\""), "{text}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1400)
+            && started.elapsed() < Duration::from_millis(4500),
+        "{:?}",
+        started.elapsed()
+    );
+    process.stop();
+}

@@ -481,7 +481,9 @@ const ADMISSION_POLL: Duration = Duration::from_millis(10);
 /// Runs `attempt` until it is admitted. A refusal with `CapacityExceeded` (every
 /// `max_in_flight` slot taken) is retried for at most `wait` (`admission_wait_ms`) before it
 /// is returned; any other result is final. The request holds no slot, spool or body read
-/// while it waits, and dropping the future (client disconnect) ends the wait.
+/// while it waits. A client that disconnects meanwhile is not noticed (the unread request
+/// body keeps Hyper from seeing the close): the wait ends at `wait` at the latest and the
+/// request is then refused, or admitted and ended by the idle rule.
 async fn admit_within<T>(
     wait: Duration,
     mut attempt: impl FnMut() -> Result<T, ApiError>,

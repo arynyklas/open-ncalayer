@@ -129,4 +129,28 @@ mod tests {
             assert!(p.arrived(9 * SECOND, 1).is_ok());
         }
     }
+
+    #[tokio::test]
+    async fn a_slow_consumer_is_never_charged() {
+        let mut p = UploadPace::new(PaceConfig {
+            idle: Duration::from_millis(200),
+            min_rate: 200_000_000,
+        });
+        let mut body = Body::from_stream(futures_util::stream::iter(
+            (0..40).map(|_| Ok::<_, std::io::Error>(Bytes::from(vec![0u8; 16 * 1024]))),
+        ));
+        let deadline = Deadline::after(Duration::from_secs(60)).unwrap();
+        let mut frames = 0;
+        while p
+            .frame(&mut body, deadline)
+            .await
+            .expect("server time must not be charged to the client")
+            .is_some()
+        {
+            frames += 1;
+            // Slower than the idle timeout: the consumer, not the client, is slow.
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        assert_eq!(frames, 40);
+    }
 }
