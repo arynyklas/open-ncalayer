@@ -508,11 +508,6 @@ fn layout(
     let mut body_ids = 0;
     let mut body_wsu = false;
     let mut work = p.max_work;
-    // Text of XAdES evidence leaves (a complete CA CRL is megabytes of base64): payload
-    // bounded by the evidence quotas, never part of the markup the metadata cap measures.
-    let mut leaf_depth: Option<usize> = None;
-    let mut payload = 0u64;
-    let mut payload_start = 0u64;
     {
         let mut events = document.events();
         while let Some(event) = events.next_event()? {
@@ -523,26 +518,7 @@ fn layout(
             if event.kind == XmlEventKind::ProcessingInstruction && !event.xml_declaration {
                 return Err(invalid("SOAP processing instruction"));
             }
-            if matches!(event.kind, XmlEventKind::Text | XmlEventKind::Cdata)
-                && leaf_depth.is_some_and(|depth| event.depth == depth + 1)
-            {
-                payload = payload.saturating_add(event.region.len);
-            }
             if event.kind == XmlEventKind::Start {
-                if event.depth == 3 && current_security.is_some() {
-                    payload_start = payload;
-                }
-                if let Some(n) = event.name.as_ref()
-                    && n.namespace() == Some(crate::XADES_NS)
-                    && matches!(
-                        n.local(),
-                        "EncapsulatedX509Certificate"
-                            | "EncapsulatedOCSPValue"
-                            | "EncapsulatedCRLValue"
-                    )
-                {
-                    leaf_depth = Some(event.depth);
-                }
                 let n = event
                     .name
                     .as_ref()
@@ -717,9 +693,6 @@ fn layout(
                     }
                 }
             } else if event.kind == XmlEventKind::End {
-                if leaf_depth == Some(event.depth) {
-                    leaf_depth = None;
-                }
                 let n = event
                     .name
                     .as_ref()
@@ -757,11 +730,7 @@ fn layout(
                             _ => return Err(invalid("Security child")),
                         };
                         if list.len() == p.max_signers
-                            || event
-                                .region
-                                .len
-                                .saturating_sub(payload.saturating_sub(payload_start))
-                                > p.max_metadata_bytes as u64 * 70
+                            || event.region.len > p.max_metadata_bytes as u64 * 70
                         {
                             return Err(ProcessingError::MetadataLimit.into());
                         }

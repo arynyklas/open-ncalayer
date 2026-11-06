@@ -305,12 +305,15 @@ buffers) so the decoded bytes are charged to `max_crl_item_bytes`/`max_crl_bytes
 `max_total_bytes` before they are stored. No `String`, DOM or base64 `Vec` of a leaf exists.
 `validate_unsigned_layout` decides from structure recorded by the scan, and the archive
 timestamp representation takes the canonical text spans of each leaf from the canonical
-renderer (`canonical_stream::stage_with_leaves`), not from parsing the rendered bytes. WSSE
-embedding applies the same markup-only bound to the `Signature` extent.
+renderer (`canonical_stream::stage_with_leaves`), not from parsing the rendered bytes. The text
+of a valid leaf is bounded by the evidence quotas on its decoded bytes only: a leaf made of
+whitespace decodes to nothing and is bounded just by the input size (it is streamed, never
+held). WSSE-embedded XAdES keeps the old extent bound (`70 x max_metadata_bytes` per
+`Signature`), so a CRL over about 17 MB inside a SOAP envelope is still refused.
 
 Host-visible changes: host-configured `EvidenceLimits` are no longer clipped by the metadata
 cap (`effective_limits`: the cap only scales the defaults of a host that configured nothing,
-so an unconfigured SDK host still refuses a CRL over 256 KiB with `EvidenceError::Limit`);
+so the same holds on the sign and extend paths (`effective_limits` is shared); an unconfigured SDK host still refuses a CRL over 256 KiB with `EvidenceError::Limit`);
 `VerifyRequest::xades_with_limits` is the XAdES counterpart of `cades`/`pades`, and the CLI
 uses it with its 32 MiB CRL quota; the readback of a scanned (DER, over 1 MiB) CRL is charged
 as memory only, not also as metadata (the XML index admission is 56 MiB of the 64 MiB default
