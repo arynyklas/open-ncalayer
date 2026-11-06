@@ -137,6 +137,10 @@ pub struct CaseRow {
     /// The production defect (an id of `[[defect]]`) this row is known to fail on.
     #[serde(default)]
     pub defect: Option<String>,
+    /// For a defect row: the observed (buggy) grade, or for an error the text of its
+    /// message, as a substring. `expected` is always the DESIRED outcome.
+    #[serde(default)]
+    pub defect_observed: Option<String>,
 }
 
 impl Coverage {
@@ -291,7 +295,16 @@ impl Ctx {
         // NCANode's timestamp requests go to the NCA's TSA over the network: a failure
         // there is transient, the same request is repeated (not a verdict about a row).
         for attempt in 0..3 {
-            let (status, value) = self.nc_post_once(path, body)?;
+            let (status, value) = match self.nc_post_once(path, body) {
+                Ok(pair) => pair,
+                Err(e) if attempt < 2 && format!("{e:#}").contains("timeout") => {
+                    // A wedged NCANode answers nothing to everything after it: start a
+                    // fresh container (the cache volume keeps its downloads) and repeat.
+                    self.nc = NodeState::Idle;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let transient = status == 500
                 && value["message"]
                     .as_str()
@@ -363,6 +376,12 @@ pub enum Status {
     Pass,
     Fail,
     Blocked,
+    /// A row with a defect marker that still shows the documented defect.
+    Defect,
+    /// A row with a defect marker that now gives its desired grade: remove the marker.
+    Fixed,
+    /// A row with a defect marker that fails differently from the documented defect.
+    Changed,
 }
 
 impl Status {
@@ -371,6 +390,9 @@ impl Status {
             Status::Pass => "PASS",
             Status::Fail => "FAIL",
             Status::Blocked => "BLOCKED",
+            Status::Defect => "DEFECT",
+            Status::Fixed => "FIXED",
+            Status::Changed => "CHANGED",
         }
     }
 }
@@ -402,6 +424,12 @@ pub struct Options {
 pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
     let coverage = std::sync::Arc::new(Coverage::load()?);
     let catalog = catalog();
+    ensure!(
+        options.list || cfg!(target_os = "linux"),
+        "platform-interop runs in Linux only (the NCANode oracle is a Docker image, the \
+         other oracles and the large-artifact checks assume POSIX files); run it in a Linux \
+         environment such as WSL: a Windows run is not an interop run"
+    );
     if options.list {
         for row in &coverage.case {
             println!("{}\t{}\t{}", row.id, row.capability, row.expected);
@@ -428,7 +456,8 @@ pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
     let oncl_version = oncl.version()?;
     let oncl_sha = sha256_file(&oncl.bin)?;
 
-    let base = scratch_base()?;
+    let run_dir = scratch_base()?;
+    let base = run_dir.path().to_path_buf();
     let world = World::start(
         &base,
         tools
@@ -525,13 +554,27 @@ pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
         count(Status::Fail),
         count(Status::Blocked),
     );
+    let (defect, fixed, changed) = (
+        count(Status::Defect),
+        count(Status::Fixed),
+        count(Status::Changed),
+    );
     println!(
-        "{} rows: {pass} PASS, {fail} FAIL, {blocked} BLOCKED; report: {}",
+        "{} rows: {pass} PASS, {fail} FAIL, {defect} DEFECT (known), {fixed} FIXED, {changed} CHANGED, {blocked} BLOCKED; report: {}",
         rows.len(),
         out.join("report.md").display()
     );
     ensure!(missing.is_empty(), "rows without a case: {missing:?}");
     ensure!(fail == 0, "{fail} rows FAILED");
+    ensure!(
+        fixed == 0,
+        "{fixed} defect rows are FIXED: remove their markers (see the report)"
+    );
+    ensure!(
+        changed == 0,
+        "{changed} defect rows fail differently from the documented defect"
+    );
+    ensure!(defect == 0, "{defect} rows show known production defects");
     ensure!(
         blocked == 0,
         "{blocked} rows are BLOCKED (see the report for each prerequisite)"
@@ -615,20 +658,28 @@ fn run_case(
             result_row.ours = observed.ours;
             result_row.oracle = observed.oracle;
             result_row.detail = observed.detail;
-            if observed.grade == row.expected {
-                result_row.status = Status::Pass;
-                if let Some(defect) = &row.defect {
-                    result_row.status = Status::Fail;
+            let matches = observed.grade == row.expected;
+            match (&row.defect, matches) {
+                (None, true) => result_row.status = Status::Pass,
+                (None, false) => {
                     result_row.detail = format!(
-                        "defect {defect} no longer reproduces: remove the marker from the row; {}",
-                        result_row.detail
+                        "observed grade `{}` differs from the expected `{}`; {}",
+                        observed.grade, row.expected, result_row.detail
                     );
                 }
-            } else {
-                result_row.detail = format!(
-                    "observed grade `{}` differs from the expected `{}`; {}",
-                    observed.grade, row.expected, result_row.detail
-                );
+                (Some(defect), true) => {
+                    result_row.status = Status::Fixed;
+                    result_row.detail = format!(
+                        "defect {defect} is FIXED: the row gives its desired grade; remove the marker"
+                    );
+                }
+                (Some(defect), false) => {
+                    result_row.status = defect_status(row, &observed.grade, &result_row.detail);
+                    result_row.detail = format!(
+                        "defect {defect}: observed `{}`, desired `{}`; {}",
+                        observed.grade, row.expected, result_row.detail
+                    );
+                }
             }
             result_row.grade = observed.grade;
         }
@@ -641,11 +692,25 @@ fn run_case(
             None => {
                 result_row.grade = "error".to_owned();
                 result_row.detail = format!("{e:#}");
+                if let Some(defect) = &row.defect {
+                    result_row.status = defect_status(row, "error", &result_row.detail);
+                    result_row.detail = format!("defect {defect}: {}", result_row.detail);
+                }
             }
         },
     }
     keep_artifacts(&dir, &out.join("artifacts").join(&case.id));
     result_row
+}
+
+/// `Defect` if the row still shows the documented defect, else `Changed`.
+fn defect_status(row: &CaseRow, grade: &str, detail: &str) -> Status {
+    match row.defect_observed.as_deref() {
+        Some(known) if grade.contains(known) || (grade == "error" && detail.contains(known)) => {
+            Status::Defect
+        }
+        _ => Status::Changed,
+    }
 }
 
 /// A case whose oracle is not the pinned one cannot judge: BLOCKED with the mismatch.
@@ -926,10 +991,12 @@ fn fixture_digests() -> anyhow::Result<BTreeMap<String, String>> {
     Ok(digests)
 }
 
-fn scratch_base() -> anyhow::Result<PathBuf> {
-    let base = std::env::temp_dir().join("oncl-v02-interop");
-    std::fs::create_dir_all(&base).with_context(|| base.display().to_string())?;
-    Ok(base)
+/// A fresh directory for this run, so concurrent runs never share files.
+fn scratch_base() -> anyhow::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("oncl-platform-interop-")
+        .tempdir()
+        .context("creating the run directory")
 }
 
 /// Builds `oncl` from this workspace (debug profile; `--oncl` takes a release binary).
@@ -969,8 +1036,10 @@ fn report_json(
         && !coverage.pending.is_empty()
     {
         "INCOMPLETE"
-    } else if count(Status::Fail) > 0 {
+    } else if count(Status::Fail) + count(Status::Changed) + count(Status::Fixed) > 0 {
         "FAIL"
+    } else if count(Status::Defect) > 0 {
+        "FAIL-KNOWN-DEFECTS"
     } else if count(Status::Blocked) > 0 {
         "BLOCKED"
     } else {

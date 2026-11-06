@@ -227,7 +227,7 @@ fn tampered(ctx: &mut Ctx, profile: Profile, tamper: &str) -> anyhow::Result<Obs
             "ours",
             format!("{}/{}", ours.verdict(), ours.check(0, "signature")),
         ),
-        ("ncanode", nc),
+        ("ncanode-nondiscriminating", nc),
     ];
     if profile == Profile::Rsa {
         let python = lxml(ctx, &path)?;

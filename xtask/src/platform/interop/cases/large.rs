@@ -20,9 +20,13 @@ pub fn cases() -> Vec<Case> {
     vec![
         Case::new("large-cms-detached-rsa", large_cms),
         Case::new("large-xml-enveloped-rsa", large_xml),
-        Case::new("large-pdf-signature-rsa", |ctx| large_pdf(ctx, 16_300)),
+        Case::new("large-pdf-signature-rsa", |ctx| large_pdf(ctx, 16_300, ctx.large_bytes)),
+        // The cheap reproduction of D6: 128 MiB, about 8000 pages with 16 KiB streams.
+        Case::new("pdf-many-pages-128mib-rsa", |ctx| {
+            large_pdf(ctx, 16_300, 134_217_728)
+        }),
         Case::new("large-pdf-signature-rsa-1mib-pages", |ctx| {
-            large_pdf(ctx, 1 << 20)
+            large_pdf(ctx, 1 << 20, ctx.large_bytes)
         }),
     ]
 }
@@ -417,10 +421,10 @@ fn write_pdf(path: &Path, bytes: u64, stream_len: usize) -> anyhow::Result<u64> 
     Ok(at)
 }
 
-fn large_pdf(ctx: &mut Ctx, stream: usize) -> anyhow::Result<Observed> {
-    let dir = scratch(ctx, &format!("large-pdf-{stream}"))?;
+fn large_pdf(ctx: &mut Ctx, stream: usize, bytes: u64) -> anyhow::Result<Observed> {
+    let dir = scratch(ctx, &format!("large-pdf-{stream}-{bytes}"))?;
     let (doc, signed) = (dir.join("doc.pdf"), dir.join("signed.pdf"));
-    let size = write_pdf(&doc, ctx.large_bytes, stream)?;
+    let size = write_pdf(&doc, bytes, stream)?;
     let started = Instant::now();
     let out = oncl_run(ctx, &dir, &sign_words(ctx, "pdf", &doc, &signed, &[])?)?;
     ensure!(

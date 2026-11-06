@@ -127,7 +127,7 @@ impl World {
         let address = listener.local_addr()?;
         let origin = format!("http://{address}");
         let dir = tempfile::Builder::new()
-            .prefix("oncl-v02-world-")
+            .prefix("oncl-interop-world-")
             .tempdir_in(base)
             .context("creating the world directory")?;
 

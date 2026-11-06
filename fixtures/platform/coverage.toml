@@ -1664,7 +1664,7 @@ capability = "wsse.verify"
 profile = "rsa"
 oracles = ["ncanode", "lxml", "cryptography"]
 what = "the body of our rsa WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false lxml-rsa=rejected"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false lxml-rsa=rejected"
 
 [[case]]
 id = "wsse-tamper-rsa-signature"
@@ -1672,7 +1672,7 @@ capability = "wsse.verify"
 profile = "rsa"
 oracles = ["ncanode", "lxml", "cryptography"]
 what = "the signature of our rsa WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false lxml-rsa=rejected"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false lxml-rsa=rejected"
 
 [[case]]
 id = "wsse-verify-ncanode-rsa"
@@ -1696,7 +1696,7 @@ capability = "wsse.verify"
 profile = "gost2015"
 oracles = ["ncanode"]
 what = "the body of our gost2015 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
 
 [[case]]
 id = "wsse-tamper-gost2015-signature"
@@ -1704,7 +1704,7 @@ capability = "wsse.verify"
 profile = "gost2015"
 oracles = ["ncanode"]
 what = "the signature of our gost2015 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
 
 [[case]]
 id = "wsse-verify-ncanode-gost2015"
@@ -1728,7 +1728,7 @@ capability = "wsse.verify"
 profile = "gost2004"
 oracles = ["ncanode"]
 what = "the body of our gost2004 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
 
 [[case]]
 id = "wsse-tamper-gost2004-signature"
@@ -1736,7 +1736,7 @@ capability = "wsse.verify"
 profile = "gost2004"
 oracles = ["ncanode"]
 what = "the signature of our gost2004 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode=HTTP200 valid=false"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
 
 [[case]]
 id = "wsse-verify-ncanode-gost2004"
@@ -2170,3 +2170,11 @@ profile = "rsa"
 oracles = ["asn1crypto", "cryptography"]
 what = "the same 1.1 GiB PDF with 1 MiB content streams (about 1100 pages instead of 71000): the object count, not the size, is what varies"
 expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"
+
+[[case]]
+id = "pdf-many-pages-128mib-rsa"
+capability = "large"
+profile = "rsa"
+oracles = ["asn1crypto", "cryptography"]
+what = "cheap reproduction of D6: a 128 MiB classic-xref PDF of about 8000 pages with 16 KiB content streams, signed adbe.pkcs7.detached; independent ByteRange decomposition; one flipped bit rejected"
+expected = "?"
