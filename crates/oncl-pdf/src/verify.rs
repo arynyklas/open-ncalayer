@@ -248,6 +248,11 @@ impl PdfDocument<'_, '_> {
                 {
                     return Err(PdfError::Malformed("document timestamp dictionary"));
                 }
+            } else if document_timestamp && get(dict, b"Type")?.name(b"DocTimeStamp") {
+                // The generic profile reports signers. A document timestamp (ISO 32000-2
+                // 12.8.5) is evidence, not a signer: it is neither judged here nor refused;
+                // the PAdES profiles verify it.
+                continue;
             } else {
                 if dict
                     .get(b"Type".as_slice())
