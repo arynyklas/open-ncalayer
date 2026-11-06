@@ -233,3 +233,102 @@ async fn deadline_during_secret_upload_is_a_typed_error_and_never_reaches_the_jo
     );
     service.stop().await;
 }
+
+/// The operation deadline is far away (20 s); only the upload idle timeout (1 s) can end a
+/// stall in a few seconds.
+fn idle_config(config: &mut oncl_server::config::ServerConfig) {
+    config.operation_timeout_ms = 20_000;
+    config.header_timeout_ms = 1000;
+    config.admission_wait_ms = 200;
+    config.upload_idle_timeout_ms = 1000;
+    config.tokens[0].actions = vec![Permission::Sign, Permission::Hash];
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_route_stalled_upload_is_ended_by_the_idle_timeout_before_any_key_use() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(|config, dir| {
+        config.inline_pkcs12 = true;
+        config.tokens[0].inline_pkcs12 = true;
+        config.pki = pki.config(dir);
+        idle_config(config);
+    })
+    .await;
+    let metadata = r#"{"items":[{"id":"s1","operation":{"kind":"sign","profile":"cms","input":"doc","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"s1","role":"secret"},{"name":"pw","item_id":"s1","role":"secret"},{"name":"doc","item_id":"s1","role":"document"}]}"#;
+    let mut prefix = multipart(
+        metadata,
+        &[
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+        ],
+    );
+    prefix.truncate(prefix.len() - b"--b--\r\n".len());
+    prefix.extend_from_slice(
+        b"--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\nfirst bytes of a document that never completes",
+    );
+    let started = std::time::Instant::now();
+    let response = stalled_upload(&service, "/v1/operations", &prefix, 1 << 20).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(8),
+        "the 1 s idle timeout, not the 20 s operation deadline, must end the stall: {:?}",
+        started.elapsed()
+    );
+    assert_typed_deadline(&response);
+    assert!(
+        service
+            .host
+            .audit
+            .records()
+            .unwrap()
+            .iter()
+            .all(|r| !matches!(r.kind, oncl_server::audit::RecordKind::Begin)),
+        "an idle-timeout refusal happens before key use: no BEGIN"
+    );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_route_stalled_secret_upload_is_ended_by_the_idle_timeout_before_any_key_use() {
+    let pki = Pki::start();
+    let service = Running::start_with(|config, dir| {
+        config.inline_pkcs12 = true;
+        config.tokens[0].inline_pkcs12 = true;
+        config.pki = pki.config(dir);
+        idle_config(config);
+    })
+    .await;
+    let metadata = r#"{"items":[{"id":"s1","operation":{"kind":"sign","profile":"cms","input":"doc","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"s1","role":"secret"},{"name":"pw","item_id":"s1","role":"secret"},{"name":"doc","item_id":"s1","role":"document"}]}"#;
+    let mut prefix = multipart(metadata, &[]);
+    prefix.truncate(prefix.len() - b"--b--\r\n".len());
+    prefix.extend_from_slice(
+        b"--b\r\nContent-Disposition: form-data; name=\"p12\"\r\n\r\npartial container bytes",
+    );
+    let started = std::time::Instant::now();
+    let response = stalled_upload(&service, "/v1/operations", &prefix, 1 << 20).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_typed_deadline(&response);
+    assert!(
+        service
+            .host
+            .audit
+            .records()
+            .unwrap()
+            .iter()
+            .all(|r| !matches!(r.kind, oncl_server::audit::RecordKind::Begin)),
+        "no private use before the secret is complete"
+    );
+    service.stop().await;
+}

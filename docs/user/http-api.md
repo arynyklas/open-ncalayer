@@ -167,7 +167,8 @@ not a claim that a prior private effect was rolled back.
 Before a completed response, execution failures use the stable `code` and
 `applied` envelope from the raw service: 403 PermissionDenied, 400 InvalidRequest,
 413 byte/resource limit, 503 CapacityExceeded/AuditUnavailable, or 504
-DeadlineExceeded. Hashing never applies a private key. Authentication occurs
+DeadlineExceeded (also for an upload that stalls or falls below the minimum upload rate,
+see [the server guide](server.md)). Hashing never applies a private key. Authentication occurs
 before body intake; the original admission root starts before bounded metadata
 intake, then the host consumes that same root into an authorized operation
 context. Queueing, SDK work, response ownership and actual network writes retain
