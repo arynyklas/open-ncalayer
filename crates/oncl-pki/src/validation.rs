@@ -9,7 +9,7 @@ use crate::{
     http::HttpTransport,
     info::{CertInfo, cert_info},
     ocsp::{self, CertStatus},
-    pkix::{self, CaSet},
+    pkix::{self, CaSet, Currency},
 };
 use time::OffsetDateTime;
 const SIGNER_REASON_CAPACITY: usize = 8;
@@ -493,6 +493,7 @@ fn validate_prepared_cms_impl(
                             evidence.responses(index),
                             &evidence.crls,
                             time,
+                            true,
                             ctx.now,
                         ),
                         None => online_path_status(&path, time, ctx),
@@ -550,6 +551,7 @@ fn validate_prepared_cms_impl(
                     evidence.responses(index),
                     &evidence.crls,
                     at,
+                    proven.is_some(),
                     ctx.now,
                 );
                 checked.revocation = status;
@@ -933,8 +935,19 @@ pub(crate) fn offline_revocation<'a>(
     responses: impl Iterator<Item = &'a [u8]> + Clone,
     crls: &[&[u8]],
     at: OffsetDateTime,
+    proven: bool,
     now: OffsetDateTime,
 ) -> (CheckStatus, Option<OffsetDateTime>) {
+    // `at` is a verified proof (control) time when `proven`: embedded status is then judged
+    // against it (issued no earlier than it, ETSI EN 319 102-1), not against `now`. Without
+    // a proof time `at` is `now` and the status must be current.
+    let currency = |_: ()| {
+        if proven {
+            Currency::AtProof { proof: at, now }
+        } else {
+            Currency::Now(now)
+        }
+    };
     if path.len() < 2 {
         return (CheckStatus::Unavailable, None);
     }
@@ -947,9 +960,14 @@ pub(crate) fn offline_revocation<'a>(
         let mut status = None;
         if index == 0 {
             for response in responses.clone() {
-                if let Ok(answer) =
-                    ocsp::check_embedded_issuer_bound(response, cert, issuer, &trusted, now)
-                    && answer.status != CertStatus::Unknown
+                if let Ok(answer) = match currency(()) {
+                    Currency::Now(now) => {
+                        ocsp::check_embedded_issuer_bound(response, cert, issuer, &trusted, now)
+                    }
+                    Currency::AtProof { proof, now } => {
+                        ocsp::check_embedded_at_proof(response, cert, issuer, &trusted, proof, now)
+                    }
+                } && answer.status != CertStatus::Unknown
                 {
                     status = Some(answer.status);
                     break;
@@ -958,12 +976,13 @@ pub(crate) fn offline_revocation<'a>(
         }
         if status.is_none() {
             for bytes in crls {
-                if let Ok(found) = crl::serial_status(
-                    bytes,
-                    issuer,
-                    cert.tbs_certificate().serial_number().as_bytes(),
-                    now,
-                ) {
+                let serial = cert.tbs_certificate().serial_number().as_bytes();
+                if let Ok(found) = match currency(()) {
+                    Currency::Now(now) => crl::serial_status(bytes, issuer, serial, now),
+                    Currency::AtProof { proof, now } => {
+                        crl::serial_status_at_proof(bytes, issuer, serial, proof, now)
+                    }
+                } {
                     status = Some(match found {
                         CrlStatus::Good => CertStatus::Good,
                         CrlStatus::Revoked { time, reason } => CertStatus::Revoked { time, reason },

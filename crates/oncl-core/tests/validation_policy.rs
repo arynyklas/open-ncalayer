@@ -1269,13 +1269,14 @@ impl TsaFixture {
         }
         let stale = matches!(status, TsaStatus::Stale);
         let mut crl = MockCrl::new(self.authority.clone())
+            // Embedded status is judged at the proof time: stale is issued before it.
             .with_this_update(if stale {
-                NOW - time::Duration::hours(2)
+                PROVEN - time::Duration::hours(2)
             } else {
                 NOW - time::Duration::MINUTE
             })
             .next_update(Some(if stale {
-                NOW - time::Duration::HOUR
+                PROVEN - time::Duration::HOUR
             } else {
                 NOW + time::Duration::HOUR
             }));

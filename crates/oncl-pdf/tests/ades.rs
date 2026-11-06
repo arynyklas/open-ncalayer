@@ -108,6 +108,23 @@ impl Fixture {
         level: AdesLevel,
         source: &[u8],
     ) -> (Vec<u8>, ades::PadesReport) {
+        let (bytes, checked) = self.try_run_from(old, level, source).unwrap();
+        assert_eq!(checked.verdict, Verdict::Valid);
+        assert_eq!(checked.level(), Some(level));
+        assert_eq!(
+            lopdf::Document::load_mem(&bytes).unwrap().get_pages().len(),
+            4
+        );
+        (bytes, checked)
+    }
+    /// Sign or extend and verify at `NOW` without judging the verdict; an error is the
+    /// operation refusing the evidence.
+    fn try_run_from(
+        &self,
+        old: Option<&[u8]>,
+        level: AdesLevel,
+        source: &[u8],
+    ) -> Result<(Vec<u8>, ades::PadesReport), String> {
         let temp = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(temp.path()).unwrap();
         let http = MockTsa::new(self.tsa.clone()).with_gen_time(NOW);
@@ -161,7 +178,7 @@ impl Fixture {
                 &mut output,
                 &s,
             )
-            .unwrap();
+            .map_err(|e| format!("{e:?}"))?;
         } else {
             ades::sign(
                 level,
@@ -172,10 +189,10 @@ impl Fixture {
                 &mut output,
                 &s,
             )
-            .unwrap();
+            .map_err(|e| format!("{e:?}"))?;
         }
         let mut bytes = Vec::new();
-        output.copy_to(&mut bytes).unwrap();
+        output.copy_to(&mut bytes).map_err(|e| format!("{e:?}"))?;
         let checked = ades::verify(
             level,
             Source::sequential(&mut Cursor::new(&bytes), None),
@@ -184,14 +201,8 @@ impl Fixture {
             &[SigAlg::RsaSha256],
             &mut s,
         )
-        .unwrap();
-        assert_eq!(checked.verdict, Verdict::Valid);
-        assert_eq!(checked.level(), Some(level));
-        assert_eq!(
-            lopdf::Document::load_mem(&bytes).unwrap().get_pages().len(),
-            4
-        );
-        (bytes, checked)
+        .map_err(|e| format!("{e:?}"))?;
+        Ok((bytes, checked))
     }
     fn inspect(
         &self,
@@ -1040,7 +1051,8 @@ fn required_level_is_not_achieved_and_tsa_status_is_current_not_token_presence()
         f.inspect(&lta, AdesLevel::B, NOW, &[]).unwrap().level(),
         Some(AdesLevel::Lta)
     );
-    assert_ne!(
+    // The status the document carries is judged at the proof time, not at the later clock.
+    assert_eq!(
         f.inspect(&lta, AdesLevel::B, NOW + time::Duration::hours(2), &[])
             .unwrap()
             .verdict,
@@ -2752,4 +2764,67 @@ fn evidence_readback_charge_applies_the_rule_only_over_the_ber_limit() {
             .verdict,
         Verdict::Valid
     );
+}
+
+#[test]
+fn lt_embedded_status_is_judged_at_the_proof_time_not_now() {
+    let f = Fixture::new();
+    for level in [AdesLevel::Lt, AdesLevel::Lta] {
+        let (signed, _) = f.run(None, level);
+        for (label, delta) in [
+            ("+0", time::Duration::ZERO),
+            ("+6m", time::Duration::minutes(6)),
+            ("+1h", time::Duration::HOUR),
+            ("+1d", time::Duration::DAY),
+            ("+400d", time::Duration::days(400)),
+        ] {
+            // The DSS carries the status: no extra material is given.
+            let report = f.inspect(&signed, level, NOW + delta, &[]).unwrap();
+            assert_eq!(report.verdict, Verdict::Valid, "{level:?} {label}");
+        }
+    }
+}
+#[test]
+fn lt_embedded_status_control_cases_are_never_valid() {
+    let hour = time::Duration::HOUR;
+    let doc_serial = [0x63, 0x17, 2];
+    let mut worlds: Vec<(&str, Vec<u8>, &[time::Duration])> = Vec::new();
+    let all = [time::Duration::ZERO, hour, time::Duration::DAY];
+    let base = Fixture::new();
+    let crl = |this: OffsetDateTime| {
+        MockCrl::new(base.root.clone())
+            .with_this_update(this)
+            .next_update(Some(this + 3 * hour))
+    };
+    worlds.push(("stale", crl(NOW - 2 * hour).der(), &all));
+    worlds.push((
+        "revoked at P",
+        crl(NOW - time::Duration::MINUTE)
+            .revoke(&doc_serial, NOW - time::Duration::minutes(10))
+            .der(),
+        &all,
+    ));
+    let mut damaged = crl(NOW - time::Duration::MINUTE).der();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    worlds.push(("bad signature", damaged, &all));
+    for (label, crl_der, deltas) in worlds {
+        let mut f = Fixture::new();
+        f.crl = crl_der;
+        let Ok((signed, report)) = f.try_run_from(
+            None,
+            AdesLevel::Lt,
+            include_bytes!("fixtures/external-multipage.pdf"),
+        ) else {
+            continue;
+        };
+        assert_ne!(report.verdict, Verdict::Valid, "{label} at signing");
+        for &delta in deltas {
+            let verdict = f.inspect(&signed, AdesLevel::Lt, NOW + delta, &[]);
+            assert!(
+                verdict.is_ok_and(|r| r.verdict != Verdict::Valid),
+                "{label} +{delta}"
+            );
+        }
+    }
 }

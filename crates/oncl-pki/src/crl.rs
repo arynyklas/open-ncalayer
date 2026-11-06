@@ -33,7 +33,7 @@ use crate::cert::Certificate;
 use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, NetKind};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
-use crate::pkix::time_of;
+use crate::pkix::{Currency, time_of};
 use der::asn1::{BitStringRef, IntRef, ObjectIdentifier};
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Reader, SliceReader};
@@ -273,7 +273,11 @@ fn verify_any_crl(
             "a delta CRL without deltaCRLIndicator".to_owned(),
         ));
     }
-    check_times(&tbs.this_update, tbs.next_update.as_ref(), now)?;
+    check_times(
+        &tbs.this_update,
+        tbs.next_update.as_ref(),
+        Currency::Now(now),
+    )?;
     Ok(crl)
 }
 
@@ -374,13 +378,28 @@ fn scan_extensions<'a>(
 fn check_times(
     this_update: &x509_cert::time::Time,
     next_update: Option<&x509_cert::time::Time>,
-    now: OffsetDateTime,
+    currency: Currency,
 ) -> Result<(), CrlError> {
-    if time_of(this_update) > now {
-        return Err(CrlError::NotYetValid);
-    }
-    if next_update.is_some_and(|next| now >= time_of(next)) {
-        return Err(CrlError::Outdated);
+    match currency {
+        Currency::Now(now) => {
+            if time_of(this_update) > now {
+                return Err(CrlError::NotYetValid);
+            }
+            if next_update.is_some_and(|next| now >= time_of(next)) {
+                return Err(CrlError::Outdated);
+            }
+        }
+        Currency::AtProof { proof, now } => {
+            // Issued after the proof time less the skew (EN 319 102-1 5.2.5.4 step 2, proof
+            // time as validation time, freshness constraint CLOCK_SKEW): it covers the
+            // status up to the proof. Its nextUpdate is not compared with the verifier's clock.
+            if time_of(this_update) > now {
+                return Err(CrlError::NotYetValid);
+            }
+            if time_of(this_update) <= proof - crate::ocsp::CLOCK_SKEW {
+                return Err(CrlError::Outdated);
+            }
+        }
     }
     Ok(())
 }
@@ -402,6 +421,34 @@ pub fn serial_status(
     issuer: &Certificate,
     serial: &[u8],
     now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    serial_status_at(crl_der, issuer, serial, Currency::Now(now))
+}
+
+/// [`serial_status`] for a CRL a signature carries, once the signature's proof time (the
+/// control time of ETSI EN 319 102-1) is verified: everything is checked as there except
+/// currency. thisUpdate must not be before `proof` less [`crate::ocsp::CLOCK_SKEW`]
+/// ([`CrlError::Outdated`]) nor after `now` ([`CrlError::NotYetValid`]); nextUpdate is not
+/// compared with `now`.
+///
+/// # Errors
+///
+/// The errors of [`serial_status`].
+pub fn serial_status_at_proof(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    proof: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    serial_status_at(crl_der, issuer, serial, Currency::AtProof { proof, now })
+}
+
+fn serial_status_at(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    serial: &[u8],
+    currency: Currency,
 ) -> Result<CrlStatus, CrlError> {
     use der::Tagged;
     use x509_cert::certificate::Version;
@@ -483,7 +530,7 @@ pub fn serial_status(
             return Err(error);
         }
     }
-    check_times(&this_update, next_update.as_ref(), now)?;
+    check_times(&this_update, next_update.as_ref(), currency)?;
     Ok(found.unwrap_or(CrlStatus::Good))
 }
 

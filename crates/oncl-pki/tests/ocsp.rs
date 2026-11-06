@@ -786,3 +786,171 @@ fn fetch_check_reports_problem() {
     let e = fetch_leaf("inter-user-gost2015-sign", &fetch_spec(), &failing, true).unwrap_err();
     assert_eq!(e.kind(), oncl_pki::http::NetKind::Http(503));
 }
+
+// ---- embedded answers judged at the proof time of the signature that carries them -------
+
+const PROOF: OffsetDateTime = datetime!(2026-11-02 12:00 UTC);
+
+fn embedded_response(mock: &MockOcsp) -> Vec<u8> {
+    ocsp::fetch(
+        &entry("inter-user-gost2015-sign").cert,
+        &cer("inter-gost2015"),
+        &fetch_spec(),
+        mock,
+        None,
+    )
+    .unwrap()
+    .response
+}
+
+fn at_proof(
+    response: &[u8],
+    proof: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<CertStatus, OcspError> {
+    ocsp::check_embedded_at_proof(
+        response,
+        &entry("inter-user-gost2015-sign").cert,
+        &cer("inter-gost2015"),
+        &cas(),
+        proof,
+        now,
+    )
+    .map(|answer| answer.status)
+}
+
+fn responder(now: OffsetDateTime) -> MockOcsp {
+    MockOcsp::new(entry("ocsp-gost2015")).with_now(now)
+}
+
+#[test]
+fn embedded_answer_is_current_at_the_proof_time_however_old_it_is_now() {
+    let response = embedded_response(&responder(PROOF));
+    let leaf = entry("inter-user-gost2015-sign").cert;
+    for later in [
+        Duration::from_secs(0),
+        Duration::from_secs(3600),
+        Duration::from_secs(86_400),
+        Duration::from_secs(400 * 86_400),
+    ] {
+        assert_eq!(
+            at_proof(&response, PROOF, PROOF + later),
+            Ok(CertStatus::Good)
+        );
+    }
+    // The wall-clock rule, which stays for a signature without a proof time, ages it out.
+    let aged = ocsp::check_embedded_issuer_bound(
+        &response,
+        &leaf,
+        &cer("inter-gost2015"),
+        &cas(),
+        PROOF + Duration::from_secs(86_400),
+    );
+    assert_eq!(aged.map(|a| a.status), Err(OcspError::NextUpdate));
+}
+
+#[test]
+fn embedded_answer_must_be_issued_no_earlier_than_the_proof_less_the_skew() {
+    // thisUpdate is a minute before the mock's clock.
+    let response = embedded_response(&responder(PROOF));
+    let issued = PROOF - Duration::from_secs(60);
+    let now = PROOF + Duration::from_secs(3600);
+    // Issued after proof - CLOCK_SKEW (EN 319 102-1 5.2.5.4 step 2): the bound is exclusive.
+    assert_eq!(
+        at_proof(&response, issued + CLOCK_SKEW - Duration::from_secs(1), now),
+        Ok(CertStatus::Good)
+    );
+    assert_eq!(
+        at_proof(&response, issued + CLOCK_SKEW, now),
+        Err(OcspError::NextUpdate)
+    );
+    assert_eq!(
+        at_proof(&response, issued + CLOCK_SKEW + Duration::from_secs(1), now),
+        Err(OcspError::NextUpdate)
+    );
+    let stale = embedded_response(
+        &MockOcsp::new(entry("ocsp-gost2015"))
+            .with_now(PROOF)
+            .tamper(OcspTamper::Stale),
+    );
+    assert_eq!(at_proof(&stale, PROOF, now), Err(OcspError::NextUpdate));
+}
+
+#[test]
+fn embedded_answer_from_the_verifiers_future_is_refused() {
+    let response = embedded_response(&responder(PROOF + Duration::from_secs(7200)));
+    assert_eq!(
+        at_proof(&response, PROOF, PROOF + Duration::from_secs(3600)),
+        Err(OcspError::ThisUpdate)
+    );
+    assert_eq!(
+        at_proof(&response, PROOF, PROOF + Duration::from_secs(7200)),
+        Ok(CertStatus::Good)
+    );
+}
+
+#[test]
+fn embedded_answer_keeps_every_trust_and_binding_check_at_the_proof_time() {
+    let now = PROOF + Duration::from_secs(86_400);
+    let response = embedded_response(&responder(PROOF).tamper(OcspTamper::OtherCertId));
+    assert_eq!(
+        at_proof(&response, PROOF, now),
+        Err(OcspError::CertIdMismatch)
+    );
+    let forged = embedded_response(&responder(PROOF).tamper(OcspTamper::WrongKey));
+    assert!(matches!(
+        at_proof(&forged, PROOF, now),
+        Err(OcspError::BadSignature(_))
+    ));
+    // Not an OCSP responder.
+    let not_a_responder =
+        embedded_response(&MockOcsp::new(entry("inter-user-gost2015-sign")).with_now(PROOF));
+    assert_eq!(
+        at_proof(&not_a_responder, PROOF, now),
+        Err(OcspError::OcspSigningMissing)
+    );
+    let leaf = entry("inter-user-gost2015-sign").cert;
+    let response = embedded_response(&responder(PROOF));
+    // A responder whose issuer is not trusted.
+    let root_only = CaSet::new(vec![cer("root-gost2015")]);
+    assert_eq!(
+        ocsp::check_embedded_at_proof(
+            &response,
+            &leaf,
+            &cer("inter-gost2015"),
+            &root_only,
+            PROOF,
+            now
+        )
+        .map(|a| a.status),
+        Err(OcspError::ResponderNotTrusted(PathError::IssuerNotFound))
+    );
+    // Revoked stays revoked, at whatever time the answer says.
+    let revoked = CertStatus::Revoked {
+        time: PROOF - Duration::from_secs(600),
+        reason: None,
+    };
+    let response = embedded_response(&responder(PROOF).status(&serial_hex(&leaf), revoked));
+    assert_eq!(at_proof(&response, PROOF, now), Ok(revoked));
+}
+
+#[test]
+fn embedded_responder_is_judged_as_of_the_answers_issuance_not_now() {
+    // Long after the synthetic PKI expired the answer minted within its life still holds;
+    // an answer minted before the responder's certificate existed does not.
+    let response = embedded_response(&responder(PROOF));
+    assert_eq!(
+        at_proof(
+            &response,
+            PROOF,
+            PROOF + Duration::from_secs(20_000 * 86_400)
+        ),
+        Ok(CertStatus::Good)
+    );
+    let early = datetime!(2000-01-01 00:00 UTC);
+    let response = embedded_response(&responder(early));
+    assert!(matches!(
+        at_proof(&response, early, PROOF),
+        Err(OcspError::ResponderNotTrusted(_))
+    ));
+}

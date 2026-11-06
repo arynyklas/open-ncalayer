@@ -294,6 +294,60 @@ CRL files (`--evidence-crl` is limited to 256 KiB per file), PAdES-LT of real NC
 (separate structural guards in `oncl-pdf`), XAdES-LT (XML element cap and DOM
 materialization of `EncapsulatedCRLValue`).
 
+## Embedded status of LT/LTA is judged at the proof time
+
+Revocation status carried by a signature (OCSP answers, CRLs of CAdES/PAdES/XAdES `LT`
+and `LTA`) is evidence for verifying long after it was issued. It used to be judged against
+the verifier's clock (`nextUpdate`, `ALLOWED_PERIOD`, responder certificate validity at
+`now`), so a document that verified `Valid` at signing turned `Indeterminate` after a few
+minutes, for any size. The rule now lives once in `oncl-pki` (`ocsp::check_embedded_at_proof`,
+`crl::serial_status_at_proof`, selected by `validation::offline_revocation`; `pkix::Currency`
+is the switch) and CAdES, XAdES and PAdES all use it.
+
+**Rule.** When a proof time `P` is verified, an embedded OCSP answer or CRL about a path
+certificate is accepted when everything that was checked before still passes (CertID, issuer
+binding, signature, responder chain and OCSPSigning/no-check, `unknown` is refused, a CRL
+is a complete CRL of the issuer) and:
+
+* `P - CLOCK_SKEW < thisUpdate` (300 s): the status is issued after the control time, so it
+  covers the certificate up to `P`;
+* `thisUpdate <= now + CLOCK_SKEW` (a CRL: `thisUpdate <= now`): never from the verifier's
+  future;
+* the responder certificate chains **as of `thisUpdate`** (not `now`);
+* `nextUpdate` and `ALLOWED_PERIOD` are not compared with `now`.
+
+`P` is the genTime of the signature time-stamp (`T`, `LT`) — for a PAdES document
+time-stamp that is the first proof — and, for `LTA`, the same signature time-stamp: the
+archive time-stamps protect the evidence but do not move `P` (a status embedded after the
+signature time-stamp and before the archive time-stamp must stay acceptable). A time-stamp
+authority certificate's own embedded status is judged the same way with that token's genTime
+as its `P`. Without a proof time (level `B`, a missing or invalid timestamp) `at` is `now`
+and the old rule is kept; status fetched online is always judged current at `now`.
+
+Unchanged: the signer and chain certificates are judged valid **at `P`** (they already were:
+`certificate_facts` and the anchored path use `P`); revoked at or before `P` is `Invalid`;
+revoked after `P` leaves the signature valid and reports `RevokedAfterProvenTime`.
+
+**Standard basis (ETSI EN 319 102-1 V1.3.1, read from the published text).** 5.2.5.4 (Revocation
+freshness checker): status is fresh when `issuance time > validation time - maximum accepted
+freshness`; 5.5.4 step 6 reruns the checker with the *best-signature-time* when the status
+was not fresh against the current time; 5.5.4 step 4a: a revocation time after the
+best-signature-time does not invalidate the signature, one at or before it is
+`INDETERMINATE/REVOKED_NO_POE`; 5.2.6.4 (X.509 certificate validation) runs the checker with
+the validation time and does not check the issuer's CRL-signing certificate against it. The
+maximum freshness is taken as the validation constraint `CLOCK_SKEW`, which 5.2.5.4 step 1
+lets a constraint override the `nextUpdate - thisUpdate` default (that default is not used:
+NCA responders send no nextUpdate, and the tighter bound is the stricter reading).
+
+**Not verified / deliberate differences.** (1) 5.6.2.2.4 step 2a also asks for a proof of
+existence of the revocation information at or before the control time; for `LTA` this is the
+archive time-stamp binding the evidence, which is checked by the evidence graph, for `LT`
+it is not requested (nothing but the signature time-stamp exists), as in 5.5.4. (2) The
+strict `>` and the 300 s freshness are choices within the constraint the standard leaves to
+the validation policy, not values it prescribes. (3) Revoked-at-or-before-`P` is `Invalid`
+here; the standard says `INDETERMINATE/REVOKED_NO_POE` (stricter, unchanged). (4) The standard's
+chain-model rule for key-compromise revocation after `P` of a CA is not modelled.
+
 ## Dense PDFs: the cross-reference budget (D4, D6)
 
 `PdfLimits::max_objects` (default 4096) bounds object-GRAPH walks only: the AcroForm field

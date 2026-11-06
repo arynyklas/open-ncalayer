@@ -1296,8 +1296,10 @@ fn path_status<'a>(
     responses: &'a [&'a [u8]],
     crls: &'a [&'a [u8]],
     embedded_only: bool,
+    proven: bool,
 ) -> (CheckStatus, Option<OffsetDateTime>) {
-    let status = validation::offline_revocation(path, responses.iter().copied(), crls, at, ctx.now);
+    let status =
+        validation::offline_revocation(path, responses.iter().copied(), crls, at, proven, ctx.now);
     if status.0 == CheckStatus::Unavailable
         && !embedded_only
         && ctx.policy != ValidationPolicy::OfflineReport
@@ -1687,6 +1689,7 @@ fn validate_evidence_impl(
                     .filter(|_| current_archive)
                     .unwrap_or(&crls),
                 required >= AdesLevel::Lt,
+                true,
             );
             finish()?;
             timestamp = combine(timestamp, status);
@@ -1795,6 +1798,7 @@ fn validate_evidence_impl(
                     &responses,
                     &crls,
                     required >= AdesLevel::Lt,
+                    checked.proof_time.is_some(),
                 );
                 finish()?;
                 checked.revocation = status;
@@ -1858,7 +1862,7 @@ fn check_current_tsa_tail(
     parsed: &ParsedEvidence,
     cutoff: usize,
     path: &[Certificate],
-    _at: OffsetDateTime,
+    at: OffsetDateTime,
     now: OffsetDateTime,
     bundle: &EvidenceBundle,
     resources: &ResourceScope,
@@ -1892,14 +1896,16 @@ fn check_current_tsa_tail(
             }
             // Role and freshness are separate facts: issuer/CertID/EKU/math
             // precede these time-only errors in the existing strict checker.
-            // Current freshness is still checked by path_status below.
+            // Currency (issued at or after the TSA token's genTime) is still checked by
+            // path_status below.
             EvidenceKind::Ocsp => path.windows(2).any(|pair| {
                 matches!(
-                    crate::ocsp::check_embedded_issuer_bound(
+                    crate::ocsp::check_embedded_at_proof(
                         &item.bytes,
                         &pair[0],
                         &pair[1],
                         role_cas.as_ref().expect("OCSP role path"),
+                        at,
                         now
                     ),
                     Ok(_)
@@ -1910,10 +1916,11 @@ fn check_current_tsa_tail(
             }),
             EvidenceKind::Crl => path.windows(2).any(|pair| {
                 matches!(
-                    crate::crl::serial_status(
+                    crate::crl::serial_status_at_proof(
                         &item.bytes,
                         &pair[1],
                         pair[0].tbs_certificate().serial_number().as_bytes(),
+                        at,
                         now
                     ),
                     Ok(_) | Err(crate::crl::CrlError::NotYetValid | crate::crl::CrlError::Outdated)
