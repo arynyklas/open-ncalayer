@@ -178,12 +178,55 @@ pub fn sign_prepared(
         || (services.validation.policy == ValidationPolicy::StrictOnline
             && verification.validation.verdict != Verdict::Valid)
     {
-        return Err(invalid("final XAdES validation failed"));
+        return Err(invalid(final_failure(&verification)));
     }
     Ok(XadesReport {
         summary,
         verification,
     })
+}
+/// The first failing signer check of a final validation, as a static reason: a multi-hour
+/// operation that fails after key use must name the check, not only "validation failed".
+pub(crate) fn final_failure(verification: &crate::XmlVerification) -> &'static str {
+    use oncl_pki::validation::CheckStatus::{Failed, Unavailable};
+    let Some(signer) = verification.validation.signers.first() else {
+        return "final XAdES validation failed: no signer result";
+    };
+    if verification
+        .signatures()
+        .iter()
+        .any(|s| s.references().iter().any(|r| !r.digest_matches))
+    {
+        return "final XAdES validation failed: reference digest mismatch";
+    }
+    for (check, name) in [
+        (
+            signer.signature,
+            "final XAdES validation failed: signature value",
+        ),
+        (signer.chain, "final XAdES validation failed: signer chain"),
+        (
+            signer.validity,
+            "final XAdES validation failed: signer certificate validity",
+        ),
+        (
+            signer.key_usage,
+            "final XAdES validation failed: signer key usage",
+        ),
+        (
+            signer.revocation,
+            "final XAdES validation failed: signer revocation status",
+        ),
+        (
+            signer.timestamp,
+            "final XAdES validation failed: signature time-stamp",
+        ),
+    ] {
+        if matches!(check, Failed | Unavailable) {
+            return name;
+        }
+    }
+    "final XAdES validation failed: format or evidence level"
 }
 fn canonical(
     signature: &str,

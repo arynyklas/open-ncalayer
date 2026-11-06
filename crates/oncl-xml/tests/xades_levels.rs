@@ -176,6 +176,14 @@ struct Pki {
 }
 impl Pki {
     fn new(name: &str) -> Self {
+        Self::at(name, time::macros::datetime!(2026-11-02 12:00 UTC))
+    }
+    /// TSA genTime and OCSP thisUpdate as minted by responders at `now`.
+    fn at(name: &str, now: time::OffsetDateTime) -> Self {
+        Self::at_split(name, now, now)
+    }
+    /// A TSA whose reply genTime is `tsa_now` while OCSP is minted at `now`.
+    fn at_split(name: &str, now: time::OffsetDateTime, tsa_now: time::OffsetDateTime) -> Self {
         use oncl_pki::{
             http::RouteTransport,
             ocsp::MockOcsp,
@@ -221,13 +229,12 @@ impl Pki {
         tsa_key.cert = issue_cert(&root, spec);
         let mut responder = key("ocsp-gost2015");
         responder.cert = issue_cert(&root, TestCertSpec::from_cert(&responder.cert));
-        let now = time::macros::datetime!(2026-11-02 12:00 UTC);
         let mut tsa = TsaSpec::from(TsaProfile::basics_default());
         tsa.url = "http://tsa.synthetic.test".into();
         let http = RouteTransport::new(vec![
             (
                 tsa.url.clone(),
-                Arc::new(MockTsa::new(tsa_key).with_gen_time(now))
+                Arc::new(MockTsa::new(tsa_key).with_gen_time(tsa_now))
                     as Arc<dyn oncl_pki::http::HttpTransport>,
             ),
             (
@@ -1574,4 +1581,241 @@ fn wsse_embedding_retains_baseline_properties_and_every_carried_proof_check() {
             assert!(checked.is_err() || checked.unwrap().xml.validation.verdict != Verdict::Valid);
         }
     }
+}
+
+/// A long operation: the validation context and SigningTime are sampled when the operation
+/// starts, the trusted host clock, responders and the final verification are hours later.
+fn delayed_sign(
+    level: oncl_pki::evidence::AdesLevel,
+    host_clock_late: bool,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    let mut pki = Pki::at("user-rsa-sign", late);
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: if host_clock_late { Some(&clock) } else { None },
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn delayed_operation_signs_with_host_clock_and_fails_closed_with_stale_context() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    for level in [AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        let ok = delayed_sign(level, true);
+        eprintln!("{level:?} host-clock: {ok:?}");
+        assert_eq!(ok, Ok(Verdict::Valid), "{level:?}");
+        let stale = delayed_sign(level, false);
+        eprintln!("{level:?} stale-context: {stale:?}");
+        assert!(
+            stale.is_err(),
+            "{level:?} must not succeed with stale context"
+        );
+    }
+}
+
+/// Same long operation through the prepared path the host (`oncl-core`) uses: preparation and
+/// SigningTime at `start`, signing, timestamp and final verification at `late`.
+fn delayed_prepared(
+    level: oncl_pki::evidence::AdesLevel,
+    tsa_hours_before: i64,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    let mut pki = Pki::at_split(
+        "user-rsa-sign",
+        late,
+        late - time::Duration::hours(tsa_hours_before),
+    );
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&clock),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut prepared = oncl_xml::xades::prepare_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &store,
+        &mut scope,
+    )
+    .map_err(|e| format!("prepare {e:?}"))?;
+    prepared
+        .verify_existing_with_clock(&context, &network, &clock, &mut scope)
+        .map_err(|e| format!("existing {e:?}"))?;
+    let stage_budget = ResourceLimits::default();
+    let _ = stage_budget;
+    let mut stage = store.stage(&mut scope).map_err(|e| format!("{e:?}"))?;
+    let mut output =
+        oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).map_err(|e| format!("{e:?}"))?;
+    let mut resources = scope.shared_view();
+    oncl_xml::xades::sign_prepared(
+        prepared,
+        level,
+        start,
+        &mut pki.signer,
+        &services,
+        &mut output,
+        &mut resources,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn delayed_prepared_path_signs_with_host_clock() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    for level in [AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        assert_eq!(delayed_prepared(level, 0), Ok(Verdict::Valid), "{level:?}");
+        eprintln!("{level:?} tsa 5h old: {:?}", delayed_prepared(level, 5));
+    }
+}
+
+#[test]
+fn stale_status_after_long_operation_fails_closed_naming_the_check() {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let late = start + time::Duration::hours(6);
+    // The responder answers as of `start` (its answer expired hours ago), the host clock is late.
+    let mut pki = Pki::at("user-rsa-sign", start);
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let clock = move || late;
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&clock),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level: oncl_pki::evidence::AdesLevel::T,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    let error = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let text = format!("{error:?}");
+    eprintln!("stale status: {text}");
+    assert!(text.contains("final XAdES validation failed:"), "{text}");
 }
