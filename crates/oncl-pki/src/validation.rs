@@ -245,12 +245,15 @@ pub enum ProfileViolation {
     /// A PAdES CMS carries a signing-time attribute. EN 319 142-1 table 1 forbids it:
     /// the claimed signing time is the signature dictionary's `/M`.
     SigningTimeForbidden,
-    /// A CAdES CMS carries no signing-time attribute. EN 319 122-1 clause 5.2.1 requires it.
+    /// A CAdES CMS carries no signing-time attribute. EN 319 122-1 clause 6.3 table 1
+    /// requires it at every baseline level (clause 5.2.1 only defines the attribute).
     SigningTimeMissing,
-    /// The encapsulated content type is not id-data (EN 319 122-1 clause 5.1.1).
+    /// The encapsulated content type is not id-data (EN 319 122-1 clause 6.3 table 1
+    /// note f; clause 4.2).
     ContentTypeNotData,
     /// Neither signing-certificate nor signing-certificate-v2 protects the signer
-    /// certificate (EN 319 122-1 clause 5.2.2).
+    /// certificate (EN 319 122-1 clause 6.3 table 1, "protection of signing certificate
+    /// shall be provided"; clause 5.2.2 gives the attribute syntax).
     SigningCertificateMissing,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

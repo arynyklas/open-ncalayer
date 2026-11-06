@@ -132,9 +132,10 @@ key was applied reports `Applied`.
 **Errors.** `OperationError` (the typed error) and `ErrorCode` (`OperationError::code`, stable
 machine-readable categories, never inferred from messages) are public. Stability stance for the
 pre-1.0 alphas: hosts must match `ErrorCode` with a wildcard arm. Today neither enum is
-`#[non_exhaustive]`, so adding a variant is a source-breaking change; it is listed in the
-migration notes of the release that makes it. Making both `#[non_exhaustive]` is the intended
-change for the first release that needs a new code; it is deliberately not done inside this
+`#[non_exhaustive]`, nor are `ValidationReason` and `ProfileViolation`; adding a variant
+(as `ValidationReason::Profile` was) is a source-breaking change; it is listed in the
+migration notes of the release that makes it. Making these enums `#[non_exhaustive]` is the
+intended change for the first release that needs a new code; it is deliberately not done inside this
 delivery because it also changes every in-workspace consumer's matches. Variant `Display`
 text is for logs, not for control flow.
 

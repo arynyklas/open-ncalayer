@@ -1278,6 +1278,50 @@ mod tests {
         }
     }
 
+    /// Every baseline finding names its cause in every language, distinct from the signature
+    /// failures and from each other, and a signer carrying one is rendered as a failure.
+    #[test]
+    fn every_profile_violation_has_its_own_text_in_every_language() {
+        use oncl_pki::validation::ProfileViolation::*;
+        let all = [
+            SigningTimeForbidden,
+            SigningTimeMissing,
+            ContentTypeNotData,
+            SigningCertificateMissing,
+        ];
+        for locale in LOCALES {
+            let t = Texts::of(locale);
+            let texts: Vec<String> = all
+                .iter()
+                .map(|v| reason_text(t, &ValidationReason::Profile(*v)))
+                .collect();
+            for (i, text) in texts.iter().enumerate() {
+                assert!(!text.trim().is_empty(), "{locale:?}: {:?}", all[i]);
+                assert_ne!(
+                    text,
+                    &reason_text(t, &ValidationReason::Signature(Problem::Malformed)),
+                    "{locale:?}: {:?}",
+                    all[i]
+                );
+                for other in &texts[i + 1..] {
+                    assert_ne!(text, other, "{locale:?}");
+                }
+            }
+            assert!(
+                texts[0].contains("signing-time") && texts[1].contains("signing-time"),
+                "{locale:?}"
+            );
+            assert!(
+                texts[2].contains("id-data") && texts[3].contains("signing-certificate"),
+                "{locale:?}"
+            );
+            assert_eq!(
+                reason_tone(&ValidationReason::Profile(SigningTimeForbidden)),
+                Tone::Failure
+            );
+        }
+    }
+
     #[test]
     fn a_valid_report_is_success_and_names_every_check() {
         let view = batch(vec![verified(Verdict::Valid, CheckStatus::Passed)]);
