@@ -316,7 +316,7 @@ refusal is `PdfError::Limit("xref entries")` (limit+1 exact, over all revisions)
 memory quota that cannot hold the rows is `MemoryLimit`; both happen while reading, before
 any private key use (`NotApplied`). A classic table is accepted independently of where the
 64 KiB read chunks fall: a subsection header or entry cut by a chunk end is re-read from a
-fresh chunk (also when its last token reaches the chunk end, where a number may be cut), so acceptance never depends on the alignment; a unit starting at a chunk start is accepted when it ends before that 64 KiB chunk does, and refused otherwise.
+fresh chunk (also when its last token reaches the chunk end, where a number may be cut), so acceptance of ordinary entries does not depend on the alignment; a unit starting at a chunk start is accepted when it ends before that 64 KiB chunk does, and refused otherwise. A subsection header surrounded by more than a chunk of blanks can still be refused depending on the alignment (it fails closed; not a real-world layout).
 
 Not charged (bounded transients): the 64 KiB read chunk, the inflate/predictor row buffers
 (`RowReader`, one predictor row of at most `max_object_bytes`), and the copy made while the
