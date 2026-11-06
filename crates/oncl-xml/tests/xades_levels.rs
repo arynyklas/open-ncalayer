@@ -168,6 +168,53 @@ fn source_baseline_b_binds_signing_certificate_and_properties_reference() {
     );
 }
 
+type Clock = Arc<dyn Fn() -> time::OffsetDateTime + Send + Sync>;
+/// A responder that stamps its answer with the host clock at the instant of the request.
+struct Live {
+    key: oncl_pki::pkcs12::KeyEntry,
+    tsa: bool,
+    clock: Clock,
+}
+impl oncl_pki::http::HttpTransport for Live {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        let now = (self.clock)();
+        if self.tsa {
+            oncl_pki::tsp::MockTsa::new(self.key.clone())
+                .with_gen_time(now)
+                .send(request)
+        } else {
+            oncl_pki::ocsp::MockOcsp::new(self.key.clone())
+                .with_now(now)
+                .send(request)
+        }
+    }
+}
+/// Operation time that advances only while the operation does work: every checkpoint (taken per
+/// parsed event of every document pass and per evidence step) costs `step`.
+struct Ticking {
+    now: std::sync::Mutex<time::OffsetDateTime>,
+    step: time::Duration,
+}
+impl Ticking {
+    fn new(start: time::OffsetDateTime, step: time::Duration) -> Arc<Self> {
+        Arc::new(Self {
+            now: std::sync::Mutex::new(start),
+            step,
+        })
+    }
+    fn read(&self) -> time::OffsetDateTime {
+        *self.now.lock().unwrap()
+    }
+}
+impl OperationControl for Ticking {
+    fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+        *self.now.lock().unwrap() += self.step;
+        Ok(())
+    }
+}
 struct Pki {
     signer: oncl_pki::pkcs12::KeyEntry,
     anchors: oncl_pki::pkix::CaSet,
@@ -180,10 +227,20 @@ impl Pki {
     }
     /// TSA genTime and OCSP thisUpdate as minted by responders at `now`.
     fn at(name: &str, now: time::OffsetDateTime) -> Self {
-        Self::at_split(name, now, now)
+        Self::at_split(name, now, now, None)
+    }
+    /// Responders that answer as of the host clock at the instant of each request.
+    fn live(name: &str, clock: Clock) -> Self {
+        let now = clock();
+        Self::at_split(name, now, now, Some(clock))
     }
     /// A TSA whose reply genTime is `tsa_now` while OCSP is minted at `now`.
-    fn at_split(name: &str, now: time::OffsetDateTime, tsa_now: time::OffsetDateTime) -> Self {
+    fn at_split(
+        name: &str,
+        now: time::OffsetDateTime,
+        tsa_now: time::OffsetDateTime,
+        live: Option<Clock>,
+    ) -> Self {
         use oncl_pki::{
             http::RouteTransport,
             ocsp::MockOcsp,
@@ -231,16 +288,31 @@ impl Pki {
         responder.cert = issue_cert(&root, TestCertSpec::from_cert(&responder.cert));
         let mut tsa = TsaSpec::from(TsaProfile::basics_default());
         tsa.url = "http://tsa.synthetic.test".into();
-        let http = RouteTransport::new(vec![
+        let (tsa_route, ocsp_route): (
+            Arc<dyn oncl_pki::http::HttpTransport>,
+            Arc<dyn oncl_pki::http::HttpTransport>,
+        ) = if let Some(clock) = live {
             (
-                tsa.url.clone(),
-                Arc::new(MockTsa::new(tsa_key).with_gen_time(tsa_now))
-                    as Arc<dyn oncl_pki::http::HttpTransport>,
-            ),
+                Arc::new(Live {
+                    key: tsa_key,
+                    tsa: true,
+                    clock: clock.clone(),
+                }),
+                Arc::new(Live {
+                    key: responder,
+                    tsa: false,
+                    clock,
+                }),
+            )
+        } else {
             (
-                "http://ocsp.synthetic.test".into(),
+                Arc::new(MockTsa::new(tsa_key).with_gen_time(tsa_now)),
                 Arc::new(MockOcsp::new(responder).with_now(now)),
-            ),
+            )
+        };
+        let http = RouteTransport::new(vec![
+            (tsa.url.clone(), tsa_route),
+            ("http://ocsp.synthetic.test".into(), ocsp_route),
         ]);
         Self {
             signer,
@@ -1676,6 +1748,7 @@ fn delayed_prepared(
         "user-rsa-sign",
         late,
         late - time::Duration::hours(tsa_hours_before),
+        None,
     );
     let limits = ResourceLimits::default();
     let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
@@ -1818,4 +1891,83 @@ fn stale_status_after_long_operation_fails_closed_naming_the_check() {
     let text = format!("{error:?}");
     eprintln!("stale status: {text}");
     assert!(text.contains("final XAdES validation failed:"), "{text}");
+}
+
+/// Run one signature at `level` where every checkpoint of the operation costs `step_seconds` of
+/// host time, so document passes take (simulated) minutes. Returns verdict or error text.
+fn ticking_sign(
+    level: oncl_pki::evidence::AdesLevel,
+    step_ms: i64,
+) -> Result<oncl_pki::validation::Verdict, String> {
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let start = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let ticking = Ticking::new(start, time::Duration::milliseconds(step_ms));
+    let clock: Clock = {
+        let t = ticking.clone();
+        Arc::new(move || t.read())
+    };
+    let mut pki = Pki::live("user-rsa-sign", clock.clone());
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, ticking.clone()).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now: start,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let host = clock.clone();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: Some(&*host),
+    };
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level,
+        signing_time: start,
+    };
+    let mut bytes = Vec::new();
+    oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><data Id='p'>protected</data><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .map(|r| r.verification.validation.verdict)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn long_document_passes_do_not_age_the_status_checked_after_them() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    // Each checkpoint costs 1 s of host time: the carried-proof passes between the context
+    // sample and the status check last several times the 300 s OCSP window (verified RED
+    // without the fresh sample), the evidence steps themselves stay far below it.
+    // LT/LTA are NOT asserted here: their embedded status ages with the signing-time
+    // acquisition, which is a separate, documented limitation (see the D2 report).
+    assert_eq!(ticking_sign(AdesLevel::T, 1000), Ok(Verdict::Valid));
 }

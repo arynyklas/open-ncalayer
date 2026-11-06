@@ -89,6 +89,10 @@ pub(super) fn check_carried_evidence(
     store: &TemporaryStore,
     reference_stream: Option<&mut oncl_pki::io::StagedArtifact>,
     ctx: &ValidationContext<'_>,
+    (clock, shared_now): (
+        Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
+        &std::cell::Cell<Option<time::OffsetDateTime>>,
+    ),
     network: &NetworkPolicy,
     scope: &mut ResourceScope,
     work: &mut u64,
@@ -265,7 +269,25 @@ pub(super) fn check_carried_evidence(
         .required_level
         .unwrap_or(AdesLevel::B)
         .max(evidence_level);
-    let report = validate_evidence(&signer, &mut bundle, &proofs, required, ctx, network, scope)?;
+    // The document passes above (canonicalization of carried proofs and archive coverage re-read
+    // the source from its start) can take hours on a large input. Status and time-stamp freshness
+    // is judged at the moment the evidence is checked, never at the sample taken before them;
+    // the window itself is unchanged and never earlier than the original context time.
+    let now = shared_now.get().unwrap_or_else(|| {
+        let now = clock.map_or(ctx.now, |clock| clock().max(ctx.now));
+        shared_now.set(Some(now));
+        now
+    });
+    let current = ValidationContext { now, ..*ctx };
+    let report = validate_evidence(
+        &signer,
+        &mut bundle,
+        &proofs,
+        required,
+        &current,
+        network,
+        scope,
+    )?;
     Ok((report, level))
 }
 fn copy_stage(
