@@ -8389,6 +8389,7 @@ dependencies = [
  "toml",
  "tungstenite",
  "ureq",
+ "wat",
  "x509-cert",
  "zeroize",
  "zip",

@@ -12,12 +12,22 @@ use ureq::Agent;
 /// NCANode 3.5.1 (commit `0adab29a`, the one `fetch-fixtures` pins), pinned by digest.
 pub const IMAGE: &str =
     "malikzh/ncanode@sha256:052222f30ac73d9f0060a5c80c572723d25dd84e21073435795a10db254c02b8";
-/// Name of the container; a container of that name left by a killed run is removed first.
+/// Default name of the container; a container of that name left by a killed run is removed
+/// first. `ONCL_NCANODE_CONTAINER` overrides it, so that concurrent runs of several
+/// checkouts do not remove each other's container.
 const CONTAINER: &str = "oncl-ncanode-interop";
-/// Docker volume for NCANode's cache (`/app/cache`): the NCA certificates and CRLs it
-/// downloads. Kept between runs, so a start after the first one (even a failed one) has
-/// fewer downloads left to fail.
+/// Default Docker volume for NCANode's cache (`/app/cache`): the NCA certificates and CRLs
+/// it downloads. Kept between runs, so a start after the first one (even a failed one) has
+/// fewer downloads left to fail. `ONCL_NCANODE_CACHE_VOLUME` overrides it.
 const CACHE_VOLUME: &str = "oncl-ncanode-cache";
+
+/// A name from the environment variable, else `default`.
+fn named(variable: &str, default: &str) -> String {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
 /// NCANode's HTTP port inside the container.
 const NCANODE_PORT: u16 = 14579;
 /// How long NCANode gets to report `UP`: at startup it downloads the NCA certificates and
@@ -27,13 +37,24 @@ const STARTUP: Duration = Duration::from_secs(300);
 const STARTS: u32 = 5;
 
 /// The NCANode container; removed on drop.
-pub struct Container;
+pub struct Container {
+    name: String,
+    volume: String,
+}
 
 impl Container {
+    /// The container named by the environment, else by the defaults.
+    fn new() -> Self {
+        Self {
+            name: named("ONCL_NCANODE_CONTAINER", CONTAINER),
+            volume: named("ONCL_NCANODE_CACHE_VOLUME", CACHE_VOLUME),
+        }
+    }
+
     /// Removes the container, also one a killed run left.
     fn remove(&self) {
         let _ = Command::new("docker")
-            .args(["rm", "-f", CONTAINER])
+            .args(["rm", "-f", &self.name])
             .output();
     }
 
@@ -41,11 +62,11 @@ impl Container {
     /// base URL.
     fn run(&self) -> anyhow::Result<String> {
         let publish = format!("127.0.0.1::{NCANODE_PORT}");
-        let cache = format!("{CACHE_VOLUME}:/app/cache");
+        let cache = format!("{}:/app/cache", self.volume);
         docker(&[
-            "run", "-d", "--name", CONTAINER, "-p", &publish, "-v", &cache, IMAGE,
+            "run", "-d", "--name", &self.name, "-p", &publish, "-v", &cache, IMAGE,
         ])?;
-        let mapped = docker(&["port", CONTAINER, &format!("{NCANODE_PORT}/tcp")])?;
+        let mapped = docker(&["port", &self.name, &format!("{NCANODE_PORT}/tcp")])?;
         let address = mapped
             .lines()
             .find(|l| l.starts_with("127.0.0.1:"))
@@ -54,14 +75,14 @@ impl Container {
     }
 
     fn is_running(&self) -> bool {
-        docker(&["inspect", "--format", "{{.State.Running}}", CONTAINER])
+        docker(&["inspect", "--format", "{{.State.Running}}", &self.name])
             .is_ok_and(|state| state == "true")
     }
 
     /// The last lines of NCANode's log (stdout and stderr).
     fn log_tail(&self) -> String {
         Command::new("docker")
-            .args(["logs", "--tail", "30", CONTAINER])
+            .args(["logs", "--tail", "30", &self.name])
             .output()
             .map(|o| {
                 let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -105,7 +126,7 @@ fn docker(args: &[&str]) -> anyhow::Result<String> {
 pub fn start(agent: &Agent) -> anyhow::Result<(Container, String)> {
     docker(&["version", "--format", "{{.Server.Version}}"])
         .context("the Docker daemon is not available (as root: `service docker start`)")?;
-    let container = Container;
+    let container = Container::new();
     for attempt in 1..=STARTS {
         container.remove();
         let base = container.run()?;

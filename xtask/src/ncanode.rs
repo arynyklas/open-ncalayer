@@ -22,7 +22,7 @@
 //! to it with an internal DTD subset that declares the signed element's `Id` an ID; that
 //! changes no canonical form.
 
-mod container;
+pub(crate) mod container;
 mod keyfile;
 
 use std::time::Duration;
@@ -528,14 +528,31 @@ fn last_digest_value(xml: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// A running NCANode.
-struct Ncanode {
-    base: String,
-    agent: Agent,
+pub(crate) struct Ncanode {
+    pub(crate) base: String,
+    pub(crate) agent: Agent,
+}
+
+/// Starts the pinned NCANode container (named by `ONCL_NCANODE_CONTAINER` and
+/// `ONCL_NCANODE_CACHE_VOLUME`, see [`container`]) and returns it with its client; the
+/// container is removed when the first value is dropped.
+///
+/// # Errors
+///
+/// If Docker is missing or NCANode does not come up.
+pub(crate) fn launch() -> anyhow::Result<(container::Container, Ncanode)> {
+    let agent: Agent = Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .build()
+        .into();
+    let (container, base) = container::start(&agent)?;
+    Ok((container, Ncanode { base, agent }))
 }
 
 impl Ncanode {
     /// POSTs `body` and returns the JSON response; an HTTP error status is an error.
-    fn post(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
+    pub(crate) fn post(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
         let mut response = self
             .agent
             .post(format!("{}{path}", self.base))
