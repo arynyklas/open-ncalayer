@@ -117,10 +117,38 @@ fn own_signed_pdf_verifies_with_document_exact_input_limit() {
     let tiny = PdfLimits {
         max_revisions: 2,
         max_object_bytes: (surcharge as usize - 1) / 4,
+        max_evidence_bytes: 0,
         ..PdfLimits::default()
     };
     assert!(super_cap(&tiny) < surcharge);
     let (r, _) = verify_with(&signed, limits(source.len() as u64, 1 << 30), &tiny);
+    assert!(matches!(
+        r,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
+    // Exactly at the format cap verifies; cap-1 is rejected (cap+1 above).
+    let exact = |cap: u64| {
+        let mob = (cap / 4) as usize;
+        PdfLimits {
+            max_revisions: 2,
+            max_object_bytes: mob,
+            max_evidence_bytes: cap - 4 * mob as u64,
+            ..PdfLimits::default()
+        }
+    };
+    let at = exact(surcharge);
+    assert_eq!(super_cap(&at), surcharge);
+    // Capture accepts; later object parsing may need larger objects, so only
+    // the intake verdict is pinned here: not InputLimit.
+    let (r, taken) = verify_with(&signed, limits(source.len() as u64, 1 << 30), &at);
+    assert_eq!(taken.progress().bytes_in, signed.len() as u64);
+    assert!(!matches!(
+        r,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
+    let below = exact(surcharge - 1);
+    assert_eq!(super_cap(&below), surcharge - 1);
+    let (r, _) = verify_with(&signed, limits(source.len() as u64, 1 << 30), &below);
     assert!(matches!(
         r,
         Err(PdfError::Processing(ProcessingError::InputLimit))
@@ -146,5 +174,76 @@ fn own_signed_pdf_verifies_with_document_exact_input_limit() {
     ));
 }
 fn super_cap(l: &PdfLimits) -> u64 {
-    (l.max_revisions as u64 - 1) * 4 * l.max_object_bytes as u64
+    (l.max_revisions as u64 - 1) * 4 * l.max_object_bytes as u64 + l.max_evidence_bytes
+}
+
+fn find_last(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .rposition(|w| w == needle)
+        .unwrap()
+}
+fn number_after(bytes: &[u8], at: usize, skip: usize) -> u64 {
+    let end = (at + skip + 32).min(bytes.len());
+    String::from_utf8_lossy(&bytes[at + skip..end])
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+// D1 streams DSS evidence (a ~20 MB CRL) as a stream object per appended LT/LTA
+// revision. Such a tail must fit the evidence allowance without any document
+// credit; intake is the only layer asserted (progress == full wire).
+#[test]
+fn twenty_megabyte_evidence_revisions_fit_the_default_surcharge() {
+    let source = include_bytes!("fixtures/external-multipage.pdf");
+    let mut chain = sign(source);
+    let crl = vec![0x5au8; 20 * 1024 * 1024];
+    for revision in 0..3u32 {
+        let prev = number_after(&chain, find_last(&chain, b"startxref"), 9);
+        let root_at = find_last(&chain, b"/Root");
+        let root = number_after(&chain, root_at, 5);
+        let size = 100 + revision;
+        let offset = chain.len();
+        chain.extend_from_slice(
+            format!("\n{size} 0 obj\n<</Length {}>>\nstream\n", crl.len()).as_bytes(),
+        );
+        chain.extend_from_slice(&crl);
+        chain.extend_from_slice(b"\nendstream\nendobj\n");
+        let xref = chain.len();
+        chain.extend_from_slice(
+            format!(
+                "xref\n{size} 1\n{offset:010} 00000 n \ntrailer\n<</Size {} /Root {root} 0 R /Prev {prev}>>\nstartxref\n{xref}\n%%EOF\n",
+                size + 1
+            )
+            .as_bytes(),
+        );
+    }
+    let signed_len = sign(source).len() as u64;
+    assert!(chain.len() as u64 - signed_len > 3 * 20 * 1024 * 1024);
+    let limits = ResourceLimits {
+        input_bytes: source.len() as u64,
+        ..ResourceLimits::default()
+    };
+    let (result, taken) = verify(&chain, limits.clone());
+    assert_eq!(taken.progress().bytes_in, chain.len() as u64);
+    assert!(
+        !matches!(
+            result,
+            Err(PdfError::Processing(ProcessingError::InputLimit))
+        ),
+        "{result:?}"
+    );
+    // Without the evidence allowance the same wire is an oversized document.
+    let none = PdfLimits {
+        max_evidence_bytes: 0,
+        ..PdfLimits::default()
+    };
+    let (result, _) = verify_with(&chain, limits, &none);
+    assert!(matches!(
+        result,
+        Err(PdfError::Processing(ProcessingError::InputLimit))
+    ));
 }

@@ -18,7 +18,12 @@ pub const IO_CHUNK_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug)]
 pub struct ResourceLimits {
     pub max_in_flight: u64,
+    /// Document allowance. Hostile input one byte past it is rejected.
     pub input_bytes: u64,
+    /// Signature/envelope bytes. Own signed results (CMS, PDF) may exceed
+    /// `input_bytes` by classified container bytes only, never past this value;
+    /// formats may narrow it further (PDF: appended revisions, `PdfLimits`).
+    /// `output_bytes` should cover input + container + framing.
     pub container_bytes: u64,
     pub framing_bytes: u64,
     pub output_bytes: u64,

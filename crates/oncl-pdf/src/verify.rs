@@ -339,24 +339,26 @@ impl PdfDocument<'_, '_> {
         Ok(result)
     }
 }
+/// Largest signature/validation increment accepted beyond the document
+/// allowance: four reader-bounded objects per appended revision plus one
+/// total evidence allowance (`max_evidence_bytes`).
+pub(crate) fn max_surcharge(limits: &PdfLimits) -> u64 {
+    (limits.max_revisions.saturating_sub(1) as u64)
+        .saturating_mul((limits.max_object_bytes as u64).saturating_mul(4))
+        .saturating_add(limits.max_evidence_bytes)
+}
 /// Intake of a PDF that may be this SDK's own signed result. The wire may exceed
 /// the remaining document allowance only by revision bytes appended after the
 /// first revision, and only up to `container_bytes`; anything else keeps the
 /// ordinary document limit (limit+1 is rejected).
 ///
 /// Contract: the surcharge is at most `container_bytes` AND at most
-/// [`max_surcharge`]: four reader-bounded objects (signature dictionary and
-/// field, evidence/DSS objects, cross-reference section) for every appended
-/// revision. So the accepted wire is the document plus a small, format-derived
+/// [`max_surcharge`]: four reader-bounded objects per appended revision
+/// (signature dictionary and field, cross-reference section) plus
+/// `max_evidence_bytes` in total for DSS evidence. So the accepted wire is the document plus a small, format-derived
 /// increment, never a second document-sized payload. Bytes past that bound fail
 /// with `InputLimit` while being read. A wire above the document allowance whose
 /// tail is not at least one appended revision after the first is `InputLimit`.
-/// Largest signature/validation increment accepted beyond the document allowance.
-pub(crate) fn max_surcharge(limits: &PdfLimits) -> u64 {
-    (limits.max_revisions.saturating_sub(1) as u64)
-        .saturating_mul(4)
-        .saturating_mul(limits.max_object_bytes as u64)
-}
 pub(crate) fn capture_signed(
     input: Source<'_>,
     store: &oncl_pki::io::TemporaryStore,
