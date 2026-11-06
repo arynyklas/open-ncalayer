@@ -20,7 +20,8 @@
 //!   crosses a second boundary); [`CLOCK_SKEW`] absorbs that.
 //! - Status that a signature carries, once the signature's proof time `P` is verified
 //!   ([`check_embedded_at_proof`], ETSI EN 319 102-1 control time): current means
-//!   `P - CLOCK_SKEW < thisUpdate ≤ now + CLOCK_SKEW`, with the responder certificate
+//!   `thisUpdate ≤ now + CLOCK_SKEW` and `P < nextUpdate`, or, without nextUpdate,
+//!   `P - CLOCK_SKEW < thisUpdate`, with the responder certificate
 //!   chained as of thisUpdate; nextUpdate and [`ALLOWED_PERIOD`] are not compared with `now`.
 //! - Every failure is an [`OcspError`], never a [`CertStatus`]: callers decide what an
 //!   unchecked certificate means.
@@ -633,10 +634,12 @@ pub fn check_embedded_issuer_bound(
 
 /// [`check_embedded_issuer_bound`] for a signature with a verified proof time `proof` (the
 /// control time of ETSI EN 319 102-1): everything is checked as there, except currency.
-/// The responder certificate must chain at the response's `thisUpdate`, which must be
-/// after `proof` less [`CLOCK_SKEW`] (the answer then covers the certificate's status up
-/// to the proof) and not after `now + CLOCK_SKEW`. `nextUpdate` and [`ALLOWED_PERIOD`] are not
-/// compared with `now`: the evidence is embedded to be judged long after it was issued.
+/// The responder certificate must chain at the response's `thisUpdate`, which must not be
+/// after `now + CLOCK_SKEW`. The answer is fresh when `proof` precedes its `nextUpdate`
+/// (EN 319 102-1 5.2.5.4: maximum freshness `nextUpdate - thisUpdate`) or, without
+/// `nextUpdate`, when `thisUpdate` is after `proof` less [`CLOCK_SKEW`]. `nextUpdate` and
+/// [`ALLOWED_PERIOD`] are not compared with `now`: the evidence is embedded to be judged
+/// long after it was issued.
 ///
 /// # Errors
 ///
@@ -776,10 +779,10 @@ fn read_basic<'c>(
         .map(|t| generalized_time(t.0))
         .transpose()?;
     let current = match (proof, next_update) {
-        // EN 319 102-1 5.2.5.4 step 2 with the proof time as validation time and the
-        // freshness constraint CLOCK_SKEW: issued after proof - CLOCK_SKEW, so it covers the
-        // status up to the proof.
-        (Some(proof), _) => this_update > proof - CLOCK_SKEW,
+        // EN 319 102-1 5.2.5.4: with nextUpdate fresh iff the proof precedes it (maximum
+        // freshness nextUpdate - thisUpdate); without, issued after proof - CLOCK_SKEW.
+        (Some(proof), Some(next_update)) => next_update > proof,
+        (Some(proof), None) => this_update > proof - CLOCK_SKEW,
         (None, Some(next_update)) => now < next_update,
         // A thisUpdate ahead of now (within the skew) is a negative age: current.
         (None, None) => now - this_update < ALLOWED_PERIOD,

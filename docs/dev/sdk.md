@@ -309,8 +309,10 @@ certificate is accepted when everything that was checked before still passes (Ce
 binding, signature, responder chain and OCSPSigning/no-check, `unknown` is refused, a CRL
 is a complete CRL of the issuer) and:
 
-* `P - CLOCK_SKEW < thisUpdate` (300 s): the status is issued after the control time, so it
-  covers the certificate up to `P`;
+* fresh at `P` (EN 319 102-1 5.2.5.4: maximum freshness `nextUpdate - thisUpdate` unless a
+  constraint says otherwise): with a `nextUpdate` (every CRL, an OCSP answer that has one)
+  the answer is fresh iff `P < nextUpdate`, so a 35-day CA CRL issued hours before the proof
+  is good; without one (NCA OCSP) iff `P - CLOCK_SKEW < thisUpdate` (300 s, exclusive);
 * `thisUpdate <= now + CLOCK_SKEW` (a CRL: `thisUpdate <= now`): never from the verifier's
   future;
 * the responder certificate chains **as of `thisUpdate`** (not `now`);
@@ -335,11 +337,11 @@ was not fresh against the current time; 5.5.4 step 4a: a revocation time after t
 best-signature-time does not invalidate the signature, one at or before it is
 `INDETERMINATE/REVOKED_NO_POE`; 5.2.6.4 (X.509 certificate validation) runs the checker with
 the validation time and does not check the issuer's CRL-signing certificate against it. The
-maximum freshness is taken as the validation constraint `CLOCK_SKEW`, which 5.2.5.4 step 1
-lets a constraint override the `nextUpdate - thisUpdate` default (that default is not used:
-NCA responders send no nextUpdate, and the tighter bound is the stricter reading).
+`nextUpdate - thisUpdate` default of 5.2.5.4 step 1 is used for answers that carry a
+`nextUpdate`; for NCA OCSP answers, which carry none, the freshness is the constraint
+`CLOCK_SKEW` (the standard says FAILED without nextUpdate unless a constraint is given).
 
-**Not verified / deliberate differences.** (1) 5.6.2.2.4 step 2a also asks for a proof of
+**Not verified / deliberate differences.** (0) No real-PKI proof: the pinned NCANode LT fixtures never reach a proof time here, so the NCA cadence (35-day root CRL issued hours before the timestamp) is tested with the recorded production CRL (`tests/crl.rs`) and a synthetic 35-day CRL, not with a Valid real document; the plain-CMS offline path is covered by `oncl-core` `offline_cms_status_is_judged_at_the_proof_time_not_the_host_clock`; P is the LAST passing signature time-stamp where the standard (5.5.4 step 3b) takes the earliest (conservative, pre-existing). (1) 5.6.2.2.4 step 2a also asks for a proof of
 existence of the revocation information at or before the control time; for `LTA` this is the
 archive time-stamp binding the evidence, which is checked by the evidence graph, for `LT`
 it is not requested (nothing but the signature time-stamp exists), as in 5.5.4. (2) The

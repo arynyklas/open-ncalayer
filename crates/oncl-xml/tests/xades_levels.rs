@@ -2007,8 +2007,6 @@ fn long_document_passes_do_not_age_the_status_checked_after_them() {
     // Each checkpoint costs 1 s of host time: the carried-proof passes between the context
     // sample and the status check last several times the 300 s OCSP window (verified RED
     // without the fresh sample), the evidence steps themselves stay far below it.
-    // LT/LTA are NOT asserted here: their embedded status ages with the signing-time
-    // acquisition, which is a separate, documented limitation (see the D2 report).
     assert_eq!(ticking_sign(AdesLevel::T, 1000), Ok(Verdict::Valid));
 }
 
@@ -2305,5 +2303,30 @@ fn lt_lta_control_cases_stay_rejected_at_proof_time() {
             });
             lt_control_never_valid(label, &mut pki, level, T0);
         }
+    }
+}
+
+#[test]
+fn xades_lt_with_damaged_embedded_status_is_not_valid_an_hour_later() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    let mut pki = Pki::at("user-rsa-sign", T0);
+    let (bytes, _) = lt_sign(&mut pki, AdesLevel::Lt, T0).unwrap();
+    let hour = T0 + time::Duration::HOUR;
+    assert_eq!(
+        lt_verify(&pki, &bytes, hour, ValidationPolicy::StrictOnline).0,
+        Verdict::Valid
+    );
+    let mut text = String::from_utf8(bytes).unwrap();
+    let start =
+        text.find("<xades:EncapsulatedOCSPValue>").unwrap() + "<xades:EncapsulatedOCSPValue>".len();
+    let byte = if &text[start..start + 1] == "A" {
+        "B"
+    } else {
+        "A"
+    };
+    text.replace_range(start..start + 1, byte);
+    for now in [T0, hour] {
+        let (verdict, ..) = lt_verify(&pki, text.as_bytes(), now, ValidationPolicy::StrictOnline);
+        assert_ne!(verdict, Verdict::Valid, "{now}");
     }
 }

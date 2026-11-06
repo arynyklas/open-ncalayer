@@ -852,7 +852,9 @@ fn embedded_answer_is_current_at_the_proof_time_however_old_it_is_now() {
 #[test]
 fn embedded_answer_must_be_issued_no_earlier_than_the_proof_less_the_skew() {
     // thisUpdate is a minute before the mock's clock.
-    let response = embedded_response(&responder(PROOF));
+    let response = embedded_response(&responder(PROOF).tamper(OcspTamper::NoNextUpdate {
+        age: Duration::from_secs(60),
+    }));
     let issued = PROOF - Duration::from_secs(60);
     let now = PROOF + Duration::from_secs(3600);
     // Issued after proof - CLOCK_SKEW (EN 319 102-1 5.2.5.4 step 2): the bound is exclusive.
@@ -953,4 +955,18 @@ fn embedded_responder_is_judged_as_of_the_answers_issuance_not_now() {
         at_proof(&response, early, PROOF),
         Err(OcspError::ResponderNotTrusted(_))
     ));
+}
+
+#[test]
+fn embedded_answer_with_next_update_is_fresh_until_the_proof_reaches_it() {
+    // thisUpdate a minute before PROOF, nextUpdate an hour after it.
+    let response = embedded_response(&responder(PROOF));
+    let now = PROOF + Duration::from_secs(400 * 86_400);
+    let next = PROOF + Duration::from_secs(3600);
+    // Issued long before the proof: still fresh while the proof precedes nextUpdate.
+    assert_eq!(
+        at_proof(&response, next - Duration::from_secs(1), now),
+        Ok(CertStatus::Good)
+    );
+    assert_eq!(at_proof(&response, next, now), Err(OcspError::NextUpdate));
 }

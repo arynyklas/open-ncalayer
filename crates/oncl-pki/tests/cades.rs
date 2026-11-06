@@ -1801,7 +1801,7 @@ mod cades {
         let mut f = Fixture::new();
         f.crl = MockCrl::new(f.root.clone())
             .with_this_update(NOW - 2 * hour)
-            .next_update(Some(NOW + hour))
+            .next_update(Some(NOW - hour))
             .der();
         worlds.push(("stale", f, NOW, &all));
         // From the future: minted two hours after the proof; verified an hour after it.
@@ -1839,6 +1839,61 @@ mod cades {
                     "{label} +{delta}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lt_document_with_damaged_embedded_crl_is_not_valid_an_hour_later() {
+        // Unlike the sign-time controls, this one is built in a good world, signed Valid,
+        // and only then verified (at +0 and +1h) with the embedded CRL's bytes damaged.
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+        let (lt, verdict) = extend_with(&f, &baseline, NOW, NOW, AdesLevel::Lt).unwrap();
+        assert_eq!(verdict, Verdict::Valid);
+        assert_eq!(
+            verify_later(&f, &lt, NOW + time::Duration::HOUR),
+            Verdict::Valid
+        );
+        let at = lt
+            .windows(f.crl.len())
+            .position(|window| window == f.crl.as_slice())
+            .expect("the CRL is embedded verbatim");
+        let mut damaged = lt.clone();
+        damaged[at + f.crl.len() - 1] ^= 1;
+        for delta in [time::Duration::ZERO, time::Duration::HOUR] {
+            assert_ne!(
+                verify_later(&f, &damaged, NOW + delta),
+                Verdict::Valid,
+                "+{delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn lt_with_a_35_day_ca_crl_issued_hours_before_the_proof_stays_valid() {
+        // NCA shape: the CRL is issued hours before the timestamp and lives 35 days.
+        let mut f = Fixture::new();
+        f.crl = MockCrl::new(f.root.clone())
+            .with_this_update(NOW - time::Duration::hours(6))
+            .next_update(Some(NOW + time::Duration::days(35)))
+            .der();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let baseline = baseline(&f, true, NOW - time::Duration::MINUTE, &store);
+        let (lt, verdict) = extend_with(&f, &baseline, NOW, NOW, AdesLevel::Lt).unwrap();
+        assert_eq!(verdict, Verdict::Valid);
+        for delta in [
+            time::Duration::ZERO,
+            time::Duration::DAY,
+            time::Duration::days(400),
+        ] {
+            assert_eq!(
+                verify_later(&f, &lt, NOW + delta),
+                Verdict::Valid,
+                "+{delta}"
+            );
         }
     }
 }

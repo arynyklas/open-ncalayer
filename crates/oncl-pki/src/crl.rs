@@ -390,13 +390,19 @@ fn check_times(
             }
         }
         Currency::AtProof { proof, now } => {
-            // Issued after the proof time less the skew (EN 319 102-1 5.2.5.4 step 2, proof
-            // time as validation time, freshness constraint CLOCK_SKEW): it covers the
-            // status up to the proof. Its nextUpdate is not compared with the verifier's clock.
+            // EN 319 102-1 5.2.5.4 with the proof time as validation time. nextUpdate is not
+            // compared with the verifier's clock.
             if time_of(this_update) > now {
                 return Err(CrlError::NotYetValid);
             }
-            if time_of(this_update) <= proof - crate::ocsp::CLOCK_SKEW {
+            // With nextUpdate the maximum freshness is nextUpdate - thisUpdate (5.2.5.4
+            // step 1 default), i.e. fresh iff the proof precedes nextUpdate: a 35-day CA CRL
+            // issued hours before the proof is fine. Without it the skew is the freshness.
+            let stale = match next_update {
+                Some(next) => time_of(next) <= proof,
+                None => time_of(this_update) <= proof - crate::ocsp::CLOCK_SKEW,
+            };
+            if stale {
                 return Err(CrlError::Outdated);
             }
         }

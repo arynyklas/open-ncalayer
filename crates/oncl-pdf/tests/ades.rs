@@ -1032,7 +1032,7 @@ fn missing_acquisition_is_not_applied_but_future_and_untrusted_tsa_fail_after_on
     }
 }
 #[test]
-fn required_level_is_not_achieved_and_tsa_status_is_current_not_token_presence() {
+fn required_level_is_not_achieved_and_tsa_status_is_judged_at_proof_time_not_token_presence() {
     let f = Fixture::new();
     let (t, _) = f.run(None, AdesLevel::T);
     assert_eq!(
@@ -2796,7 +2796,15 @@ fn lt_embedded_status_control_cases_are_never_valid() {
             .with_this_update(this)
             .next_update(Some(this + 3 * hour))
     };
-    worlds.push(("stale", crl(NOW - 2 * hour).der(), &all));
+    // Stale: its nextUpdate (an hour before the proof) has passed at the proof.
+    worlds.push((
+        "stale",
+        MockCrl::new(base.root.clone())
+            .with_this_update(NOW - 2 * hour)
+            .next_update(Some(NOW - hour))
+            .der(),
+        &all,
+    ));
     worlds.push((
         "revoked at P",
         crl(NOW - time::Duration::MINUTE)
@@ -2826,5 +2834,28 @@ fn lt_embedded_status_control_cases_are_never_valid() {
                 "{label} +{delta}"
             );
         }
+    }
+}
+
+#[test]
+fn lt_pdf_with_damaged_embedded_crl_is_not_valid_an_hour_later() {
+    let f = Fixture::new();
+    let (signed, _) = f.run(None, AdesLevel::Lt);
+    let hour = NOW + time::Duration::HOUR;
+    assert_eq!(
+        f.inspect(&signed, AdesLevel::Lt, hour, &[])
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+    let at = signed
+        .windows(f.crl.len())
+        .position(|window| window == f.crl.as_slice())
+        .expect("the DSS carries the CRL uncompressed");
+    let mut damaged = signed.clone();
+    damaged[at + f.crl.len() - 1] ^= 1;
+    for now in [NOW, hour] {
+        let verdict = f.inspect(&damaged, AdesLevel::Lt, now, &[]);
+        assert!(verdict.is_ok_and(|r| r.verdict != Verdict::Valid), "{now}");
     }
 }

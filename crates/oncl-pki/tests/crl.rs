@@ -1111,3 +1111,115 @@ fn patch_enclosing_lengths(tbs: &mut [u8], at: usize, grow: i64) {
     let total = tbs.len();
     walk(tbs, 0, total, at, grow);
 }
+
+// ---- a CRL a signature carries, judged at the signature's proof time ----------------------
+
+const SERIAL: &[u8] = &[0x42];
+const P: OffsetDateTime = datetime!(2026-10-26 12:00:00 UTC);
+
+fn at_proof(
+    der: &[u8],
+    issuer: &Certificate,
+    proof: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    crl::serial_status_at_proof(der, issuer, SERIAL, proof, now)
+}
+
+#[test]
+fn real_nca_root_crl_is_fresh_at_any_proof_before_its_next_update() {
+    // The production root CRL: 35 days of validity, no entries. Under the wall-clock rule it
+    // is Good until nextUpdate; at a proof time inside its validity it stays Good however
+    // late it is verified, and is refused for a proof at or after nextUpdate.
+    let der = read(fixture("nca-crl/gost2015_2022.crl"));
+    let root = nca("rcagost22");
+    let ncagost22 = nca("ncagost22");
+    let serial = serial(&ncagost22);
+    for later in [0, 1, 400] {
+        let now = P + later * time::Duration::DAY;
+        assert_eq!(
+            crl::serial_status_at_proof(&der, &root, serial, P, now),
+            Ok(CrlStatus::Good),
+            "+{later}d"
+        );
+    }
+    let next = datetime!(2026-11-06 05:12:41 UTC);
+    let later = next + time::Duration::DAY;
+    assert_eq!(
+        crl::serial_status_at_proof(&der, &root, serial, next - time::Duration::SECOND, later),
+        Ok(CrlStatus::Good)
+    );
+    assert_eq!(
+        crl::serial_status_at_proof(&der, &root, serial, next, later),
+        Err(CrlError::Outdated)
+    );
+    // Issued after `now`: not from the verifier's past.
+    assert_eq!(
+        crl::serial_status_at_proof(&der, &root, serial, P, datetime!(2026-10-02 05:12:40 UTC)),
+        Err(CrlError::NotYetValid)
+    );
+}
+
+#[test]
+fn long_lived_crl_issued_hours_before_the_proof_is_fresh() {
+    let issuer = cer("inter-gost2015");
+    let der = MockCrl::new(entry("inter-gost2015.key"))
+        .with_this_update(P - time::Duration::hours(6))
+        .next_update(Some(P + time::Duration::days(35)))
+        .der();
+    for later in [0, 1, 400] {
+        assert_eq!(
+            at_proof(&der, &issuer, P, P + later * time::Duration::DAY),
+            Ok(CrlStatus::Good)
+        );
+    }
+}
+
+#[test]
+fn crl_with_next_update_is_stale_at_the_proof_when_next_update_has_passed() {
+    let issuer = cer("inter-gost2015");
+    let key = entry("inter-gost2015.key");
+    let der = MockCrl::new(key)
+        .with_this_update(P - time::Duration::hours(6))
+        .next_update(Some(P))
+        .der();
+    let now = P + time::Duration::HOUR;
+    assert_eq!(at_proof(&der, &issuer, P, now), Err(CrlError::Outdated));
+    assert_eq!(
+        at_proof(&der, &issuer, P - time::Duration::SECOND, now),
+        Ok(CrlStatus::Good)
+    );
+}
+
+#[test]
+fn crl_without_next_update_needs_thisupdate_after_the_proof_less_the_skew() {
+    use oncl_pki::ocsp::CLOCK_SKEW;
+    let issuer = cer("inter-gost2015");
+    let skew = time::Duration::try_from(CLOCK_SKEW).unwrap();
+    let now = P + time::Duration::HOUR;
+    let issued = |this| {
+        MockCrl::new(entry("inter-gost2015.key"))
+            .with_this_update(this)
+            .next_update(None)
+            .der()
+    };
+    // thisUpdate = P - skew is not "after" it: the bound is exclusive.
+    assert_eq!(
+        at_proof(&issued(P - skew), &issuer, P, now),
+        Err(CrlError::Outdated)
+    );
+    assert_eq!(
+        at_proof(&issued(P - skew - time::Duration::SECOND), &issuer, P, now),
+        Err(CrlError::Outdated)
+    );
+    assert_eq!(
+        at_proof(&issued(P - skew + time::Duration::SECOND), &issuer, P, now),
+        Ok(CrlStatus::Good)
+    );
+    // From the verifier's future.
+    assert_eq!(
+        at_proof(&issued(now + time::Duration::SECOND), &issuer, P, now),
+        Err(CrlError::NotYetValid)
+    );
+    assert_eq!(at_proof(&issued(now), &issuer, P, now), Ok(CrlStatus::Good));
+}

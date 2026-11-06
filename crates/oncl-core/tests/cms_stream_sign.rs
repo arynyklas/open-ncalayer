@@ -2805,10 +2805,12 @@ fn keyless_xml_renewal_refreshes_stale_status_without_rescuing_a_bad_old_proof()
                 &mut ctx,
             )
             .unwrap();
-        assert_ne!(
+        // Embedded status is judged at the proof time, not at the verifier's later clock:
+        // answers issued before the proof and valid at it stay good two hours later.
+        assert_eq!(
             report.verdict,
             Verdict::Valid,
-            "old embedded status is genuinely stale"
+            "embedded status is judged at the proof time"
         );
     }
     let before = std::str::from_utf8(&bytes).unwrap();
