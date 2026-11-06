@@ -213,7 +213,7 @@ impl HttpTransport for NoNetwork {
         Err(HttpError::other("offline fixture must not fetch"))
     }
 }
-fn engine(dir: &std::path::Path) -> Engine {
+fn engine(dir: &std::path::Path, limits: ResourceLimits) -> Engine {
     let services = ValidationServices::new(
         CaSet::new(vec![cert::parse(&synthetic_cert("root-gost2015")).unwrap()]),
         vec![entry("inter-gost2015.key").cert],
@@ -222,7 +222,7 @@ fn engine(dir: &std::path::Path) -> Engine {
         Arc::new(|| NOW),
     );
     Engine::new(
-        EngineServices::hash_only(ResourceLimits::default())
+        EngineServices::hash_only(limits)
             .with_validation(services)
             .with_temporary_store(TemporaryStore::new(dir).unwrap()),
     )
@@ -244,8 +244,11 @@ fn evidence_limits() -> EvidenceLimits {
 }
 type Verified = Result<oncl_core::VerificationReport, OperationError>;
 fn verify(request: &VerifyRequest, input: &[u8]) -> (Verified, usize) {
+    verify_with(request, input, ResourceLimits::default())
+}
+fn verify_with(request: &VerifyRequest, input: &[u8], limits: ResourceLimits) -> (Verified, usize) {
     let dir = tempfile::tempdir().unwrap();
-    let engine = engine(dir.path());
+    let engine = engine(dir.path(), limits);
     let mut ctx = engine
         .begin(
             ExecutionGrant::new([Action::Verify]),
@@ -421,4 +424,37 @@ fn a_big_crl_must_be_minimal_der_not_renormalized_ber() {
         let (result, _) = verify(&request, &input);
         assert!(result.is_err(), "{name}: a non-DER big CRL must be refused");
     }
+}
+
+#[test]
+fn only_a_crl_over_the_ber_limit_gets_the_scan_in_place_charge() {
+    let _serial = serial();
+    // A tight RAM budget: a CRL over the BER limit (1 MiB) is scanned in place and charged
+    // once, so it is admitted; a smaller CRL may be BER and is normalized into a tree, so it
+    // keeps the amplified charge and is refused by the same budget, though it is smaller.
+    let limits = || ResourceLimits {
+        memory_bytes: 48 << 20,
+        ..ResourceLimits::default()
+    };
+    let mut sizes = Vec::new();
+    for revoked in [34_000u32, 60_000] {
+        let (set, crl_len) = revocation_set(revoked, false);
+        sizes.push(crl_len);
+        let input = with_revocation_set(&signer(), &set);
+        let (result, _) = verify_with(&VerifyRequest::cms(), &input, limits());
+        if crl_len > oncl_pki::crl::MAX_BER_CRL_LEN {
+            assert_eq!(result.unwrap().verdict, Verdict::Valid, "{crl_len} bytes");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(OperationError::Processing(
+                        ProcessingError::MemoryLimit | ProcessingError::MetadataLimit
+                    ))
+                ),
+                "{crl_len} bytes"
+            );
+        }
+    }
+    assert!(sizes[0] < oncl_pki::crl::MAX_BER_CRL_LEN && sizes[1] > oncl_pki::crl::MAX_BER_CRL_LEN);
 }

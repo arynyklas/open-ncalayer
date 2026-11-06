@@ -419,7 +419,8 @@ pub fn serial_status(
     let mut found = None;
     let mut reader = SliceReader::new(tbs)?;
     let (this_update, next_update, extensions) = reader.sequence(|r| {
-        let _version: Option<Version> = r.decode()?;
+        // Required, as in the full decode: a CRL without a version field is refused.
+        let _version: Version = r.decode()?;
         let _signature: AlgorithmIdentifierRef<'_> = r.decode()?;
         let _issuer = r.tlv_bytes()?;
         let this_update: Time = r.decode()?;
@@ -432,9 +433,12 @@ pub fn serial_status(
                         let date: Time = entry.decode()?;
                         let rest = entry.read_slice(entry.remaining_len())?;
                         let mut reason = None;
+                        let mut seen_reason = false;
                         if !rest.is_empty() {
                             scan_extensions(rest, |id, _, value| {
-                                if reason.is_none() && id == CrlReason::OID {
+                                // The first CrlReason decides, malformed or not.
+                                if !seen_reason && id == CrlReason::OID {
+                                    seen_reason = true;
                                     reason = Enumerated::from_der(value).ok().map(|v| v.0);
                                 }
                                 Ok(())

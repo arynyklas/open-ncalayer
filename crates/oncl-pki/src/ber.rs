@@ -203,7 +203,7 @@ struct Parser<'a> {
 
 /// Definite-length constructed elements at least this long are skimmed (1 MiB, the
 /// bulk-CRL threshold).
-const SKIM_MIN: usize = 1 << 20;
+const SKIM_MIN: usize = crate::crl::MAX_BER_CRL_LEN;
 
 impl Parser<'_> {
     fn byte(&mut self) -> Result<u8, BerError> {

@@ -1058,12 +1058,16 @@ impl ParsedEvidence {
             .ok_or(EvidenceError::Limit)? as u64;
         resources.checkpoint()?;
         bundle.scope.checkpoint()?;
-        // CRLs are loaded as raw bytes and only scanned (never decoded into a tree):
-        // retained once. Certificates, tokens and OCSP answers decode and amplify.
+        // A CRL over MAX_BER_CRL_LEN must be DER and is only scanned (never decoded into a
+        // tree): retained once. A smaller one may be BER, and normalizing it builds a tree,
+        // so it, like certificates, tokens and OCSP answers, is charged with amplification.
         let crl_bytes = bundle
             .entries
             .iter()
-            .filter(|entry| entry.kind == EvidenceKind::Crl)
+            .filter(|entry| {
+                entry.kind == EvidenceKind::Crl
+                    && entry.region.len > crate::crl::MAX_BER_CRL_LEN as u64
+            })
             .try_fold(0u64, |sum, entry| sum.checked_add(entry.region.len))
             .ok_or(EvidenceError::Limit)?;
         let decoded = bytes.saturating_sub(crl_bytes);

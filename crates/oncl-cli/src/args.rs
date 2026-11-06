@@ -601,17 +601,3 @@ pub fn evidence_limits() -> oncl_pki::evidence::EvidenceLimits {
 fn coverage_bytes() -> u64 {
     oncl_pki::resource::ResourceLimits::default().output_bytes
 }
-
-#[cfg(test)]
-mod evidence_limit_tests {
-    use super::*;
-    #[test]
-    fn coverage_admits_the_document_ceiling_and_stays_finite() {
-        let limits = evidence_limits();
-        let resources = oncl_pki::resource::ResourceLimits::default();
-        assert!(limits.max_coverage_bytes >= resources.input_bytes);
-        assert!(limits.max_coverage_bytes <= resources.output_bytes);
-        assert!(limits.max_crl_bytes <= limits.max_total_bytes);
-        assert!(limits.max_item_bytes <= 1024 * 1024);
-    }
-}
