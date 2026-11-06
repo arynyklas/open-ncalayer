@@ -280,7 +280,8 @@ pub(super) fn check_carried_evidence(
                     "required XAdES-LT/LTA CertificateValues for the signing path absent",
                 ));
             }
-            // No path from the host's anchors: validation reports the untrusted chain.
+            // No path from the host's anchors: validation reports the untrusted chain
+            // (a host that requires LT/LTA is told so by that report, not by this check).
             Some(false) | None => {
                 if level.is_some_and(|l| l >= AdesLevel::Lt) {
                     level = Some(AdesLevel::T);
@@ -306,6 +307,18 @@ fn signing_path_embedded(
     ctx: &ValidationContext<'_>,
     scope: &ResourceScope,
 ) -> Result<Option<bool>> {
+    let mut total = 0u64;
+    for row in rows.iter().filter(|r| r.kind == EvidenceKind::Certificate) {
+        total = total.saturating_add(
+            bundle
+                .entry(row.id)
+                .ok_or_else(|| invalid("carried certificate entry"))?
+                .region()
+                .len,
+        );
+    }
+    // One reservation for the whole retained set (raw DER plus parsed copies).
+    let _memory = scope.reserve_memory(total.saturating_mul(2))?;
     let mut embedded_der = Vec::new();
     let mut embedded = Vec::new();
     for row in rows.iter().filter(|r| r.kind == EvidenceKind::Certificate) {
@@ -314,7 +327,6 @@ fn signing_path_embedded(
             .ok_or_else(|| invalid("carried certificate entry"))?
             .region()
             .len;
-        let _memory = scope.reserve_memory(len.saturating_mul(2))?;
         let mut der = vec![0; len as usize];
         let mut offset = 0;
         while offset < der.len() {

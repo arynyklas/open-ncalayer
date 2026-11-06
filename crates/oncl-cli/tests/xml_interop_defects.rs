@@ -239,3 +239,66 @@ fn xades_lt_carries_the_trust_anchor_and_the_verifier_does_not_claim_lt_without_
     let (_, report) = verify_json(&w, "xades-t", &stripped);
     assert_eq!(report["ades_level"], "T", "{report}");
 }
+
+/// D3 negative controls: the certificate digest is really compared and only known
+/// digest algorithms are admitted. A flipped digest value, a SHA-1 digest URI and an
+/// unknown URI in an otherwise genuine oncl XAdES-B each get a typed refusal
+/// (`InvalidInput`, exit 1), never a verdict that passes them.
+#[test]
+fn a_wrong_or_weak_signing_certificate_digest_is_refused_with_a_typed_error() {
+    let w = world();
+    let doc = w.dir.path().join("doc.xml");
+    std::fs::write(&doc, b"<r><p>b</p></r>").unwrap();
+    let signed = w.dir.path().join("b.xml");
+    let mut args = sign_args(&w, "xades-b", &doc, &signed);
+    args.extend(["--signature-id", "sig-1"]);
+    let created = run(&args, b"");
+    assert_eq!(created.status.code(), Some(0), "{created:?}");
+    let text = std::fs::read_to_string(&signed).unwrap();
+    let (code, _) = verify_json(&w, "xades-b", &signed);
+    assert_eq!(code, Some(0), "untouched document verifies");
+
+    let marker = "<xades:CertDigest>";
+    let at = text.find(marker).expect("CertDigest");
+    let value_at = at + text[at..].find("<ds:DigestValue>").unwrap() + "<ds:DigestValue>".len();
+    let first = text.as_bytes()[value_at];
+    let flipped_char = if first == b'A' { 'B' } else { 'A' };
+    let flipped = format!(
+        "{}{}{}",
+        &text[..value_at],
+        flipped_char,
+        &text[value_at + 1..]
+    );
+    let method_at = at + text[at..].find("Algorithm=\"").unwrap() + "Algorithm=\"".len();
+    let method_end = method_at + text[method_at..].find('"').unwrap();
+    let with_method = |uri: &str| format!("{}{}{}", &text[..method_at], uri, &text[method_end..]);
+    for (name, mutated) in [
+        ("flipped digest value", flipped),
+        (
+            "sha1 digest uri",
+            with_method("http://www.w3.org/2000/09/xmldsig#sha1"),
+        ),
+        (
+            "unknown digest uri",
+            with_method("urn:example:unknown-digest"),
+        ),
+    ] {
+        let file = w.dir.path().join("mutated.xml");
+        std::fs::write(&file, mutated).unwrap();
+        let mut args = vec![
+            "verify",
+            "--profile",
+            "xades-b",
+            "--input",
+            path(&file),
+            "--json",
+        ];
+        args.extend(trust(&w));
+        let result = run(&args, b"");
+        assert_eq!(result.status.code(), Some(1), "{name}: {result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("InvalidInput"),
+            "{name}: {result:?}"
+        );
+    }
+}
