@@ -13,17 +13,46 @@ pub(crate) struct Metadata {
     bytes: Vec<u8>,
     memory: ResourceReservation,
     metadata: ResourceReservation,
+    /// Bytes of bulk revocation evidence (a CRL encoding over [`BULK_MIN`] bytes) that sit
+    /// verbatim inside `bytes`: they are borrowed and scanned, never decoded into a tree,
+    /// so consumers charge decode amplification only for the rest.
+    bulk: u64,
 }
+/// A CRL element of at least this many bytes is bulk evidence: it must be DER (the same
+/// rule [`crate::crl::MAX_BER_CRL_LEN`] states for CRLs) and is kept as received.
+pub(crate) const BULK_MIN: u64 = crate::crl::MAX_BER_CRL_LEN as u64;
 impl Metadata {
     pub(crate) fn new(scope: &ResourceScope) -> Result<Self, ProcessingError> {
         Ok(Self {
             bytes: Vec::new(),
             memory: scope.reserve_memory(0)?,
             metadata: scope.reserve_metadata(0)?,
+            bulk: 0,
         })
     }
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+    /// Bytes that decoders can amplify: everything but the bulk evidence.
+    pub(crate) fn decoded_bytes(&self) -> u64 {
+        (self.bytes.len() as u64).saturating_sub(self.bulk)
+    }
+    /// Reserves capacity for `total` bytes in one step (no doubling), charged before it is
+    /// allocated, so a declared size the budget cannot hold fails with a typed limit.
+    pub(crate) fn reserve_total(&mut self, total: u64) -> Result<(), ProcessingError> {
+        let total = usize::try_from(total).map_err(|_| ProcessingError::MemoryLimit)?;
+        if total <= self.bytes.capacity() {
+            return Ok(());
+        }
+        let previous = self.bytes.capacity() as u64;
+        self.memory.grow(total as u64)?;
+        self.metadata.grow(total as u64)?;
+        self.bytes
+            .try_reserve_exact(total - self.bytes.len())
+            .map_err(|_| ProcessingError::MemoryLimit)?;
+        self.memory.shrink(previous)?;
+        self.metadata.shrink(previous)?;
+        Ok(())
     }
     pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
         let len = self
@@ -47,15 +76,26 @@ impl Metadata {
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
-    pub(crate) fn append_tlv(&mut self, tag: u8, bytes: &[u8]) -> Result<(), ProcessingError> {
+    /// Appends a part (whole, with its bulk accounting) and releases the part.
+    pub(crate) fn append_part(&mut self, part: Self) -> Result<(), ProcessingError> {
+        self.append(&part.bytes)?;
+        self.bulk += part.bulk;
+        Ok(())
+    }
+    pub(crate) fn append_header(&mut self, tag: u8, len: u64) -> Result<(), ProcessingError> {
         self.append(&[tag])?;
-        let (length, count) = encoded_length(bytes.len() as u64);
-        self.append(&length[..count])?;
+        let (length, count) = encoded_length(len);
+        self.append(&length[..count])
+    }
+    pub(crate) fn append_tlv(&mut self, tag: u8, bytes: &[u8]) -> Result<(), ProcessingError> {
+        self.append_header(tag, bytes.len() as u64)?;
         self.append(bytes)
     }
     pub(super) fn normalize(self, scope: &ResourceScope) -> Result<Self, StreamError> {
         // The existing normalizer builds a tree (including Vec capacities).
-        // Its input is ONLY this bounded metadata TLV, never eContent.
+        // Its input is ONLY this bounded metadata TLV, never eContent. Bulk
+        // evidence never reaches it: see `Reader::revocation_set`.
+        debug_assert_eq!(self.bulk, 0);
         let bytes = (self.bytes.len() as u64)
             .checked_mul(128)
             .and_then(|n| n.checked_add(1024))
@@ -70,6 +110,7 @@ impl Metadata {
             bytes: normalized,
             memory,
             metadata,
+            bulk: 0,
         })
     }
 }
@@ -120,6 +161,7 @@ pub(super) struct Reader<'a, 's> {
     frames: [Frame; MAX_DEPTH],
     depth: usize,
     replay: bool,
+    chunk_container: u64,
 }
 impl<'a, 's> Reader<'a, 's> {
     pub fn new(source: Source<'a>, scope: &'s mut ResourceScope) -> Result<Self, StreamError> {
@@ -140,9 +182,11 @@ impl<'a, 's> Reader<'a, 's> {
         scope.checkpoint()?;
         scope.check_input()?;
         if !replay
-            && source
-                .known_len()
-                .is_some_and(|len| len > scope.input_remaining())
+            && source.known_len().is_some_and(|len| {
+                len > scope
+                    .input_remaining()
+                    .saturating_add(scope.container_remaining())
+            })
         {
             return Err(ProcessingError::InputLimit.into());
         }
@@ -178,18 +222,26 @@ impl<'a, 's> Reader<'a, 's> {
                 ended: false,
             }; MAX_DEPTH],
             depth: 0,
+            chunk_container: 0,
         })
     }
     fn fill(&mut self) -> Result<bool, StreamError> {
         if self.start != self.available {
             return Ok(true);
         }
+        if !self.replay && self.available != 0 {
+            let container = std::mem::take(&mut self.chunk_container);
+            self.scope
+                .settle_wire(self.available as u64 - container, container)?;
+            self.available = 0;
+            self.start = 0;
+        }
         loop {
             self.scope.checkpoint()?;
             let request = if self.replay {
                 self.buffer.len()
             } else {
-                self.scope.input_request(self.buffer.len())?
+                self.scope.wire_request(self.buffer.len())?
             };
             let n = match self.source.read(&mut self.buffer[..request]) {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -199,7 +251,7 @@ impl<'a, 's> Reader<'a, 's> {
                 return Err(malformed("reader exceeded supplied buffer"));
             }
             if !self.replay {
-                self.scope.consumed_input(n as u64)?;
+                self.scope.consumed_wire(n as u64)?;
             }
             self.scope.checkpoint()?;
             self.start = 0;
@@ -225,6 +277,7 @@ impl<'a, 's> Reader<'a, 's> {
             .checked_add(1)
             .ok_or_else(|| malformed("CMS offset overflows u64"))?;
         self.scope.account_container(1)?;
+        self.chunk_container += 1;
         self.scope.account_framing(1)?;
         Ok(value)
     }
@@ -318,7 +371,12 @@ impl<'a, 's> Reader<'a, 's> {
                     .known_len()
                     .ok_or_else(|| malformed("internal replay requires a bounded source"))?
             } else {
-                self.scope.limits().input_bytes
+                // Document plus container surcharge; actual bytes are classified
+                // and bounded separately by the scope while they are consumed.
+                self.scope
+                    .limits()
+                    .input_bytes
+                    .saturating_add(self.scope.limits().container_bytes)
             };
             if end > wire_limit {
                 return Err(ProcessingError::InputLimit.into());
@@ -385,6 +443,7 @@ impl<'a, 's> Reader<'a, 's> {
             let count = remaining.min((self.available - self.start) as u64) as usize;
             if !content {
                 self.scope.account_container(count as u64)?;
+                self.chunk_container += count as u64;
             }
             consume(&self.buffer[self.start..self.start + count], self.scope)?;
             self.start += count;
@@ -423,6 +482,60 @@ impl<'a, 's> Reader<'a, 's> {
         let mut value = Metadata::new(self.scope)?;
         self.capture(header, &mut value)?;
         value.normalize(self.scope)
+    }
+    /// The `[1] IMPLICIT RevocationInfoChoices` set. Its small elements are normalized one
+    /// by one like any metadata; a CRL encoding over [`BULK_MIN`] bytes is kept verbatim (it
+    /// must already be minimal DER, as [`crate::crl::serial_status`] requires) and counted as
+    /// bulk, so the normalizer never builds a tree of it and decoders never charge
+    /// amplification for it. Capacity is reserved once from the declared length before any
+    /// byte is read, so an oversized declaration is a typed limit, not an allocation.
+    pub fn revocation_set(
+        &mut self,
+        header: Header,
+        retain_bulk: bool,
+    ) -> Result<Metadata, StreamError> {
+        const PREFIX: usize = 10;
+        if header.tag & 0x20 == 0 {
+            return Err(malformed("constructed value required"));
+        }
+        let mut out = Metadata::new(self.scope)?;
+        if let Some(len) = header.len.filter(|_| retain_bulk) {
+            out.reserve_total(len.saturating_add(PREFIX as u64))?;
+        }
+        out.append(&[0; PREFIX])?;
+        self.enter(header)?;
+        while let Some(child) = self.next()? {
+            if let Some(len) = child
+                .len
+                .filter(|len| child.tag == 0x30 && child.encoded_len as u64 + *len > BULK_MIN)
+            {
+                if child.encoded_len != 1 + encoded_length(len).1 {
+                    return Err(malformed("a CRL over the BER limit must be DER"));
+                }
+                if retain_bulk {
+                    out.append(&child.encoded[..child.encoded_len])?;
+                    self.payload(len, false, |bytes, _| {
+                        out.append(bytes)?;
+                        Ok(())
+                    })?;
+                    out.bulk += child.encoded_len as u64 + len;
+                } else {
+                    self.payload(len, false, |_, _| Ok(()))?;
+                }
+            } else {
+                let mut piece = Metadata::new(self.scope)?;
+                self.capture(child, &mut piece)?;
+                let piece = piece.normalize(self.scope)?;
+                out.append(piece.as_bytes())?;
+            }
+        }
+        self.leave()?;
+        let (length, count) = encoded_length((out.bytes.len() - PREFIX) as u64);
+        let start = PREFIX - 1 - count;
+        out.bytes[start] = header.tag;
+        out.bytes[start + 1..PREFIX].copy_from_slice(&length[..count]);
+        out.bytes.drain(..start);
+        Ok(out)
     }
     pub fn finish(&mut self) -> Result<(), StreamError> {
         if self.depth != 0 {

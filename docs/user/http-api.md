@@ -46,7 +46,11 @@ A cryptographically invalid signature is a completed HTTP 200 result with
 `kind:"verification"` and `verdict:"Invalid"`, not HTTP 500. Results carry actual
 per-signer signature, chain, validity, revocation, timestamp and key-usage checks,
 the host policy, checked time and time basis. Diagnostic reasons are explanatory
-text, not additional authorization or a replacement for the typed check fields.
+text, not additional authorization or a replacement for the typed check fields. A signature
+that is cryptographically intact but misses a CAdES/PAdES baseline rule (for example the
+signing-time attribute Kalkan writes into a PAdES CMS, which EN 319 142-1 forbids) shows
+every check `Passed` or `Unavailable`, a `Profile(...)` reason and `verdict:"Invalid"`; read
+the verdict and the reasons together, not the six checks alone.
 
 ## Metadata-first multipart
 

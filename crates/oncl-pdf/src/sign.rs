@@ -5,7 +5,7 @@ use crate::{
 };
 use oncl_pki::{
     cms::stream::{CmsSignServices, SignSummary},
-    io::{FrozenInput, PdfSignatureOutput, Region, Source, StagedArtifact},
+    io::{PdfSignatureOutput, Region, Source, StagedArtifact},
     key::DigestSigner,
     resource::{IO_CHUNK_BYTES, ResourceScope},
     validation::Verdict,
@@ -135,8 +135,8 @@ pub(crate) fn plan(doc: &mut PdfDocument<'_, '_>, pades: bool) -> Result<Plan> {
                 extras.insert(k.to_vec(), v.clone());
             }
         }
-        for key in r.entries.keys() {
-            next = next.max(u64::from(*key) + 1);
+        if let Some(highest) = r.entries.max_id() {
+            next = next.max(u64::from(highest) + 1);
         }
     }
     let next = u32::try_from(next).map_err(|_| PdfError::Limit("object identifiers"))?;
@@ -295,7 +295,8 @@ fn sign_impl(
     let store = services
         .temporary()
         .ok_or(oncl_pki::cms::stream::StreamError::MissingTemporaryStore)?;
-    let mut snapshot = FrozenInput::capture(input, store, &mut operation)?;
+    let mut snapshot =
+        crate::verify::capture_signed(input, store, &profile.limits, &mut operation)?;
     let length = snapshot.len();
     let mut reader = snapshot.reader(
         &[Region {

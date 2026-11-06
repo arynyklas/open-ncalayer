@@ -809,6 +809,9 @@ fn host_evidence_limits_preflight_lta_and_restrict_carried_proofs() {
         max_items: 1,
         max_bytes: 6291456,
         max_item_bytes: 262144,
+        max_crl_bytes: 6291456,
+        max_crl_item_bytes: 262144,
+        max_total_bytes: 6291456,
         max_chain_len: 16,
         max_proofs: 1,
         max_coverage_parts: 256,
@@ -1444,6 +1447,9 @@ fn bounded_spec_preflights_combined_host_and_request_material_without_encoding_c
                 max_items: if count_limit { 2 } else { 24 },
                 max_bytes: if count_limit { 6291456 } else { size * 2 - 1 },
                 max_item_bytes: size,
+                max_crl_bytes: if count_limit { 6291456 } else { size * 2 - 1 },
+                max_crl_item_bytes: size,
+                max_total_bytes: if count_limit { 6291456 } else { size * 2 - 1 },
                 max_chain_len: 16,
                 max_proofs: 1,
                 max_coverage_parts: 256,
@@ -1494,6 +1500,9 @@ fn bounded_spec_preflights_combined_host_and_request_material_without_encoding_c
                 max_items: 24,
                 max_bytes: 6291456,
                 max_item_bytes: size - 1,
+                max_crl_bytes: 6291456,
+                max_crl_item_bytes: size - 1,
+                max_total_bytes: 6291456,
                 max_chain_len: 16,
                 max_proofs: 1,
                 max_coverage_parts: 256,
@@ -1970,4 +1979,63 @@ fn long_document_passes_do_not_age_the_status_checked_after_them() {
     // LT/LTA are NOT asserted here: their embedded status ages with the signing-time
     // acquisition, which is a separate, documented limitation (see the D2 report).
     assert_eq!(ticking_sign(AdesLevel::T, 1000), Ok(Verdict::Valid));
+}
+
+/// D3: NCANode/Kalkan writes `SigningCertificateV2/CertDigest` with the GOST R 34.11-2015
+/// digest for a GOST key. The strict XAdES structure check refused every level of that
+/// real output (`InvalidInput`) although the RSA/SHA-256 shape verified. The pinned
+/// fixtures are NCANode's own GOST 2015 documents (fetched, not committed).
+#[test]
+fn ncanode_gost_xades_with_a_gost_certificate_digest_is_structurally_accepted() {
+    use oncl_pki::evidence::AdesLevel;
+    for (level, expected) in [
+        ("b", AdesLevel::B),
+        ("t", AdesLevel::T),
+        ("lt", AdesLevel::Lt),
+        ("lta", AdesLevel::Lta),
+    ] {
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+        let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+        let anchors = oncl_pki::pkix::CaSet::new(vec![]);
+        let ctx = ValidationContext {
+            policy: ValidationPolicy::OfflineReport,
+            now: time::macros::datetime!(2026-11-02 12:00 UTC),
+            anchors: &anchors,
+            intermediates: &[],
+            http: &Offline,
+        };
+        let xml = read(oncl_testkit::ncanode(&format!(
+            "xades-test-signed-{level}.xml"
+        )));
+        let verification = verify_source(
+            Source::sequential(&mut Cursor::new(xml), None),
+            &XmlVerifyProfile {
+                required_level: Some(AdesLevel::B),
+                ..Default::default()
+            },
+            &store,
+            &ctx,
+            &NetworkPolicy::deny_all(),
+            &mut scope,
+        )
+        .unwrap_or_else(|error| panic!("{level}: {error:?}"));
+        let signers = verification.facts.signatures();
+        assert_eq!(signers.len(), 1, "{level}");
+        assert!(
+            signers[0]
+                .references()
+                .iter()
+                .all(|reference| reference.digest_matches),
+            "{level}"
+        );
+        // Chain trust is absent here, so the verdict is not Valid; but the level the
+        // structure carries must never exceed the evidence the document holds.
+        assert!(
+            signers[0].level.is_some_and(|l| l <= expected),
+            "{level}: {:?}",
+            signers[0].level
+        );
+    }
 }

@@ -14,6 +14,9 @@ pub struct FrozenInput {
     pub(super) pending_accounting: bool,
     pub(super) classification: Option<Arc<super::provisional::FormatClassification>>,
     pub(super) wire_digest: Option<crate::digest::DigestValue>,
+    /// Captured as a signed result whose container surcharge may exceed the
+    /// document allowance once classified; see [`Self::capture_signed`].
+    pub(super) surcharge: bool,
 }
 pub struct FrozenReader<'a> {
     input: &'a mut FrozenInput,
@@ -53,7 +56,53 @@ impl FrozenInput {
         store: &TemporaryStore,
         scope: &mut ResourceScope,
     ) -> Result<Self, ProcessingError> {
-        Self::capture_limited(source, store, scope, None, None)
+        Self::capture_limited(source, store, scope, None, None, false)
+    }
+    /// Capture a signed result (for example this SDK's own signed PDF) whose
+    /// wire may exceed the document allowance by a container surcharge. Wire is
+    /// bounded by the remaining document allowance plus the remaining
+    /// `container_bytes`; the caller MUST then call [`Self::settle_container_tail`]
+    /// to classify the surcharge. `maximum_surcharge` narrows (never widens)
+    /// `container_bytes` for this format, and wire beyond it fails while being
+    /// read, before it is spooled. Until settled, no further intake is admitted
+    /// and dropping the capture makes the operation's intake terminal.
+    pub fn capture_signed(
+        source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum_surcharge: u64,
+    ) -> Result<Self, ProcessingError> {
+        let overhead = scope.limits().container_bytes.min(maximum_surcharge);
+        Self::capture_limited(source, store, scope, None, Some(overhead), true)
+    }
+    /// Whether wire accounting is still awaiting [`Self::settle_container_tail`].
+    pub fn is_pending_container(&self) -> bool {
+        self.pending_accounting
+    }
+    /// Classify the last `tail` wire bytes as container surcharge and the rest as
+    /// document. The format parser must have verified that the tail is
+    /// structurally signature/revision material; the scope still enforces
+    /// `input_bytes` for the document part and `container_bytes` for the tail.
+    pub fn settle_container_tail(
+        &mut self,
+        tail: u64,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        if !self.surcharge || !self.pending_accounting {
+            return Err(ProcessingError::InvalidInput("no pending container intake"));
+        }
+        if !self.stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "snapshot belongs to another operation",
+            ));
+        }
+        let document = self
+            .len()
+            .checked_sub(tail)
+            .ok_or(ProcessingError::InvalidInput("container tail"))?;
+        scope.classify_signed_input(&self.identity, self.len(), document, tail)?;
+        self.pending_accounting = false;
+        Ok(())
     }
     /// Narrow the existing input/output role limit; never grant fresh input
     /// credit or convert an authenticated output projection to original input.
@@ -63,7 +112,7 @@ impl FrozenInput {
         scope: &mut ResourceScope,
         maximum: u64,
     ) -> Result<Self, ProcessingError> {
-        Self::capture_limited(source, store, scope, Some(maximum), None)
+        Self::capture_limited(source, store, scope, Some(maximum), None, false)
     }
     pub(super) fn capture_format(
         source: Source<'_>,
@@ -71,7 +120,7 @@ impl FrozenInput {
         scope: &mut ResourceScope,
         maximum_overhead: u64,
     ) -> Result<Self, ProcessingError> {
-        Self::capture_limited(source, store, scope, None, Some(maximum_overhead))
+        Self::capture_limited(source, store, scope, None, Some(maximum_overhead), false)
     }
     fn capture_limited(
         mut source: Source<'_>,
@@ -79,6 +128,7 @@ impl FrozenInput {
         scope: &mut ResourceScope,
         maximum: Option<u64>,
         format_overhead: Option<u64>,
+        surcharge: bool,
     ) -> Result<Self, ProcessingError> {
         // Authentic roles/foreign identities are checked BEFORE any debit,
         // pending ownership or originating-output invalidation.
@@ -132,6 +182,12 @@ impl FrozenInput {
                             .min(format_overhead.expect("pending overhead")),
                     ))
                 .min(u128::from(u64::MAX)) as u64
+            } else if surcharge && replay {
+                // Bytes of an already admitted same-operation snapshot.
+                scope
+                    .limits()
+                    .input_bytes
+                    .saturating_add(scope.limits().container_bytes)
             } else {
                 scope.limits().input_bytes
             };
@@ -185,7 +241,7 @@ impl FrozenInput {
                     active: true,
                 });
             }
-            let mut hash = (format_overhead.is_some() && prior.is_none())
+            let mut hash = (format_overhead.is_some() && prior.is_none() && !surcharge)
                 .then(|| crate::digest::HashState::new(crate::key::HashAlg::Sha256));
             let capacity = if maximum.is_some() {
                 extent_limit
@@ -260,13 +316,17 @@ impl FrozenInput {
                 stage,
                 identity: identity.clone(),
                 output_derived,
-                pending_format: format_overhead.is_some() && !output_derived && prior.is_none(),
+                pending_format: format_overhead.is_some()
+                    && !surcharge
+                    && !output_derived
+                    && prior.is_none(),
                 pending_accounting: pending,
                 wire_digest: prior
                     .as_ref()
                     .map(|ledger| ledger.digest)
                     .or_else(|| hash.map(crate::digest::HashState::finish)),
                 classification: prior.clone(),
+                surcharge,
             })
         })();
         if result.is_ok()
@@ -364,7 +424,7 @@ impl FrozenInput {
         }
         let extent_limit = if self.output_derived {
             scope.limits().output_bytes
-        } else if self.pending_format || self.classification.is_some() {
+        } else if self.pending_format || self.classification.is_some() || self.surcharge {
             self.len()
         } else {
             scope.limits().input_bytes
@@ -689,5 +749,13 @@ impl super::CapturedInput for FrozenInput {
         scope: &ResourceScope,
     ) -> Result<FrozenReader<'a>, ProcessingError> {
         self.reader(regions, scope)
+    }
+}
+
+impl Drop for FrozenInput {
+    fn drop(&mut self) {
+        if self.surcharge && self.pending_accounting {
+            self.stage.scope.abandon_signed_input(&self.identity);
+        }
     }
 }

@@ -96,6 +96,18 @@ impl Fixture {
         }
     }
     fn run(&self, old: Option<&[u8]>, level: AdesLevel) -> (Vec<u8>, ades::PadesReport) {
+        self.run_from(
+            old,
+            level,
+            include_bytes!("fixtures/external-multipage.pdf"),
+        )
+    }
+    fn run_from(
+        &self,
+        old: Option<&[u8]>,
+        level: AdesLevel,
+        source: &[u8],
+    ) -> (Vec<u8>, ades::PadesReport) {
         let temp = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(temp.path()).unwrap();
         let http = MockTsa::new(self.tsa.clone()).with_gen_time(NOW);
@@ -122,6 +134,9 @@ impl Fixture {
                 max_items: 64,
                 max_bytes: 8 << 20,
                 max_item_bytes: 1 << 20,
+                max_crl_bytes: 8 << 20,
+                max_crl_item_bytes: 1 << 20,
+                max_total_bytes: 8 << 20,
                 max_chain_len: 8,
                 max_proofs: 16,
                 max_coverage_parts: 1024,
@@ -150,10 +165,7 @@ impl Fixture {
         } else {
             ades::sign(
                 level,
-                Source::sequential(
-                    &mut Cursor::new(include_bytes!("fixtures/external-multipage.pdf")),
-                    None,
-                ),
+                Source::sequential(&mut Cursor::new(source), None),
                 &PdfSignProfile::default(),
                 &mut self.doc.clone(),
                 &services,
@@ -205,6 +217,31 @@ impl Fixture {
         crl: &[u8],
         action: impl FnOnce(&AdesServices<'_>) -> T,
     ) -> T {
+        self.context_limits(
+            now,
+            crl,
+            EvidenceLimits {
+                max_items: 64,
+                max_bytes: 8 << 20,
+                max_item_bytes: 1 << 20,
+                max_crl_bytes: 8 << 20,
+                max_crl_item_bytes: 1 << 20,
+                max_total_bytes: 8 << 20,
+                max_chain_len: 8,
+                max_proofs: 16,
+                max_coverage_parts: 1024,
+                max_coverage_bytes: 10_737_418_240,
+            },
+            action,
+        )
+    }
+    fn context_limits<T>(
+        &self,
+        now: OffsetDateTime,
+        crl: &[u8],
+        limits: EvidenceLimits,
+        action: impl FnOnce(&AdesServices<'_>) -> T,
+    ) -> T {
         let temp = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(temp.path()).unwrap();
         let http = MockTsa::new(self.tsa.clone()).with_gen_time(now);
@@ -231,15 +268,7 @@ impl Fixture {
             host_clock: None,
             network: &network,
             temporary: &store,
-            limits: EvidenceLimits {
-                max_items: 64,
-                max_bytes: 8 << 20,
-                max_item_bytes: 1 << 20,
-                max_chain_len: 8,
-                max_proofs: 16,
-                max_coverage_parts: 1024,
-                max_coverage_bytes: 10_737_418_240,
-            },
+            limits,
             tsa: None,
             material: ValidationMaterial {
                 certificates: &certs,
@@ -426,7 +455,7 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Prev {previous} /Root ",
-            doc.max_id + 1
+            doc.max_id + 1,
         )
         .as_bytes(),
     );
@@ -441,6 +470,241 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     }
     result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     result
+}
+/// One classic xref entry: (object, offset-or-next-free, generation, 'n' or 'f').
+type XrefLine = (u32, u64, u32, char);
+/// Appends an object-less increment with a hand-written xref section and a raw
+/// `/ID` trailer value (e.g. `[<aa> <bb>]`), so malformed IDs can be forged.
+fn append_raw(bytes: &[u8], lines: &[XrefLine], id: Option<&str>) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous = std::str::from_utf8(&bytes[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let mut result = bytes.to_vec();
+    result.push(b'\n');
+    let xref = result.len();
+    result.extend_from_slice(b"xref\n");
+    for (id, offset, generation, kind) in lines {
+        result.extend_from_slice(
+            format!("{id} 1\n{offset:010} {generation:05} {kind} \n").as_bytes(),
+        );
+    }
+    result.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Prev {previous} /Root ",
+            doc.max_id + 8,
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut result);
+    if let Ok(value) = doc.trailer.get(b"Info") {
+        result.extend_from_slice(b" /Info ");
+        encode_object(value, &mut result);
+    }
+    if let Some(id) = id {
+        result.extend_from_slice(format!(" /ID {id}").as_bytes());
+    }
+    result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    result
+}
+fn hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02X}")).collect()
+}
+fn id_pair(a: &[u8], b: &[u8]) -> String {
+    format!("[<{}> <{}>]", hex(a), hex(b))
+}
+fn trailer_id(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    doc.trailer
+        .get(b"ID")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_vec())
+        .collect()
+}
+/// `Ok(())` only when the increment passes the augmentation grammar and the
+/// document is then evaluated; otherwise the exact refusal text.
+fn grammar(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
+    match f.inspect(bytes, AdesLevel::B, NOW, &f.crl) {
+        Err(oncl_pdf::PdfError::Unsupported(m)) => Err(m.to_string()),
+        Err(e) => panic!("unexpected non-grammar error: {e:?}"),
+        Ok(report) => {
+            assert_eq!(report.verdict, Verdict::Valid);
+            Ok(())
+        }
+    }
+}
+const TRAILER: &str = "incremental trailer metadata change";
+const FREE: &str = "free or compressed augmentation entry";
+#[test]
+fn update_may_change_trailer_id_instance_and_relist_free_head_only() {
+    let f = Fixture::new();
+    let (lt, _) = f.run(None, AdesLevel::Lt);
+    let ids = trailer_id(&lt);
+    let original = ids[0].clone();
+    let head: XrefLine = (0, 0, 65535, 'f');
+    let new_id = id_pair(&original, &[9, 8, 7, 6]);
+    // The unchanged document is itself Valid; the same bytes plus an ID[1] change
+    // and the object 0 free head stay Valid.
+    assert_eq!(grammar(&f, &lt), Ok(()));
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], Some(&new_id))),
+        Ok(())
+    );
+    // ID[0] substitution.
+    let swapped = id_pair(&vec![1; original.len()], &[9, 8, 7, 6]);
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], Some(&swapped))),
+        Err(TRAILER.into())
+    );
+    // Malformed IDs: wrong length, non-string, indirect, missing.
+    for bad in [
+        format!("[<{}>]", hex(&original)),
+        format!("[<{}> <01> <02>]", hex(&original)),
+        format!("[<{}> 7]", hex(&original)),
+        "[7 <01>]".to_string(),
+        format!("[<{}> 7 0 R]", hex(&original)),
+        "7 0 R".to_string(),
+    ] {
+        assert_eq!(
+            grammar(&f, &append_raw(&lt, &[head], Some(&bad))),
+            Err(TRAILER.into()),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], None)),
+        Err(TRAILER.into())
+    );
+    // Freeing a real object is refused; only the object 0 head is exempt.
+    let doc = lopdf::Document::load_mem(&lt).unwrap();
+    let page = doc.get_pages().values().next().unwrap().0;
+    let deleted = append_raw(&lt, &[head, (page, 0, 1, 'f')], Some(&new_id));
+    assert_eq!(grammar(&f, &deleted), Err(FREE.into()));
+    // Head generation must be 65535.
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[(0, 0, 0, 'f')], Some(&new_id))),
+        Err(FREE.into())
+    );
+    // Head whose next-free link names a live object is refused; a link to another
+    // free entry is accepted.
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(&lt, &[(0, page as u64, 65535, 'f')], Some(&new_id))
+        ),
+        Err(FREE.into())
+    );
+    let spare = doc.max_id + 1;
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(
+                &lt,
+                &[(0, spare as u64, 65535, 'f'), (spare, 0, 1, 'f')],
+                Some(&new_id)
+            )
+        ),
+        Err(FREE.into()),
+        "a new free object is still an object-level change"
+    );
+    // Object 0 reported in use is not a free head: refused by the generic
+    // object rule (it points before the new revision).
+    let in_use = append_raw(&lt, &[(0, 12, 0, 'n')], Some(&new_id));
+    assert_eq!(
+        grammar(&f, &in_use),
+        Err("validation metadata aliases existing source object".into())
+    );
+    // The earlier increment is what trips first in the forgery above; a later
+    // head over it is refused identically.
+    assert_eq!(
+        grammar(&f, &append_raw(&in_use, &[head], Some(&new_id))),
+        Err("validation metadata aliases existing source object".into())
+    );
+}
+#[test]
+fn free_head_is_refused_when_object_zero_was_in_use_before_signing() {
+    let f = Fixture::new();
+    // The unsigned source already carries an increment listing object 0 as in use,
+    // so only the prior-state guard of the head check can refuse the later head.
+    let source = append_raw(
+        include_bytes!("fixtures/external-multipage.pdf"),
+        &[(0, 12, 0, 'n')],
+        None,
+    );
+    let (lt, _) = f.run_from(None, AdesLevel::Lt, &source);
+    let head: XrefLine = (0, 0, 65535, 'f');
+    let doc = lopdf::Document::load_mem(&lt).unwrap();
+    let id = doc.trailer.get(b"ID").ok().map(|_| {
+        let ids = trailer_id(&lt);
+        id_pair(&ids[0], &[9, 8, 7, 6])
+    });
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], id.as_deref())),
+        Err(FREE.into())
+    );
+}
+/// Appends an increment whose cross-reference is an uncompressed xref stream.
+fn append_xref_stream(bytes: &[u8], w2: usize, head_generation: u16, id: &str) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous = std::str::from_utf8(&bytes[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let mut result = bytes.to_vec();
+    result.push(b'\n');
+    let xref = result.len();
+    let own = doc.max_id + 1;
+    let mut data = vec![0, 0, 0, 0];
+    if w2 == 2 {
+        data.extend_from_slice(&head_generation.to_be_bytes());
+    }
+    data.extend_from_slice(&[1, (xref >> 16) as u8, (xref >> 8) as u8, xref as u8]);
+    if w2 == 2 {
+        data.extend_from_slice(&[0, 0]);
+    }
+    result.extend_from_slice(
+        format!(
+            "{own} 0 obj\n<< /Type /XRef /Size {} /W [1 3 {w2}] /Index [0 1 {own} 1] /Prev {previous} /Root ",
+            own + 1
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut result);
+    if let Ok(value) = doc.trailer.get(b"Info") {
+        result.extend_from_slice(b" /Info ");
+        encode_object(value, &mut result);
+    }
+    result.extend_from_slice(format!(" /ID {id} /Length {} >>\nstream\n", data.len()).as_bytes());
+    result.extend_from_slice(&data);
+    result.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    result
+}
+#[test]
+fn xref_stream_free_head_generation_field_is_tolerated_only_when_absent() {
+    let f = Fixture::new();
+    let (lt, _) = f.run(None, AdesLevel::Lt);
+    let original = trailer_id(&lt)[0].clone();
+    let id = id_pair(&original, &[9, 8, 7, 6]);
+    // W[2] == 0 (NCANode shape): head generation is implied.
+    assert_eq!(grammar(&f, &append_xref_stream(&lt, 0, 0, &id)), Ok(()));
+    // An explicit generation field must itself be 65535.
+    assert_eq!(grammar(&f, &append_xref_stream(&lt, 2, 65535, &id)), Ok(()));
+    assert_eq!(
+        grammar(&f, &append_xref_stream(&lt, 2, 0, &id)),
+        Err(FREE.into())
+    );
 }
 #[test]
 fn validation_update_cannot_alias_existing_page_as_acroform() {
@@ -646,6 +910,9 @@ fn with_tsa_counted<T>(
             max_items: 64,
             max_bytes: 8 << 20,
             max_item_bytes: 1 << 20,
+            max_crl_bytes: 8 << 20,
+            max_crl_item_bytes: 1 << 20,
+            max_total_bytes: 8 << 20,
             max_chain_len: 8,
             max_proofs: 16,
             max_coverage_parts: 1024,
@@ -1146,6 +1413,214 @@ fn initial_signed_catalog_permissions_are_not_silently_accepted() {
         bytes[range[1] + 2 + index * 2] = b"0123456789ABCDEF"[(byte & 15) as usize];
     }
     f.rejected(&bytes);
+}
+
+/// The `/ByteRange` of the only signature of a PAdES file, from an independent parser.
+fn only_byte_range(bytes: &[u8]) -> [usize; 4] {
+    let doc = lopdf::Document::load_mem(bytes).unwrap();
+    let signature = doc
+        .objects
+        .values()
+        .filter_map(|value| value.as_dict().ok())
+        .find(|d| {
+            d.get(b"Type")
+                .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Sig"))
+        })
+        .unwrap();
+    let range: Vec<_> = signature
+        .get(b"ByteRange")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as usize)
+        .collect();
+    range.try_into().unwrap()
+}
+
+/// What Kalkan (NCALayer/NCANode `/pdf/sign`) puts into an ETSI.CAdES.detached `/Contents`:
+/// contentType, signingTime, signingCertificateV2 and messageDigest over the ByteRange, no
+/// CMSAlgorithmProtection. The CMS is written over the original reserved space, so the rest
+/// of the file (the covered bytes) is untouched.
+fn with_kalkan_style_cms(f: &Fixture, mut bytes: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+    use oncl_pki::cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec};
+    let range = only_byte_range(&bytes);
+    let mut protected = bytes[..range[1]].to_vec();
+    protected.extend_from_slice(&bytes[range[2]..range[2] + range[3]]);
+    let cms = cms::sign_spec(
+        &f.doc,
+        &[],
+        &SignSpec {
+            content: Content::Data(&protected),
+            encapsulate: false,
+            cosign: CoSign::Never,
+            econtent_type: None,
+            digest: None,
+            attrs: AttrSpec::cades(NOW),
+            certificates: CertSpec::Signer,
+        },
+    )
+    .unwrap();
+    cms::verify(&cms, Some(&protected)).unwrap();
+    assert!(cms.len() * 2 <= range[2] - range[1] - 2, "reserved space");
+    bytes[range[1] + 1..range[2] - 1].fill(b'0');
+    for (index, byte) in cms.iter().enumerate() {
+        bytes[range[1] + 1 + index * 2] = b"0123456789ABCDEF"[(byte >> 4) as usize];
+        bytes[range[1] + 2 + index * 2] = b"0123456789ABCDEF"[(byte & 15) as usize];
+    }
+    (bytes, cms)
+}
+
+fn only_signer(report: &ades::PadesReport) -> &oncl_pki::validation::SignerValidation {
+    assert_eq!(report.signatures().len(), 1);
+    assert_eq!(report.signatures()[0].validation.signers.len(), 1);
+    &report.signatures()[0].validation.signers[0]
+}
+
+#[test]
+fn kalkan_style_signing_time_is_a_profile_finding_not_a_failed_malformed_signature() {
+    use oncl_pki::validation::{CheckStatus, ProfileViolation, ValidationReason};
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (bytes, _) = with_kalkan_style_cms(&f, original);
+    let report = f.inspect(&bytes, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    // The signature value, the ByteRange digest and the signing certificate binding verify
+    // (the `pdf` profile accepts the same bytes: see the next test).
+    assert_eq!(signer.signature, CheckStatus::Passed);
+    assert!(
+        signer
+            .reasons
+            .iter()
+            .all(|reason| !matches!(reason, ValidationReason::Signature(_))),
+        "{:?}",
+        signer.reasons
+    );
+    // EN 319 142-1 table 1: a PAdES baseline CMS carries no signing-time attribute (the
+    // claimed time is the dictionary's /M), so the grade is "not conformant to this profile".
+    assert!(
+        signer.reasons.contains(&ValidationReason::Profile(
+            ProfileViolation::SigningTimeForbidden
+        )),
+        "{:?}",
+        signer.reasons
+    );
+    assert_eq!(signer.ades_level, None);
+    assert_eq!(report.verdict, Verdict::Invalid);
+    assert_eq!(report.level(), None);
+    // Nothing may be extended from a signature that does not meet the profile.
+    f.rejected(&bytes);
+}
+
+#[test]
+fn kalkan_style_pdf_is_accepted_by_the_generic_pdf_profile_with_the_same_signature_verdict() {
+    use oncl_pki::validation::CheckStatus;
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (bytes, _) = with_kalkan_style_cms(&f, original);
+    let report = f.context(NOW, &f.crl, |services| {
+        oncl_pdf::verify_source(
+            Source::sequential(&mut Cursor::new(&bytes), None),
+            &PdfLimits::default(),
+            services.temporary,
+            services.validation,
+            &[SigAlg::RsaSha256],
+            &mut scope(),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        report.signatures[0].validation.signers[0].signature,
+        CheckStatus::Passed
+    );
+}
+
+#[test]
+fn tampered_kalkan_style_pades_still_fails_with_the_cryptographic_reason() {
+    use oncl_pki::{
+        cms::Problem,
+        validation::{CheckStatus, ProfileViolation, ValidationReason},
+    };
+    let f = Fixture::new();
+    let (original, _) = f.run(None, AdesLevel::B);
+    let (good, cms) = with_kalkan_style_cms(&f, original);
+    let range = only_byte_range(&good);
+
+    // A covered content byte (a digit of the claimed /M date) no longer matches the
+    // messageDigest.
+    let mut content = good.clone();
+    let m = content[..range[1]]
+        .windows(4)
+        .position(|w| w == b"(D:2")
+        .unwrap()
+        + 10;
+    assert!(content[m].is_ascii_digit());
+    content[m] = if content[m] == b'1' { b'2' } else { b'1' };
+    let report = f.inspect(&content, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    assert_eq!(signer.signature, CheckStatus::Failed);
+    assert!(
+        signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::DigestMismatch)),
+        "{:?}",
+        signer.reasons
+    );
+    assert_ne!(report.verdict, Verdict::Valid);
+
+    // The signature value no longer verifies; the messageDigest still matches the bytes.
+    let mut forged = good.clone();
+    let last = range[1] + 1 + (cms.len() - 1) * 2;
+    forged[last] = if forged[last] == b'0' { b'1' } else { b'0' };
+    let report = f.inspect(&forged, AdesLevel::B, NOW, &f.crl).unwrap();
+    let signer = only_signer(&report);
+    assert_eq!(signer.signature, CheckStatus::Failed);
+    assert!(
+        !signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::DigestMismatch)),
+        "{:?}",
+        signer.reasons
+    );
+    assert!(
+        signer
+            .reasons
+            .contains(&ValidationReason::Signature(Problem::BadSignature)),
+        "{:?}",
+        signer.reasons
+    );
+    assert_ne!(report.verdict, Verdict::Valid);
+    // A profile finding rides along, it never replaces the failure.
+    assert!(signer.reasons.contains(&ValidationReason::Profile(
+        ProfileViolation::SigningTimeForbidden
+    )));
+
+    // A ByteRange that no longer matches /Contents is not a verifiable signature at all.
+    let mut shifted = good.clone();
+    let key = shifted
+        .windows(10)
+        .position(|w| w == b"/ByteRange")
+        .unwrap();
+    // `/ByteRange [<20-digit start> <20-digit first length> ...`
+    let second = key + "/ByteRange [".len() + 21;
+    assert_eq!(
+        std::str::from_utf8(&shifted[second..second + 20])
+            .unwrap()
+            .parse::<usize>()
+            .unwrap(),
+        range[1]
+    );
+    let at = second + 19;
+    assert!(shifted[at].is_ascii_digit());
+    shifted[at] = if shifted[at] == b'9' {
+        b'8'
+    } else {
+        shifted[at] + 1
+    };
+    assert!(
+        !f.inspect(&shifted, AdesLevel::B, NOW, &f.crl)
+            .is_ok_and(|r| r.verdict == Verdict::Valid)
+    );
 }
 
 // Count real allocation work on this test thread only. Other parallel tests
@@ -1946,4 +2421,335 @@ fn final_check_rejects_an_old_signature_that_stopped_validating_after_key_use() 
             assert!(!readable);
         }
     }
+}
+
+// ---- DSS evidence streams are recorded as regions (D1) ------------------------------------
+
+fn find_from(hay: &[u8], needle: &[u8], from: usize) -> usize {
+    from + hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("needle")
+}
+
+/// `lt` with the DSS CRL stream whose body is `old_crl` replaced by `header` (the dictionary
+/// and `stream` keyword line) and `body`, the incremental cross-reference stream shifted to
+/// match, so every other object, the xref and `startxref` stay consistent.
+fn replace_crl_stream(lt: &[u8], old_crl: &[u8], header: &str, body: &[u8]) -> Vec<u8> {
+    let body_pos = find_from(lt, old_crl, 0);
+    let old_header = format!("<< /Length {} >>\nstream\n", old_crl.len());
+    let start = body_pos - old_header.len();
+    assert_eq!(&lt[start..body_pos], old_header.as_bytes());
+    let old_end = body_pos + old_crl.len();
+    let mut out = lt[..start].to_vec();
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body);
+    out.extend_from_slice(&lt[old_end..]);
+    let delta = (header.len() + body.len()) as i64 - (old_header.len() + old_crl.len()) as i64;
+    // The last revision's xref is a stream of 11-byte rows: type, 8-byte offset, generation.
+    let xref = find_from(&out, b"/Type /XRef", start);
+    let length_at = find_from(&out, b"/Length ", xref) + 8;
+    let digits = out[length_at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let length: usize = std::str::from_utf8(&out[length_at..length_at + digits])
+        .unwrap()
+        .parse()
+        .unwrap();
+    let rows = find_from(&out, b"stream\n", xref) + 7;
+    for row in 0..length / 11 {
+        let at = rows + row * 11;
+        let offset = u64::from_be_bytes(out[at + 1..at + 9].try_into().unwrap());
+        if out[at] == 1 && offset > start as u64 {
+            out[at + 1..at + 9].copy_from_slice(&((offset as i64 + delta) as u64).to_be_bytes());
+        }
+    }
+    let sx = out.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+    let end = find_from(&out, b"\n", sx);
+    let value: i64 = std::str::from_utf8(&out[sx..end]).unwrap().parse().unwrap();
+    out.splice(sx..end, (value + delta).to_string().bytes());
+    out
+}
+
+fn lt_with_crl(f: &Fixture) -> Vec<u8> {
+    let (t, _) = f.run(None, AdesLevel::T);
+    f.run(Some(&t), AdesLevel::Lt).0
+}
+
+fn wide_limits() -> EvidenceLimits {
+    EvidenceLimits {
+        max_items: 64,
+        max_bytes: 16 << 20,
+        max_item_bytes: 1 << 20,
+        max_crl_bytes: 16 << 20,
+        max_crl_item_bytes: 8 << 20,
+        max_total_bytes: 16 << 20,
+        max_chain_len: 8,
+        max_proofs: 16,
+        max_coverage_parts: 1024,
+        max_coverage_bytes: 10_737_418_240,
+    }
+}
+
+/// A current CRL of the fixture root that is `target` bytes of DER (padded by one unknown
+/// non-critical CRL extension, whose length fields are stable in this size range).
+fn root_crl_of_size(f: &Fixture, target: usize) -> Vec<u8> {
+    use der::asn1::OctetString;
+    use x509_cert::ext::Extension;
+    let build = |pad: usize| {
+        MockCrl::new(f.root.clone())
+            .with_this_update(NOW - time::Duration::MINUTE)
+            .next_update(Some(NOW + time::Duration::HOUR))
+            .extension(Extension {
+                extn_id: "1.2.3.4.5".parse().unwrap(),
+                critical: false,
+                extn_value: OctetString::new(vec![0u8; pad]).unwrap(),
+            })
+            .der()
+    };
+    let first = build(target / 2);
+    let pad = target / 2 + target - first.len();
+    let exact = build(pad);
+    assert_eq!(exact.len(), target);
+    exact
+}
+
+fn verify_lt(f: &Fixture, bytes: &[u8]) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    verify_lt_budget(f, bytes, None)
+}
+
+fn verify_lt_budget(
+    f: &Fixture,
+    bytes: &[u8],
+    memory: Option<u64>,
+) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    f.context_limits(NOW, &[], wide_limits(), |services| {
+        let mut scope = match memory {
+            Some(memory) => scope_with_memory(memory),
+            None => scope(),
+        };
+        ades::verify(
+            AdesLevel::Lt,
+            Source::sequential(&mut Cursor::new(bytes), None),
+            &PdfLimits::default(),
+            services,
+            &[SigAlg::RsaSha256],
+            &mut scope,
+        )
+    })
+}
+
+fn scope_with_memory(memory: u64) -> ResourceScope {
+    let limits = ResourceLimits {
+        memory_bytes: memory,
+        metadata_bytes: 64 << 20,
+        temp_bytes: 256 << 20,
+        ..ResourceLimits::default()
+    };
+    Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Control))
+        .unwrap()
+}
+
+#[test]
+fn dss_crl_stream_over_one_mib_is_a_region_not_a_window() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    // The patcher alone changes nothing.
+    let same = replace_crl_stream(
+        &lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", f.crl.len()),
+        &f.crl,
+    );
+    assert_eq!(same, lt);
+    // A 3 MiB CRL (the reader's old window and decode caps are 1 MiB and 4 MiB) verifies.
+    let big = root_crl_of_size(&f, 3 << 20);
+    let patched = replace_crl_stream(
+        &lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", big.len()),
+        &big,
+    );
+    let report = verify_lt(&f, &patched).unwrap();
+    assert_eq!(report.verdict, Verdict::Valid);
+}
+
+#[test]
+fn dss_crl_stream_length_past_the_end_of_file_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = format!("<< /Length {} >>\nstream\n", lt.len() + 4096);
+    let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+    assert!(matches!(
+        verify_lt(&f, &patched),
+        Err(oncl_pdf::PdfError::Malformed("stream beyond the source"))
+    ));
+}
+
+#[test]
+fn dss_crl_stream_length_off_the_endstream_keyword_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    // One short (lands inside the body) and two long (lands inside the keyword).
+    for length in [f.crl.len() - 1, f.crl.len() + 2] {
+        let header = format!("<< /Length {length} >>\nstream\n");
+        let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+        assert!(
+            matches!(
+                verify_lt(&f, &patched),
+                Err(oncl_pdf::PdfError::Malformed(_))
+            ),
+            "length {length}"
+        );
+    }
+}
+
+#[test]
+fn dss_crl_stream_with_a_filter_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = format!(
+        "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+        f.crl.len()
+    );
+    let patched = replace_crl_stream(&lt, &f.crl, &header, &f.crl);
+    assert!(matches!(
+        verify_lt(&f, &patched),
+        Err(oncl_pdf::PdfError::Unsupported("filtered evidence stream"))
+    ));
+}
+
+#[test]
+fn dss_crl_stream_with_an_indirect_length_is_refused() {
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let header = "<< /Length 21 0 R >>\nstream\n";
+    let patched = replace_crl_stream(&lt, &f.crl, header, &f.crl);
+    assert!(verify_lt(&f, &patched).is_err());
+}
+
+fn small_pdf_limits() -> PdfLimits {
+    PdfLimits {
+        max_object_bytes: 1 << 16,
+        max_decoded_bytes: 1 << 18,
+        max_objects: 512,
+        ..PdfLimits::default()
+    }
+}
+
+fn refused_for_memory(result: Result<ades::PadesReport, oncl_pdf::PdfError>) -> bool {
+    matches!(&result, Err(error) if format!("{error:?}").contains("MemoryLimit"))
+}
+
+/// The LT document whose DSS CRL is `crl`.
+fn lt_with_dss_crl(f: &Fixture, lt: &[u8], crl: &[u8]) -> Vec<u8> {
+    replace_crl_stream(
+        lt,
+        &f.crl,
+        &format!("<< /Length {} >>\nstream\n", crl.len()),
+        crl,
+    )
+}
+
+fn verify_small(
+    f: &Fixture,
+    bytes: &[u8],
+    level: AdesLevel,
+    crl: &[u8],
+    memory: u64,
+) -> Result<ades::PadesReport, oncl_pdf::PdfError> {
+    f.context_limits(NOW, crl, wide_limits(), |services| {
+        ades::verify(
+            level,
+            Source::sequential(&mut Cursor::new(bytes), None),
+            &small_pdf_limits(),
+            services,
+            &[SigAlg::RsaSha256],
+            &mut scope_with_memory(memory << 20),
+        )
+    })
+}
+
+const AT_LIMIT: usize = oncl_pki::crl::MAX_BER_CRL_LEN;
+
+#[test]
+fn snapshot_charge_applies_the_scan_in_place_rule_only_over_the_ber_limit() {
+    // Same document, same small PDF reader, 64 MiB of RAM: a DSS CRL of exactly the BER limit
+    // may be BER and keeps the amplified charge (refused); one byte more is DER only and is
+    // charged once (admitted).
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let at = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT));
+    let over = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT + 1));
+    assert!(refused_for_memory(verify_small(
+        &f,
+        &at,
+        AdesLevel::Lt,
+        &[],
+        64
+    )));
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 64)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+}
+
+#[test]
+fn snapshot_charge_applies_the_same_rule_to_caller_supplied_crls() {
+    // No DSS: the CRL is operator material (`services.material.crls`).
+    let f = Fixture::new();
+    let (t, _) = f.run(None, AdesLevel::T);
+    let at = root_crl_of_size(&f, AT_LIMIT);
+    let over = root_crl_of_size(&f, AT_LIMIT + 1);
+    assert!(refused_for_memory(verify_small(
+        &f,
+        &t,
+        AdesLevel::B,
+        &at,
+        64
+    )));
+    assert_eq!(
+        verify_small(&f, &t, AdesLevel::B, &over, 64)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+}
+
+#[test]
+fn evidence_readback_charge_applies_the_rule_only_over_the_ber_limit() {
+    // 160 MiB lets the snapshot charge through, so the refusal below is the evidence
+    // readback's: a CRL of exactly the BER limit is read back with amplification.
+    let f = Fixture::new();
+    let lt = lt_with_crl(&f);
+    let at = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT));
+    let over = lt_with_dss_crl(&f, &lt, &root_crl_of_size(&f, AT_LIMIT + 1));
+    let error = verify_small(&f, &at, AdesLevel::Lt, &[], 160).unwrap_err();
+    assert!(format!("{error:?}").contains("Evidence"), "{error:?}");
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 160)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+    // And a CRL over the limit is not amplified at the readback: 24 MiB would refuse a
+    // 32x charge of 1 MiB but admits the single charge.
+    assert_eq!(
+        verify_small(&f, &over, AdesLevel::Lt, &[], 24)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
+    let (t, _) = f.run(None, AdesLevel::T);
+    let supplied = root_crl_of_size(&f, AT_LIMIT + 1);
+    assert_eq!(
+        verify_small(&f, &t, AdesLevel::B, &supplied, 24)
+            .unwrap()
+            .verdict,
+        Verdict::Valid
+    );
 }

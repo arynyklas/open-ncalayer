@@ -842,6 +842,75 @@ fn decode_id(uri: &str) -> Result<String> {
     }
     String::from_utf8(bytes).map_err(|_| invalid("URI fragment UTF-8"))
 }
+/// Resolves a `Reference/@URI` to `(target, missing, drop_comments)`: `None` is the
+/// whole document. Shared by verification and by the key-independent preflight of an
+/// Add, so both read a reference identically.
+fn resolve_reference_uri(
+    document: &mut XmlDocument,
+    reference: Node<'_, '_>,
+    work: &mut u64,
+    scope: &ResourceScope,
+) -> Result<(Option<Region>, bool, bool)> {
+    let uri = reference
+        .attribute("URI")
+        .ok_or_else(|| invalid("Reference without URI"))?;
+    if uri.is_empty() {
+        return Ok((None, false, true));
+    }
+    let fragment = decode_id(uri)?;
+    let Some(expression) = fragment
+        .strip_prefix("xpointer(")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        let target = document
+            .lookup_id(&fragment)?
+            .map(|n| document.node_region(&n))
+            .transpose()?;
+        return Ok((target, target.is_none(), true));
+    };
+    if expression == "/" {
+        return Ok((None, false, false));
+    }
+    let node = if let Some(literal) = expression
+        .strip_prefix("id(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let quote = literal
+            .as_bytes()
+            .first()
+            .copied()
+            .ok_or_else(|| invalid("xpointer id"))?;
+        if !matches!(quote, b'\'' | b'"')
+            || literal.len() < 2
+            || literal.as_bytes().last() != Some(&quote)
+            || literal.as_bytes()[1..literal.len() - 1].contains(&quote)
+        {
+            return Err(invalid("xpointer id literal"));
+        }
+        let identity = &literal[1..literal.len() - 1];
+        if identity.is_empty()
+            || identity
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            return Err(XmlSourceError::Unsupported(
+                "empty or multi-ID XPointer id()",
+            ));
+        }
+        document.lookup_id(identity)?
+    } else {
+        *work = work
+            .checked_sub(document.len())
+            .ok_or(ProcessingError::InvalidInput("reference work limit"))?;
+        let namespaces: Vec<_> = reference
+            .namespaces()
+            .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
+            .collect();
+        document.select_xpath_unique(expression, &namespaces, scope)?
+    };
+    let target = node.map(|n| document.node_region(&n)).transpose()?;
+    Ok((target, target.is_none(), false))
+}
 struct ReferenceVerifier<'a> {
     document: &'a mut XmlDocument,
     profile: &'a XmlVerifyProfile,
@@ -890,71 +959,8 @@ impl ReferenceVerifier<'_> {
         if *self.count > self.profile.max_references {
             return Err(ProcessingError::MetadataLimit.into());
         }
-        let uri = reference
-            .attribute("URI")
-            .ok_or_else(|| invalid("Reference without URI"))?;
-        let (target, missing, drop_comments) = if uri.is_empty() {
-            (None, false, true)
-        } else {
-            let fragment = decode_id(uri)?;
-            if let Some(expression) = fragment
-                .strip_prefix("xpointer(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                if expression == "/" {
-                    (None, false, false)
-                } else {
-                    let node = if let Some(literal) = expression
-                        .strip_prefix("id(")
-                        .and_then(|s| s.strip_suffix(')'))
-                    {
-                        let quote = literal
-                            .as_bytes()
-                            .first()
-                            .copied()
-                            .ok_or_else(|| invalid("xpointer id"))?;
-                        if !matches!(quote, b'\'' | b'"')
-                            || literal.len() < 2
-                            || literal.as_bytes().last() != Some(&quote)
-                            || literal.as_bytes()[1..literal.len() - 1].contains(&quote)
-                        {
-                            return Err(invalid("xpointer id literal"));
-                        }
-                        let identity = &literal[1..literal.len() - 1];
-                        if identity.is_empty()
-                            || identity
-                                .bytes()
-                                .any(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-                        {
-                            return Err(XmlSourceError::Unsupported(
-                                "empty or multi-ID XPointer id()",
-                            ));
-                        }
-                        self.document.lookup_id(identity)?
-                    } else {
-                        *self.work = self
-                            .work
-                            .checked_sub(self.document.len())
-                            .ok_or(ProcessingError::InvalidInput("reference work limit"))?;
-                        let namespaces: Vec<_> = reference
-                            .namespaces()
-                            .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
-                            .collect();
-                        self.document
-                            .select_xpath_unique(expression, &namespaces, self.scope)?
-                    };
-                    let target = node.map(|n| self.document.node_region(&n)).transpose()?;
-                    (target, target.is_none(), false)
-                }
-            } else {
-                let target = self
-                    .document
-                    .lookup_id(&fragment)?
-                    .map(|n| self.document.node_region(&n))
-                    .transpose()?;
-                (target, target.is_none(), true)
-            }
-        };
+        let (target, missing, drop_comments) =
+            resolve_reference_uri(self.document, reference, self.work, self.scope)?;
         let mut method = C14n::Inclusive;
         let mut inclusive = Vec::new();
         let mut enveloped = false;

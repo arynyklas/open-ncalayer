@@ -185,10 +185,11 @@ impl ScopedSigners {
             sources.push(growth);
             self._sources = sources;
         }
-        if matches!(&reason, ValidationReason::Signature(_)) {
-            signer.signature = CheckStatus::Failed;
-        } else {
-            signer.timestamp = CheckStatus::Failed;
+        match &reason {
+            ValidationReason::Signature(_) => signer.signature = CheckStatus::Failed,
+            // The signature itself verified; only the claimed conformance level is lost.
+            ValidationReason::Profile(_) => {}
+            _ => signer.timestamp = CheckStatus::Failed,
         }
         signer.ades_level = None;
         signer.reasons.push(reason);
@@ -235,10 +236,31 @@ pub enum FormatFailure {
     ReferenceDigestMismatch,
     ReferenceTargetMissing,
 }
+/// A requirement of the CAdES/PAdES baseline that was asked for and that an otherwise
+/// cryptographically intact signature does not meet. The signature value, the signed-data
+/// digest and the signing-certificate binding are not in question: such a finding never
+/// marks the signature check failed, but the signature cannot claim a conformance level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileViolation {
+    /// A PAdES CMS carries a signing-time attribute. EN 319 142-1 table 1 forbids it:
+    /// the claimed signing time is the signature dictionary's `/M`.
+    SigningTimeForbidden,
+    /// A CAdES CMS carries no signing-time attribute. EN 319 122-1 clause 6.3 table 1
+    /// requires it at every baseline level (clause 5.2.1 only defines the attribute).
+    SigningTimeMissing,
+    /// The encapsulated content type is not id-data (EN 319 122-1 clause 6.3 table 1
+    /// note f; clause 4.2).
+    ContentTypeNotData,
+    /// Neither signing-certificate nor signing-certificate-v2 protects the signer
+    /// certificate (EN 319 122-1 clause 6.3 table 1, "protection of signing certificate
+    /// shall be provided"; clause 5.2.2 gives the attribute syntax).
+    SigningCertificateMissing,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationReason {
     Signature(cms::Problem),
     Format(FormatFailure),
+    Profile(ProfileViolation),
     CertificateValidity,
     UntrustedChain,
     KeyUsage,
@@ -362,7 +384,13 @@ impl SignerValidation {
             self.timestamp,
             self.key_usage,
         ];
-        if checks.contains(&CheckStatus::Failed) {
+        // A signature that misses the requested baseline is not valid at that profile even
+        // though every cryptographic check passed.
+        let profile = self
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, ValidationReason::Profile(_)));
+        if checks.contains(&CheckStatus::Failed) || profile {
             Verdict::Invalid
         } else if checks.contains(&CheckStatus::Unavailable) {
             Verdict::Indeterminate
@@ -930,15 +958,16 @@ pub(crate) fn offline_revocation<'a>(
         }
         if status.is_none() {
             for bytes in crls {
-                if let Ok(crl) = crl::verify_crl(bytes, issuer, now) {
-                    status = Some(
-                        match crl::lookup(&crl, cert.tbs_certificate().serial_number().as_bytes()) {
-                            CrlStatus::Good => CertStatus::Good,
-                            CrlStatus::Revoked { time, reason } => {
-                                CertStatus::Revoked { time, reason }
-                            }
-                        },
-                    );
+                if let Ok(found) = crl::serial_status(
+                    bytes,
+                    issuer,
+                    cert.tbs_certificate().serial_number().as_bytes(),
+                    now,
+                ) {
+                    status = Some(match found {
+                        CrlStatus::Good => CertStatus::Good,
+                        CrlStatus::Revoked { time, reason } => CertStatus::Revoked { time, reason },
+                    });
                     break;
                 }
             }

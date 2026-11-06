@@ -40,6 +40,7 @@ base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+flate2.workspace = true
 oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 base64.workspace = true

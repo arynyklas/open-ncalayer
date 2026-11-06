@@ -401,6 +401,9 @@ pub(super) fn evidence_limits(limits: &oncl_pki::resource::ResourceLimits) -> Ev
         max_items: 128,
         max_bytes: limits.metadata_bytes.min(16 << 20),
         max_item_bytes: limits.metadata_bytes.min(2 << 20),
+        max_crl_bytes: limits.metadata_bytes.min(16 << 20),
+        max_crl_item_bytes: limits.metadata_bytes.min(2 << 20),
+        max_total_bytes: limits.metadata_bytes.min(16 << 20),
         max_chain_len: 8,
         max_proofs: 16,
         max_coverage_parts: 4096,
@@ -785,6 +788,7 @@ pub(super) fn memory_preflight(
         };
         signature_count_fits(prior.count, limits.max_signatures)?;
         let inputs = oncl_pdf::budget::PlanInputs {
+            xref_entries: prior.xref_entries,
             prior_contents_sum: prior.contents_sum,
             prior_contents_max: prior.contents_max,
             evidence_bytes,
