@@ -18,7 +18,7 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn len(&self) -> u64 {
+    pub fn byte_len(&self) -> u64 {
         match self {
             Source::Bytes(b) => b.len() as u64,
             Source::Pattern { len, .. } => *len,
@@ -128,7 +128,9 @@ impl Wire<'_> {
     }
 }
 
-fn read_head(stream: &mut TcpStream) -> std::io::Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+type Head = (u16, Vec<(String, String)>, Vec<u8>);
+
+fn read_head(stream: &mut TcpStream) -> std::io::Result<Head> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -163,7 +165,12 @@ fn read_body(
     headers: &[(String, String)],
     reply: &mut Reply,
 ) -> std::io::Result<()> {
-    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
     let push = |data: &[u8], reply: &mut Reply| {
         reply.body_len += data.len() as u64;
         let room = CAPTURE.saturating_sub(reply.body.len());
@@ -184,7 +191,11 @@ fn read_body(
                 }
             }
             let size = usize::from_str_radix(
-                String::from_utf8_lossy(&line).trim().split(';').next().unwrap_or("0"),
+                String::from_utf8_lossy(&line)
+                    .trim()
+                    .split(';')
+                    .next()
+                    .unwrap_or("0"),
                 16,
             )
             .map_err(std::io::Error::other)?;
@@ -247,7 +258,7 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
     stream.set_write_timeout(Some(Duration::from_secs(3600)))?;
     let head = prelude(up);
     let tail = epilogue();
-    let total = head.len() as u64 + up.document.len() + tail.len() as u64;
+    let total = head.len() as u64 + up.document.byte_len() + tail.len() as u64;
     let mut request = format!(
         "POST {} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nConnection: close\r\n",
         up.path
@@ -289,7 +300,9 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
         let paced = Instant::now();
         loop {
             let want = match (up.abort_after, up.stall_after) {
-                (Some(limit), _) | (None, Some((limit, _))) => (limit.saturating_sub(sent)).min(buf.len() as u64) as usize,
+                (Some(limit), _) | (None, Some((limit, _))) => {
+                    (limit.saturating_sub(sent)).min(buf.len() as u64) as usize
+                }
                 _ => buf.len(),
             };
             if want == 0 {
@@ -326,7 +339,11 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
             while Instant::now() < until {
                 match peek.peek(&mut one) {
                     Ok(_) => return Ok(true),
-                    Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
                     Err(_) => return Ok(true),
                 }
             }
@@ -399,12 +416,11 @@ pub fn multipart_final(reply: &Reply) -> Option<(serde_json::Value, Vec<u8>)> {
         let head_start = part_start + 2;
         let head_end = find(body, b"\r\n\r\n", head_start)?;
         let head = String::from_utf8_lossy(&body[head_start..head_end]).into_owned();
-        let length = head
-            .lines()
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
-            });
+        let length = head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse::<usize>().ok())?
+        });
         let data_start = head_end + 4;
         let data_end = match length {
             Some(len) => data_start + len,
@@ -426,5 +442,9 @@ pub fn multipart_final(reply: &Reply) -> Option<(serde_json::Value, Vec<u8>)> {
 }
 
 fn find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    haystack.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
 }

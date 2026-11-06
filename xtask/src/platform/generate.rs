@@ -65,11 +65,10 @@ impl Rng {
     }
 
     pub fn fill(&mut self, out: &mut [u8]) {
-        let mut chunks = out.chunks_exact_mut(8);
-        for chunk in &mut chunks {
-            chunk.copy_from_slice(&self.next_u64().to_le_bytes());
+        let (chunks, rest) = out.as_chunks_mut::<8>();
+        for chunk in chunks {
+            *chunk = self.next_u64().to_le_bytes();
         }
-        let rest = chunks.into_remainder();
         if !rest.is_empty() {
             let word = self.next_u64().to_le_bytes();
             rest.copy_from_slice(&word[..rest.len()]);
@@ -204,9 +203,9 @@ pub mod blob {
             }
             let take = (remaining - overhead).min(FRAME_PAYLOAD as u64) as usize;
             rng.fill(&mut payload[..take]);
-            let checksum = payload[..take]
-                .chunks(8)
-                .fold(0u32, |a, c| a.rotate_left(5) ^ u32::from(c[0]) ^ c.len() as u32);
+            let checksum = payload[..take].chunks(8).fold(0u32, |a, c| {
+                a.rotate_left(5) ^ u32::from(c[0]) ^ c.len() as u32
+            });
             file.write_all(MAGIC)?;
             file.write_all(&frames.to_be_bytes())?;
             file.write_all(&(take as u32).to_be_bytes())?;

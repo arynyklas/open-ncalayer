@@ -2,7 +2,7 @@
 //! per-case `oncl-server` process and its audit journal.
 
 use super::{Manifest, ProofArgs};
-use crate::platform::measure::{self, Measured, RunOptions, Running};
+use crate::platform::measure::{Measured, RunOptions, Running};
 use anyhow::{Context, bail};
 use oncl_pki::private_fs::PrivateDirectory;
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,10 @@ impl Bins {
         };
         for p in [&bins.probe, &bins.oncl, &bins.server] {
             if !p.is_file() {
-                bail!("BLOCKED: {} is missing (build with the release profile)", p.display());
+                bail!(
+                    "BLOCKED: {} is missing (build with the release profile)",
+                    p.display()
+                );
             }
         }
         Ok(bins)
@@ -120,7 +123,6 @@ impl Drop for PkiServer {
 pub struct Env {
     pub args: ProofArgs,
     pub root: PathBuf,
-    pub out: PathBuf,
     pub data_dir: PathBuf,
     pub work_dir: PathBuf,
     pub scratch_root: PathBuf,
@@ -174,7 +176,6 @@ pub struct HttpServer {
     pub operator: PathBuf,
     pub token_file: PathBuf,
     pub scratch: PathBuf,
-    pub audit: PathBuf,
     pub config_path: PathBuf,
 }
 
@@ -225,11 +226,7 @@ fn toml_path(path: &Path) -> String {
 }
 
 impl HttpServer {
-    pub fn start(
-        env: &Env,
-        base: &Path,
-        settings: &ServerSettings,
-    ) -> anyhow::Result<Self> {
+    pub fn start(env: &Env, base: &Path, settings: &ServerSettings) -> anyhow::Result<Self> {
         let operator = base.join("operator");
         let dir = PrivateDirectory::create(&operator).context("operator directory")?;
         let output = Command::new(&env.bins.server)
@@ -239,7 +236,10 @@ impl HttpServer {
             .output()
             .context("token-create")?;
         if !output.status.success() {
-            bail!("token-create refused: {}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "token-create refused: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         let stdout = String::from_utf8(output.stdout)?;
         let verifier = stdout
@@ -281,7 +281,8 @@ impl HttpServer {
             if settings.token_alias.is_some() { "'card-a', 'card-b'" } else { "'rsa', 'gost'" }
         ));
         if let Some(alias) = &settings.token_alias {
-            dir.create_file("pin")?.write_all(crate::platform::token_host::PIN.as_bytes())?;
+            dir.create_file("pin")?
+                .write_all(crate::platform::token_host::PIN.as_bytes())?;
             for (name, reader) in [("card-a", "reader-a"), ("card-b", "reader-b")] {
                 config.push_str(&format!(
                     "\n[[keys]]\nsource = 'token'\nname = '{name}'\nreader = '{reader}'\nkind = 'AKKaztokenStore'\nalias = {}\nsecret = {{ directory = {}, name = 'pin' }}\n",
@@ -313,7 +314,8 @@ impl HttpServer {
                 "\n[telemetry]\nenabled = true\nendpoint = '{endpoint}'\nexport_interval_ms = 200\ntraces = false\n"
             ));
         }
-        dir.create_file("server.toml")?.write_all(config.as_bytes())?;
+        dir.create_file("server.toml")?
+            .write_all(config.as_bytes())?;
         let config_path = operator.join("server.toml");
         let mut command = if settings.token_alias.is_some() {
             // the service library with a counting software card: see `token_host`
@@ -328,7 +330,9 @@ impl HttpServer {
             c
         } else {
             let mut c = Command::new(&env.bins.server);
-            c.args(["serve", "--config"]).arg(&config_path).arg("--shutdown-stdin");
+            c.args(["serve", "--config"])
+                .arg(&config_path)
+                .arg("--shutdown-stdin");
             c
         };
         command.env_remove("ONCL_PY_TOOLS");
@@ -355,7 +359,6 @@ impl HttpServer {
             token_file: operator.join("token"),
             operator,
             scratch,
-            audit,
             config_path,
         })
     }
@@ -435,10 +438,4 @@ pub fn make_secret(dir: &Path, password: &str) -> anyhow::Result<PathBuf> {
         .create_file("key.secret")?
         .write_all(password.as_bytes())?;
     Ok(dir.join("key.secret"))
-}
-
-pub fn free_space_note(path: &Path) -> String {
-    measure::storage_of(path)
-        .map(|s| format!("{} free of {}", s.free_bytes, s.total_bytes))
-        .unwrap_or_default()
 }

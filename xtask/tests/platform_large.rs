@@ -43,13 +43,20 @@ fn blob_has_the_exact_size_a_visible_structure_and_is_deterministic() {
         let (_, again) = blob::generate(&b, size, 7).unwrap();
         assert_eq!(digests.len, size);
         assert_eq!(digests, again, "same seed, same bytes");
-        assert_eq!(sha256(&a), digests.sha256, "the digest is of the bytes written");
+        assert_eq!(
+            sha256(&a),
+            digests.sha256,
+            "the digest is of the bytes written"
+        );
         let bytes = std::fs::read(&a).unwrap();
         assert_eq!(bytes.len() as u64, size);
         let mut at = 0usize;
         let mut frames = 0u64;
         while at + 20 <= bytes.len() && &bytes[at..at + 8] == b"ONCLBLOB" {
-            assert_eq!(u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap()), frames);
+            assert_eq!(
+                u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap()),
+                frames
+            );
             let len = u32::from_be_bytes(bytes[at + 16..at + 20].try_into().unwrap()) as usize;
             at += 20 + len + 4;
             frames += 1;
@@ -60,7 +67,11 @@ fn blob_has_the_exact_size_a_visible_structure_and_is_deterministic() {
     let (_, _) = blob::generate(&dir.path().join("c"), 100_000, 1).unwrap();
     let bytes = std::fs::read(dir.path().join("c")).unwrap();
     let distinct: std::collections::HashSet<u8> = bytes.iter().copied().collect();
-    assert!(distinct.len() > 200, "{} distinct byte values", distinct.len());
+    assert!(
+        distinct.len() > 200,
+        "{} distinct byte values",
+        distinct.len()
+    );
 }
 
 #[test]
@@ -83,17 +94,43 @@ fn xml_has_the_exact_size_consistent_extents_and_is_deterministic() {
                 assert!(e.canonical_len > 0 && e.canonical_len <= e.end - e.start + 4096);
             }
             let close = facts.root_close_offset as usize;
-            assert_eq!(&bytes[close..close + facts.suffix_after_root_close.len()], facts.suffix_after_root_close.as_bytes());
+            assert_eq!(
+                &bytes[close..close + facts.suffix_after_root_close.len()],
+                facts.suffix_after_root_close.as_bytes()
+            );
             assert!(bytes[facts.far_tamper_offset as usize].is_ascii_digit());
-            assert_eq!(bytes[facts.far_tamper_offset as usize], facts.far_tamper_byte);
-            assert_eq!(bytes[facts.uncovered_tamper_offset as usize], facts.uncovered_tamper_byte);
-            let far = facts.elements.iter().find(|e| e.id == facts.far_target).unwrap();
-            assert!(facts.far_tamper_offset > far.start && facts.far_tamper_offset < far.end, "the far byte lies inside the far element");
-            assert!(facts.uncovered_tamper_offset < far.start || facts.uncovered_tamper_offset >= far.end, "the other byte lies outside");
+            assert_eq!(
+                bytes[facts.far_tamper_offset as usize],
+                facts.far_tamper_byte
+            );
+            assert_eq!(
+                bytes[facts.uncovered_tamper_offset as usize],
+                facts.uncovered_tamper_byte
+            );
+            let far = facts
+                .elements
+                .iter()
+                .find(|e| e.id == facts.far_target)
+                .unwrap();
+            assert!(
+                facts.far_tamper_offset > far.start && facts.far_tamper_offset < far.end,
+                "the far byte lies inside the far element"
+            );
+            assert!(
+                facts.uncovered_tamper_offset < far.start
+                    || facts.uncovered_tamper_offset >= far.end,
+                "the other byte lies outside"
+            );
             // non-canonical on purpose: the document is not its own canonical form
             let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("<rec:item  seq = "), "records are written in a lexical form that canonicalization changes");
-            assert!(text.contains("xmlns:unused="), "an unused namespace declaration is present");
+            assert!(
+                text.contains("<rec:item  seq = "),
+                "records are written in a lexical form that canonicalization changes"
+            );
+            assert!(
+                text.contains("xmlns:unused="),
+                "an unused namespace declaration is present"
+            );
         }
     }
 }
@@ -105,8 +142,14 @@ fn soap_has_no_processing_instruction_and_archive_has() {
     let (_, _) = xml::generate(&dir.path().join("a.xml"), 400_000, 3, XmlKind::Archive).unwrap();
     let soap = std::fs::read_to_string(dir.path().join("s.xml")).unwrap();
     let archive = std::fs::read_to_string(dir.path().join("a.xml")).unwrap();
-    assert!(!soap.replace("<?xml version", "").contains("<?"), "SOAP 1.1 forbids processing instructions");
-    assert!(archive.contains("<?audit seq="), "the archive exercises PI canonicalization");
+    assert!(
+        !soap.replace("<?xml version", "").contains("<?"),
+        "SOAP 1.1 forbids processing instructions"
+    );
+    assert!(
+        archive.contains("<?audit seq="),
+        "the archive exercises PI canonicalization"
+    );
 }
 
 #[test]
@@ -123,7 +166,8 @@ fn pdf_has_three_revisions_valid_trailers_and_the_exact_size() {
         for r in &facts.revisions {
             assert_eq!(r.start, previous_end);
             previous_end = r.end;
-            let tail = String::from_utf8_lossy(&bytes[r.end as usize - 40..r.end as usize]).into_owned();
+            let tail =
+                String::from_utf8_lossy(&bytes[r.end as usize - 40..r.end as usize]).into_owned();
             assert!(tail.ends_with("%%EOF\n"), "{tail:?}");
             assert!(tail.contains(&format!("startxref\n{}\n", r.startxref)));
             let at = r.startxref as usize;
@@ -134,8 +178,12 @@ fn pdf_has_three_revisions_valid_trailers_and_the_exact_size() {
             }
         }
         assert_eq!(previous_end, digests.len);
-        let payload = &bytes[facts.embedded_offset as usize..(facts.embedded_offset + facts.embedded_len) as usize];
-        assert_eq!(generate::hex(&<sha2::Sha256 as sha2::Digest>::digest(payload)), facts.embedded_sha256);
+        let payload = &bytes
+            [facts.embedded_offset as usize..(facts.embedded_offset + facts.embedded_len) as usize];
+        assert_eq!(
+            generate::hex(&<sha2::Sha256 as sha2::Digest>::digest(payload)),
+            facts.embedded_sha256
+        );
         assert!(facts.pages > 4);
     }
 }
@@ -147,7 +195,9 @@ fn stored_zlib_streams_decode_with_a_real_inflater() {
         let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
         let z = pdf::zlib_stored(&data);
         let mut out = Vec::new();
-        flate2::read::ZlibDecoder::new(&z[..]).read_to_end(&mut out).unwrap();
+        flate2::read::ZlibDecoder::new(&z[..])
+            .read_to_end(&mut out)
+            .unwrap();
         assert_eq!(out, data, "length {len}");
     }
 }
@@ -161,35 +211,61 @@ fn reference_generator_agrees_with_lxml_and_pyhanko() {
     let dir = scratch();
     let evidence = xtask::platform::large::validate_reference(
         Path::new(&python),
-        std::env::var_os("ONCL_PY_TOOLS").map(std::path::PathBuf::from).as_deref(),
+        std::env::var_os("ONCL_PY_TOOLS")
+            .map(std::path::PathBuf::from)
+            .as_deref(),
         dir.path(),
         &mut |_| {},
     )
     .unwrap();
-    for name in ["blob", "xml-archive", "xml-soap", "pdf-dense", "pdf-compact"] {
+    for name in [
+        "blob",
+        "xml-archive",
+        "xml-soap",
+        "pdf-dense",
+        "pdf-compact",
+    ] {
         assert_eq!(evidence[name]["ok"], true, "{name}: {}", evidence[name]);
     }
 }
 
 #[test]
 fn proc_status_and_result_lines_parse() {
-    let text = "Name:\tx\nVmPeak:\t  900 kB\nVmHWM:\t 2048 kB\nVmRSS:\t 1024 kB\nRssAnon:\t  512 kB\n";
+    let text =
+        "Name:\tx\nVmPeak:\t  900 kB\nVmHWM:\t 2048 kB\nVmRSS:\t 1024 kB\nRssAnon:\t  512 kB\n";
     let s = measure::parse_proc_status(text).unwrap();
-    assert_eq!((s.vm_hwm, s.vm_rss, s.rss_anon), (2048 * 1024, 1024 * 1024, 512 * 1024));
+    assert_eq!(
+        (s.vm_hwm, s.vm_rss, s.rss_anon),
+        (2048 * 1024, 1024 * 1024, 512 * 1024)
+    );
     assert!(measure::parse_proc_status("Name:\tx\n").is_none());
     let out = "noise\nONCL-PROOF-RESULT {\"ok\":true,\"digest\":\"ab\"}\n";
     let v = measure::parse_result_line(out, "ONCL-PROOF-RESULT ").unwrap();
     assert_eq!(v["digest"], "ab");
     assert!(measure::parse_result_line("nothing", "ONCL-PROOF-RESULT ").is_none());
-    assert!(measure::parse_result_line("ONCL-PROOF-RESULT {not json", "ONCL-PROOF-RESULT ").is_none());
+    assert!(
+        measure::parse_result_line("ONCL-PROOF-RESULT {not json", "ONCL-PROOF-RESULT ").is_none()
+    );
 }
 
 #[test]
 fn peaks_criterion_is_the_stricter_of_working_set_and_private_bytes() {
-    let p = measure::Peaks { peak_working_set: 5, peak_private: 9, sampled_max: 1 };
+    let p = measure::Peaks {
+        peak_working_set: 5,
+        peak_private: 9,
+        sampled_max: 1,
+    };
     assert_eq!(p.criterion(), 9);
-    let p = measure::Peaks { peak_working_set: 12, peak_private: 9, sampled_max: 99 };
-    assert_eq!(p.criterion(), 12, "a polling sample never replaces the OS peak");
+    let p = measure::Peaks {
+        peak_working_set: 12,
+        peak_private: 9,
+        sampled_max: 99,
+    };
+    assert_eq!(
+        p.criterion(),
+        12,
+        "a polling sample never replaces the OS peak"
+    );
 }
 
 #[test]
@@ -212,9 +288,17 @@ fn a_real_process_is_measured_by_the_operating_system() {
     .unwrap();
     assert!(m.success, "{:?}", m.exit);
     assert!(m.stdout_text().contains("measured"));
-    assert!(m.peaks.peak_working_set > 0, "the OS reports a peak working set: {:?}", m.peaks);
+    assert!(
+        m.peaks.peak_working_set > 0,
+        "the OS reports a peak working set: {:?}",
+        m.peaks
+    );
     #[cfg(windows)]
-    assert!(m.peaks.peak_private > 0, "the OS reports peak private bytes: {:?}", m.peaks);
+    assert!(
+        m.peaks.peak_private > 0,
+        "the OS reports peak private bytes: {:?}",
+        m.peaks
+    );
     assert_eq!(m.temp.unwrap().final_files, 0);
 }
 
@@ -230,9 +314,20 @@ fn a_fed_stdin_with_no_declared_length_reaches_the_child() {
     };
     let mut command = std::process::Command::new(program);
     command.args(args);
-    let m = measure::run_measured(command, RunOptions { feed: Feed::File(path), ..RunOptions::default() }).unwrap();
+    let m = measure::run_measured(
+        command,
+        RunOptions {
+            feed: Feed::File(path),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
     assert!(m.success, "{}", m.stderr_text());
-    let counted: String = m.stdout_text().chars().filter(char::is_ascii_digit).collect();
+    let counted: String = m
+        .stdout_text()
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
     assert!(!counted.is_empty());
 }
 
@@ -241,7 +336,9 @@ fn storage_preflight_refuses_an_insufficient_scratch_as_blocked() {
     let dir = scratch();
     let ok = measure::preflight_storage(dir.path(), 1).unwrap();
     assert_eq!(ok.kind, "fixed", "tests run on a local fixed drive");
-    let err = measure::preflight_storage(dir.path(), u64::MAX).unwrap_err().to_string();
+    let err = measure::preflight_storage(dir.path(), u64::MAX)
+        .unwrap_err()
+        .to_string();
     assert!(err.starts_with("BLOCKED:"), "{err}");
 }
 
@@ -262,17 +359,28 @@ fn otlp_gauges_decode_from_the_wire_format() {
     assert_eq!(points, vec![("oncl.executor.running".to_owned(), 2.0)]);
     let body = otlp::encode_gauge("oncl.executor.queued", -1);
     assert_eq!(otlp::decode_metrics(&body).unwrap()[0].1, -1.0);
-    assert!(otlp::decode_metrics(&[0x0a, 0xff, 0xff]).is_none(), "a truncated message is refused");
+    assert!(
+        otlp::decode_metrics(&[0x0a, 0xff, 0xff]).is_none(),
+        "a truncated message is refused"
+    );
 }
 
 #[test]
 fn a_multipart_mixed_answer_yields_its_final_record_and_artifact() {
-    let part = |content_type: &str, data: &str| format!("--B\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{data}\r\n", data.len());
+    let part = |content_type: &str, data: &str| {
+        format!(
+            "--B\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{data}\r\n",
+            data.len()
+        )
+    };
     let body = format!(
         "{}{}{}--B--\r\n",
         part("application/json", "{\"type\":\"progress\"}"),
         part("application/octet-stream", "ABCDE"),
-        part("application/json", "{\"type\":\"final\",\"status\":\"completed\"}")
+        part(
+            "application/json",
+            "{\"type\":\"final\",\"status\":\"completed\"}"
+        )
     )
     .into_bytes();
     let reply = http_raw::Reply {
