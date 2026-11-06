@@ -9,7 +9,11 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Entry {
-    Free,
+    /// Free entry: next free object number and the generation to use if reused.
+    Free {
+        next: u64,
+        generation: u32,
+    },
     Direct(u64, u16),
     Compressed(u32, u32),
 }
@@ -297,7 +301,11 @@ impl PdfDocument<'_, '_> {
                     let generation = p.integer()?;
                     let kind = p.word()?;
                     let entry = match kind {
-                        b"f" => Entry::Free,
+                        b"f" => Entry::Free {
+                            next: offset,
+                            generation: u32::try_from(generation)
+                                .map_err(|_| PdfError::Malformed("generation"))?,
+                        },
                         b"n" => Entry::Direct(
                             offset,
                             u16::try_from(generation)
@@ -374,7 +382,12 @@ impl PdfDocument<'_, '_> {
                         field[0] = 1;
                     }
                     let entry = match field[0] {
-                        0 => Entry::Free,
+                        0 => Entry::Free {
+                            next: field[1],
+                            // An absent generation field (W[2] == 0) leaves the
+                            // free-list head's 65535 implied, not a real 0.
+                            generation: if w[2] == 0 { 65535 } else { field[2] as u32 },
+                        },
                         1 => Entry::Direct(
                             field[1],
                             u16::try_from(field[2])
@@ -412,7 +425,7 @@ impl PdfDocument<'_, '_> {
             .copied()
             .ok_or(PdfError::Malformed("unresolved reference"))?;
         match entry {
-            Entry::Free => Err(PdfError::Malformed("free object reference")),
+            Entry::Free { .. } => Err(PdfError::Malformed("free object reference")),
             Entry::Direct(offset, gen_actual) => {
                 if gen_actual != *generation || offset >= self.revisions[revision].end {
                     return Err(PdfError::Malformed("reference generation or revision"));

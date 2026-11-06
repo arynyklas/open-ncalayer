@@ -511,13 +511,8 @@ fn permitted(
             // Object 0 is the mandatory head of the free list (ISO 32000-1
             // 7.5.4); every revision's xref re-lists it. Only that entry,
             // and only when it was already free, is not an object change.
-            Entry::Free
-                if id == 0
-                    && doc.revisions[..revision]
-                        .iter()
-                        .rev()
-                        .find_map(|r| r.entries.get(&0))
-                        .is_none_or(|e| matches!(e, Entry::Free)) => {}
+            Entry::Free { next, generation }
+                if id == 0 && generation == 65535 && free_head_unchanged(doc, revision, next) => {}
             _ => {
                 return Err(PdfError::Unsupported(
                     "free or compressed augmentation entry",
@@ -532,6 +527,22 @@ fn permitted(
         at = end;
     }
     white_gap(doc, at, xref)
+}
+/// Object 0 may be re-listed only as the free-list head: it was never in use,
+/// and its next-free link ends the list (0) or names another free entry.
+fn free_head_unchanged(doc: &PdfDocument<'_, '_>, revision: usize, next: u64) -> bool {
+    let latest = |id: u64| {
+        doc.revisions[..=revision]
+            .iter()
+            .rev()
+            .find_map(|r| r.entries.get(&(id as u32)))
+    };
+    doc.revisions[..revision].iter().all(|r| {
+        !matches!(
+            r.entries.get(&0),
+            Some(Entry::Direct(..) | Entry::Compressed(..))
+        )
+    }) && (next == 0 || matches!(latest(next), Some(Entry::Free { .. })))
 }
 struct Parsed {
     candidates: Vec<(usize, Candidate)>,

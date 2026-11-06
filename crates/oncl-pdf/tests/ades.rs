@@ -426,7 +426,7 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Prev {previous} /Root ",
-            doc.max_id + 1
+            doc.max_id + 1,
         )
         .as_bytes(),
     );
@@ -442,12 +442,11 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     result
 }
-/// Appends an object-less increment with a hand-written xref section and trailer ID.
-fn append_trailer_only(
-    bytes: &[u8],
-    free_entries: &[u32],
-    id: Option<(Vec<u8>, Vec<u8>)>,
-) -> Vec<u8> {
+/// One classic xref entry: (object, offset-or-next-free, generation, 'n' or 'f').
+type XrefLine = (u32, u64, u32, char);
+/// Appends an object-less increment with a hand-written xref section and a raw
+/// `/ID` trailer value (e.g. `[<aa> <bb>]`), so malformed IDs can be forged.
+fn append_raw(bytes: &[u8], lines: &[XrefLine], id: Option<&str>) -> Vec<u8> {
     let doc = lopdf::Document::load_mem(bytes).unwrap();
     let marker = bytes.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
     let previous = std::str::from_utf8(&bytes[marker..])
@@ -461,18 +460,15 @@ fn append_trailer_only(
     result.push(b'\n');
     let xref = result.len();
     result.extend_from_slice(b"xref\n");
-    for id in free_entries {
-        let line = if *id == 0 {
-            "0 1\n0000000000 65535 f \n".to_string()
-        } else {
-            format!("{id} 1\n0000000000 00001 f \n")
-        };
-        result.extend_from_slice(line.as_bytes());
+    for (id, offset, generation, kind) in lines {
+        result.extend_from_slice(
+            format!("{id} 1\n{offset:010} {generation:05} {kind} \n").as_bytes(),
+        );
     }
     result.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Prev {previous} /Root ",
-            doc.max_id + 1
+            doc.max_id + 8,
         )
         .as_bytes(),
     );
@@ -481,12 +477,17 @@ fn append_trailer_only(
         result.extend_from_slice(b" /Info ");
         encode_object(value, &mut result);
     }
-    if let Some((a, b)) = id {
-        let hex = |v: Vec<u8>| v.iter().map(|b| format!("{b:02X}")).collect::<String>();
-        result.extend_from_slice(format!(" /ID [<{}> <{}>]", hex(a), hex(b)).as_bytes());
+    if let Some(id) = id {
+        result.extend_from_slice(format!(" /ID {id}").as_bytes());
     }
     result.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     result
+}
+fn hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02X}")).collect()
+}
+fn id_pair(a: &[u8], b: &[u8]) -> String {
+    format!("[<{}> <{}>]", hex(a), hex(b))
 }
 fn trailer_id(bytes: &[u8]) -> Vec<Vec<u8>> {
     let doc = lopdf::Document::load_mem(bytes).unwrap();
@@ -499,35 +500,97 @@ fn trailer_id(bytes: &[u8]) -> Vec<Vec<u8>> {
         .map(|v| v.as_str().unwrap().to_vec())
         .collect()
 }
-fn permitted_or(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
+/// `Ok(())` only when the increment passes the augmentation grammar and the
+/// document is then evaluated; otherwise the exact refusal text.
+fn grammar(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
     match f.inspect(bytes, AdesLevel::B, NOW, &f.crl) {
         Err(oncl_pdf::PdfError::Unsupported(m)) => Err(m.to_string()),
-        _ => Ok(()),
+        Err(e) => panic!("unexpected non-grammar error: {e:?}"),
+        Ok(report) => {
+            assert_eq!(report.verdict, Verdict::Valid);
+            Ok(())
+        }
     }
 }
+const TRAILER: &str = "incremental trailer metadata change";
+const FREE: &str = "free or compressed augmentation entry";
 #[test]
 fn update_may_change_trailer_id_instance_and_relist_free_head_only() {
     let f = Fixture::new();
     let (lt, _) = f.run(None, AdesLevel::Lt);
     let ids = trailer_id(&lt);
     let original = ids[0].clone();
-    // ID[1] changes, ID[0] preserved, object 0 free head re-listed: valid update.
-    let valid = append_trailer_only(&lt, &[0], Some((original.clone(), vec![9, 8, 7, 6])));
-    assert_eq!(permitted_or(&f, &valid), Ok(()));
-    // ID[0] substitution is refused.
-    let swapped = append_trailer_only(&lt, &[0], Some((vec![1; ids[0].len()], vec![9, 8, 7, 6])));
+    let head: XrefLine = (0, 0, 65535, 'f');
+    let new_id = id_pair(&original, &[9, 8, 7, 6]);
+    // The unchanged document is itself Valid; the same bytes plus an ID[1] change
+    // and the object 0 free head stay Valid.
+    assert_eq!(grammar(&f, &lt), Ok(()));
     assert_eq!(
-        permitted_or(&f, &swapped),
-        Err("incremental trailer metadata change".into())
+        grammar(&f, &append_raw(&lt, &[head], Some(&new_id))),
+        Ok(())
     );
-    // Deleting (freeing) a real object is refused; only the object 0 head is exempt.
+    // ID[0] substitution.
+    let swapped = id_pair(&vec![1; original.len()], &[9, 8, 7, 6]);
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], Some(&swapped))),
+        Err(TRAILER.into())
+    );
+    // Malformed IDs: wrong length, non-string, indirect, missing.
+    for bad in [
+        format!("[<{}>]", hex(&original)),
+        format!("[<{}> <01> <02>]", hex(&original)),
+        format!("[<{}> 7]", hex(&original)),
+        "[7 <01>]".to_string(),
+        format!("[<{}> 7 0 R]", hex(&original)),
+        "7 0 R".to_string(),
+    ] {
+        assert_eq!(
+            grammar(&f, &append_raw(&lt, &[head], Some(&bad))),
+            Err(TRAILER.into()),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        grammar(&f, &append_raw(&lt, &[head], None)),
+        Err(TRAILER.into())
+    );
+    // Freeing a real object is refused; only the object 0 head is exempt.
     let doc = lopdf::Document::load_mem(&lt).unwrap();
     let page = doc.get_pages().values().next().unwrap().0;
-    let deleted = append_trailer_only(&lt, &[0, page], Some((original.clone(), vec![9, 8, 7, 6])));
+    let deleted = append_raw(&lt, &[head, (page, 0, 1, 'f')], Some(&new_id));
+    assert_eq!(grammar(&f, &deleted), Err(FREE.into()));
+    // Head generation must be 65535.
     assert_eq!(
-        permitted_or(&f, &deleted),
-        Err("free or compressed augmentation entry".into())
+        grammar(&f, &append_raw(&lt, &[(0, 0, 0, 'f')], Some(&new_id))),
+        Err(FREE.into())
     );
+    // Head whose next-free link names a live object is refused; a link to another
+    // free entry is accepted.
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(&lt, &[(0, page as u64, 65535, 'f')], Some(&new_id))
+        ),
+        Err(FREE.into())
+    );
+    let spare = doc.max_id + 1;
+    assert_eq!(
+        grammar(
+            &f,
+            &append_raw(
+                &lt,
+                &[(0, spare as u64, 65535, 'f'), (spare, 0, 1, 'f')],
+                Some(&new_id)
+            )
+        ),
+        Err(FREE.into()),
+        "a new free object is still an object-level change"
+    );
+    // Object 0 reported in use is not a free head.
+    assert!(grammar(&f, &append_raw(&lt, &[(0, 12, 0, 'n')], Some(&new_id))).is_err());
+    // A later head over an in-use object 0 is refused as well.
+    let in_use = append_raw(&lt, &[(0, 12, 0, 'n')], Some(&new_id));
+    assert!(grammar(&f, &append_raw(&in_use, &[head], Some(&new_id))).is_err());
 }
 #[test]
 fn validation_update_cannot_alias_existing_page_as_acroform() {
