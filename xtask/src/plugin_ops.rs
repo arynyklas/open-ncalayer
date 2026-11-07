@@ -158,9 +158,10 @@ fn rule_of(error: &PackageError) -> &'static str {
             | OperationError::DuplicateImport { .. }
             | OperationError::ForbiddenImport { .. }
             | OperationError::UndeclaredImport { .. }
+            | OperationError::TooManyImports(_)
             | OperationError::Interactive { .. } => "imports",
-            OperationError::Network { .. } => "network",
-            OperationError::KeyUse { .. } => "key-use",
+            OperationError::Network { .. } | OperationError::NetworkNeeded { .. } => "network",
+            OperationError::KeyUse { .. } | OperationError::TooManyKeyUses(_) => "key-use",
             OperationError::KeyContent { .. } => "key-content",
             OperationError::Profile { .. } => "profile",
         },
