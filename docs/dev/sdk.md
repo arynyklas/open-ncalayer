@@ -269,7 +269,7 @@ Three Core steps, in this order (`docs/design/manual-plugins.md` 4.2, 4.3, 4.8).
 params, key: &PluginKeyBinding, caller: &CallerContext }`:
 
 1. `Engine::plugin_prepare(&ManualCall, &OperationContext)` returns a `PluginPrepared` or a
-   `PluginPrepareError` (always `NotApplied`; nothing is opened).
+   `PluginPrepareError` (always `NotApplied`; it takes `&mut OperationContext` to open the key once).
    It validates the parameters like `plugin_request`, freezes what is signed (the bytes of the
    bound parameter, SHA-256 and length; for a `cms_ex` profile whose `content_form` is `digest`
    the digest Core itself computes with the hash algorithm of the bound key's signature
@@ -315,6 +315,19 @@ params, key: &PluginKeyBinding, caller: &CallerContext }`:
    `TicketRefusal::NoGuard`); one approved call runs at a time (`Busy`). Keep documents on
    another engine: the desktop `ConsentGuard` refuses a ticketed event and the plugin guard
    refuses an event without one.
+
+The approval binds the SHA-256 of the signer certificate: `ApprovedUse` and `PluginUse` carry
+it, `ConsentSummary.key.fingerprint_sha256` shows it, `plugin_prepare` opens the key once and
+refuses (`CertificateMismatch`) if the key store's certificate is not the binding's metadata,
+and at the signing point `AuthorizedSigner` stamps the ticket with the fingerprint of the
+certificate its key lease holds; the guard (and the fast check of `plugin_call_approved`)
+refuse another with `TicketRefusal::CertificateChanged`, key not applied. The alias is display
+only and is not compared. The prehash algorithm uses the same strict selection as the signer.
+Operational notes: give each engine its own `PluginConsentGuard` (one approval slot); a call
+refused as `Busy` consumes its approval (the user confirms again); hosts MUST set a deadline on
+the context given to `plugin_call_approved` (a plugin holds the in-flight slot until the
+deadline or its fuel ends); the approval deadline is a monotonic `Instant`, which may not
+advance while the system is suspended.
 
 `ApprovedCall` is the honest outcome: `result()`/`response()` (the module's reply string),
 `applied()` (`Applied` also when the module failed after the key use, `Unknown` when the

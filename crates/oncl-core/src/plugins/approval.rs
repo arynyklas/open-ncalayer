@@ -51,6 +51,11 @@ pub enum PluginPrepareError {
     UnsupportedKey,
     /// A `param:` source of the profile has no valid text.
     Options,
+    /// The key could not be opened to compare its certificate with the binding's.
+    KeyUnavailable,
+    /// The certificate in the binding's metadata is not the one the key store holds for the
+    /// key: what the user would be shown is not what would sign.
+    CertificateMismatch,
 }
 impl PluginPrepareError {
     /// Always `NotApplied`: nothing here opens a key.
@@ -68,6 +73,10 @@ impl std::fmt::Display for PluginPrepareError {
             Self::KeyMetadataMissing => f.write_str("the key binding has no public metadata"),
             Self::UnsupportedKey => f.write_str("the key's certificate cannot be used"),
             Self::Options => f.write_str("a profile parameter has no valid text"),
+            Self::KeyUnavailable => f.write_str("the key could not be opened"),
+            Self::CertificateMismatch => {
+                f.write_str("the binding's certificate is not the key's certificate")
+            }
         }
     }
 }
@@ -88,7 +97,9 @@ impl From<PluginPrepareError> for OperationError {
             PluginPrepareError::Options => {
                 ProcessingError::InvalidInput("invalid plugin operation parameters").into()
             }
+            PluginPrepareError::KeyUnavailable => OperationError::MissingKeyProvider,
             PluginPrepareError::CallerNotManual
+            | PluginPrepareError::CertificateMismatch
             | PluginPrepareError::NoKeyUse
             | PluginPrepareError::KeyMetadataMissing => OperationError::PermissionDenied,
         }
@@ -195,30 +206,74 @@ impl ConsentSummary {
             h.update((bytes.len() as u64).to_be_bytes());
             h.update(bytes);
         }
-        let mut h = Sha256::new();
-        h.update(b"ONCLCONSENT1\0");
-        field(&mut h, self.plugin.id.as_bytes());
-        field(&mut h, &self.plugin.package.canonical());
-        field(&mut h, self.plugin.version.as_bytes());
-        field(&mut h, self.operation.as_bytes());
-        field(&mut h, self.kind.as_str().as_bytes());
-        h.update([self.uses]);
-        field(&mut h, &self.options_sha256);
-        field(&mut h, self.content.param.as_bytes());
-        h.update(self.content.len.to_be_bytes());
-        field(&mut h, &self.content.sha256);
-        match &self.content.prehashed {
-            None => h.update([0]),
-            Some(p) => {
-                h.update([1]);
-                field(&mut h, format!("{:?}", p.alg).as_bytes());
-                field(&mut h, &p.digest);
+        fn alg_tag(alg: HashAlg) -> u8 {
+            match alg {
+                HashAlg::Sha1 => 1,
+                HashAlg::Sha256 => 2,
+                HashAlg::Sha512 => 3,
+                HashAlg::Gost34311 => 4,
+                HashAlg::Streebog256 => 5,
+                HashAlg::Streebog512 => 6,
             }
         }
-        field(&mut h, self.key.alias.as_bytes());
-        field(&mut h, self.key.serial_hex.as_bytes());
-        field(&mut h, &self.key.fingerprint_sha256);
-        match &self.network {
+        // Exhaustive on purpose: a new field breaks the build until it is hashed here.
+        let Self {
+            plugin,
+            operation,
+            kind,
+            uses,
+            profile,
+            options_sha256,
+            content,
+            key,
+            network,
+        } = self;
+        let ConsentContent {
+            param,
+            len,
+            sha256,
+            prehashed,
+        } = content;
+        let ConsentKey {
+            alias,
+            serial_hex,
+            subject_cn,
+            fingerprint_sha256,
+            not_after,
+        } = key;
+        let mut h = Sha256::new();
+        h.update(b"ONCLCONSENT2\0");
+        field(&mut h, plugin.id.as_bytes());
+        field(&mut h, &plugin.package.canonical());
+        field(&mut h, plugin.version.as_bytes());
+        field(&mut h, operation.as_bytes());
+        field(&mut h, kind.as_str().as_bytes());
+        h.update([*uses]);
+        // The resolved profile, in the canonical encoding that `options_sha256` also names.
+        field(&mut h, &profile.encode(*kind, None).unwrap_or_default());
+        field(&mut h, options_sha256);
+        field(&mut h, param.as_bytes());
+        h.update(len.to_be_bytes());
+        field(&mut h, sha256);
+        match prehashed {
+            None => h.update([0]),
+            Some(PrehashedDigest { alg, digest }) => {
+                h.update([1, alg_tag(*alg)]);
+                field(&mut h, digest);
+            }
+        }
+        field(&mut h, alias.as_bytes());
+        field(&mut h, serial_hex.as_bytes());
+        match subject_cn {
+            None => h.update([0]),
+            Some(cn) => {
+                h.update([1]);
+                field(&mut h, cn.as_bytes());
+            }
+        }
+        field(&mut h, fingerprint_sha256);
+        h.update(not_after.unix_timestamp().to_be_bytes());
+        match network {
             ConsentNetwork::None => h.update([0]),
             ConsentNetwork::Pki { endpoints } => {
                 h.update([1]);
@@ -538,20 +593,19 @@ impl Engine {
             .as_ref()
             .ok_or(PluginPrepareError::KeyMetadataMissing)?;
         let cert: &Certificate = metadata.certificate;
-        let der = cert
-            .to_der()
+        cert.to_der()
             .map_err(|_| PluginPrepareError::UnsupportedKey)?;
         let info = oncl_pki::info::cert_info(cert);
 
         let sha256: [u8; 32] = Sha256::digest(bytes).into();
         let (content, prehashed) = if is_digest_form(declared.profile()) {
             // The digest of the document with the algorithm the signer will use for this
-            // key (the one `AuthorizedSigner` derives): Core's, never the plugin's.
+            // key (the strict one `Engine::operation_signer` derives for a plugin's signing import): Core's, never the plugin's.
             let public = oncl_pki::key::PublicKey::from_spki(
                 cert.tbs_certificate().subject_public_key_info(),
             )
             .map_err(|_| PluginPrepareError::UnsupportedKey)?;
-            let alg = signature_algorithm(cert, public.alg(), ctx.policy(), false)
+            let alg = signature_algorithm(cert, public.alg(), ctx.policy(), true)
                 .map_err(|_| PluginPrepareError::UnsupportedKey)?
                 .hash_alg();
             let mut state = HashState::new(alg);
@@ -594,7 +648,8 @@ impl Engine {
             },
             _ => ConsentNetwork::None,
         };
-        let used = ApprovedUse::new(declared.kind(), content, options_sha256);
+        let fingerprint = certificate_sha256(cert);
+        let used = ApprovedUse::new(declared.kind(), content, options_sha256, fingerprint);
         Ok(Plan {
             identity: installed.identity.clone(),
             operation: operation.to_owned(),
@@ -618,7 +673,7 @@ impl Engine {
                     alias: metadata.alias.to_owned(),
                     serial_hex: info.serial_hex,
                     subject_cn: info.subject_cn,
-                    fingerprint_sha256: Sha256::digest(&der).into(),
+                    fingerprint_sha256: fingerprint,
                     not_after: info.not_after,
                 },
                 network,
@@ -634,8 +689,12 @@ impl Engine {
     /// local operator the operation is registered for; `key` must carry its public
     /// metadata (alias, certificate).
     ///
-    /// Nothing is opened, granted or applied; the invocation `ctx` only names the approval
-    /// that [`PluginPrepared::approve`] will issue.
+    /// The key is opened (and released) once to compare its certificate with the binding's
+    /// metadata ([`PluginPrepareError::CertificateMismatch`]); nothing is granted or applied.
+    /// The approval binds that certificate's SHA-256: the guard refuses the key use
+    /// ([`TicketRefusal::CertificateChanged`], not applied) if the key about to sign holds
+    /// another. The alias is display only and is not compared. `ctx` names the approval that
+    /// [`PluginPrepared::approve`] will issue.
     ///
     /// # Errors
     ///
@@ -643,9 +702,23 @@ impl Engine {
     pub fn plugin_prepare(
         &self,
         call: &ManualCall<'_>,
-        ctx: &OperationContext,
+        ctx: &mut OperationContext,
     ) -> Result<PluginPrepared, PluginPrepareError> {
         let plan = self.plugin_plan(call, ctx)?;
+        // What the user is shown is what will sign: the key store's own certificate for this
+        // key must be the one the binding's metadata carries. Opening a key applies none.
+        let services = self
+            .keys
+            .as_ref()
+            .ok_or(PluginPrepareError::KeyUnavailable)?;
+        let lease = services
+            .provider
+            .open(&call.key.key, ctx)
+            .map_err(|_| PluginPrepareError::KeyUnavailable)?;
+        if certificate_sha256(lease.certificate()) != plan.used.certificate_sha256 {
+            return Err(PluginPrepareError::CertificateMismatch);
+        }
+        drop(lease);
         // A request that cannot be built is no operation to ask the user about.
         self.plugin_request(call.plugin_id, call.operation, call.params)?;
         Ok(PluginPrepared {
@@ -747,5 +820,33 @@ impl Engine {
         );
         drop(armed);
         ApprovedCall::of(outcome, guard.take_refusals(ctx.id()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The honest AppliedState of an outcome is the engine's own, for all three states.
+    #[test]
+    fn applied_follows_the_engines_state_in_all_three_cases() {
+        let after = |applied| {
+            Err(OperationError::AfterKeyUse {
+                source: Box::new(OperationError::PermissionDenied),
+                applied,
+            })
+        };
+        assert_eq!(
+            ApprovedCall::of(after(AppliedState::Unknown), Vec::new()).applied(),
+            AppliedState::Unknown
+        );
+        assert_eq!(
+            ApprovedCall::of(after(AppliedState::Applied), Vec::new()).applied(),
+            AppliedState::Applied
+        );
+        assert_eq!(
+            ApprovedCall::of(Err(OperationError::PermissionDenied), Vec::new()).applied(),
+            AppliedState::NotApplied
+        );
     }
 }

@@ -239,9 +239,12 @@ impl KeyProvider for Counting {
         if self.panic_once.swap(false, Ordering::SeqCst) {
             panic!("the key provider panicked");
         }
-        if let Some(tx) = self.entered.lock().unwrap().take() {
+        // Taken first: the locks must not be held while this open waits.
+        let entered = self.entered.lock().unwrap().take();
+        if let Some(tx) = entered {
+            let release = self.release.lock().unwrap().take();
             tx.send(()).unwrap();
-            if let Some(rx) = self.release.lock().unwrap().take() {
+            if let Some(rx) = release {
                 rx.recv().unwrap();
             }
         }
@@ -384,7 +387,7 @@ fn try_prepare(
     params: &[(&str, PluginParam<'_>)],
     key: &PluginKeyBinding<'_>,
     caller: &CallerContext,
-    ctx: &OperationContext,
+    ctx: &mut OperationContext,
 ) -> Result<PluginPrepared, PluginPrepareError> {
     rig.engine.plugin_prepare(
         &ManualCall {
@@ -401,10 +404,13 @@ fn prepare(
     rig: &Rig,
     op: &str,
     params: &[(&str, PluginParam<'_>)],
-    ctx: &OperationContext,
+    ctx: &mut OperationContext,
 ) -> PluginPrepared {
-    try_prepare(rig, op, params, &bound(rig), &manual(), ctx)
-        .unwrap_or_else(|e| panic!("{op}: {e:?}"))
+    let prepared = try_prepare(rig, op, params, &bound(rig), &manual(), ctx)
+        .unwrap_or_else(|e| panic!("{op}: {e:?}"));
+    // Preparing opened the key once to compare certificates; the tests count what follows.
+    rig.provider.opens.store(0, Ordering::SeqCst);
+    prepared
 }
 fn confirm(prepared: PluginPrepared) -> PluginApproval {
     let confirmation = UserConfirmation::after_user_confirmed(prepared.summary());
@@ -449,7 +455,7 @@ fn flow(
     params: &[(&str, PluginParam<'_>)],
 ) -> (OperationContext, ApprovedCall) {
     let mut c = ctx(rig, op);
-    let approval = confirm(prepare(rig, op, params, &c));
+    let approval = confirm(prepare(rig, op, params, &mut c));
     let result = call(rig, op, params, approval, &mut c);
     (c, result)
 }
@@ -558,8 +564,8 @@ fn confirmed_raw_run_applies_the_key_and_the_signature_verifies() {
 #[test]
 fn consent_summary_is_trusted_data_from_core() {
     let rig = rigged(&[], "");
-    let c = ctx(&rig, "sign-cms-ex");
-    let prepared = prepare(&rig, "sign-cms-ex", &doc(DOC), &c);
+    let mut c = ctx(&rig, "sign-cms-ex");
+    let prepared = prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c);
     let s = prepared.summary();
     assert_eq!(&s.plugin, rig.engine.plugin_identity(ID).unwrap());
     assert_eq!(s.operation, "sign-cms-ex");
@@ -597,24 +603,24 @@ fn consent_summary_is_trusted_data_from_core() {
         assert!(!shown.contains(author), "{author} leaked into the summary");
     }
     // Another document, another summary; the same input, the same one.
-    let again = prepare(&rig, "sign-cms-ex", &doc(DOC), &c);
+    let again = prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c);
     assert_eq!(s.digest(), again.summary().digest());
-    let other = prepare(&rig, "sign-cms-ex", &doc(OTHER), &c);
+    let other = prepare(&rig, "sign-cms-ex", &doc(OTHER), &mut c);
     assert_ne!(s.digest(), other.summary().digest());
 }
 
 #[test]
 fn confirmation_of_another_summary_issues_nothing() {
     let rig = rigged(&[], "");
-    let c = ctx(&rig, "sign-cms-ex");
-    let a = prepare(&rig, "sign-cms-ex", &doc(DOC), &c);
-    let b = prepare(&rig, "sign-cms-ex", &doc(OTHER), &c);
+    let mut c = ctx(&rig, "sign-cms-ex");
+    let a = prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c);
+    let b = prepare(&rig, "sign-cms-ex", &doc(OTHER), &mut c);
     let shown_b = UserConfirmation::after_user_confirmed(b.summary());
     assert_eq!(
         a.approve(shown_b, None).unwrap_err(),
         ApprovalIssueError::ConfirmationMismatch
     );
-    let c2 = prepare(&rig, "sign-cms-ex", &doc(DOC), &c);
+    let c2 = prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c);
     let conf = UserConfirmation::after_user_confirmed(c2.summary());
     assert_eq!(
         c2.approve(conf, Some(Duration::ZERO)).unwrap_err(),
@@ -625,9 +631,9 @@ fn confirmation_of_another_summary_issues_nothing() {
 #[test]
 fn ttl_is_at_most_the_constant_and_configurable_only_downward() {
     let rig = rigged(&[], "");
-    let c = ctx(&rig, "sign-cms-ex");
-    let take = |ttl: Option<Duration>| {
-        let p = prepare(&rig, "sign-cms-ex", &doc(DOC), &c);
+    let mut c = ctx(&rig, "sign-cms-ex");
+    let mut take = |ttl: Option<Duration>| {
+        let p = prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c);
         let conf = UserConfirmation::after_user_confirmed(p.summary());
         let before = Instant::now();
         let a = p.approve(conf, ttl).unwrap();
@@ -665,7 +671,7 @@ fn approval_with_an_expired_ttl_is_refused_before_the_module_runs() {
     let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
     let params = doc(DOC);
     let mut c = ctx(&rig, "sign-cms-ex");
-    let p = prepare(&rig, "sign-cms-ex", &params, &c);
+    let p = prepare(&rig, "sign-cms-ex", &params, &mut c);
     let conf = UserConfirmation::after_user_confirmed(p.summary());
     let approval = p.approve(conf, Some(Duration::from_millis(1))).unwrap();
     std::thread::sleep(Duration::from_millis(30));
@@ -683,7 +689,7 @@ fn guard_refuses_an_approval_that_expires_during_the_call() {
     let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
     let params = doc(DOC);
     let mut c = ctx(&rig, "sign-cms-ex");
-    let p = prepare(&rig, "sign-cms-ex", &params, &c);
+    let p = prepare(&rig, "sign-cms-ex", &params, &mut c);
     let conf = UserConfirmation::after_user_confirmed(p.summary());
     let approval = p.approve(conf, Some(Duration::from_millis(300))).unwrap();
     let (tx, rx) = channel();
@@ -709,7 +715,7 @@ fn guard_refuses_an_approval_that_expires_during_the_call() {
 fn another_document_than_the_approved_one_never_reaches_the_plugin() {
     let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
     let mut c = ctx(&rig, "sign-cms-ex");
-    let approved = confirm(prepare(&rig, "sign-cms-ex", &doc(DOC), &c));
+    let approved = confirm(prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c));
     // A -> B at the call: refused before the module ran, with nothing opened or applied.
     let result = call(&rig, "sign-cms-ex", &doc(OTHER), approved, &mut c);
     assert!(denied(&result), "{result:?}");
@@ -723,7 +729,7 @@ fn another_document_than_the_approved_one_never_reaches_the_plugin() {
     let mut longer = DOC.to_vec();
     longer.push(b'!');
     let mut c = ctx(&rig, "sign-cms-ex");
-    let approved = confirm(prepare(&rig, "sign-cms-ex", &doc(DOC), &c));
+    let approved = confirm(prepare(&rig, "sign-cms-ex", &doc(DOC), &mut c));
     let result = call(&rig, "sign-cms-ex", &doc(&longer), approved, &mut c);
     assert!(denied(&result));
 }
@@ -733,21 +739,21 @@ fn approval_of_another_invocation_or_key_or_caller_is_refused() {
     let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
     let params = doc(DOC);
     // Another invocation than the approved one.
-    let c1 = ctx(&rig, "sign-cms-ex");
-    let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &c1));
+    let mut c1 = ctx(&rig, "sign-cms-ex");
+    let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &mut c1));
     let mut c2 = ctx(&rig, "sign-cms-ex");
     let result = call(&rig, "sign-cms-ex", &params, approval, &mut c2);
     assert!(denied(&result));
     assert_eq!(result.refusals(), [TicketRefusal::OperationId]);
     // Another operation.
     let mut c = ctx(&rig, "sign-cms-ex");
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
     let result = call(&rig, "sign-cms-ex", &params, approval, &mut c);
     assert!(denied(&result));
     assert_eq!(result.refusals(), [TicketRefusal::Operation]);
     // Another handle for the same key.
     let mut c = ctx(&rig, "sign-cms-ex");
-    let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &mut c));
     let rebound = binding(&rig.key, 2).with_public_metadata(&rig.alias, &rig.cert, &[]);
     let result = call_with(&rig, "sign-cms-ex", &params, &rebound, approval, &mut c);
     assert!(denied(&result));
@@ -805,8 +811,8 @@ fn a_text_parameter_of_the_profile_is_part_of_the_approved_options() {
     };
     // The module signs the element the user was shown.
     let rig = rigged(&[xml_call(Some("//p:data"))], "");
-    let c = ctx(&rig, "sign-xml");
-    let prepared = prepare(&rig, "sign-xml", &params("//p:data"), &c);
+    let mut c = ctx(&rig, "sign-xml");
+    let prepared = prepare(&rig, "sign-xml", &params("//p:data"), &mut c);
     let Profile::Xml(profile) = &prepared.summary().profile else {
         panic!("not an XML profile")
     };
@@ -820,10 +826,11 @@ fn a_text_parameter_of_the_profile_is_part_of_the_approved_options() {
     assert!(denied(&result), "{result:?}");
     assert_eq!(result.refusals(), [TicketRefusal::Options]);
     // An XPath no XPath rule allows is no operation to approve.
-    let c = ctx(&rig, "sign-xml");
+    let mut c = ctx(&rig, "sign-xml");
     let key = bound(&rig);
     for bad in ["not-absolute", "/r\u{202e}"] {
-        let error = try_prepare(&rig, "sign-xml", &params(bad), &key, &manual(), &c).unwrap_err();
+        let error =
+            try_prepare(&rig, "sign-xml", &params(bad), &key, &manual(), &mut c).unwrap_err();
         assert_eq!(error, PluginPrepareError::Options, "{bad}");
     }
 }
@@ -841,8 +848,8 @@ fn prehashed_digest_is_computed_by_core_with_the_key_algorithm() {
         )))],
         "",
     );
-    let c = ctx(&rig, "sign-cms-digest");
-    let prepared = prepare(&rig, "sign-cms-digest", &doc(DOC), &c);
+    let mut c = ctx(&rig, "sign-cms-digest");
+    let prepared = prepare(&rig, "sign-cms-digest", &doc(DOC), &mut c);
     let p = prepared.summary().content.prehashed.clone().unwrap();
     assert_eq!(p.alg, oncl_pki::key::HashAlg::Sha256);
     assert_eq!(p.digest, digest);
@@ -877,8 +884,8 @@ fn rig_digest(digest: Vec<u8>) -> Rig {
 #[test]
 fn prehashed_digest_of_a_gost_key_uses_streebog() {
     let rig = rig_with(&[], "", true, "user-gost2015-sign");
-    let c = ctx(&rig, "sign-cms-digest");
-    let prepared = prepare(&rig, "sign-cms-digest", &doc(DOC), &c);
+    let mut c = ctx(&rig, "sign-cms-digest");
+    let prepared = prepare(&rig, "sign-cms-digest", &doc(DOC), &mut c);
     let p = prepared.summary().content.prehashed.clone().unwrap();
     assert_eq!(p.alg, oncl_pki::key::HashAlg::Streebog512);
     assert_eq!(p.digest, SigAlg::Gost2015_512.digest(DOC));
@@ -940,7 +947,7 @@ fn the_approval_is_revoked_when_the_call_ends() {
     // The same after a call that failed without using the key.
     let rig = rig_raw(DOC);
     let mut c = ctx(&rig, "sign-raw");
-    let approval = confirm(prepare(&rig, "sign-raw", &doc(DOC), &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &doc(DOC), &mut c));
     let refused = call(&rig, "sign-raw", &doc(OTHER), approval, &mut c);
     assert!(denied(&refused));
     let key = [bound(&rig)];
@@ -1005,9 +1012,9 @@ fn the_approval_is_revoked_when_the_call_panics() {
     };
     // A panic in a host function (the key provider) is a trap of the module: the call
     // ends with the key not applied, and the approval is gone.
-    rig.provider.panic_once.store(true, Ordering::SeqCst);
     let mut c = ctx(&rig, "sign-raw");
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
+    rig.provider.panic_once.store(true, Ordering::SeqCst);
     let trapped = call(&rig, "sign-raw", &params, approval, &mut c);
     assert!(trapped.response().is_none());
     assert_eq!(trapped.applied(), AppliedState::NotApplied);
@@ -1022,7 +1029,7 @@ fn the_approval_is_revoked_when_the_call_panics() {
         .engine
         .begin(grant, OperationPolicy::strict_online(), control.clone())
         .unwrap();
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
     control.0.store(true, Ordering::SeqCst);
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         call(&rig, "sign-raw", &params, approval, &mut c)
@@ -1047,7 +1054,7 @@ fn an_approved_call_of_another_engine_configuration_or_concurrent_call_is_refuse
     let rig = rigged(&[raw_call(DOC)], "");
     let params = doc(DOC);
     let mut c = ctx(&rig, "sign-raw");
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
     let (tx, rx) = channel();
     *rig.provider.entered.lock().unwrap() = Some(tx);
     let (release_tx, release_rx) = channel();
@@ -1057,7 +1064,7 @@ fn an_approved_call_of_another_engine_configuration_or_concurrent_call_is_refuse
         let busy = s.spawn(move || {
             rx.recv().unwrap();
             let mut c2 = ctx(rig, "sign-raw");
-            let approval2 = confirm(prepare(rig, "sign-raw", params, &c2));
+            let approval2 = confirm(prepare(rig, "sign-raw", params, &mut c2));
             let second = call(rig, "sign-raw", params, approval2, &mut c2);
             release_tx.send(()).unwrap();
             second
@@ -1075,7 +1082,7 @@ fn replayed_nonce_is_refused_by_the_call() {
     let rig = rigged(&[raw_call(DOC)], "");
     let params = doc(DOC);
     let nonce = [7u8; 16];
-    let forge = |c: &OperationContext| {
+    let forge = |c: &mut OperationContext| {
         let p = prepare(&rig, "sign-raw", &params, c);
         let s = p.summary();
         PluginApproval::for_tests(
@@ -1089,16 +1096,17 @@ fn replayed_nonce_is_refused_by_the_call() {
                 s.kind,
                 ContentBinding::bytes(DOC),
                 s.options_sha256,
+                s.key.fingerprint_sha256,
             )],
             Instant::now() + APPROVAL_TTL,
             nonce,
         )
     };
     let mut c = ctx(&rig, "sign-raw");
-    let first = call(&rig, "sign-raw", &params, forge(&c), &mut c);
+    let first = call(&rig, "sign-raw", &params, forge(&mut c), &mut c);
     assert_eq!(first.applied(), AppliedState::Applied, "{first:?}");
     let mut c = ctx(&rig, "sign-raw");
-    let second = call(&rig, "sign-raw", &params, forge(&c), &mut c);
+    let second = call(&rig, "sign-raw", &params, forge(&mut c), &mut c);
     assert!(denied(&second));
     assert_eq!(second.refusals(), [TicketRefusal::Replayed]);
     assert_eq!(rig.guard.applications(), 1);
@@ -1108,9 +1116,10 @@ fn replayed_nonce_is_refused_by_the_call() {
 fn undeclared_derived_server_and_keyless_operations_have_no_approved_run() {
     let rig = rigged(&[raw_call(DOC)], "");
     let params = doc(DOC);
-    let c = ctx(&rig, "sign-raw");
+    let mut c = ctx(&rig, "sign-raw");
     let key = bound(&rig);
-    let prepare_error = |op: &str| try_prepare(&rig, op, &params, &key, &manual(), &c).unwrap_err();
+    let mut prepare_error =
+        |op: &str| try_prepare(&rig, op, &params, &key, &manual(), &mut c).unwrap_err();
     assert_eq!(
         prepare_error("nope"),
         PluginPrepareError::Request(PluginRequestError::UndeclaredOperation)
@@ -1124,17 +1133,17 @@ fn undeclared_derived_server_and_keyless_operations_have_no_approved_run() {
         PluginPrepareError::Request(PluginRequestError::NotManual)
     );
     assert_eq!(
-        try_prepare(&rig, "no-key", &[], &key, &manual(), &c).unwrap_err(),
+        try_prepare(&rig, "no-key", &[], &key, &manual(), &mut c).unwrap_err(),
         PluginPrepareError::NoKeyUse
     );
     // The call refuses the same, with the typed reason where there is one.
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c));
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
     let mut c = ctx(&rig, "sign-raw");
     let undeclared = call(&rig, "nope", &params, approval, &mut c);
     assert!(denied(&undeclared));
     assert_eq!(undeclared.refusals(), [TicketRefusal::UndeclaredOperation]);
-    let c0 = ctx(&rig, "sign-raw");
-    let approval = confirm(prepare(&rig, "sign-raw", &params, &c0));
+    let mut c0 = ctx(&rig, "sign-raw");
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c0));
     let mut c = ctx(&rig, "sign-raw");
     let derived = call(&rig, "derive-op", &params, approval, &mut c);
     assert!(denied(&derived));
@@ -1142,13 +1151,13 @@ fn undeclared_derived_server_and_keyless_operations_have_no_approved_run() {
     // A caller that is not a local operator has no manual window.
     let service = CallerContext::ServiceClient("svc".to_owned());
     assert_eq!(
-        try_prepare(&rig, "sign-raw", &params, &key, &service, &c).unwrap_err(),
+        try_prepare(&rig, "sign-raw", &params, &key, &service, &mut c).unwrap_err(),
         PluginPrepareError::CallerNotManual
     );
     // A key binding without its public metadata cannot be shown to the user.
     let bare = binding(&rig.key, 1);
     assert_eq!(
-        try_prepare(&rig, "sign-raw", &params, &bare, &manual(), &c).unwrap_err(),
+        try_prepare(&rig, "sign-raw", &params, &bare, &manual(), &mut c).unwrap_err(),
         PluginPrepareError::KeyMetadataMissing
     );
     // A parameter the operation does not declare, a missing one, a wrong kind.
@@ -1165,7 +1174,7 @@ fn undeclared_derived_server_and_keyless_operations_have_no_approved_run() {
     ] {
         assert!(
             matches!(
-                try_prepare(&rig, "sign-raw", &params, &key, &manual(), &c).unwrap_err(),
+                try_prepare(&rig, "sign-raw", &params, &key, &manual(), &mut c).unwrap_err(),
                 PluginPrepareError::Request(_)
             ),
             "{name}"
@@ -1362,4 +1371,141 @@ fn rig_browser(scan: &str, browser: &CallerContext) -> Rig {
         cache: Arc::new(OcspCache::new()),
         _dir: dir,
     }
+}
+
+#[test]
+fn the_certificate_that_signs_is_the_one_the_user_approved() {
+    let params = doc(DOC);
+    let other = crypto::issued("user-gost2015-sign").cert;
+    // Positive control: the binding's certificate is the key's.
+    let rig = rigged(&[raw_call(DOC)], "");
+    let (_c, ok) = flow(&rig, "sign-raw", &params);
+    assert_eq!(ok.applied(), AppliedState::Applied, "{ok:?}");
+    // Prepare refuses metadata that is not what the key store holds for the key.
+    let mut c = ctx(&rig, "sign-raw");
+    let lying = binding(&rig.key, 1).with_public_metadata(&rig.alias, &other, &[]);
+    assert_eq!(
+        try_prepare(&rig, "sign-raw", &params, &lying, &manual(), &mut c).unwrap_err(),
+        PluginPrepareError::CertificateMismatch
+    );
+    // Approved with certificate A, called with the same selector and handle but certificate
+    // B in the metadata: refused before the module runs, key not applied.
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
+    let result = call_with(&rig, "sign-raw", &params, &lying, approval, &mut c);
+    assert!(denied(&result), "{result:?}");
+    assert_eq!(result.refusals(), [TicketRefusal::CertificateChanged]);
+    assert_eq!(
+        rig.guard.applications(),
+        1,
+        "only the control applied the key"
+    );
+    drop(c);
+    // The guard decides on the certificate of the key that actually signs: an approval for
+    // certificate B whose metadata also says B (so the fast check passes) is refused at the
+    // key use, because the key lease holds A.
+    let mut c = ctx(&rig, "sign-raw");
+    let p = prepare(&rig, "sign-raw", &params, &mut c);
+    let s = p.summary();
+    let fingerprint: [u8; 32] = {
+        use sha2::Digest;
+        Sha256::digest(der::Encode::to_der(&other).unwrap()).into()
+    };
+    let forged = PluginApproval::for_tests(
+        s.plugin.clone(),
+        "sign-raw",
+        manual(),
+        c.id(),
+        rig.key.key_id(),
+        1,
+        vec![ApprovedUse::for_tests(
+            s.kind,
+            ContentBinding::bytes(DOC),
+            s.options_sha256,
+            fingerprint,
+        )],
+        Instant::now() + APPROVAL_TTL,
+        [9; 16],
+    );
+    // The metadata is not compared by the guard; the fast check compares the plan's
+    // fingerprint (A) with the approval's (B) and refuses first, so assert that too.
+    let result = call(&rig, "sign-raw", &params, forged, &mut c);
+    assert!(denied(&result), "{result:?}");
+    assert_eq!(result.refusals(), [TicketRefusal::CertificateChanged]);
+    assert_eq!(rig.guard.applications(), 1);
+}
+
+#[test]
+fn guard_refuses_a_key_whose_certificate_changed_after_the_fast_check() {
+    // Lease certificate A, approval and metadata B: reaches the guard only if the fast check
+    // is bypassed, which `plugin_call` (no fast check) does.
+    let rig = rigged(&[raw_call(DOC)], "");
+    let params = doc(DOC);
+    let mut c = ctx(&rig, "sign-raw");
+    let p = prepare(&rig, "sign-raw", &params, &mut c);
+    let s = p.summary();
+    let forged = PluginApproval::for_tests(
+        s.plugin.clone(),
+        "sign-raw",
+        manual(),
+        c.id(),
+        rig.key.key_id(),
+        1,
+        vec![ApprovedUse::for_tests(
+            s.kind,
+            ContentBinding::bytes(DOC),
+            s.options_sha256,
+            [7; 32],
+        )],
+        Instant::now() + APPROVAL_TTL,
+        [8; 16],
+    );
+    rig.guard.grant(forged).unwrap();
+    let caller = manual();
+    let key = [bound(&rig)];
+    let error = rig
+        .engine
+        .plugin_call(
+            &PluginCall {
+                plugin_id: ID,
+                operation: "sign-raw",
+                args: "{}",
+            },
+            &PluginBindings::new(&caller, &key),
+            &mut c,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(
+        rig.guard.refusal_log().last().map(|(_, r)| *r),
+        Some(TicketRefusal::CertificateChanged)
+    );
+    assert_eq!(rig.guard.applications(), 0);
+}
+
+#[test]
+fn prehash_algorithm_agrees_with_the_signer_under_ncalayer_compatibility() {
+    // A certificate whose issuer signed with another algorithm than the leaf key's: the
+    // non-strict selection would take the issuer's, the signer (strict) the key's.
+    let (selector, cert) = crypto::selector_with_certificate("user-rsa-sign");
+    assert_ne!(
+        oncl_pki::info::cert_info(&cert).signing_alg().ok(),
+        Some(SigAlg::RsaSha256),
+        "the fixture's issuer signs with another algorithm"
+    );
+    let mut rig = rigged(&[], "");
+    rig.key = selector;
+    rig.cert = cert;
+    rig.alias = crypto::raw("user-rsa-sign").alias;
+    let grant = ExecutionGrant::new([Action::Sign, Action::SignDigest, Action::Hash])
+        .with_keys([rig.key.key_id()])
+        .with_plugins([permission(&rig, "sign-cms-digest", manual())]);
+    let policy = OperationPolicy {
+        allow_prehashed: true,
+        ..OperationPolicy::ncalayer_compatibility()
+    };
+    let mut c = rig.engine.begin(grant, policy, Arc::new(Control)).unwrap();
+    let prepared = prepare(&rig, "sign-cms-digest", &doc(DOC), &mut c);
+    let p = prepared.summary().content.prehashed.clone().unwrap();
+    assert_eq!(p.alg, oncl_pki::key::HashAlg::Sha256);
+    assert_eq!(p.digest, SigAlg::RsaSha256.digest(DOC));
 }

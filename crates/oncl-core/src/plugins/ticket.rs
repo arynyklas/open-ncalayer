@@ -78,9 +78,20 @@ pub struct PluginUse {
     key: KeyId,
     content: ContentBinding,
     options_sha256: [u8; 32],
+    /// SHA-256 of the DER of the certificate of the key that is about to sign: set at the
+    /// signing point from the key lease itself (never from host metadata or the plugin).
+    certificate_sha256: [u8; 32],
     max_uses: u8,
 }
 impl PluginUse {
+    pub(crate) fn with_signer_certificate(mut self, certificate_sha256: [u8; 32]) -> Self {
+        self.certificate_sha256 = certificate_sha256;
+        self
+    }
+    /// SHA-256 of the certificate of the key that signs, from its lease.
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
+        &self.certificate_sha256
+    }
     /// A ticket for tests of guards (for example a document guard that must refuse every
     /// plugin event). Core builds the real ones from the arguments it runs. Not part of a
     /// release: only with the `testing` feature.
@@ -95,6 +106,7 @@ impl PluginUse {
         key: KeyId,
         content: ContentBinding,
         options_sha256: [u8; 32],
+        certificate_sha256: [u8; 32],
     ) -> Self {
         Self {
             identity,
@@ -105,6 +117,7 @@ impl PluginUse {
             key,
             content,
             options_sha256,
+            certificate_sha256,
             max_uses: MAX_USES,
         }
     }
@@ -168,6 +181,7 @@ impl PluginUse {
         h.update(self.content.len.to_be_bytes());
         h.update([u8::from(self.content.prehashed)]);
         field(&mut h, &self.options_sha256);
+        field(&mut h, &self.certificate_sha256);
         h.update([self.max_uses]);
         h.finalize().into()
     }
@@ -181,20 +195,36 @@ pub struct ApprovedUse {
     pub(super) kind: KeyKind,
     pub(super) content: ContentBinding,
     pub(super) options_sha256: [u8; 32],
+    /// SHA-256 of the DER of the signer certificate the user was shown.
+    pub(super) certificate_sha256: [u8; 32],
 }
 impl ApprovedUse {
-    pub(super) fn new(kind: KeyKind, content: ContentBinding, options_sha256: [u8; 32]) -> Self {
+    pub(super) fn new(
+        kind: KeyKind,
+        content: ContentBinding,
+        options_sha256: [u8; 32],
+        certificate_sha256: [u8; 32],
+    ) -> Self {
         Self {
             kind,
             content,
             options_sha256,
+            certificate_sha256,
         }
     }
     /// For tests of the guard, which must forge what Core never would. Not part of a
     /// release: only with the `testing` feature.
     #[cfg(feature = "testing")]
-    pub fn for_tests(kind: KeyKind, content: ContentBinding, options_sha256: [u8; 32]) -> Self {
-        Self::new(kind, content, options_sha256)
+    pub fn for_tests(
+        kind: KeyKind,
+        content: ContentBinding,
+        options_sha256: [u8; 32],
+        certificate_sha256: [u8; 32],
+    ) -> Self {
+        Self::new(kind, content, options_sha256, certificate_sha256)
+    }
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
+        &self.certificate_sha256
     }
     pub fn kind(&self) -> KeyKind {
         self.kind
@@ -310,6 +340,9 @@ impl PluginApproval {
             return Some(TicketRefusal::Key);
         }
         let used = &self.uses[0];
+        if used.certificate_sha256 != plan.used.certificate_sha256 {
+            return Some(TicketRefusal::CertificateChanged);
+        }
         if used.kind != plan.used.kind {
             return Some(TicketRefusal::Kind);
         }
@@ -369,6 +402,8 @@ pub enum TicketRefusal {
     /// The plugin declares operations and the call's operation is none of them (refused
     /// in `plugin_call`, before the module runs; see `OperationContext::plugin_refusal`).
     UndeclaredOperation,
+    /// The certificate of the key that is about to sign is not the one the user approved.
+    CertificateChanged,
     /// The engine has no [`PluginConsentGuard`] configured for plugin key uses
     /// ([`crate::EngineServices::with_plugin_keys`]), so no approved call can run.
     NoGuard,
@@ -513,6 +548,13 @@ impl PluginConsentGuard {
         if event.action != ticket.content.action() {
             return Err(TicketRefusal::Action);
         }
+        if approval
+            .uses
+            .iter()
+            .any(|u| u.certificate_sha256 != ticket.certificate_sha256)
+        {
+            return Err(TicketRefusal::CertificateChanged);
+        }
         let matches = |u: &ApprovedUse| {
             u.kind == ticket.kind
                 && u.content == ticket.content
@@ -652,6 +694,8 @@ impl<'a, 'b> Backend<'a, 'b> {
             key: key.key.selector().key_id(),
             content,
             options_sha256,
+            // Filled in at the signing point from the key lease.
+            certificate_sha256: [0; 32],
             max_uses: MAX_USES,
         };
         *self
@@ -1428,6 +1472,7 @@ mod tests {
             key: selector.key_id(),
             content: ContentBinding::bytes(b"x"),
             options_sha256: [0; 32],
+            certificate_sha256: [0; 32],
             max_uses: MAX_USES,
         };
         *ctx.plugin_ticket.lock().unwrap() = Some(ticket);
@@ -1487,6 +1532,7 @@ mod tests {
             key: selector.key_id(),
             content,
             options_sha256: [0; 32],
+            certificate_sha256: [0; 32],
             max_uses: MAX_USES,
         };
         guard
@@ -1501,6 +1547,7 @@ mod tests {
                     kind: KeyKind::Raw,
                     content,
                     options_sha256: [0; 32],
+                    certificate_sha256: [0; 32],
                 }],
                 Instant::now() + std::time::Duration::from_secs(60),
                 [1; 16],

@@ -403,6 +403,11 @@ impl fmt::Debug for KeyLease {
     }
 }
 impl KeyLease {
+    /// The certificate this lease holds for its key.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn certificate(&self) -> &Certificate {
+        &self.entry.cert
+    }
     pub fn new(id: KeyId, entry: KeyEntry, ctx: &OperationContext) -> Result<Self, OperationError> {
         authority(ctx.grant(), &id)?;
         let public = oncl_pki::key::PublicKey::from_spki(
@@ -686,12 +691,16 @@ impl AuthorizedSigner<'_> {
         // One ticket, one use: a second `sign_digest` of the same plugin call finds none.
         #[cfg(feature = "plugins")]
         {
+            // The certificate of the key that is actually about to sign, from its lease.
+            let signer =
+                crate::plugins::certificate_sha256(&self.ctx.leases[self.index].entry.cert);
             event.plugin = self
                 .ctx
                 .plugin_ticket
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+                .take()
+                .map(|ticket| ticket.with_signer_certificate(signer));
         }
         let receipt = self.guard.before_use(&event).inspect_err(|_| {
             self.ctx

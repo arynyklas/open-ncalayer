@@ -39,6 +39,14 @@ pub use ticket::{
     REFUSAL_LOG, TicketRefusal,
 };
 
+/// SHA-256 of the DER of `cert`; all zeros (never an approved value) if it cannot be encoded.
+pub(crate) fn certificate_sha256(cert: &oncl_pki::cert::Certificate) -> [u8; 32] {
+    use sha2::Digest;
+    der::Encode::to_der(cert)
+        .map(|der| sha2::Sha256::digest(der).into())
+        .unwrap_or([0; 32])
+}
+
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
 #[derive(Clone, Debug)]
 pub struct PluginPermission {

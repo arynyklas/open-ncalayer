@@ -71,6 +71,9 @@ impl EngineServices {
     /// engine configured with [`EngineServices::with_keys`] cannot run an approved call.
     /// Keep documents on another engine (their guard refuses a plugin ticket, this one
     /// refuses everything without one).
+    ///
+    /// Give each engine its own guard: the guard has one approval slot, so two engines sharing
+    /// one clobber each other's approval (the key use fails closed, a denial of service).
     #[cfg(feature = "plugins")]
     pub fn with_plugin_keys(
         mut self,

@@ -1285,6 +1285,7 @@ mod tests {
             key,
             ContentBinding::bytes(b"document"),
             [0; 32],
+            [0; 32],
         );
         let ticketed = plain.clone().with_plugin_ticket_for_tests(ticket);
         assert!(!plain.is_plugin());

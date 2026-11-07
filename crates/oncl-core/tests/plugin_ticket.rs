@@ -157,6 +157,7 @@ struct Rig {
     guard: Arc<Watch>,
     provider: Arc<crypto::Provider>,
     key: KeySelector,
+    cert: oncl_pki::cert::Certificate,
     _dir: tempfile::TempDir,
 }
 
@@ -169,7 +170,7 @@ fn rig(
     consent: bool,
     with_operations: bool,
 ) -> Rig {
-    let (key, validation) = xades_fixture::matching_issuer("user-rsa-sign");
+    let (key, validation, cert) = xades_fixture::matching_issuer_with_certificate("user-rsa-sign");
     let exact: Vec<PluginPermission> = exact
         .iter()
         .map(|(op, imports)| {
@@ -220,6 +221,7 @@ fn rig(
         guard,
         provider,
         key,
+        cert,
         _dir: dir,
     }
 }
@@ -287,8 +289,17 @@ fn declared_options(rig: &Rig, op: &str, text: &str) -> [u8; 32] {
         .options_sha256(&|_| Some(text.to_owned()))
         .unwrap()
 }
+fn fingerprint(cert: &oncl_pki::cert::Certificate) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(der::Encode::to_der(cert).unwrap()).into()
+}
 fn used(rig: &Rig, op: &str, kind: KeyKind, content: ContentBinding) -> ApprovedUse {
-    ApprovedUse::for_tests(kind, content, declared_options(rig, op, "/r"))
+    ApprovedUse::for_tests(
+        kind,
+        content,
+        declared_options(rig, op, "/r"),
+        fingerprint(&rig.cert),
+    )
 }
 fn raw_call(handle: u32, data: &[u8]) -> (Import, Vec<u8>) {
     (
@@ -856,7 +867,12 @@ fn options_mismatch_refused() {
     let right = used(&r, case.op, case.kind, case.content);
     let mut options = *right.options_sha256();
     options[0] ^= 1;
-    let wrong = ApprovedUse::for_tests(case.kind, case.content, options);
+    let wrong = ApprovedUse::for_tests(
+        case.kind,
+        case.content,
+        options,
+        *right.certificate_sha256(),
+    );
     assert!(denied(go(&r, &case, vec![wrong]).unwrap_err()));
     assert_eq!(last(&r), Some(TicketRefusal::Options));
 }
