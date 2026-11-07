@@ -126,8 +126,14 @@ pub fn serve(out: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::write(out.join("rsa.p12"), p12(&pki.rsa)?)?;
     std::fs::write(out.join("gost.p12"), p12(&pki.gost)?)?;
     std::fs::write(out.join("tsa.der"), pki.tsa.cert.to_der()?)?;
-    std::fs::write(out.join("leaf-rsa.ocsp"), ocsp_for(&pki, &origin, &pki.rsa.cert))?;
-    std::fs::write(out.join("leaf-gost.ocsp"), ocsp_for(&pki, &origin, &pki.gost.cert))?;
+    std::fs::write(
+        out.join("leaf-rsa.ocsp"),
+        ocsp_for(&pki, &origin, &pki.rsa.cert),
+    )?;
+    std::fs::write(
+        out.join("leaf-gost.ocsp"),
+        ocsp_for(&pki, &origin, &pki.gost.cert),
+    )?;
     std::fs::write(out.join("tsa.ocsp"), ocsp_for(&pki, &origin, &pki.tsa.cert))?;
     let meta = format!(
         "{{\"origin\":\"{origin}\",\"tsa_url\":\"{origin}/tsa\",\"tsa_policy\":\"{TSA_POLICY}\",\"password\":\"{PASSWORD}\",\"alias_rsa\":{},\"alias_gost\":{}}}",
@@ -140,11 +146,20 @@ pub fn serve(out: &Path) -> Result<(), Box<dyn Error>> {
     // after an earlier operation's timestamp, always gets later ones.
     let refresh_stop = Arc::new(AtomicBool::new(false));
     let refresher = {
-        let (pki, origin, out, stop) = (pki.clone(), origin.clone(), out.to_owned(), refresh_stop.clone());
+        let (pki, origin, out, stop) = (
+            pki.clone(),
+            origin.clone(),
+            out.to_owned(),
+            refresh_stop.clone(),
+        );
         thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_secs(3));
-                for (name, cert) in [("leaf-rsa.ocsp", &pki.rsa.cert), ("leaf-gost.ocsp", &pki.gost.cert), ("tsa.ocsp", &pki.tsa.cert)] {
+                for (name, cert) in [
+                    ("leaf-rsa.ocsp", &pki.rsa.cert),
+                    ("leaf-gost.ocsp", &pki.gost.cert),
+                    ("tsa.ocsp", &pki.tsa.cert),
+                ] {
                     let partial = out.join(format!("{name}.partial"));
                     if std::fs::write(&partial, ocsp_for(&pki, &origin, cert)).is_ok() {
                         let _ = std::fs::rename(&partial, out.join(name));
@@ -160,14 +175,12 @@ pub fn serve(out: &Path) -> Result<(), Box<dyn Error>> {
     let base = origin.clone();
     let server_pki = pki.clone();
     let accept = thread::spawn(move || {
-        let tsa = Arc::new(MockTsa::new(server_pki.tsa.clone()).with_gen_time(time::OffsetDateTime::now_utc()));
         while !stopping.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let (base, pki, tsa, counted) =
-                        (base.clone(), server_pki.clone(), tsa.clone(), counted.clone());
+                    let (base, pki, counted) = (base.clone(), server_pki.clone(), counted.clone());
                     thread::spawn(move || {
-                        let _ = handle(&mut stream, &base, &pki, &tsa, &counted);
+                        let _ = handle(&mut stream, &base, &pki, &counted);
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -194,7 +207,6 @@ fn handle(
     stream: &mut TcpStream,
     origin: &str,
     pki: &Pki,
-    tsa: &MockTsa,
     counted: &AtomicU64,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
@@ -243,23 +255,27 @@ fn handle(
     // meets an expired responder answer.
     let now = time::OffsetDateTime::now_utc();
     let reply = if path == "/tsa" {
-        MockTsa::new(pki.tsa.clone()).with_gen_time(now).send(&HttpRequest::post(
-            &url,
-            Some("application/timestamp-query"),
-            &body,
-            GetOptions::default(),
-        ))
+        MockTsa::new(pki.tsa.clone())
+            .with_gen_time(now)
+            .send(&HttpRequest::post(
+                &url,
+                Some("application/timestamp-query"),
+                &body,
+                GetOptions::default(),
+            ))
     } else if method == "GET" {
         MockOcsp::new(pki.responder.clone())
             .with_now(now)
             .send(&HttpRequest::get(&url, GetOptions::default()))
     } else {
-        MockOcsp::new(pki.responder.clone()).with_now(now).send(&HttpRequest::post(
-            &url,
-            Some("application/ocsp-request"),
-            &body,
-            GetOptions::default(),
-        ))
+        MockOcsp::new(pki.responder.clone())
+            .with_now(now)
+            .send(&HttpRequest::post(
+                &url,
+                Some("application/ocsp-request"),
+                &body,
+                GetOptions::default(),
+            ))
     };
     match reply {
         Ok(reply) => {

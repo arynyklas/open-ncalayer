@@ -319,7 +319,10 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             authority = Some(guard);
             selector = Some(key);
         }
-        if matches!(opts.level.as_deref(), Some("t" | "lt" | "lta")) || op == "extend" || op == "xades-sign" {
+        if matches!(opts.level.as_deref(), Some("t" | "lt" | "lta"))
+            || op == "extend"
+            || op == "xades-sign"
+        {
             let mut tsa = oncl_pki::tsp::TsaSpec {
                 url: pki.tsa_url.clone(),
                 method: oncl_pki::http::PkiMethod::Post { content_type: None },
@@ -384,10 +387,9 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             let request = verify_request(opts)?;
             let mut detached_input = opts.detached.as_deref().map(Input::open).transpose()?;
             let mut detached_lock;
-            let detached = match &mut detached_input {
-                Some(input) => Some(source!(input, false, detached_lock)),
-                None => None,
-            };
+            let detached = detached_input
+                .as_mut()
+                .map(|input| source!(input, false, detached_lock));
             let source = source!(&mut input, opts.unknown_length, stdin_lock);
             let report = engine.verify(&request, source, detached, &mut ctx)?;
             out.insert("verdict".into(), format!("{:?}", report.verdict).into());
@@ -426,8 +428,15 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
         "extend" => {
             let lvl = level(opts.level.as_deref().ok_or("--level")?)?;
             let pki = pki_files.as_ref().ok_or("pki")?;
-            let certificates = vec![pki.root.clone(), oncl_pki::cert::parse(&std::fs::read(pki.dir.join("tsa.der"))?)?];
-            let leaf = std::fs::read(pki.dir.join(if opts.key == "gost" { "leaf-gost.ocsp" } else { "leaf-rsa.ocsp" }))?;
+            let certificates = vec![
+                pki.root.clone(),
+                oncl_pki::cert::parse(&std::fs::read(pki.dir.join("tsa.der"))?)?,
+            ];
+            let leaf = std::fs::read(pki.dir.join(if opts.key == "gost" {
+                "leaf-gost.ocsp"
+            } else {
+                "leaf-rsa.ocsp"
+            }))?;
             let tsa_ocsp = std::fs::read(pki.dir.join("tsa.ocsp"))?;
             let ocsp = [leaf.as_slice(), tsa_ocsp.as_slice()];
             let material = ValidationMaterial {
@@ -501,7 +510,9 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
                     },
                     lvl.ok_or("--level")?,
                 ),
-                "wsse-sign" => SignRequest::wsse(key(), oncl_xml::wsse::SourceWsseSignProfile::default()),
+                "wsse-sign" => {
+                    SignRequest::wsse(key(), oncl_xml::wsse::SourceWsseSignProfile::default())
+                }
                 "pdf-sign" => SignRequest::pdf(key(), oncl_pdf::PdfSignProfile::default()),
                 "pades-sign" => SignRequest::pades(
                     key(),
@@ -516,9 +527,18 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             let mut stage = stage_out(&mut ctx)?;
             let sign = engine.sign_staged(request, source, &mut stage, &mut ctx);
             if let Some(guard) = &authority {
-                out.insert("key_begins".into(), guard.begins.load(Ordering::SeqCst).into());
-                out.insert("key_applied".into(), guard.applied.load(Ordering::SeqCst).into());
-                out.insert("key_unknown".into(), guard.unknown.load(Ordering::SeqCst).into());
+                out.insert(
+                    "key_begins".into(),
+                    guard.begins.load(Ordering::SeqCst).into(),
+                );
+                out.insert(
+                    "key_applied".into(),
+                    guard.applied.load(Ordering::SeqCst).into(),
+                );
+                out.insert(
+                    "key_unknown".into(),
+                    guard.unknown.load(Ordering::SeqCst).into(),
+                );
             }
             let report = sign?;
             out.insert("bytes_in".into(), report.bytes_in.into());
