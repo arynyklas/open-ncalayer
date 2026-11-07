@@ -65,6 +65,10 @@ total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
 framing_bytes = 67108864
+# Metadata budget per operation: bounded XML/PDF/CMS metadata one operation (or one
+# batch) may hold (default 64 MiB, minimum 32 KiB). A batch of several XML or PDF
+# signatures needs a larger value (see docs/user/http-api.md, closed batch).
+metadata_bytes = 67108864
 inline_pkcs12 = false
 
 # One entry per API client; the verifier is printed by `oncl-server token-create`.

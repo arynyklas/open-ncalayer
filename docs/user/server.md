@@ -49,6 +49,7 @@ total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
 framing_bytes = 67108864
+metadata_bytes = 67108864   # default 64 MiB; raise for batches of XML/PDF signatures
 # Optional, required for multipart public-document snapshots:
 # scratch_directory = "/private/oncl-scratch"
 inline_pkcs12 = false
@@ -83,7 +84,9 @@ Only these routes exist:
 
 * `POST /v1/hash`: raw binary request body, SHA-256, authenticated hash ACL.
 * `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing,
-  verification and binary streaming extraction; see [the HTTP contract](http-api.md).
+  verification, signing and binary streaming extraction; see [the HTTP contract](http-api.md).
+* `POST /v1/batch`: ordered batch of operations; needs the separate `batch` right.
+* `GET /v1/openapi.json`: the published contract; authenticated like `/health`.
 * `GET /health`: authenticated hash ACL; reports the actual local audit health.
 
 Send `Authorization: Bearer <token-file-content>`, the configured `Host`, and the
@@ -193,11 +196,12 @@ foreign/old journal formats and live ownership. It does not silently migrate or
 repair another journal. Audit identity/lock/rotation/quota and opaque actor/key
 labels retain the audit library's existing semantics.
 
-Inline PKCS#12 transport is not exposed by S02. The provider is off by default;
-SDK hosts can enable it only with both operator configuration and a per-token
-`inline_pkcs12 = true` right, using `AccessPolicy::authorize_inline` for the actual
-immutable inline selector identity. That method cannot authorize a File/Token
-selector, and no wildcard/source identity from a client becomes a grant. The Core
+Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global
+`inline_pkcs12 = true` and the token's own `inline_pkcs12 = true` right (both off
+by default; see [the HTTP contract](http-api.md), "Keys and secret roles"). The host
+grants only the exact immutable inline selector identity computed from the received
+container and alias (`AccessPolicy::authorize_inline`), which cannot authorize a File/Token
+selector; no wildcard/source identity from a client becomes a grant. The Core
 provider accounts secret containers in bounded memory, never document scratch.
 `KeySelector::is_inline` exposes classification only, not secret bytes or paths.
 

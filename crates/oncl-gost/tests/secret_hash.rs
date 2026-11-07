@@ -6,10 +6,10 @@
 //! - RFC 7836 Appendix B examples 1/2: complete HMAC byte-vector examples.
 //!   https://www.rfc-editor.org/rfc/rfc7836#appendix-B
 //!
-//! The secret types are intentionally not available in the current dependency
-//! releases. Controller records missing-type RED before authorizing their patch.
-//! Do not request a nonexistent feature, add a stub, or replace these imports
-//! with ordinary types just to make this target compile.
+//! The secret types (`HmacSecret`, `Streebog256Secret`, `Streebog512Secret`) come from
+//! the workspace's modified `hmac`/`streebog` copies under `vendor/` (feature
+//! `secret-input`); crates.io's releases do not have them. The imports must stay the real
+//! types: never replace them with ordinary ones to make this target compile.
 
 use hmac::{HmacSecret, KeyInit, Mac};
 use streebog::{Digest, Streebog256, Streebog256Secret, Streebog512, Streebog512Secret};

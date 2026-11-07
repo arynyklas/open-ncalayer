@@ -1566,16 +1566,11 @@ profile = "gost2015"
 oracles = ["ncanode", "asn1crypto"]
 what = "Kalkan's PAdES-LTA fixture of NCANode's repository (GOST 2015): oncl verifies at that level, the ByteRange decomposition agrees"
 expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Passed/ts=Failed/level=none ncanode=INDETERMINATE/CHAIN_INCOMPLETE/level=LTA byterange=2x digest=ok"
-defect_observed = "InvalidInput"
-defect = "D5"
-
-[[defect]]
-id = "D5"
-title = "oncl verify --profile pades-lta of Kalkan's PAdES-LTA fixture is refused (InvalidInput, no report)"
-reproduction = "oncl verify --profile pades-lta --input target/fixtures/ncanode/sample-signed-lta.pdf (sha256 pinned by `cargo xtask fetch-fixtures`; the PAdES-B, T and LT fixtures verify since the integration fixes); platform-interop --case pdf-verify-fixture-lta"
-observed = "exit 1, `oncl: InvalidInput; applied=NotApplied`, no JSON report (observed on the merged tip 902ed9f1)"
-expected = "signature Passed with the chain/timestamp reasons only, as for the same fixture at LT; NCANode reads it as level LTA"
-
+# D5 (the PAdES-LTA fixture refused with InvalidInput) was fixed by 3bec6612/3d20c244, merged at
+# 0196ffa1: the file now gets a report, so the defect marker and its [[defect]] entry are gone.
+# The `expected` grade above is the one the fix's own test pins for the signer (signature Passed,
+# `Profile(SigningTimeForbidden)`, no `ades_level`, verdict Invalid); a fresh Linux
+# `platform-interop` run has not yet confirmed the full grade string.
 [[excluded]]
 id = "envelope"
 title = "CMS encryption/decryption (envelope), RSA and KZ GOST profiles"

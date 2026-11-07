@@ -48,3 +48,21 @@ A big run that was not done is **not** a pass.
   process working set, mapped pages do; both peaks are reported.
 * The report (`report.json`) holds environment, program hashes, artifact digests, per-case checks,
   per-process peaks, durations and temp peaks.
+
+## Status (2026-11-07, tree `0.1.0-alpha.7`): the gate is NOT passed
+
+These are the ledger facts; no claim is made beyond them.
+
+* **Verdict: FAIL / no PASS.** The only 10 GiB run (build `0c0cb19`, before the fixes below) was resumed after an outage; its durable report had stopped at about 39,900 s with 37 completed cases. It exposed four production defects (labelled D1–D4 here; this numbering is separate from the D1–D6 of `platform-interop.md`), none of which is accepted as a pass:
+  * **D1** (PDF/CMS output): own-output `InputLimit` of a signed PDF readback. Fixed by the container surcharge (`6d3ba57e`, f4359257).
+  * **D2** (XAdES-T): `InvalidInput` after key use at about 21,000 s. Root cause: the host clock was sampled before the carried-proof passes, so the online OCSP answer left its 300 s window; fixed by sampling after (`2736f787`, `66eb1e36`). The throughput cost is **not** fixed: XAdES-T at 10 GiB took about 21,000 s against about 900 s for PDF, because every carried proof re-reads the whole source.
+  * **D3** (HTTP signing): `ResponseLost`. Root cause confirmed on a diagnostic run: unthrottled progress frames (about 1.48 MB/s) consumed the operation output allowance (aborted after exactly 11,878,268,140 response bytes, BEGIN=0). Fixed by the progress throttle (`cba9f224`, merged `31854c17`).
+  * **D4** (dense PDF): the cross-reference budget. Fixed by `a07d2832` (documented in `docs/dev/sdk.md`, "Dense PDFs").
+* A later defect, **D7** (server: a stalled or crawling upload held an admission slot), was found by `overload-profile` and fixed (`902ed9f1`: `upload_idle_timeout_ms`, `upload_min_bytes_per_second`).
+* **2 GiB rerun on `efc785ed`** passes: PDF compact and dense, PAdES-B and its levels, CAdES levels, XML far-reference / whole-document / WSSE. `cms-attached` at 2 GiB has its independent OpenSSL oracle replaced above `INT_MAX` by a decomposition (OpenSSL stops with `asn1_d2i_read_bio: too long`). Peak working set and private bytes stayed at or below about 20 MiB in every measured process.
+* **OPEN (not done):**
+  * the **10 GiB re-confirmation** after the fixes (D2, D3 and the LT/LTA levels on the current tip); no full 10 GiB gate has been run on the tip;
+  * the **`overload-profile` re-measure**: it failed with D7, which is fixed but was not re-measured;
+  * XAdES-T throughput at 10 GiB (see D2 above);
+  * encrypt/decrypt (G01/G02) has no case: it is externally blocked.
+

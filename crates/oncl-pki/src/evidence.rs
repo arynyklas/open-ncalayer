@@ -1898,8 +1898,9 @@ fn check_current_tsa_tail(
             }
             // Role and freshness are separate facts: issuer/CertID/EKU/math
             // precede these time-only errors in the existing strict checker.
-            // Currency (issued at or after the TSA token's genTime) is still checked by
-            // path_status below.
+            // No rule here compares an item's issue time with the TSA token's genTime:
+            // freshness is judged at the proof time by the checks of the shared
+            // proof-time rule (nextUpdate vs proof, or the 300 s skew without one).
             EvidenceKind::Ocsp => path.windows(2).any(|pair| {
                 matches!(
                     crate::ocsp::check_embedded_at_proof(

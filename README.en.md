@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the latest pre-release is `0.1.0-alpha.6` ([Releases](https://github.com/arynyklas/OpenNCALayer/releases)); the plugin catalogue, downloads and the original's history are on the [project site](#project-site). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist (see [Windows 7](#windows-7)). Releases from `0.1.0-alpha.3` on build installers for Windows, macOS and Linux, and releases without a suffix an AUR package (see [Installation](#installation)); before each pre-release is published, the project's lab installs and uninstalls its installers on Windows 7, Windows 11 and Linux (not on macOS yet). Ports of 34 third-party plugins of the original (WebAssembly) are here: they install from a `.onclp` file in the «Плагины…» (Plugins…) window, and the plugin catalog works once the builds carry the maintainer's key (see [Plugins](#plugins)). The behaviour has been compared with a running original in the project's lab (P10): the differences found are fixed (with a test), recorded as deviations or judged not observable, and a port whose differences are all closed is marked `conformance = "confirmed"` in its `registry.toml` (all 34 now) — only such ports enter the `stable` channel, and a new core version only with a green comparison on its tag. Fixes made after the last comparison are pinned by tests but have not been repeated against the original yet; known differences of the built-in modules: `getBundles` gives a port's bundle version as in its manifest (the original's is `major.minor.micro`), and `getServices` lists the modules in another order when plugins are installed. Tokens are experimental, off by default and checked on an emulator only (see [Tokens (experimental)](#tokens-experimental)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key and Pages has no signed index (see [Updates](#updates)). Turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the latest released pre-release is `0.1.0-alpha.6` ([Releases](https://github.com/arynyklas/OpenNCALayer/releases)); the version in this tree is `0.1.0-alpha.7`, which is **not released** (the SDK, HTTP service and platform material described below exist only in this tree); the plugin catalogue, downloads and the original's history are on the [project site](#project-site). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist (see [Windows 7](#windows-7)). Releases from `0.1.0-alpha.3` on build installers for Windows, macOS and Linux, and releases without a suffix an AUR package (see [Installation](#installation)); before each pre-release is published, the project's lab installs and uninstalls its installers on Windows 7, Windows 11 and Linux (not on macOS yet). Ports of 34 third-party plugins of the original (WebAssembly) are here: they install from a `.onclp` file in the «Плагины…» (Plugins…) window, and the plugin catalog works once the builds carry the maintainer's key (see [Plugins](#plugins)). The behaviour has been compared with a running original in the project's lab (P10): the differences found are fixed (with a test), recorded as deviations or judged not observable, and a port whose differences are all closed is marked `conformance = "confirmed"` in its `registry.toml` (all 34 now) — only such ports enter the `stable` channel, and a new core version only with a green comparison on its tag. Fixes made after the last comparison are pinned by tests but have not been repeated against the original yet; known differences of the built-in modules: `getBundles` gives a port's bundle version as in its manifest (the original's is `major.minor.micro`), and `getServices` lists the modules in another order when plugins are installed. Tokens are experimental, off by default and checked on an emulator only (see [Tokens (experimental)](#tokens-experimental)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key and Pages has no signed index (see [Updates](#updates)). Turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -122,7 +122,19 @@ It emits only public synthetic RSA artifacts for all four levels, attached and
 detached content, multiple signers and altered archives for an independent
 oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
 
-`oncl-server` is a standalone durable-audit library, not an HTTP-server scaffold.
+`oncl-server` is a standalone service and library. The `oncl-server` binary has
+the subcommands `serve`, `token-create` and `install-file`; the HTTP API is **off
+by default** (`enabled = false`, switched on in `server.toml` or with
+`--enable-api`), access is by tokens with per-action permissions, and TLS and
+OTLP are operator choices (OTLP only on explicit opt-in). See
+[`docs/user/server.md`](docs/user/server.md) (configuration, tokens, limits),
+[`docs/user/http-api.md`](docs/user/http-api.md) (routes, errors),
+[`docs/dev/platform-interop.md`](docs/dev/platform-interop.md) (NCANode
+comparison) and [`docs/dev/platform-acceptance.md`](docs/dev/platform-acceptance.md)
+(acceptance V01 and its status). Encrypt/decrypt (G01/G02) does not exist in the
+SDK, CLI or HTTP API: it depends on an external part and is not implemented.
+WinGet is not available (`winget/hash-ledger.json` holds no version); install from
+Releases. What follows is the service's durable-audit part; the embedding host works like this:
 The host installs `DurableAuditGuard` through `EngineServices::with_keys` and
 binds the original `OperationContext` to its authenticated opaque principal and
 safe 16-byte key labels (`bind` / `AuditBinding`). BEGIN/FINAL retain the original
@@ -162,7 +174,7 @@ descriptor-relative nofollow I/O and directory-fsync. ACLs do not defend against
 privileged host; checksums are not nonrepudiation. Run
 `cargo test -p oncl-server --test audit`, then the actual synthetic signing smoke:
 `cargo run -p oncl-server --example audit_smoke -- target/s01-smoke`.
-This enables no HTTP/auth/OTLP and does not replace Windows 7 platform acceptance.
+The audit example enables no HTTP/auth/OTLP and does not replace Windows 7 platform acceptance.
 
 
 ### Certificate checking
@@ -752,7 +764,10 @@ are never read from the PDF. After the first signature, only explicitly checked
 DSS/VRI/status/certificate and signature/timestamp-field additions are allowed:
 page/content, original-object alias, permission and unrelated catalog/trailer
 changes cannot be laundered by a newer revision or timestamp. Existing DSS/VRI
-entries remain intact. The complete PDF verification batch owns one common
+entries are checked at key level only: a signature's old VRI key may not be
+removed, but its contents may be re-pointed. A DocumentTimeStamp skipped by the
+generic profile is not validated for ByteRange/Contents there: a malformed or
+non-covering token is ignored. The complete PDF verification batch owns one common
 evidence store and one F04 PreparedEvidence cache, rather than copying DSS and
 decoding tokens again per signer. Each source CMS retains its actual digest,
 SID/ESS and exact inclusion graph; imprint, time, host trust and current TSA-path
