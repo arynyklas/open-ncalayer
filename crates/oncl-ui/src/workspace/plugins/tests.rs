@@ -1560,9 +1560,11 @@ fn a_cms_operation_with_every_kind_of_parameter_signs_the_approved_file() {
     );
     // What the user entered is listed as entered, each value as it will be given.
     let inputs = model_strings(ui.get_c_inputs());
-    assert_eq!(
-        inputs,
-        ["note = note-1", "mode = slow", "loud = yes", "lang = kk"]
+    assert_eq!(inputs, ["note = \"note-1\"", "loud = yes", "lang = kk"]);
+    assert!(
+        model_strings(ui.get_c_frame_lines())
+            .iter()
+            .any(|l| l.contains("\"slow\""))
     );
     rig.arm();
     rig.ui().invoke_confirm();
@@ -1779,5 +1781,57 @@ fn an_operation_the_engine_cannot_run_is_not_offered() {
             .operations
             .iter()
             .any(|o| o.operation == "sign-raw")
+    );
+}
+
+#[test]
+fn a_typed_but_unsubmitted_password_is_cleared_when_the_operation_is_left() {
+    let rig = rig();
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_key_raw(&doc);
+    rig.ui().set_password("typed, never submitted".into());
+    rig.ui().invoke_cancel();
+    assert_eq!(rig.step(), Step::List);
+    assert_eq!(rig.ui().get_password(), "");
+    // And by leaving the page, and by Back.
+    rig.to_key_raw(&doc);
+    rig.ui().set_password("typed again".into());
+    rig.ui().invoke_back();
+    assert_eq!(rig.ui().get_password(), "");
+    rig.ui().invoke_cancel();
+    rig.to_key_raw(&doc);
+    rig.ui().set_password("third".into());
+    rig.ws.ui.set_section(6);
+    rig.ws.ui.invoke_section_changed(6);
+    assert_eq!(rig.ui().get_password(), "");
+}
+
+#[test]
+fn a_failed_run_is_not_announced_as_ready_in_the_status_line() {
+    let rig = rig();
+    let other = rig.file("other.bin", OTHER);
+    rig.to_consent_raw(&other);
+    rig.arm();
+    rig.ui().invoke_confirm();
+    until("the run ends", || rig.step() == Step::Result);
+    assert_eq!(rig.ws.ui.get_status_kind(), 3);
+    assert_eq!(rig.ws.ui.get_status_text(), rig.ui().get_report_headline());
+}
+
+#[test]
+fn a_text_with_a_direction_mark_is_refused_by_the_form_with_a_clear_message() {
+    let rig = rig();
+    let doc = rig.file("doc.bin", DOC);
+    rig.open("test.cms", "sign-cms");
+    rig.ui()
+        .invoke_field_text(0, doc.display().to_string().into());
+    rig.ui().invoke_field_text(1, "a\u{202E}b".into());
+    rig.ui()
+        .set_store_path(rig.w.store.display().to_string().into());
+    rig.ui().invoke_form_continue();
+    assert_eq!(rig.step(), Step::Form);
+    assert_eq!(
+        rig.ui().get_error(),
+        Texts::of(Locale::En).e_text_bad.replace("{0}", "note")
     );
 }

@@ -173,14 +173,21 @@ component ConsentStep inherits VerticalLayout {
         for line in PluginsState.c-trusted: NameText {
             text: line;
         }
+        Subheading {
+            text: PluginsState.c-key-heading;
+        }
+
+        for line in PluginsState.c-key-lines: NameText {
+            text: line;
+        }
         FieldLabel {
-            text: PluginsState.c-package-caption;
+            text: PluginsState.c-fingerprint-caption;
         }
 
         LineEdit {
             read-only: true;
-            text: PluginsState.c-package-sha;
-            accessible-label: PluginsState.c-package-caption;
+            text: PluginsState.c-fingerprint;
+            accessible-label: PluginsState.c-fingerprint-caption;
         }
 
         for line in PluginsState.c-file-lines: NameText {
@@ -208,23 +215,6 @@ component ConsentStep inherits VerticalLayout {
                 accessible-label: PluginsState.c-prehash-caption;
             }
         }
-        Subheading {
-            text: PluginsState.c-key-heading;
-        }
-
-        for line in PluginsState.c-key-lines: NameText {
-            text: line;
-        }
-        FieldLabel {
-            text: PluginsState.c-fingerprint-caption;
-        }
-
-        LineEdit {
-            read-only: true;
-            text: PluginsState.c-fingerprint;
-            accessible-label: PluginsState.c-fingerprint-caption;
-        }
-
         if PluginsState.c-inputs.length > 0: VerticalLayout {
             spacing: 2px;
             Text {
@@ -236,6 +226,16 @@ component ConsentStep inherits VerticalLayout {
                 text: line;
             }
         }
+        FieldLabel {
+            text: PluginsState.c-package-caption;
+        }
+
+        LineEdit {
+            read-only: true;
+            text: PluginsState.c-package-sha;
+            accessible-label: PluginsState.c-package-caption;
+        }
+
         Text {
             text: PluginsState.c-ttl;
             wrap: word-wrap;

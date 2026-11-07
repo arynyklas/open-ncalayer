@@ -111,8 +111,21 @@ pub(super) enum Typed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FormError {
     NoPath(String),
-    TextTooLong { name: String, max: u32 },
+    TextTooLong {
+        name: String,
+        max: u32,
+    },
     NoChoice(String),
+    /// A text with a character that cannot be shown as it is typed (see [`bad_text_char`]).
+    BadText(String),
+}
+
+/// Whether `c` may not be in a text parameter. A text is SIGNED BYTES: the confirmation shows
+/// the exact text, so a character that is drawn as nothing or reorders the text around it
+/// (controls other than line breaks and tab, bidirectional marks and isolates, zero-width and
+/// other invisible format characters) is refused instead of being hidden on the page.
+pub(super) fn bad_text_char(c: char) -> bool {
+    !matches!(c, '\n' | '\r' | '\t') && crate::view::is_invisible(c)
 }
 
 /// A path as typed or pasted: Explorer's «Copy as path» wraps it in quotes.
@@ -142,6 +155,9 @@ pub(super) fn read(
                 Typed::Document(PathBuf::from(path))
             }
             (FieldKind::Text { max_chars }, FieldValue::Text(text)) => {
+                if text.chars().any(bad_text_char) {
+                    return Err(FormError::BadText(field.name.clone()));
+                }
                 if text.chars().count() as u64 > u64::from(*max_chars) {
                     return Err(FormError::TextTooLong {
                         name: field.name.clone(),
@@ -419,6 +435,33 @@ mod tests {
         );
         let over = std::io::Read::take(std::io::repeat(1), 17);
         assert!(read_capped(over, 17, "file", 16, &Control(false)).is_err());
+    }
+
+    #[test]
+    fn a_text_is_refused_if_it_cannot_be_shown_as_typed_and_is_kept_byte_for_byte_otherwise() {
+        let (fields, mut values) = filled("docs/a.txt");
+        for bad in [
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "a\u{200E}",
+            "a\u{0007}",
+            "\u{2066}x",
+            "a\u{FEFF}",
+        ] {
+            values[1] = FieldValue::Text(bad.to_owned());
+            assert_eq!(
+                read(&fields, &values),
+                Err(FormError::BadText("path".to_owned())),
+                "{bad:?}"
+            );
+        }
+        // Line breaks and tab are text: CRLF stays CRLF, LF stays LF, all the way to the
+        // value the engine is given.
+        for good in ["a\r\nb", "a\nb", "a\tb"] {
+            values[1] = FieldValue::Text(good.to_owned());
+            let typed = read(&fields, &values).unwrap();
+            assert_eq!(typed[1].1, Typed::Text(good.to_owned()));
+        }
     }
 
     #[test]

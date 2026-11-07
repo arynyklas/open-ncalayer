@@ -14,6 +14,19 @@ use time::OffsetDateTime;
 /// The longest text of a page shown in a notification or a window, in characters.
 pub const MAX_PAGE_TEXT: usize = 128;
 
+/// Whether `c` is drawn as nothing or changes how text around it reads: controls, line and
+/// paragraph separators, bidirectional marks, embeddings, overrides and isolates (LRM, RLM,
+/// ALM among them), zero-width and other invisible format characters, the BOM, tag characters.
+pub(crate) fn is_invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
 /// `text` from a page (its origin, a name it sends) as a notification or a window shows it:
 /// without control characters, line and paragraph separators (U+2028, U+2029) and
 /// bidirectional controls (U+202A–U+202E, U+2066–U+2069), at most [`MAX_PAGE_TEXT`]
@@ -24,6 +37,18 @@ pub fn page_text(text: &str) -> String {
             && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     };
     let mut chars = text.chars().filter(shown);
+    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+/// [`page_text`] for what the program shows as its own data (a certificate's alias, subject and
+/// serial, a file name): also without the invisible and direction-changing format characters
+/// ([`is_invisible`]: LRM, RLM, ALM, zero-width, BOM). Not for text with emoji.
+pub(crate) fn display_text(text: &str) -> String {
+    let mut chars = text.chars().filter(|c| !is_invisible(*c));
     let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
     if chars.next().is_some() {
         shown.push('…');

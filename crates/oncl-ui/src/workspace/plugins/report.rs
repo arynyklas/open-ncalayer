@@ -15,7 +15,9 @@
 //!   Core's call has no output binding, so the result is shown, not saved (`no_save`).
 
 use oncl_core::ErrorCode;
-use oncl_core::plugins::{PluginPrepareError, PluginRequestError, TicketRefusal};
+use oncl_core::plugins::{
+    PluginPrepareError, PluginRefusalCode, PluginRequestError, TicketRefusal,
+};
 use oncl_flows::Locale;
 use oncl_pki::key::AppliedState;
 
@@ -33,6 +35,8 @@ pub(in crate::workspace) struct CallReport {
     pub(super) applied: AppliedState,
     /// Core's typed refusals of this invocation, oldest first.
     pub(super) refusals: Vec<TicketRefusal>,
+    /// Core's stable reason for the refusal, if it gave one.
+    pub(super) subcode: Option<PluginRefusalCode>,
     /// The module's reply, if it replied.
     pub(super) response: Option<String>,
     /// How the call failed, if it did.
@@ -49,7 +53,71 @@ pub(super) struct RunFacts<'a> {
 /// How the refusals of Core are put into words.
 pub(super) trait RefusalWords {
     fn words(&self, refusal: &TicketRefusal, l: Locale) -> String;
+    /// The words for a stable subcode of Core.
+    fn code(&self, code: PluginRefusalCode, l: Locale) -> String;
 }
+
+/// The subcodes that have words of their own; every other one gets the generic text and its id
+/// as a technical row. A new code of Core is in neither list until it is classified, and
+/// `every_subcode_is_classified` fails until then.
+pub(super) fn code_words(code: PluginRefusalCode, l: Locale) -> Option<&'static str> {
+    use PluginRefusalCode as C;
+    let t = Texts::of(l);
+    Some(match code {
+        C::TicketMissing => t.f_no_ticket,
+        C::ApprovalMissing => t.f_no_approval,
+        C::TicketUses => t.f_uses,
+        C::ApprovalExpired => t.f_expired,
+        C::OperationIdMismatch => t.f_operation_id,
+        C::PackageChanged => t.f_identity,
+        C::OperationMismatch => t.f_operation,
+        C::CallerMismatch => t.f_caller,
+        C::KeyMismatch => t.f_key,
+        C::ActionMismatch => t.f_action,
+        C::KindMismatch => t.f_kind,
+        C::ContentMismatch => t.f_content,
+        C::OptionsMismatch => t.f_options,
+        C::KeyUseSpent => t.f_already_used,
+        C::NotDeclared => t.f_undeclared,
+        C::CertificateChanged => t.f_certificate_changed,
+        C::NoConsentGuard => t.f_no_guard,
+        C::Busy => t.f_busy,
+        C::ApprovalReplayed => t.f_replayed,
+        C::UnknownPlugin
+        | C::NotManual
+        | C::DerivedUnsupported
+        | C::NetworkUnsupported
+        | C::NetworkNotDeclared => t.p_not_runnable,
+        C::ParamTooLarge | C::RequestTooLarge => t.p_too_large,
+        C::UnknownParam
+        | C::DuplicateParam
+        | C::MissingParam
+        | C::ParamWrongKind
+        | C::ParamInvalidValue => t.p_value,
+        C::KeyUnavailable => t.p_key_unavailable,
+        C::CertificateMismatch => t.p_cert_mismatch,
+        C::UnsupportedKey => t.p_unsupported_key,
+        C::NoKeyUse => t.p_no_key_use,
+        C::OptionsInvalid => t.p_options,
+        _ => return None,
+    })
+}
+
+/// The subcodes worded only generically (with their id shown).
+#[cfg(test)]
+pub(super) const GENERIC_ONLY: [PluginRefusalCode; 11] = [
+    PluginRefusalCode::NotGranted,
+    PluginRefusalCode::InvalidEndpoint,
+    PluginRefusalCode::InvalidTemplate,
+    PluginRefusalCode::InvalidContext,
+    PluginRefusalCode::CallerNotManual,
+    PluginRefusalCode::KeyMetadataMissing,
+    PluginRefusalCode::ConfirmationMismatch,
+    PluginRefusalCode::ApprovalTtlInvalid,
+    PluginRefusalCode::ApprovalRandomUnavailable,
+    PluginRefusalCode::AuditFactTooLong,
+    PluginRefusalCode::ContentBindingUnavailable,
+];
 
 /// The local mapping of the variants of [`TicketRefusal`] (which is `non_exhaustive`: a variant
 /// this build does not know is worded as «refused»).
@@ -82,6 +150,11 @@ impl RefusalWords for TicketWords {
         }
         .to_owned()
     }
+    fn code(&self, code: PluginRefusalCode, l: Locale) -> String {
+        code_words(code, l)
+            .unwrap_or(Texts::of(l).f_other)
+            .to_owned()
+    }
 }
 
 /// The plugin's reply as the frame draws it.
@@ -113,8 +186,7 @@ pub(super) fn clean_reply(raw: &str) -> (String, usize) {
     for c in raw.chars() {
         let c = match c {
             '\n' | '\r' | '\t' => ' ',
-            c if c.is_control() => continue,
-            '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => continue,
+            c if crate::view::is_invisible(c) => continue,
             c => c,
         };
         if kept < MAX_REPLY_CHARS {
@@ -188,12 +260,21 @@ pub(super) fn render(
     let mut rows = plain_rows(facts, l, key_row);
     // Why, as far as Core says it: its typed refusals first, then the error's code.
     let reason = {
-        let mut parts: Vec<String> = report.refusals.iter().map(|r| words.words(r, l)).collect();
+        let mut parts: Vec<String> = match report.subcode {
+            Some(code) => vec![words.code(code, l)],
+            None => report.refusals.iter().map(|r| words.words(r, l)).collect(),
+        };
         if let (true, Some(code)) = (parts.is_empty(), report.error) {
             parts.push(error_text(WorkspaceTexts::of(l), &JobError::Operation(code), 0).to_owned());
         }
-        parts.join("; ")
+        if parts.is_empty() {
+            t.no_reason.to_owned()
+        } else {
+            parts.join("; ")
+        }
     };
+    let reason_known =
+        !report.refusals.is_empty() || report.subcode.is_some() || report.error.is_some();
     let verified = report.applied == AppliedState::Applied
         && report.refusals.is_empty()
         && report.error.is_none()
@@ -222,7 +303,15 @@ pub(super) fn render(
             detail: String::new(),
         });
     }
-    if !reason.is_empty() && !verified {
+    if let Some(code) = report.subcode {
+        rows.push(Row {
+            depth: 0,
+            tone: Tone::Neutral,
+            text: t.row_code.replace("{0}", code.id()),
+            detail: String::new(),
+        });
+    }
+    if reason_known && !verified {
         rows.push(Row {
             depth: 0,
             tone: Tone::Neutral,
@@ -298,6 +387,7 @@ mod tests {
         CallReport {
             applied,
             refusals,
+            subcode: None,
             response: response.map(str::to_owned),
             error,
         }
@@ -485,11 +575,73 @@ mod tests {
     }
 
     #[test]
+    fn every_subcode_is_classified_and_worded_in_every_language() {
+        for code in PluginRefusalCode::ALL {
+            let generic = GENERIC_ONLY.contains(&code);
+            for l in ALL {
+                assert_eq!(
+                    code_words(code, l).is_none(),
+                    generic,
+                    "{} must be either worded or in GENERIC_ONLY",
+                    code.id()
+                );
+                let words = TicketWords.code(code, l);
+                assert!(!words.is_empty());
+            }
+        }
+        // A generic one still shows its stable id as a technical row.
+        let r = CallReport {
+            applied: AppliedState::NotApplied,
+            refusals: vec![],
+            subcode: Some(PluginRefusalCode::NotGranted),
+            response: None,
+            error: Some(ErrorCode::PermissionDenied),
+        };
+        let v = render(&r, &facts(), Locale::En, &TicketWords);
+        assert!(v.rows.iter().any(|row| row.text.contains("not-granted")));
+        // A worded one is worded by its own text.
+        let r = CallReport {
+            subcode: Some(PluginRefusalCode::ContentMismatch),
+            ..r
+        };
+        let v = render(&r, &facts(), Locale::En, &TicketWords);
+        assert!(v.headline.contains(Texts::of(Locale::En).f_content));
+    }
+
+    #[test]
+    fn an_applied_call_with_no_reason_does_not_end_on_an_empty_reason() {
+        for l in ALL {
+            let r = report(AppliedState::Applied, vec![], None, None);
+            let v = render(&r, &facts(), l, &TicketWords);
+            assert!(
+                v.headline.contains(Texts::of(l).no_reason),
+                "{}",
+                v.headline
+            );
+            assert!(!v.headline.trim_end().ends_with(':'));
+            assert_eq!(v.tone, Tone::Failure);
+        }
+    }
+
+    #[test]
+    fn the_reply_and_names_lose_invisible_and_direction_characters() {
+        let (text, _) = clean_reply("a\u{200E}b\u{200F}c\u{061C}d\u{200B}e\u{2066}f\u{FEFF}g");
+        assert_eq!(text, "abcdefg");
+        assert_eq!(
+            crate::view::display_text("x\u{200E}y\u{200D}z\u{202E}"),
+            "xyz"
+        );
+    }
+
+    #[test]
     fn the_refusal_words_are_a_seam() {
         struct Subcodes;
         impl RefusalWords for Subcodes {
             fn words(&self, refusal: &TicketRefusal, _: Locale) -> String {
                 format!("SEAM-{refusal:?}")
+            }
+            fn code(&self, code: PluginRefusalCode, _: Locale) -> String {
+                format!("SEAM-{}", code.id())
             }
         }
         let r = report(

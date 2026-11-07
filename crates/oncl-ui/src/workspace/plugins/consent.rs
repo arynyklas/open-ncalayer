@@ -164,7 +164,7 @@ fn algorithm(alg: HashAlg) -> &'static str {
 /// Text that is not the program's own, as the page draws it: control and bidirectional
 /// characters gone, at most [`page_text`]'s length.
 fn plain(text: &str) -> String {
-    page_text(text)
+    crate::view::display_text(text)
 }
 
 /// The text parameters a profile reads as an XPath, with the value the user typed for each
@@ -193,6 +193,24 @@ fn typed_sources_agree(
         (None, None) => true,
         _ => false,
     })
+}
+
+/// `text` in double quotes with the characters that would be invisible or break the line
+/// spelled out: what is shown is exactly what is signed.
+fn quoted(text: &str) -> String {
+    let mut out = String::from('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The confirmation page for `input`.
@@ -291,20 +309,34 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
 
     // What the user entered besides the file: the plugin gets it as it is, and none of it is
     // part of what Core approves.
-    let inputs: Vec<String> = entered
-        .iter()
-        .filter_map(|(name, value)| {
-            let shown = match value {
-                Frozen::Document { .. } => return None,
-                Frozen::Text(text) => plain(text),
-                Frozen::Choice(choice) => plain(choice),
-                Frozen::Flag(true) => t.c_flag_yes.to_owned(),
-                Frozen::Flag(false) => t.c_flag_no.to_owned(),
-                Frozen::Locale(code) => (*code).to_owned(),
-            };
-            Some(t.c_input_line.replace("{0}", name).replace("{1}", &shown))
-        })
-        .collect();
+    let mut inputs: Vec<String> = Vec::new();
+    // A choice is the plugin's own string: it is in the plugin's frame, quoted.
+    let mut choices: Vec<String> = Vec::new();
+    for (name, value) in entered.iter() {
+        match value {
+            Frozen::Document { .. } => {}
+            // The exact text that is signed or passed: quoted, with line breaks and tab
+            // spelled out, nothing cut or cleaned.
+            Frozen::Text(text) => inputs.push(
+                t.c_input_line
+                    .replace("{0}", name)
+                    .replace("{1}", &quoted(text)),
+            ),
+            Frozen::Choice(choice) => choices.push(
+                t.c_choice_line
+                    .replace("{0}", name)
+                    .replace("{1}", &quoted(&plain(choice))),
+            ),
+            Frozen::Flag(on) => inputs.push(
+                t.c_input_line
+                    .replace("{0}", name)
+                    .replace("{1}", if *on { t.c_flag_yes } else { t.c_flag_no }),
+            ),
+            Frozen::Locale(code) => {
+                inputs.push(t.c_input_line.replace("{0}", name).replace("{1}", code))
+            }
+        }
+    }
 
     Ok(ConsentView {
         title: t.consent_title.to_owned(),
@@ -337,11 +369,11 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
             name_caption: t.frame_name.to_owned(),
             name: untrusted_label(offered.plugin_name.get(l)),
             label: untrusted_label(offered.label.get(l)),
-            lines: declared
-                .consent(None)
-                .xpaths
-                .iter()
-                .map(|x| frame_xpath(l).replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH)))
+            lines: choices
+                .into_iter()
+                .chain(declared.consent(None).xpaths.iter().map(|x| {
+                    frame_xpath(l).replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH))
+                }))
                 .collect(),
         },
         confirm_label: t.confirm_label.replace("{0}", &summary.operation),
@@ -573,13 +605,16 @@ element = "param:path"
             assert!(
                 v.inputs
                     .iter()
-                    .any(|i| i.contains("path") && i.contains("/r/data"))
+                    .any(|i| i.contains("path") && i.contains("\"/r/data\""))
             );
+            // A choice is the plugin's own string: in its frame, quoted, not among the inputs.
             assert!(
-                v.inputs
+                v.frame
+                    .lines
                     .iter()
-                    .any(|i| i.contains("mode") && i.contains("slow"))
+                    .any(|i| i.contains("mode") && i.contains("\"slow\""))
             );
+            assert!(!v.inputs.iter().any(|i| i.contains("slow")));
             assert!(!v.inputs.iter().any(|i| i.contains("file")));
             // The button names the action; it is not a plain OK or Next.
             assert!(

@@ -280,6 +280,7 @@ fn run_inner(
             return Ok(RunOutcome::Done(CallReport {
                 applied: AppliedState::NotApplied,
                 refusals: Vec::new(),
+                subcode: Some(e.subcode()),
                 response: None,
                 error: Some(ErrorCode::PermissionDenied),
             }));
@@ -297,6 +298,7 @@ fn run_inner(
     Ok(RunOutcome::Done(CallReport {
         applied: result.applied(),
         refusals: result.refusals().to_vec(),
+        subcode: result.subcode(),
         response: result.response().map(str::to_owned),
         error: result.error().map(OperationError::code),
     }))

@@ -98,6 +98,8 @@ export component PluginFrame inherits Rectangle {
     border-color: Tone.warning();
     border-radius: 4px;
     background: Palette.alternate-background;
+    accessible-role: groupbox;
+    accessible-label: root.caption;
     VerticalLayout {
         padding: 6px;
         spacing: 2px;

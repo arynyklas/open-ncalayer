@@ -457,7 +457,7 @@ mod tests {
                 "0.1.0",
                 &[
                     operation("sign", "Sign", true, true),
-                    operation("local", "Local", true, false),
+                    operation("local", "Local", false, false),
                 ],
             ),
         );

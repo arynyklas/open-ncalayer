@@ -519,6 +519,7 @@ fn form_error_text(open: &Rc<Workspace>, e: &FormError, fields: &[FormField]) ->
             .e_text_long
             .replace("{0}", name)
             .replace("{1}", &max.to_string()),
+        FormError::BadText(name) => t.e_text_bad.replace("{0}", name),
         FormError::NoChoice(name) => {
             let _ = fields;
             t.p_value.to_owned() + " " + name
@@ -1157,7 +1158,27 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<PluginOutput, JobErro
             }
         }
     }
+    status_after(open);
     render(open);
+}
+
+/// The status line says how a finished run ended, never "ready" for a failure.
+fn status_after(open: &Rc<Workspace>) {
+    let st = open.plugins.borrow();
+    let Some(view) = st
+        .result
+        .as_ref()
+        .filter(|_| st.controller.step() == Step::Result)
+    else {
+        return;
+    };
+    let kind = match view.tone {
+        crate::reports::controller::Tone::Success => 2,
+        crate::reports::controller::Tone::Failure => 3,
+        _ => 4,
+    };
+    open.ui.set_status_kind(kind);
+    open.ui.set_status_text(view.headline.as_str().into());
 }
 
 fn ran(open: &Rc<Workspace>, outcome: RunOutcome) {
@@ -1175,10 +1196,20 @@ fn ran(open: &Rc<Workspace>, outcome: RunOutcome) {
             // The worker stopped because the page was left, which is handled where it was left;
             // reaching here with the page still on the confirmation means the worker gave up
             // alone.
-            if matches!(st.controller.step(), Step::Consent | Step::Running) {
-                st.controller.dispatch(Event::Cancel);
-                st.notice = Texts::of(l).consent_idle.to_owned();
-                st.shown = None;
+            match st.controller.step() {
+                Step::Running => {
+                    // The key was never applied (the worker declined before the call): the
+                    // page is not left waiting.
+                    let facts = facts_of(&st);
+                    st.controller.dispatch(Event::Finished);
+                    st.result = Some(report::render_cancelled(&facts.as_facts(), l));
+                }
+                Step::Consent => {
+                    st.controller.dispatch(Event::Cancel);
+                    st.notice = Texts::of(l).consent_idle.to_owned();
+                    st.shown = None;
+                }
+                _ => {}
             }
         }
         RunOutcome::NotPrepared(why) => {
@@ -1200,7 +1231,14 @@ fn ran(open: &Rc<Workspace>, outcome: RunOutcome) {
                     false,
                 ),
                 NotPrepared::Registry => (t.stale.to_owned(), false),
-                NotPrepared::Prepare(e) => (report::prepare_error_text(l, e).to_owned(), false),
+                NotPrepared::Prepare(e) => (
+                    format!(
+                        "{} ({})",
+                        report::prepare_error_text(l, e),
+                        e.subcode().id()
+                    ),
+                    false,
+                ),
             };
             st.controller.dispatch(Event::PrepareFailed);
             if to_form {
