@@ -316,7 +316,10 @@ async fn mixed_batch_with_one_bad_source_keeps_exact_per_item_facts_and_verified
         finals(&service),
         [(None, true), (Some(0), true), (Some(4), true)]
     );
-    assert!(spool_files(&service.scratch()).is_empty());
+    wait_for("the batch scratch is released", || {
+        spool_files(&service.scratch()).is_empty()
+    })
+    .await;
     service.stop().await;
 }
 
@@ -369,7 +372,10 @@ async fn one_ungranted_key_refuses_the_whole_batch_before_any_secret_or_document
         "{response}"
     );
     assert!(begins(&service).is_empty(), "no item ran, no key was used");
-    assert!(spool_files(&service.scratch()).is_empty());
+    wait_for("the batch scratch is released", || {
+        spool_files(&service.scratch()).is_empty()
+    })
+    .await;
     service.stop().await;
 }
 
@@ -563,7 +569,10 @@ async fn deadline_mid_batch_aborts_without_a_terminal_record_and_audit_keeps_the
     let finals = finals(&service);
     assert_eq!(finals[0], (Some(0), true));
     assert_eq!(finals[1].0, Some(1));
-    assert!(spool_files(&service.scratch()).is_empty());
+    wait_for("the batch scratch is released", || {
+        spool_files(&service.scratch()).is_empty()
+    })
+    .await;
     let service = Arc::try_unwrap(service).ok().unwrap();
     service.stop().await;
 }
@@ -872,7 +881,10 @@ async fn disconnect_mid_batch_holds_the_root_to_native_return_and_later_items_ne
         "a cancel after use is never NotApplied"
     );
     assert_eq!(begins(&service), [Some(0), Some(1)], "item 3 never began");
-    assert!(spool_files(&service.scratch()).is_empty());
+    wait_for("the batch scratch is released", || {
+        spool_files(&service.scratch()).is_empty()
+    })
+    .await;
     assert!(
         service
             .host

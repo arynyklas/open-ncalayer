@@ -208,7 +208,6 @@ fn signing_trust() -> (
                     oncl_ui::ExtraTrust {
                         anchors,
                         origins: vec![origin.to_owned()],
-                        ..oncl_ui::ExtraTrust::default()
                     },
                     Arc::new(move || now),
                 );
