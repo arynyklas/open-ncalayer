@@ -29,6 +29,14 @@ pub fn manual_caller() -> CallerContext {
     CallerContext::LocalOperator(MANUAL_CALLER.to_owned())
 }
 
+/// The exact PKI endpoints an operation with `network = "pki"` may use: the NCA's own
+/// time-stamp and OCSP services (what `PkiUrl::Default` names), each by GET and POST: the core
+/// validates the signer's certificate online before the key is applied (a `GET` to the
+/// responder the certificate names) and Kalkan's TSA profile asks by `GET`; a plugin's own
+/// request is a `POST`. A method not listed is denied and a denied PKI request fails the call.
+/// One definition, shared with the port harness. CRLs are fetched under the provenance of the
+/// certificate, not from this list.
+const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = oncl_plugin::NCA_PKI_ENDPOINTS;
 /// One operation of an installed plugin that the manual window may offer.
 ///
 /// `plugin_name` and `label` are the plugin's own text: untrusted, to be shown as such and
@@ -49,6 +57,22 @@ pub struct ManualOperation {
     pub params: Vec<Param>,
     /// Whether it uses the user's key.
     pub uses_key: bool,
+    /// The exact PKI endpoints the registry granted the operation (empty when its network is
+    /// not `pki`): the window's per-call grant must name the same.
+    pub pki_endpoints: Vec<(HttpMethod, String)>,
+}
+
+/// An installed plugin (on, not withdrawn, its package readable) that offers no operation to the
+/// manual window. Why is not known here: its manifest declares none for this window (no
+/// `[[operations]]`, none `manual`, or only ones the window cannot run).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithoutOperations {
+    /// The plugin's id.
+    pub plugin_id: String,
+    /// The installed version.
+    pub plugin_version: Version,
+    /// The plugin's name (untrusted text).
+    pub plugin_name: Localized,
 }
 
 /// An installed plugin that was not registered because its package could not be read.
@@ -71,6 +95,9 @@ pub struct ManualPlugins {
     pub operations: Vec<ManualOperation>,
     /// Installed plugins whose package could not be used.
     pub skipped: Vec<Skipped>,
+    /// Installed plugins that are readable and offer nothing to the window, in the store's
+    /// order. They are not in the registry.
+    pub without_operations: Vec<WithoutOperations>,
 }
 
 impl ManualPlugins {
@@ -80,6 +107,7 @@ impl ManualPlugins {
             registry: PluginRegistry::new(),
             operations: Vec::new(),
             skipped: Vec::new(),
+            without_operations: Vec::new(),
         };
         for (id, installed) in store.state().plugins {
             if !installed.enabled || installed.withdrawn {
@@ -111,6 +139,7 @@ impl ManualPlugins {
             .filter(|o| !matches!(o.uses().network(), Network::Urls(_)))
             .collect();
         if ops.is_empty() {
+            self.without_operations.push(without(&package));
             return;
         }
         // The digest comes from the same `Package` as the manifest and the module.
@@ -128,12 +157,9 @@ impl ManualPlugins {
             });
             return;
         }
+        let before = self.operations.len();
         for op in ops {
-            let endpoints: &[(HttpMethod, &str)] = if matches!(op.uses().network(), Network::Pki) {
-                &oncl_plugin::NCA_PKI_ENDPOINTS
-            } else {
-                &[]
-            };
+            let endpoints = endpoints_of(op);
             match self.registry.allow_declared_with_pki(
                 &manifest.id,
                 op.name(),
@@ -147,6 +173,28 @@ impl ManualPlugins {
                 }
             }
         }
+        if self.operations.len() == before {
+            // Registered, but nothing of it is offered: the window says so, one honest line.
+            self.without_operations.push(without(&package));
+        }
+    }
+}
+
+/// The exact PKI endpoints an operation is granted: the national authority's own services when
+/// its network is `pki`, none otherwise.
+fn endpoints_of(op: &Operation) -> &'static [(HttpMethod, &'static str)] {
+    if matches!(op.uses().network(), Network::Pki) {
+        &PKI_ENDPOINTS
+    } else {
+        &[]
+    }
+}
+
+fn without(package: &oncl_plugin::Package) -> WithoutOperations {
+    WithoutOperations {
+        plugin_id: package.manifest.id.clone(),
+        plugin_version: package.manifest.version.clone(),
+        plugin_name: package.manifest.name.clone(),
     }
 }
 
@@ -159,6 +207,74 @@ fn offer(package: &oncl_plugin::Package, op: &Operation) -> ManualOperation {
         label: op.label().clone(),
         params: op.params().to_vec(),
         uses_key: !op.uses().keys().is_empty(),
+        pki_endpoints: endpoints_of(op)
+            .iter()
+            .map(|(method, url)| (*method, (*url).to_owned()))
+            .collect(),
+    }
+}
+
+/// What the tools window's Plugins page gets of `manual`: the operations by plugin, the
+/// installed plugins with nothing for the window, and the ones whose package could not be read
+/// (the reason stays in the log).
+pub fn listing(manual: &ManualPlugins) -> oncl_ui::ManualListing {
+    oncl_ui::ManualListing {
+        operations: manual
+            .operations
+            .iter()
+            .map(|o| oncl_ui::OfferedOperation {
+                plugin_id: o.plugin_id.clone(),
+                plugin_version: o.plugin_version.to_string(),
+                plugin_name: o.plugin_name.clone(),
+                operation: o.operation.clone(),
+                label: o.label.clone(),
+                params: o.params.clone(),
+                uses_key: o.uses_key,
+                pki_endpoints: o.pki_endpoints.clone(),
+            })
+            .collect(),
+        without_operations: manual
+            .without_operations
+            .iter()
+            .map(|p| oncl_ui::WithoutOperations {
+                plugin_id: p.plugin_id.clone(),
+                plugin_version: p.plugin_version.to_string(),
+                plugin_name: p.plugin_name.clone(),
+            })
+            .collect(),
+        unusable: manual
+            .skipped
+            .iter()
+            .map(|p| oncl_ui::UnusablePlugin {
+                plugin_id: p.plugin_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The plugins of the tools window's Plugins page: read from the plugin service each time the
+/// page lists them, and run on an engine of their own ([`oncl_ui::plugin_offer`]).
+pub struct DesktopManualPlugins {
+    service: std::sync::Arc<super::PluginService>,
+    kit: oncl_ui::PluginEngineKit,
+}
+
+impl DesktopManualPlugins {
+    /// `kit` is what the engine is made of: the same authority as the tools window's own
+    /// engine has, and the program's activity gate.
+    pub fn new(
+        service: std::sync::Arc<super::PluginService>,
+        kit: oncl_ui::PluginEngineKit,
+    ) -> Self {
+        Self { service, kit }
+    }
+}
+
+impl oncl_ui::ManualPluginSource for DesktopManualPlugins {
+    fn offer(&self) -> Result<oncl_ui::PluginOffer, oncl_ui::OfferError> {
+        let manual = self.service.manual_plugins();
+        let listing = listing(&manual);
+        oncl_ui::plugin_offer(manual.registry, manual_caller(), listing, &self.kit)
     }
 }
 
@@ -173,6 +289,12 @@ mod tests {
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn store_with(bytes: &[u8]) -> (tempfile::TempDir, Store) {
+        let (dir, store) = store();
+        install(&store, bytes);
         (dir, store)
     }
 
@@ -314,6 +436,111 @@ mod tests {
         let engine = engine(plugins);
         assert!(engine.plugin_identity(ID).is_none());
         assert!(engine.plugin_identity("kz.other.plugin").is_some());
+    }
+
+    #[test]
+    fn an_installed_plugin_with_nothing_for_the_window_is_listed_as_such() {
+        let (_dir, store) = store();
+        install(&store, &example("0.1.0"));
+        let none = ManualPlugins::build(&store);
+        assert!(none.operations.is_empty() && none.skipped.is_empty());
+        assert_eq!(none.without_operations.len(), 1);
+        assert_eq!(none.without_operations[0].plugin_id, ID);
+        assert_eq!(
+            none.without_operations[0].plugin_version.to_string(),
+            "0.1.0"
+        );
+        assert!(!none.without_operations[0].plugin_name.en.is_empty());
+        // One with operations is not in that list, and one that is off or withdrawn is in
+        // neither (it is not installed for this purpose).
+        install(&store, &other(&[operation("sign", "Sign", true, false)]));
+        let both = ManualPlugins::build(&store);
+        assert_eq!(both.operations.len(), 1);
+        let ids: Vec<&str> = both
+            .without_operations
+            .iter()
+            .map(|p| p.plugin_id.as_str())
+            .collect();
+        assert_eq!(ids, [ID]);
+        store.set_enabled(ID, false).unwrap();
+        assert!(ManualPlugins::build(&store).without_operations.is_empty());
+        // An operation the window cannot run (a URL network) leaves its plugin with nothing.
+        let urls = operation("fetch", "Fetch", false, false).replace(
+            "[operations.uses]\n",
+            "[operations.uses]\nnetwork = [\"https://example.invalid/\"]\n",
+        );
+        let (_dir, store) = store_with(&example_ops("0.1.0", &[urls]));
+        assert_eq!(ManualPlugins::build(&store).without_operations.len(), 1);
+    }
+
+    #[test]
+    fn the_listing_for_the_window_carries_the_granted_endpoints_and_every_plugin() {
+        let (_dir, store) = store();
+        install(
+            &store,
+            &example_ops(
+                "0.1.0",
+                &[
+                    operation("sign", "Sign", true, true),
+                    operation("local", "Local", false, false),
+                ],
+            ),
+        );
+        install(&store, &other(&[]));
+        let plugins = ManualPlugins::build(&store);
+        let listing = super::listing(&plugins);
+        assert_eq!(listing.operations.len(), 2);
+        let sign = &listing.operations[0];
+        assert_eq!(sign.operation, "sign");
+        assert_eq!(sign.plugin_version, "0.1.0");
+        // The endpoints are exactly the ones the registry was given for a `pki` operation:
+        // the NCA's services, by GET and POST (the signer is validated online by a GET).
+        let granted: Vec<(HttpMethod, String)> = PKI_ENDPOINTS
+            .iter()
+            .map(|(m, u)| (*m, (*u).to_owned()))
+            .collect();
+        assert_eq!(sign.pki_endpoints, granted);
+        assert!(
+            sign.pki_endpoints
+                .contains(&(HttpMethod::Get, DEFAULT_OCSP.to_owned()))
+        );
+        assert!(listing.operations[1].pki_endpoints.is_empty());
+        assert!(sign.uses_key);
+        assert_eq!(
+            listing.without_operations.len(),
+            1,
+            "the other plugin offers none"
+        );
+        assert!(listing.unusable.is_empty());
+    }
+
+    /// Writes the data directory the native smoke of the tools window starts from: a plugin that
+    /// declares a key operation, another that declares none, a synthetic key store with its
+    /// password and a small file. `ONCL_SMOKE_DIR=<dir> cargo test -p openncalayer --lib
+    /// smoke_data_dir -- --ignored`.
+    #[test]
+    #[ignore = "writes the data directory of the native smoke (ONCL_SMOKE_DIR)"]
+    fn smoke_data_dir() {
+        let dir =
+            std::path::PathBuf::from(std::env::var("ONCL_SMOKE_DIR").expect("ONCL_SMOKE_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir).unwrap();
+        install(
+            &store,
+            &example_ops(
+                "0.1.0",
+                &[operation("sign-file", "Sign a file", true, false)],
+            ),
+        );
+        install(&store, &other(&[]));
+        let key = oncl_testkit::synthetic("user-rsa-sign");
+        std::fs::copy(key.path, dir.join("smoke-key.p12")).unwrap();
+        std::fs::write(dir.join("smoke-key.password"), &key.password).unwrap();
+        std::fs::write(
+            dir.join("smoke-file.bin"),
+            b"a synthetic file for the plugin smoke",
+        )
+        .unwrap();
     }
 
     #[test]

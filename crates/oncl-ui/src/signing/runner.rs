@@ -49,7 +49,7 @@ pub const NCA_ORIGINS: [&str; 5] = [
 
 /// What the host adds to the national authority: roots it trusts and origins its checks may
 /// reach, both explicit.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ExtraTrust {
     pub anchors: Vec<oncl_pki::cert::Certificate>,
     pub origins: Vec<String>,
@@ -158,33 +158,49 @@ pub fn desktop_engine(
         _spool_lock: spool_lock,
         ..ConsentGuard::default()
     });
-    let mut anchors = CaSet::nca_production().certs().to_vec();
-    anchors.extend(extra.anchors);
-    let origins = NCA_ORIGINS
-        .iter()
-        .map(|o| (*o).to_owned())
-        .chain(extra.origins);
-    let network = NetworkPolicy::only_endpoints(origins)
-        .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
+    let (validation, _) = validation_services(&extra, http, clock)?;
 
     let store = TemporaryStore::new(spool)?;
     let tsa = crate::workspace::tsa_spec(HashAlg::Sha256, Some(crate::workspace::NCA_TSA_POLICY))
         .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("TSA"))?;
     let services = EngineServices::hash_only(limits)
         .with_keys(Arc::new(KeySources::new()), guard.clone())
-        .with_validation(ValidationServices::new(
-            CaSet::new(anchors),
-            Vec::new(),
-            http,
-            network,
-            clock,
-        ))
+        .with_validation(validation)
         .with_cades(CadesConfiguration::new(
             crate::workspace::evidence_limits(),
             tsa,
         ))
         .with_temporary_store(store);
     Ok((Engine::new(services)?, guard))
+}
+
+/// The validation services of the program's engines: the national authority's roots and what
+/// `extra` adds, the checks' network (the national services' origins and `extra`'s) and the
+/// clock the certificates are judged by. The policy is also returned for a caller that needs
+/// the same network for its own transport (the manual window's plugins).
+pub(crate) fn validation_services(
+    extra: &ExtraTrust,
+    http: Arc<dyn HttpTransport>,
+    clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+) -> Result<(ValidationServices, NetworkPolicy), OperationError> {
+    let mut anchors = CaSet::nca_production().certs().to_vec();
+    anchors.extend(extra.anchors.iter().cloned());
+    let origins = NCA_ORIGINS
+        .iter()
+        .map(|o| (*o).to_owned())
+        .chain(extra.origins.iter().cloned());
+    let network = NetworkPolicy::only_endpoints(origins)
+        .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
+    Ok((
+        ValidationServices::new(
+            CaSet::new(anchors),
+            Vec::new(),
+            http,
+            network.clone(),
+            clock,
+        ),
+        network,
+    ))
 }
 
 /// The spool's owner lock: `None` if another process holds it.
@@ -227,7 +243,7 @@ fn remove_stale_spool(spool: &Path) {
     }
 }
 
-fn sha256_of(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256_of(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0; 32];
     out.copy_from_slice(&HashAlg::Sha256.digest(bytes));
     out
@@ -563,7 +579,7 @@ pub(crate) struct Frozen {
 
 /// The key store file, read once into zeroizing memory. The limit caps what is READ (a file
 /// swapped in after a size check cannot exceed it), on the opened file, not on its name.
-fn read_key_store(path: &Path) -> Result<Zeroizing<Vec<u8>>, JobError> {
+pub(crate) fn read_key_store(path: &Path) -> Result<Zeroizing<Vec<u8>>, JobError> {
     use std::io::Read;
     let file = File::open(path)?;
     if !file.metadata()?.is_file() {
@@ -578,9 +594,13 @@ fn read_key_store(path: &Path) -> Result<Zeroizing<Vec<u8>>, JobError> {
     Ok(bytes)
 }
 
-/// SHA-256 of the certificate stored under `alias` in the key store `bytes`, opened with
-/// `password`. The private key is dropped here.
-fn certificate_of(bytes: &[u8], password: &str, alias: &str) -> Result<[u8; 32], JobError> {
+/// The certificate stored under `alias` in the key store `bytes`, opened with `password`. The
+/// private key is dropped here.
+pub(crate) fn key_certificate(
+    bytes: &[u8],
+    password: &str,
+    alias: &str,
+) -> Result<oncl_pki::cert::Certificate, JobError> {
     let entries = if oncl_pki::jks::is_jks(bytes) {
         oncl_pki::jks::load(bytes, password)
             .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?
@@ -588,12 +608,17 @@ fn certificate_of(bytes: &[u8], password: &str, alias: &str) -> Result<[u8; 32],
         oncl_pki::pkcs12::load(bytes, password)
             .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?
     };
-    let entry = entries
-        .iter()
+    entries
+        .into_iter()
         .find(|e| e.alias == alias)
-        .ok_or(JobError::StoreChanged)?;
-    let der = entry
-        .cert
+        .map(|entry| entry.cert)
+        .ok_or(JobError::StoreChanged)
+}
+
+/// SHA-256 of the certificate stored under `alias` in the key store `bytes`, opened with
+/// `password`.
+fn certificate_of(bytes: &[u8], password: &str, alias: &str) -> Result<[u8; 32], JobError> {
+    let der = key_certificate(bytes, password, alias)?
         .to_der()
         .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?;
     Ok(sha256_of(&der))

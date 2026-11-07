@@ -1,0 +1,6 @@
+# The user's confirmation of a plugin key use is made in ONE place of the workspace
+# (crates/oncl-ui/src/workspace/plugins/consent.rs, `user_confirmed`, which allows it with a
+# reason). Anywhere else clippy refuses it.
+disallowed-methods = [
+    { path = "oncl_core::plugins::UserConfirmation::after_user_confirmed", reason = "only the Plugins page's confirm button may say the user confirmed (consent::user_confirmed)" },
+]

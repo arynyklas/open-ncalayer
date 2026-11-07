@@ -10,15 +10,20 @@ publish.workspace = true
 
 [dependencies]
 der.workspace = true
-# The manual tools reach every family of the SDK that needs neither a token nor a plugin
-# runtime: XML/XAdES/WS-Security, PDF/PAdES and JOSE. `oncl-xml` is in the daemon already
-# (through `oncl-plugin`); `oncl-pdf` is a workspace crate whose dependencies the daemon has
-# already: the closure of `openncalayer` grows by that crate alone and by no third-party one.
-oncl-core = { workspace = true, features = ["xml", "pdf", "jose"] }
+# The manual tools reach every family of the SDK that needs no token: XML/XAdES/WS-Security,
+# PDF/PAdES and JOSE, and the plugins of the Plugins page (`plugins`: the daemon has the plugin
+# runtime already, so the closure of `openncalayer` does not grow by it). `oncl-xml` is in the
+# daemon already (through `oncl-plugin`); `oncl-pdf` is a workspace crate whose dependencies the
+# daemon has already: the closure of `openncalayer` grows by that crate alone and by no
+# third-party one.
+oncl-core = { workspace = true, features = ["xml", "pdf", "jose", "plugins"] }
 oncl-flows.workspace = true
 oncl-desktop.workspace = true
 oncl-pdf.workspace = true
 oncl-pki.workspace = true
+# The manual window's Plugins page: the declared operations, their typed parameters and the
+# consent lines come from the package manifest (`oncl_plugin::operations`).
+oncl-plugin.workspace = true
 oncl-tls.workspace = true
 oncl-token.workspace = true
 oncl-trust.workspace = true
@@ -63,7 +68,10 @@ slint-build.workspace = true
 [dev-dependencies]
 # A plugin ticket on a key-use event, to test that the document guard refuses it.
 oncl-core = { workspace = true, features = ["testing"] }
-oncl-plugin.workspace = true
+# A synthetic plugin module for the Plugins page tests, written as WebAssembly text.
+oncl-pdk.workspace = true
+wat.workspace = true
+sha2.workspace = true
 oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 # A fake mkcert CA in the TLS wizard's tests.

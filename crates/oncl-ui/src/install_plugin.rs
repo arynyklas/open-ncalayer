@@ -297,12 +297,12 @@ struct BlockTexts {
 /// A plugin's own text for the frame: control characters and bidirectional controls gone
 /// ([`page_text`]), at most [`MAX_UNTRUSTED_LABEL`] characters, then `…`. Drawn as plain
 /// text: there is no markup in a Slint `Text`.
-fn untrusted_label(text: &str) -> String {
+pub(crate) fn untrusted_label(text: &str) -> String {
     cut(&page_text(text), MAX_UNTRUSTED_LABEL)
 }
 
 /// `text` of at most `max` characters, then `…` if it was longer.
-fn cut(text: &str, max: usize) -> String {
+pub(crate) fn cut(text: &str, max: usize) -> String {
     let mut chars = text.chars();
     let mut shown: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
@@ -415,6 +415,17 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
             String::new()
         },
     }
+}
+
+/// The caption of the frame that holds a plugin's own label, in `l`: whose words they are.
+/// The Plugins page of the manual window puts the same frame under the same caption.
+pub(crate) fn frame_caption(l: Locale) -> &'static str {
+    Texts::of(l).calls
+}
+
+/// The caption of a plugin's own XPath in the frame, in `l`; `{0}` is the XPath.
+pub(crate) fn frame_xpath(l: Locale) -> &'static str {
+    Texts::of(l).xpath
 }
 
 /// The texts of the window, in one language.

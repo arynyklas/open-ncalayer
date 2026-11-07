@@ -396,7 +396,8 @@ pub fn try_run_port_operation(
     };
     let prepared = engine.plugin_prepare(&call, &mut ctx)?;
     let summary = prepared.summary().clone();
-    // The user read the summary and confirmed it.
+    // The user read the summary and confirmed it: the test IS the user here (no window).
+    #[allow(clippy::disallowed_methods)]
     let confirmation = UserConfirmation::after_user_confirmed(prepared.summary());
     let approval = prepared.approve(confirmation, None).unwrap();
     let request = engine

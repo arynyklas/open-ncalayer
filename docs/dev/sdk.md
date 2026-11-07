@@ -203,11 +203,12 @@ wiring host's check.
 
 `Engine::plugin_operations` lists `Manifest::manual_operations` (without URL networks).
 `Engine::plugin_request` builds the exact request text the module receives from the parsed
-JSON template and typed `PluginParam` values, never by pasting text: the final length is
+JSON template (any JSON object; each whole-string placeholder value at any depth is replaced,
+never a key, never part of a string) and typed `PluginParam` values, never by pasting text: the final length is
 computed first and refused above the plugin's `max_transfer` (`ErrorCode::InputLimit`)
 before anything is substituted, then written once into a buffer of that size. Documents are
 standard base64 and never empty; a text is counted in characters like its declared limit and,
-when a key profile reads it as an XPath, checked with `Source::check_value`. The text is not
+when a key profile reads it as an XPath, checked with `Source::check_value`. A text that is the signed content may hold no control character but `\n` and `\t` and no bidirectional or invisible one (`InvalidValue`; the window passes the same `&str` it renders). A key operation must declare `network = "pki"`, and a text param may be the content of any key kind (its UTF-8 bytes). The text is not
 normalized. The output is compact JSON with object keys sorted (the template's key order is
 not kept), integers as written; a template number that is not an `i64`/`u64` is refused
 (`InvalidTemplate`) rather than re-printed. Undeclared, non-manual, `derived` and URL-network

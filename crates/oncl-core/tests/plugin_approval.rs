@@ -4,6 +4,7 @@
 //! synthetic WASM and real source-bound crypto, like `plugin_ticket`; every key use is a real
 //! signature, checked by `oncl_pki` where it is cheap.
 #![allow(dead_code)]
+#![allow(clippy::disallowed_methods)] // Core's own tests make confirmations to test the guard
 #[path = "../examples/sdk_probe/plugin_fixture.rs"]
 mod fixture;
 #[path = "../examples/sdk_probe/batch_fixture.rs"]
@@ -146,6 +147,42 @@ kind = "xml"
 content = "param:file"
 [operations.uses.key.profile]
 element = "param:path"
+
+[[operations]]
+name = "sign-raw-text"
+module = "{MODULE}"
+manual = true
+request = '{{"method":"signPlainData","storageName":"PKCS12","data":"{{text}}"}}'
+label = {{ ru = "а", kk = "ә", en = "a" }}
+[[operations.params]]
+name = "text"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["keys_sign_raw"]
+network = "pki"
+[[operations.uses.key]]
+kind = "raw"
+content = "param:text"
+
+[[operations]]
+name = "sign-cms-text"
+module = "{MODULE}"
+manual = true
+request = '{{"type":"text","data":"{{text}}"}}'
+label = {{ ru = "а", kk = "ә", en = "a" }}
+[[operations.params]]
+name = "text"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["keys_sign_cms_ex"]
+network = "pki"
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:text"
+[operations.uses.key.profile]
+cosign = "never"
 
 [[operations]]
 name = "no-key"
@@ -1884,6 +1921,169 @@ fn audit_facts_carry_the_nonce_hash_not_the_nonce_or_the_document() {
     let facts = approval.audit_record(&ticket);
     let hash = facts.approval_nonce_sha256.expect("a user approved it");
     assert_ne!(hash.as_slice(), &nonce[..]);
+    // Pinned: the domain-separated hash of the nonce, so a change of the prefix is deliberate.
+    let mut expected = Sha256::new();
+    expected.update(b"ONCLNONCE1\0");
+    expected.update(nonce);
+    assert_eq!(hash.as_slice(), expected.finalize().as_slice());
+    assert!(!hash.windows(16).any(|w| w == nonce));
+    assert_eq!(facts.plugin_id, ID);
+    assert_eq!(facts.package_kind, 1);
+    assert_eq!(facts.package_sha256, [9; 32]);
+    assert_eq!(facts.operation, "sign-raw");
+    assert_eq!(facts.ticket_digest, ticket.digest());
+    assert_eq!(facts.content_sha256, Sha256::digest(DOC).as_slice());
+    assert_eq!(facts.content_len, DOC.len() as u64);
+    assert_eq!(facts.caller, PluginCallerKind::LocalOperator);
+    assert!(facts.declared);
+    assert_eq!(facts.grant_id, None);
+    // Another nonce, another hash; the same nonce the same.
+    let other = PluginAuditRecord::from_ticket(&ticket, Some(&[0xA6; 16]), None);
+    assert_ne!(other.approval_nonce_sha256, facts.approval_nonce_sha256);
+    let none = PluginAuditRecord::from_ticket(&ticket, None, Some("g".into()));
+    assert_eq!(none.approval_nonce_sha256, None);
+    assert_eq!(none.grant_id.as_deref(), Some("g"));
+}
+
+fn text(value: &str) -> Vec<(&'static str, PluginParam<'_>)> {
+    vec![("text", PluginParam::Text(value))]
+}
+
+#[test]
+fn raw_over_a_text_parameter_signs_the_utf8_bytes_and_the_summary_says_so() {
+    // Break caught: a text is not content, or its bytes are not what is bound and signed.
+    let typed = "héllo \u{4e16}";
+    let rig = rigged(&[raw_call(typed.as_bytes())], "");
+    let mut c = ctx(&rig, "sign-raw-text");
+    let prepared = prepare(&rig, "sign-raw-text", &text(typed), &mut c);
+    let s = prepared.summary();
+    assert_eq!(s.kind, KeyKind::Raw);
+    assert_eq!(s.content.param, "text");
+    assert_eq!(s.content.len, typed.len() as u64, "bytes, not characters");
+    assert_eq!(
+        s.content.sha256,
+        <[u8; 32]>::from(Sha256::digest(typed.as_bytes()))
+    );
+    assert!(s.content.prehashed.is_none());
+    // Another text, another summary.
+    let other = prepare(&rig, "sign-raw-text", &text("other"), &mut c);
+    assert_ne!(s.digest(), other.summary().digest());
+    // The run signs exactly those bytes, and the signature verifies over them.
+    let (_c, result) = flow(&rig, "sign-raw-text", &text(typed));
+    assert_eq!(result.applied(), AppliedState::Applied, "{result:?}");
+    let signature = signature(result.response().unwrap());
+    let key = oncl_pki::pkcs12::load(
+        &oncl_testkit::read(oncl_testkit::synthetic("user-rsa-sign").path),
+        &oncl_testkit::synthetic("user-rsa-sign").password,
+    )
+    .unwrap()
+    .remove(0);
+    key.key
+        .public_key()
+        .verify(SigAlg::RsaSha256, typed.as_bytes(), &signature)
+        .unwrap();
+}
+
+#[test]
+fn a_plugin_that_signs_other_bytes_than_the_text_is_refused() {
+    let rig = rigged(&[raw_call(b"something else")], "");
+    let (_c, result) = flow(&rig, "sign-raw-text", &text("what the user typed"));
+    assert_eq!(rig.guard.applications(), 0, "{result:?}");
+    assert!(denied(&result), "{result:?}");
+}
+
+#[test]
+fn cms_ex_over_a_text_parameter_signs_the_utf8_bytes() {
+    let typed = "договор №1";
+    let rig = rigged(&[cms_call(cms_ex_args(data(typed.as_bytes())))], "");
+    let (_c, result) = flow(&rig, "sign-cms-text", &text(typed));
+    assert_eq!(result.applied(), AppliedState::Applied, "{result:?}");
+    let abi::CmsOutcome::Signed(cms) = decoded(result.response().unwrap()) else {
+        panic!("not a CMS")
+    };
+    assert_eq!(
+        oncl_pki::cms::verify(&cms, Some(typed.as_bytes()))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(oncl_pki::cms::verify(&cms, Some(b"x")).is_err());
+}
+
+#[test]
+fn an_empty_text_is_not_content() {
+    let rig = rigged(&[], "");
+    let mut c = ctx(&rig, "sign-raw-text");
+    assert_eq!(
+        try_prepare(
+            &rig,
+            "sign-raw-text",
+            &text(""),
+            &bound(&rig),
+            &manual(),
+            &mut c
+        )
+        .unwrap_err(),
+        PluginPrepareError::Request(PluginRequestError::InvalidValue("text".into()))
+    );
+    // And a flag or a document is not a text.
+    let wrong = [("text", PluginParam::Flag(true))];
+    assert!(
+        try_prepare(
+            &rig,
+            "sign-raw-text",
+            &wrong,
+            &bound(&rig),
+            &manual(),
+            &mut c
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_signed_text_holds_nothing_a_window_could_hide() {
+    // Break caught: a text bound as content carries characters the consent could strip,
+    // reorder or not show; the user would approve other characters than the key signs.
+    let rig = rigged(&[], "");
+    let mut c = ctx(&rig, "sign-raw-text");
+    for bad in [
+        "pay \u{202e}100\u{202c}",
+        "a\u{0}b",
+        "a\r\nb",
+        "x\u{200b}y",
+        "\u{feff}x",
+        "a\u{2028}b",
+        "a\u{85}b",
+        "a\u{7f}",
+        "\u{1b}[2J",
+    ] {
+        assert_eq!(
+            try_prepare(
+                &rig,
+                "sign-raw-text",
+                &text(bad),
+                &bound(&rig),
+                &manual(),
+                &mut c
+            )
+            .unwrap_err(),
+            PluginPrepareError::Request(PluginRequestError::InvalidValue("text".into())),
+            "{bad:?}"
+        );
+    }
+    for good in ["a\tb\nc", "договор №1 \u{4e16}", " x ", "emoji \u{1f600}"] {
+        try_prepare(
+            &rig,
+            "sign-raw-text",
+            &text(good),
+            &bound(&rig),
+            &manual(),
+            &mut c,
+        )
+        .unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
+    }
+}
     // Pinned: the domain-separated hash of the nonce, so a change of the prefix is deliberate.
     let mut expected = Sha256::new();
     expected.update(b"ONCLNONCE1\0");

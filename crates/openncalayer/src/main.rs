@@ -318,10 +318,14 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
     };
     tracing::info!("{}", cli::token_state(&tokens));
     let (extra_trust, clock) = signing_trust();
+    let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
+    let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
+    let services = host_services(&daemon.paths, prompter, recent, &http, &tokens);
+    let (plugins, plugin_modules) = start_plugins(&daemon.paths, services.clone(), &http);
     let workspace = match oncl_ui::desktop_engine(
         oncl_ui::desktop_limits(),
         Arc::clone(&http) as _,
-        extra_trust,
+        extra_trust.clone(),
         &daemon.paths.data.join("spool"),
         Arc::clone(&clock),
     ) {
@@ -331,8 +335,24 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
             engine: Arc::new(engine.with_activity(openncalayer::activity())),
             guard,
             tokens: Arc::clone(&tokens),
-            clock,
+            clock: Arc::clone(&clock),
             settings_path: daemon.paths.settings(),
+            // The Plugins page reads the installed plugins from the plugin service, and runs
+            // them on an engine of its own (the documents' guard and the plugins' guard are
+            // two guards).
+            plugins: match &plugins {
+                Ok(service) => Arc::new(openncalayer::plugins::manual::DesktopManualPlugins::new(
+                    Arc::clone(service),
+                    oncl_ui::PluginEngineKit {
+                        http: Arc::clone(&http) as _,
+                        extra: extra_trust,
+                        clock,
+                        activity: Some(openncalayer::activity()),
+                        spool: daemon.paths.data.join("spool"),
+                    },
+                )),
+                Err(_) => Arc::new(oncl_ui::NoManualPlugins),
+            },
         },
         Err(e) => {
             tracing::error!(error = %e, "the engine of the tools window does not start");
@@ -340,10 +360,6 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
-    let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
-    let services = host_services(&daemon.paths, prompter, recent, &http, &tokens);
-    let (plugins, plugin_modules) = start_plugins(&daemon.paths, services.clone(), &http);
     let plugin_bundles = plugin_modules.as_ref().map(|p| Arc::clone(&p.bundles));
     let registry = match build_registry_from(
         sources,

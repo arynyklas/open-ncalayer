@@ -26,6 +26,9 @@ pub(crate) enum Job {
     Sign,
     /// A run of one of the tools that use no private key: verify, extend, extract, timestamp.
     Tool,
+    /// A step of the Plugins page: reading the installed plugins, opening a key store, and the
+    /// run that prepares the confirmation, waits for it and calls the plugin.
+    Plugin,
 }
 
 /// Why an operation did not complete.
@@ -99,6 +102,9 @@ pub struct JobControl {
     clock: Instant,
     /// Milliseconds after `clock` of the last word queued, plus one (0: none yet).
     last_report: AtomicU64,
+    /// Milliseconds after `clock` at which the operation is out of time, plus one (0: no
+    /// deadline of its own: the engine's holds).
+    deadline: AtomicU64,
 }
 
 impl Default for JobControl {
@@ -113,6 +119,7 @@ impl Default for JobControl {
             reporter: None,
             clock: Instant::now(),
             last_report: AtomicU64::new(0),
+            deadline: AtomicU64::new(0),
         }
     }
 }
@@ -149,6 +156,17 @@ impl JobControl {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// The operation has `after` from now: at its next checkpoint after that it stops with a
+    /// deadline error. Used for a plugin run, which starts its own clock at the user's
+    /// confirmation (the engine's deadline began earlier, with the preparation).
+    pub(crate) fn set_deadline(&self, after: Duration) {
+        let at = self.clock.elapsed().saturating_add(after);
+        let at = u64::try_from(at.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        self.deadline.store(at, Ordering::SeqCst);
     }
 
     /// The size of the input, once the worker knows it. Never 0: «unknown» is a different thing.
@@ -202,6 +220,13 @@ impl OperationControl for JobControl {
         self.bytes_in.fetch_max(progress.bytes_in, Ordering::SeqCst);
         if self.is_cancelled() {
             return Err(ProcessingError::Cancelled);
+        }
+        let deadline = self.deadline.load(Ordering::SeqCst);
+        if deadline != 0 {
+            let now = u64::try_from(self.clock.elapsed().as_millis()).unwrap_or(u64::MAX) + 1;
+            if now >= deadline {
+                return Err(ProcessingError::DeadlineExceeded);
+            }
         }
         if self.reporter.is_some() {
             // Checkpoints come for every chunk of a large file: the window is told at most
@@ -535,5 +560,27 @@ mod tests {
         let missing = dir.path().join("missing");
         let result = jobs::hash_file(&engine, HashAlg::Sha256, &missing, &Arc::new(control));
         assert_eq!(result, Err(JobError::Io(io::ErrorKind::NotFound)));
+    }
+
+    #[test]
+    fn a_runs_own_deadline_stops_it_at_its_next_checkpoint() {
+        let control = JobControl::default();
+        let progress = Progress::default();
+        // Without a deadline of its own the control does not stop.
+        assert!(control.checkpoint(progress).is_ok());
+        control.set_deadline(Duration::from_millis(40));
+        assert!(control.checkpoint(progress).is_ok());
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(matches!(
+            control.checkpoint(progress),
+            Err(ProcessingError::DeadlineExceeded)
+        ));
+        // A cancel is still a cancel.
+        let cancelled = JobControl::default();
+        cancelled.cancel();
+        assert!(matches!(
+            cancelled.checkpoint(progress),
+            Err(ProcessingError::Cancelled)
+        ));
     }
 }
