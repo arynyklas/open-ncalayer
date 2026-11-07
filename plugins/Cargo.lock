@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-esf-osdkz"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-fhs"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "der",
  "oncl-pdk",

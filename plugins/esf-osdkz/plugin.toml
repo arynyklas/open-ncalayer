@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.esf-osdkz"
-version = "1.0.0-beta.2"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.3"
+min_core = "0.1.0-alpha.7"
 modules = ["com.osdkz.esf.signer.esfSigner"]
 
 [name]
@@ -19,3 +19,27 @@ version = "1.2"
 
 [capabilities]
 keys = true
+
+# signPlainData only (auth is excluded: R17; signPlainDataMap is MULTI). The text is signed
+# as a raw signature over its UTF-8 bytes. Core refuses control, bidi and invisible
+# characters (other than \n and \t) in that text: the consent shows the text as typed.
+# The module selects a KNCA=SIGNATURE key and refuses SHA-1 RSA and GOST 2015-256 keys.
+[[operations]]
+name = "sign-plain-data"
+module = "com.osdkz.esf.signer.esfSigner"
+manual = true
+request = '{"method":"signPlainData","storageName":"PKCS12","data":"{data}"}'
+label = { ru = "Подписать текст (сырая подпись UTF-8)", kk = "Мәтінге қол қою (UTF-8 шикі қолтаңба)", en = "Sign a text (raw UTF-8 signature)" }
+
+[[operations.params]]
+name = "data"
+kind = "text"
+max_chars = 4096
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "cert_details", "keys_sign_raw"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "raw"
+content = "param:data"
