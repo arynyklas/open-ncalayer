@@ -62,7 +62,7 @@ oracle::verify_xml(signed, &cert, n) -> XmlFacts;  oracle::assert_xml_rejected(d
 * Эндпоинты `network = "pki"`: GET и POST для OCSP и TSA — подписанта проверяют GET-запросом к OCSP из сертификата, метку времени Kalkan берут GET-запросом.
 * Операция с `uses.key` без `network = "pki"` не подписывает никогда (`network.rs`).
 
-Волна 1: `rating1c` (7 операций). `fhs` и `esf-osdkz` не объявлены: шаблон `[[operations]]` не выражает форму их запроса (инвентаризация §8–9); пробы `fhs.rs` и `esf_osdkz.rs` фиксируют поведение порта на ближайшем шаблоне.
+Волна 1: `rating1c` (7 операций). Волна 2: `fhs` (`sign-xml`, `sign-text`: `args` — объект), `esf-osdkz` (`sign-plain-data`: корневой запрос, `raw` над текстом; Core отказывает на управляющих/bidi/невидимых символах).
 
 ## Границы проверок (что оракулы НЕ доказывают)
 

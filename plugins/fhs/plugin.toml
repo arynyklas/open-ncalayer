@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.fhs"
-version = "1.0.0-beta.4"
-min_core = "0.1.0-alpha.6"
+version = "1.0.0-beta.5"
+min_core = "0.1.0-alpha.7"
 modules = ["kz.fhs.cabinet.FHSCabinetSigner"]
 
 [name]
@@ -23,3 +23,49 @@ key_files = true
 dialogs = true
 files = true
 origins = ["https://fhs.kz", "https://*.fhs.kz"]
+
+# V1 methods only. On a failed signature the module opens a retry/error window
+# (dialog_choice); the manual window has no dialogs, so on failure the plugin's own window
+# is not available: the call ends as an error. Not declared: signFile (derived content),
+# signTextV2/signXmlV2 (keys_open).
+[[operations]]
+name = "sign-xml"
+module = "kz.fhs.cabinet.FHSCabinetSigner"
+manual = true
+request = '{"module":"kz.fhs.cabinet.FHSCabinetSigner","method":"signXml","args":{"xml":"{xml}"}}'
+label = { ru = "Подписать XML (при ошибке окно повтора недоступно)", kk = "XML-ге қол қою (қателікте қайталау терезесі жоқ)", en = "Sign an XML document (no retry window on failure)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "keys_sign_xml"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml"
+content = "param:xml"
+
+[[operations]]
+name = "sign-text"
+module = "kz.fhs.cabinet.FHSCabinetSigner"
+manual = true
+request = '{"module":"kz.fhs.cabinet.FHSCabinetSigner","method":"signText","args":{"base64data":"{file:base64}"}}'
+label = { ru = "Подписать данные: CMS с меткой времени (при ошибке окно повтора недоступно)", kk = "Деректерге қол қою: уақыт белгісі бар CMS (қателікте қайталау терезесі жоқ)", en = "Sign data: time-stamped detached CMS (no retry window on failure)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[operations.uses.key.profile]
+timestamp = "kalkan"
