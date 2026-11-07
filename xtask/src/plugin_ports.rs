@@ -34,7 +34,7 @@ pub fn run(root: &Path, options: &Options<'_>) -> anyhow::Result<()> {
         // `release/` of the target directory is where the modules are looked for.
         let target_dir = wasm_dir
             .ancestors()
-            .nth(3)
+            .nth(2)
             .context("the wasm directory is not <target>/wasm32-unknown-unknown/release")?;
         let status = Command::new(&cargo)
             .args([

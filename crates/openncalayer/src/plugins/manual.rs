@@ -13,10 +13,10 @@
 //! the ports the inventory marks unsupported, `docs/design/manual-plugins-inventory.md`)
 //! are not listed; the inventory, not this code, says which are which.
 
-use oncl_core::plugins::{CallerContext, PackageHash, PluginRegistry};
+use oncl_core::plugins::{CallerContext, ManualLimits, PackageHash, PluginRegistry};
 use oncl_pki::http::HttpMethod;
 use oncl_plugin::operations::{Network, Operation, Param};
-use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA, InstanceLimits, Localized, NCA_PKI_HOSTS, Store};
+use oncl_plugin::{Localized, NCA_PKI_HOSTS, Store};
 use tracing::warn;
 
 use super::Version;
@@ -28,14 +28,6 @@ pub const MANUAL_CALLER: &str = "manual-window";
 pub fn manual_caller() -> CallerContext {
     CallerContext::LocalOperator(MANUAL_CALLER.to_owned())
 }
-
-/// The exact PKI endpoints an operation with `network = "pki"` may use: the NCA's own
-/// time-stamp and OCSP services (what `PkiUrl::Default` names). CRLs are fetched under the
-/// provenance of the certificate, not from this list.
-const PKI_ENDPOINTS: [(HttpMethod, &str); 2] = [
-    (HttpMethod::Post, DEFAULT_TSA),
-    (HttpMethod::Post, DEFAULT_OCSP),
-];
 
 /// One operation of an installed plugin that the manual window may offer.
 ///
@@ -126,7 +118,7 @@ impl ManualPlugins {
             manifest.clone(),
             PackageHash::File(package.sha256),
             &package.wasm,
-            InstanceLimits::default(),
+            ManualLimits::desktop().instance,
             Vec::new(),
         ) {
             warn!(plugin = %manifest.id, error = %e, "the manual window cannot register the plugin");
@@ -138,7 +130,7 @@ impl ManualPlugins {
         }
         for op in ops {
             let endpoints: &[(HttpMethod, &str)] = if matches!(op.uses().network(), Network::Pki) {
-                &PKI_ENDPOINTS
+                &oncl_plugin::NCA_PKI_ENDPOINTS
             } else {
                 &[]
             };
@@ -176,7 +168,6 @@ mod tests {
     use crate::plugins::tests::{ID, example, example_ops, operation};
     use oncl_core::plugins::PluginIdentity;
     use oncl_core::{Engine, EngineServices};
-    use oncl_pki::resource::ResourceLimits;
     use oncl_plugin::{Package, Source};
 
     fn store() -> (tempfile::TempDir, Store) {
@@ -193,7 +184,8 @@ mod tests {
 
     fn engine(plugins: ManualPlugins) -> Engine {
         Engine::new(
-            EngineServices::hash_only(ResourceLimits::default()).with_plugins(plugins.registry),
+            EngineServices::hash_only(ManualLimits::desktop().resources)
+                .with_plugins(plugins.registry),
         )
         .unwrap()
     }
@@ -215,8 +207,23 @@ mod tests {
     }
 
     #[test]
-    fn the_pki_endpoints_are_within_the_nca_hosts() {
-        for (_, url) in PKI_ENDPOINTS {
+    fn the_pki_endpoints_are_get_and_post_of_the_ocsp_and_the_tsa_within_the_nca_hosts() {
+        use oncl_pki::http::HttpMethod::{Get, Post};
+        use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA};
+        let mut granted: Vec<_> = oncl_plugin::NCA_PKI_ENDPOINTS.to_vec();
+        granted.sort_by_key(|(method, url)| (*url, *method == Post));
+        // The signer's validation GETs the OCSP responder of its certificate and Kalkan's TSA
+        // profile GETs the TSA: a grant of POST alone refused both (MP6 wave 1).
+        assert_eq!(
+            granted,
+            [
+                (Get, DEFAULT_OCSP),
+                (Post, DEFAULT_OCSP),
+                (Get, DEFAULT_TSA),
+                (Post, DEFAULT_TSA)
+            ]
+        );
+        for (_, url) in oncl_plugin::NCA_PKI_ENDPOINTS {
             let host = url.trim_start_matches("http://");
             assert!(
                 NCA_PKI_HOSTS
@@ -225,6 +232,22 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    /// What the real ports need, measured (`oncl_core::plugins::ManualLimits`): the default
+    /// instance limits cannot run beside the default memory budget, and a registry built
+    /// here installs every plugin with the desktop's.
+    #[test]
+    fn every_plugin_is_registered_with_the_desktop_limits_and_not_the_sdk_defaults() {
+        let (_dir, store) = store();
+        install(
+            &store,
+            &example_ops("0.1.0", &[operation("sign", "Sign", true, false)]),
+        );
+        let plugins = ManualPlugins::build(&store);
+        let limits = plugins.registry.instance_limits(ID);
+        assert_eq!(limits, Some(ManualLimits::desktop().instance));
+        assert_ne!(limits, Some(oncl_plugin::InstanceLimits::default()));
     }
 
     #[test]

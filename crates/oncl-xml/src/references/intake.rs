@@ -79,6 +79,17 @@ fn validate_profile(profile: &XmlVerifyProfile) -> Result<()> {
     }
     Ok(())
 }
+/// The metadata read while the signatures of a signed document are located.
+pub(crate) fn framing_reservation(
+    profile: &XmlVerifyProfile,
+) -> std::result::Result<u64, ProcessingError> {
+    (profile.max_metadata_bytes as u64)
+        .checked_mul(10)
+        .and_then(|n| {
+            n.checked_add(profile.xml.max_depth as u64 * 2048 + profile.max_signers as u64 * 8192)
+        })
+        .ok_or(ProcessingError::MetadataLimit)
+}
 pub(crate) fn index_signed(
     source: Source<'_>,
     profile: &XmlVerifyProfile,
@@ -100,16 +111,7 @@ pub(crate) fn index_signed(
     let pending = ProvisionalInput::capture(source, store, scope, allowance)?;
     let mut document =
         XmlDocument::index_provisional(pending, &profile.xml, store, scope, index_metadata)?;
-    let framing = scope.reserve_metadata(
-        (profile.max_metadata_bytes as u64)
-            .checked_mul(10)
-            .and_then(|n| {
-                n.checked_add(
-                    profile.xml.max_depth as u64 * 2048 + profile.max_signers as u64 * 8192,
-                )
-            })
-            .ok_or(ProcessingError::MetadataLimit)?,
-    )?;
+    let framing = scope.reserve_metadata(framing_reservation(profile)?)?;
     let signatures = scan_optional(&mut document, profile, scope)?;
     for signature in &signatures {
         metadata_shape(&mut document, signature, profile, scope)?;

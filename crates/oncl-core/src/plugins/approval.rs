@@ -58,6 +58,13 @@ pub enum PluginPrepareError {
     /// The certificate in the binding's metadata is not the one the key store holds for the
     /// key: what the user would be shown is not what would sign.
     CertificateMismatch,
+    /// The engine's memory and metadata budgets cannot hold the call over this document
+    /// ([`crate::plugins::manual_call_budget`]): a call that would fail, for the XML
+    /// signatures after the key was used, so it is refused before.
+    ResourceBudget,
+    /// The operation signs XML, which is spooled through the engine's temporary store
+    /// ([`crate::EngineServices::with_temporary_store`]), and the engine has none.
+    NoTemporaryStore,
 }
 impl PluginPrepareError {
     /// Always `NotApplied`: nothing here applies a key.
@@ -78,6 +85,12 @@ impl std::fmt::Display for PluginPrepareError {
             Self::KeyUnavailable => f.write_str("the key could not be opened"),
             Self::CertificateMismatch => {
                 f.write_str("the binding's certificate is not the key's certificate")
+            }
+            Self::ResourceBudget => {
+                f.write_str("the engine's memory and metadata budgets cannot hold this call")
+            }
+            Self::NoTemporaryStore => {
+                f.write_str("the engine has no temporary store for the XML signature")
             }
         }
     }
@@ -100,6 +113,8 @@ impl From<PluginPrepareError> for OperationError {
                 ProcessingError::InvalidInput("invalid plugin operation parameters").into()
             }
             PluginPrepareError::KeyUnavailable => OperationError::MissingKeyProvider,
+            PluginPrepareError::ResourceBudget => ProcessingError::MemoryLimit.into(),
+            PluginPrepareError::NoTemporaryStore => OperationError::MissingTemporaryStore,
             PluginPrepareError::CallerNotManual
             | PluginPrepareError::CertificateMismatch
             | PluginPrepareError::NoKeyUse
@@ -580,6 +595,44 @@ fn is_digest_form(profile: &Profile) -> bool {
 }
 
 impl Engine {
+    /// Refuses, before the user is asked and before any key is opened, a call the engine
+    /// cannot run to its end: no temporary store for an XML signature, or budgets that cannot
+    /// hold what the call reserves over a document of `content_len` bytes
+    /// ([`manual_call_budget`]). The reservations are taken and released at once, from the
+    /// context's own scope, so the answer is the one the call itself will get; the XML
+    /// signatures check their output after the key was used, and without this a budget that is
+    /// too small for that check fails the call with the key applied.
+    fn plugin_preflight(
+        &self,
+        installed: &Installed,
+        kind: KeyKind,
+        content_len: u64,
+        ctx: &OperationContext,
+    ) -> Result<(), PluginPrepareError> {
+        if budget::checks_own_output(kind) && self.temporary.is_none() {
+            return Err(PluginPrepareError::NoTemporaryStore);
+        }
+        let need = manual_call_budget(&installed.compiled.limits(), kind, content_len)
+            .map_err(|_| PluginPrepareError::ResourceBudget)?;
+        // A budget that is short is what is refused; a cancelled or expired operation is
+        // reported by the call's own first checkpoint.
+        let short = |r: &Result<_, ProcessingError>| {
+            matches!(
+                r,
+                Err(ProcessingError::MemoryLimit | ProcessingError::MetadataLimit)
+            )
+        };
+        let memory = ctx.scope.reserve_memory(need.direct_memory());
+        if short(&memory) {
+            return Err(PluginPrepareError::ResourceBudget);
+        }
+        let metadata = ctx.scope.reserve_metadata(need.metadata);
+        if short(&metadata) {
+            return Err(PluginPrepareError::ResourceBudget);
+        }
+        Ok(())
+    }
+
     /// Derives everything that one manual-window key use is, from Core's data only: the
     /// registered identity, the declared operation, the frozen parameter bytes and the bound
     /// key. Nothing from a plugin is read.
@@ -614,6 +667,7 @@ impl Engine {
             return Err(PluginRequestError::DerivedUnsupported.into());
         };
         let bytes = bound_bytes(param, params)?;
+        self.plugin_preflight(installed, declared.kind(), bytes.len() as u64, ctx)?;
         let metadata = key
             .metadata
             .as_ref()
