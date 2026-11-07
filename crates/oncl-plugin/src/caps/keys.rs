@@ -475,7 +475,7 @@ pub(crate) fn tokens_scan(state: &HostState) -> TokenScan {
 }
 
 /// The basics module's conditions of `filter` and `more`.
-fn key_filter(filter: Filter, more: BasicsMore) -> HostResult<KeyFilter> {
+pub(crate) fn key_filter(filter: Filter, more: BasicsMore) -> HostResult<KeyFilter> {
     let chain = match filter.chain {
         None => ChainPolicy::Default,
         Some(certs) if certs.is_empty() => ChainPolicy::Empty,
@@ -499,7 +499,7 @@ fn key_filter(filter: Filter, more: BasicsMore) -> HostResult<KeyFilter> {
 }
 
 /// The basics module's conditions of `more`.
-fn filter_more(more: FilterMore) -> HostResult<BasicsMore> {
+pub(crate) fn filter_more(more: FilterMore) -> HostResult<BasicsMore> {
     let knca_types = more
         .knca_types
         .iter()

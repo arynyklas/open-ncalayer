@@ -3,6 +3,7 @@
 /// The one projection of the shared validator's result onto the legacy `cms_verify` report.
 pub use crate::caps::{LegacyRules, apply_validation};
 use crate::host::{AbiState, Phase, trap};
+use crate::manual::{Answer, Manual, PluginInteraction};
 use crate::runtime::{Compiled, Guest, LoadError, PluginError};
 use oncl_pdk::abi::{self, Import};
 use wasmi::{Memory, StoreLimits, TypedFunc};
@@ -54,8 +55,25 @@ struct HeadlessState<'a, 'b> {
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
     bindings: HeadlessBindings<'b>,
     backend: &'a mut dyn CapabilityBackend,
+    manual: Option<Manual<'b>>,
     failure: Option<HeadlessError>,
     fuel: crate::host::FuelBank,
+}
+impl HeadlessState<'_, '_> {
+    /// The manual window's own answer to a key choice, if it is one and this call has a
+    /// bound key; a refusal is the same kind of trap as every other.
+    fn manual_answer(
+        &mut self,
+        import: Import,
+        args: &[u8],
+    ) -> Option<Result<Vec<u8>, HeadlessError>> {
+        let manual = self.manual.as_mut()?;
+        match manual.answer(import, args) {
+            Answer::Other => None,
+            Answer::Refused => Some(Err(HeadlessError::Denied)),
+            Answer::Done(bytes) => Some(self.backend.checkpoint().map(|()| bytes)),
+        }
+    }
 }
 impl AbiState for HeadlessState<'_, '_> {
     fn limits(&mut self) -> &mut StoreLimits {
@@ -88,6 +106,8 @@ impl AbiState for HeadlessState<'_, '_> {
     fn dispatch(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, wasmi::Error> {
         let result = if !self.bindings.imports.contains(&import) {
             Err(HeadlessError::Denied)
+        } else if let Some(answer) = self.manual_answer(import, args) {
+            answer
         } else if requires_interaction(import) {
             // Before any interactive dispatch, DialogTurn or global UI lock.
             Err(HeadlessError::InteractionRequired)
@@ -137,6 +157,29 @@ impl Compiled {
         bindings: HeadlessBindings<'_>,
         request: &str,
     ) -> Result<String, HeadlessError> {
+        self.call_with(backend, bindings, None, request)
+    }
+
+    /// [`Self::call_headless`] in the manual window: the key choices are answered for the
+    /// one key the user bound there ([`PluginInteraction`], design 3.5); everything else
+    /// is as headless. The server and the CLI never call this.
+    pub fn call_manual(
+        &self,
+        backend: &mut dyn CapabilityBackend,
+        bindings: HeadlessBindings<'_>,
+        interaction: &dyn PluginInteraction,
+        request: &str,
+    ) -> Result<String, HeadlessError> {
+        self.call_with(backend, bindings, Some(interaction), request)
+    }
+
+    fn call_with(
+        &self,
+        backend: &mut dyn CapabilityBackend,
+        bindings: HeadlessBindings<'_>,
+        interaction: Option<&dyn PluginInteraction>,
+        request: &str,
+    ) -> Result<String, HeadlessError> {
         if request.len() > self.limits().max_transfer {
             return Err(PluginError::TooLarge.into());
         }
@@ -150,6 +193,7 @@ impl Compiled {
             guest: None,
             bindings,
             backend,
+            manual: interaction.map(Manual::new),
             failure: None,
             fuel: Default::default(),
         };
