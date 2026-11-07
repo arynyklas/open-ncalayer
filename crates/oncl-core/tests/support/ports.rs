@@ -34,7 +34,6 @@ use oncl_core::{
 use oncl_pdk::abi::Import;
 use oncl_pki::{
     cert::Certificate,
-    crl::MockCrl,
     http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, RouteTransport},
     ocsp::MockOcsp,
     pkcs12,
@@ -57,10 +56,13 @@ pub const GOST2015: &str = "user-gost2015-sign";
 /// The fixed time of every run (the fixtures' `NOW`).
 pub const NOW: time::OffsetDateTime = crypto::NOW;
 
-/// The PKI endpoints the production host grants a `network = "pki"` operation: the default
-/// OCSP responder and the default (Kalkan) TSA, GET and POST each
-/// (`crates/openncalayer/src/plugins/manual.rs`). The synthetic leaf names the same OCSP
-/// responder in its AIA, so that the signer's online validation reaches exactly these.
+/// The PKI endpoints this harness grants a `network = "pki"` operation: the default OCSP
+/// responder and the default (Kalkan) TSA, GET and POST each. This is what the runs showed is
+/// needed (signer OCSP and Kalkan TSA are GETs); it is NOT a claim about the desktop wiring
+/// (`crates/openncalayer/src/plugins/manual.rs` on the integration tip grants POST only and
+/// uses `InstanceLimits::default()`): when feat/mp7b-limits exposes one shared definition of
+/// limits and endpoints, switch `PKI_ENDPOINTS`/`instance_limits()`/`resource_limits()` below
+/// to it (the single place to change). The synthetic leaf names the same OCSP responder.
 pub const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = [
     (HttpMethod::Get, DEFAULT_OCSP),
     (HttpMethod::Post, DEFAULT_OCSP),
@@ -245,7 +247,6 @@ pub fn world(name: &str) -> World {
     let ocsp: Arc<dyn HttpTransport> =
         Arc::new(MockOcsp::new(under_root("ocsp-gost2015")).with_now(NOW));
     let tsa: Arc<dyn HttpTransport> = Arc::new(MockTsa::new(tsa_entry).with_gen_time(NOW));
-    let _crl = MockCrl::new(root.clone());
     let transport = Arc::new(Logged {
         routes: RouteTransport::new(vec![
             (DEFAULT_OCSP.to_owned(), ocsp),

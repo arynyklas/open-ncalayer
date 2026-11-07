@@ -175,7 +175,7 @@ name = "create-raw-sign"
 module = "kz.rating1c.edo.signUtils"
 manual = true
 request = '{"module":"kz.rating1c.edo.signUtils","method":"createRawSignFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",""]}'
-label = { ru = "Создать сырую подпись (RSA или ГОСТ)", kk = "Шикі қолтаңба жасау (RSA немесе ГОСТ)", en = "Create a raw signature (RSA or GOST)" }
+label = { ru = "Создать сырую подпись", kk = "Шикі қолтаңба жасау", en = "Create a raw signature" }
 
 [[operations.params]]
 name = "file"
