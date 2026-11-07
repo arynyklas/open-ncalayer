@@ -4,7 +4,7 @@
 // in Rust.
 
 import { Button, Palette } from "std-widgets.slint";
-import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading, Tone } from "common.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, PluginFrame, Subheading, Tone } from "common.slint";
 
 // One operation of the plugin for the manual-tools window. `heading` and `lines` are the
 // host's own words, built from checked fields only (an identifier, the kinds of key use and
@@ -112,30 +112,10 @@ export component InstallPluginWindow inherits Window {
                         text: "• " + line;
                     }
 
-                    Rectangle {
-                        border-width: 2px;
-                        border-color: Tone.warning();
-                        border-radius: 4px;
-                        background: Palette.alternate-background;
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 2px;
-                            Text {
-                                text: block.calls;
-                                wrap: word-wrap;
-                                color: Tone.quiet();
-                            }
-
-                            NameText {
-                                text: block.label;
-                                font-italic: true;
-                            }
-
-                            for text in block.plugin-lines: NameText {
-                                text: text;
-                                font-italic: true;
-                            }
-                        }
+                    PluginFrame {
+                        caption: block.calls;
+                        label: block.label;
+                        lines: block.plugin-lines;
                     }
                 }
 

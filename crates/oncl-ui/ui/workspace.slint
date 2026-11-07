@@ -3,6 +3,7 @@
 // of results and errors are composed in Rust.
 
 import { SigningPage } from "signing.slint";
+import { PluginsPage, PluginsState } from "manual_plugins.slint";
 import { ToolPage } from "tools.slint";
 import { ErrorText, FieldLabel, Heading } from "common.slint";
 import { Button, ComboBox, LineEdit, Palette, ProgressIndicator, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
@@ -15,7 +16,7 @@ export component WorkspaceWindow inherits Window {
     preferred-height: 580px;
 
     // 0: overview, 1: sign, 2: verify, 3: extend, 4: extract, 5: timestamp, 6: hash,
-    // 7: inspect.
+    // 7: inspect, 8: plugins.
     in-out property <int> section;
 
     in-out property <string> hash-path;
@@ -61,7 +62,9 @@ export component WorkspaceWindow inherits Window {
         focus-on-tab-navigation: false;
         forward-focus: sidebar;
         key-pressed(event) => {
-            if event.text == Key.Escape && root.busy {
+            // The Plugins page past its list (a form, a password, a confirmation, a run) is
+            // left by Escape from wherever the focus is, as well as while something runs.
+            if event.text == Key.Escape && (root.busy || (root.section == 8 && PluginsState.step != 0)) {
                 root.cancel();
                 return accept;
             }
@@ -77,8 +80,8 @@ export component WorkspaceWindow inherits Window {
                         x: 8px;
                         y: 8px;
                         width: parent.width - 16px;
-                        height: 8 * 40px + 8px;
-                        model: [{ text: @tr("Overview") }, { text: @tr("Sign") }, { text: @tr("Verify") }, { text: @tr("Extend") }, { text: @tr("Extract") }, { text: @tr("Timestamp") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
+                        height: 9 * 40px + 8px;
+                        model: [{ text: @tr("Overview") }, { text: @tr("Sign") }, { text: @tr("Verify") }, { text: @tr("Extend") }, { text: @tr("Extract") }, { text: @tr("Timestamp") }, { text: @tr("Hash") }, { text: @tr("Inspect") }, { text: @tr("Plugins") }];
                         current-item <=> root.section;
                     }
                 }
@@ -144,6 +147,12 @@ export component WorkspaceWindow inherits Window {
                             }
                         }
                         if root.section == 1: SigningPage { }
+                        // What the window leaves of its height to the confirmation's body: the
+                        // heading, the lead, the buttons, the status line and the paddings are
+                        // not part of it.
+                        if root.section == 8: PluginsPage {
+                            room: max(140px, root.height - 270px);
+                        }
                         if root.section >= 2 && root.section <= 5: ToolPage {
                             busy: root.busy;
                             error: root.error-section == root.section ? root.error-text : "";

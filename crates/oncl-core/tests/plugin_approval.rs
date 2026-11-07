@@ -4,6 +4,7 @@
 //! synthetic WASM and real source-bound crypto, like `plugin_ticket`; every key use is a real
 //! signature, checked by `oncl_pki` where it is cheap.
 #![allow(dead_code)]
+#![allow(clippy::disallowed_methods)] // Core's own tests make confirmations to test the guard
 #[path = "../examples/sdk_probe/plugin_fixture.rs"]
 mod fixture;
 #[path = "../examples/sdk_probe/batch_fixture.rs"]

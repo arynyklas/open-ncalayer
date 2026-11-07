@@ -65,7 +65,12 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_browse_folder(|| with_open(|open| browse(open, Target::Folder)));
     s.on_changed(|| with_open(render));
     s.on_run(|| with_open(run));
-    ui.on_section_changed(|section| with_open(|open| selected(open, section)));
+    ui.on_section_changed(|section| {
+        with_open(|open| {
+            selected(open, section);
+            super::plugins::section_changed(open, section);
+        });
+    });
 }
 
 fn texts(open: &Rc<Workspace>) -> &'static ToolTexts {
@@ -776,6 +781,7 @@ mod tests {
             tokens: Tokens::disabled(),
             clock: std::sync::Arc::new(now),
             settings_path: w.dir.path().join("settings.json"),
+            plugins: std::sync::Arc::new(super::super::plugins::NoManualPlugins),
         };
         Page {
             ws: test_workspace(services),
@@ -1397,6 +1403,7 @@ mod tests {
             tokens: Tokens::disabled(),
             clock: std::sync::Arc::new(now),
             settings_path: w.dir.path().join("settings.json"),
+            plugins: std::sync::Arc::new(super::super::plugins::NoManualPlugins),
         };
         let p = Page {
             ws: test_workspace(services),
