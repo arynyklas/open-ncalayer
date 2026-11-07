@@ -15,6 +15,8 @@ export struct OperationBlock {
     lines: [string],
     calls: string,
     label: string,
+    // More of the plugin's own text (its XPaths), in the same frame.
+    plugin-lines: [string],
 }
 
 export component InstallPluginWindow inherits Window {
@@ -52,6 +54,10 @@ export component InstallPluginWindow inherits Window {
     // What the plugin may do (the host's consent text) is in the first screenful.
     // How tall the text is (its lines counted), for the tests.
     out property <length> body-content: body.content-height;
+    // The first operation is in the first screenful, however many capabilities follow.
+    out property <bool> operations-in-view: ops-mark.absolute-position.y + ops-mark.height <= body.absolute-position.y + body.visible-height;
+    // How far the body is scrolled (zero or negative).
+    out property <length> body-y: body.content-y;
     out property <bool> consent-in-view: may-text.absolute-position.y + may-text.height <= body.absolute-position.y + body.visible-height;
 
     callback answer(bool);
@@ -82,15 +88,10 @@ export component InstallPluginWindow inherits Window {
                     color: Tone.error();
                 }
 
-                may-text := Text {
-                    text: root.may;
-                    wrap: word-wrap;
-                }
-
-                // Manifest strings (host patterns, URL prefixes): a lookalike host is read to its
-                // end, so these break anywhere.
-                for line in root.capabilities: NameText {
-                    text: "• " + line;
+                // The operations come before the (long) list of capabilities: what the key is
+                // used for is read first.
+                ops-mark := Rectangle {
+                    height: 1px;
                 }
 
                 if root.operations-heading != "": Text {
@@ -129,8 +130,24 @@ export component InstallPluginWindow inherits Window {
                                 text: block.label;
                                 font-italic: true;
                             }
+
+                            for text in block.plugin-lines: NameText {
+                                text: text;
+                                font-italic: true;
+                            }
                         }
                     }
+                }
+
+                may-text := Text {
+                    text: root.may;
+                    wrap: word-wrap;
+                }
+
+                // Manifest strings (host patterns, URL prefixes): a lookalike host is read to its
+                // end, so these break anywhere.
+                for line in root.capabilities: NameText {
+                    text: "• " + line;
                 }
 
                 if root.replacing != "": Text {

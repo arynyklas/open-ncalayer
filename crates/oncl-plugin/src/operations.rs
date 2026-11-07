@@ -17,8 +17,8 @@
 use crate::manifest::{HttpPrefix, Localized};
 use crate::{Capabilities, runtime};
 use oncl_flows::capabilities::{
-    AddedLine, CapabilityLine, KeyUseKind, NetworkLine, OperationConsent, ProfileFact, TsaFamily,
-    XadesLevelKind,
+    AddedLine, CapabilityLine, CmsAttribute, KeyUseKind, NetworkLine, OperationConsent, OutputForm,
+    PlacementKind, ProfileFact, TsaFamily, XadesLevelKind,
 };
 use oncl_pdk::abi::{C14n, CmsOutput, Import, Placement, XadesLevel};
 use semver::{BuildMetadata, Prerelease, Version};
@@ -259,6 +259,7 @@ impl Operation {
     /// [`OperationConsent::label`] and never into a line.
     pub fn consent(&self, added: Option<&AddedOperation>) -> OperationConsent {
         let mut lines = Vec::new();
+        let mut xpaths = Vec::new();
         if let Some(added) = added {
             for reason in &added.reasons {
                 lines.push(CapabilityLine::Added(match reason {
@@ -285,10 +286,11 @@ impl Operation {
                 KeyKind::XmlEx => KeyUseKind::XmlEx,
                 KeyKind::Xades => KeyUseKind::Xades,
             }));
-            let facts = key.profile.facts();
+            let (facts, texts) = key.profile.view();
             if !facts.is_empty() {
                 lines.push(CapabilityLine::KeyProfile(facts));
             }
+            xpaths.extend(texts);
         }
         lines.push(CapabilityLine::OperationNetwork(match &self.uses.network {
             Network::None => NetworkLine::None,
@@ -306,6 +308,7 @@ impl Operation {
                 self.label.kk.clone(),
                 self.label.en.clone(),
             ],
+            xpaths,
         }
     }
 
@@ -1007,8 +1010,13 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// The profile in words: what the core forces on the call, as [`ProfileFact`]s.
-    fn facts(&self) -> Vec<ProfileFact> {
+    /// The profile in words: what the core forces on the call, as [`ProfileFact`]s (host
+    /// words, from enums and checked lists) and the plugin's own XPaths (free text, to be
+    /// framed as the plugin's). Every field of every profile struct is destructured here
+    /// without `..`: a field added to one breaks this build until it is shown or declared
+    /// default. Shown: the essentials always, any other field only when it differs from the
+    /// core's default; `cosign` has the one value `never`, said with every `cms_ex`.
+    fn view(&self) -> (Vec<ProfileFact>, Vec<String>) {
         let timestamp = |t: Timestamp| match t {
             Timestamp::None => ProfileFact::NoTimestamp,
             Timestamp::Basics => ProfileFact::Timestamp(TsaFamily::Basics),
@@ -1021,51 +1029,188 @@ impl Profile {
                 ProfileFact::Detached
             }
         };
-        let element = |e: &Option<Source>| match e {
-            None => ProfileFact::XmlWholeDocument,
-            Some(Source::Fixed(xpath)) => ProfileFact::XmlElement(xpath.clone()),
-            Some(Source::Param(_)) => ProfileFact::XmlElementParam,
+        let mut facts = Vec::new();
+        let mut xpaths = Vec::new();
+        // The element to sign, or where the signature goes.
+        let mut source = |facts: &mut Vec<ProfileFact>, s: &Source, fixed, param| match s {
+            Source::Fixed(xpath) => {
+                xpaths.push(xpath.clone());
+                facts.push(fixed);
+            }
+            Source::Param(_) => facts.push(param),
         };
         match self {
-            Profile::Raw => Vec::new(),
-            Profile::Cms(p) => vec![attached(p.attached), timestamp(p.timestamp)],
-            Profile::CmsEx(p) => {
-                let mut facts = vec![attached(p.encapsulate)];
-                if p.content_form == ContentForm::Digest {
+            Profile::Raw => {}
+            Profile::Cms(CmsProfile {
+                attached: a,
+                timestamp: t,
+            }) => facts.extend([attached(*a), timestamp(*t)]),
+            Profile::CmsEx(CmsExProfile {
+                encapsulate,
+                cosign: CoSign::Never,
+                content_form,
+                timestamp: t,
+                certificates,
+                output,
+                content_type,
+                message_digest,
+                signing_certificate_v2,
+                signing_time,
+            }) => {
+                facts.push(attached(*encapsulate));
+                facts.push(ProfileFact::ContentAsIs);
+                if *content_form == ContentForm::Digest {
                     facts.push(ProfileFact::DigestOnly);
                 }
-                facts.push(timestamp(p.timestamp));
-                if p.certificates == Certificates::Chain {
+                facts.push(timestamp(*t));
+                if *certificates == Certificates::Chain {
                     facts.push(ProfileFact::ChainCertificates);
                 }
-                if p.signing_time == SigningTime::None {
+                match output {
+                    CmsOutput::Der => {}
+                    CmsOutput::Base64 => facts.push(ProfileFact::CmsOutput(OutputForm::Base64)),
+                    CmsOutput::Pem => facts.push(ProfileFact::CmsOutput(OutputForm::Pem)),
+                }
+                for (on, attribute) in [
+                    (*content_type, CmsAttribute::ContentType),
+                    (*message_digest, CmsAttribute::MessageDigest),
+                    (*signing_certificate_v2, CmsAttribute::SigningCertificate),
+                ] {
+                    if !on {
+                        facts.push(ProfileFact::AttributeOff(attribute));
+                    }
+                }
+                if *signing_time == SigningTime::None {
                     facts.push(ProfileFact::NoSigningTime);
                 }
-                facts
             }
-            Profile::Xml(p) => vec![element(&p.element)],
-            Profile::XmlEx(p) => vec![element(&p.element)],
-            Profile::Xades(p) => {
-                let tsa = match p.tsa {
+            Profile::Xml(XmlProfile { element, parent }) => {
+                match element {
+                    None => facts.push(ProfileFact::XmlWholeDocument),
+                    Some(e) => source(
+                        &mut facts,
+                        e,
+                        ProfileFact::XmlElementFixed,
+                        ProfileFact::XmlElementParam,
+                    ),
+                }
+                if let Some(p) = parent {
+                    source(
+                        &mut facts,
+                        p,
+                        ProfileFact::XmlParentFixed,
+                        ProfileFact::XmlParentParam,
+                    );
+                }
+            }
+            Profile::XmlEx(XmlExProfile {
+                element,
+                parent,
+                placement,
+                namespaces,
+                other_prefix_uri,
+                signature_method,
+                digest_method,
+                c14n,
+                strip_whitespace,
+                base64_line_breaks,
+                output,
+            }) => {
+                match element {
+                    None => facts.push(ProfileFact::XmlWholeDocument),
+                    Some(e) => source(
+                        &mut facts,
+                        e,
+                        ProfileFact::XmlElementFixed,
+                        ProfileFact::XmlElementParam,
+                    ),
+                }
+                if let Some(p) = parent {
+                    source(
+                        &mut facts,
+                        p,
+                        ProfileFact::XmlParentFixed,
+                        ProfileFact::XmlParentParam,
+                    );
+                }
+                match placement {
+                    Placement::DocumentElement => {}
+                    Placement::FirstChildOfDocument => {
+                        facts.push(ProfileFact::XmlPlacement(
+                            PlacementKind::FirstChildOfDocument,
+                        ));
+                    }
+                    Placement::Parent => {
+                        facts.push(ProfileFact::XmlPlacement(PlacementKind::Parent));
+                    }
+                }
+                if !namespaces.is_empty() {
+                    facts.push(ProfileFact::XmlNamespaces(namespaces.len()));
+                }
+                if other_prefix_uri.is_some() {
+                    facts.push(ProfileFact::XmlOtherPrefixUri);
+                }
+                if let Some(m) = signature_method {
+                    facts.push(ProfileFact::SignatureMethod(m.clone()));
+                }
+                if let Some(m) = digest_method {
+                    facts.push(ProfileFact::DigestMethod(m.clone()));
+                }
+                if let Some(c) = c14n {
+                    facts.push(ProfileFact::C14n(
+                        match c {
+                            C14n::Inclusive => "inclusive",
+                            C14n::InclusiveWithComments => "inclusive with comments",
+                            C14n::Exclusive => "exclusive",
+                            C14n::ExclusiveWithComments => "exclusive with comments",
+                        }
+                        .to_owned(),
+                    ));
+                }
+                if *strip_whitespace {
+                    facts.push(ProfileFact::XmlStripWhitespace);
+                }
+                if let Some(on) = base64_line_breaks {
+                    facts.push(ProfileFact::XmlBase64LineBreaks(*on));
+                }
+                match output {
+                    XmlOutputProfile::AsIs => {}
+                    XmlOutputProfile::Serialize { .. } => facts.push(ProfileFact::XmlSerialized),
+                }
+            }
+            Profile::Xades(XadesProfile {
+                level,
+                tsa,
+                signature_method,
+                digest_method,
+            }) => {
+                let tsa = match tsa {
                     XadesTsa::Basics => TsaFamily::Basics,
                     XadesTsa::Kalkan => TsaFamily::Kalkan,
                 };
-                match p.level {
-                    XadesLevel::B => vec![
+                facts.extend(match level {
+                    XadesLevel::B => [
                         ProfileFact::Xades(XadesLevelKind::B),
                         ProfileFact::NoTimestamp,
                     ],
-                    XadesLevel::T => vec![
+                    XadesLevel::T => [
                         ProfileFact::Xades(XadesLevelKind::T),
                         ProfileFact::Timestamp(tsa),
                     ],
-                    XadesLevel::Lt => vec![
+                    XadesLevel::Lt => [
                         ProfileFact::Xades(XadesLevelKind::Lt),
                         ProfileFact::Timestamp(tsa),
                     ],
+                });
+                if let Some(m) = signature_method {
+                    facts.push(ProfileFact::SignatureMethod(m.clone()));
+                }
+                if let Some(m) = digest_method {
+                    facts.push(ProfileFact::DigestMethod(m.clone()));
                 }
             }
         }
+        (facts, xpaths)
     }
 
     fn encode(&self, kind: KeyKind, values: Option<ParamValues<'_>>) -> Option<Vec<u8>> {

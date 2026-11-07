@@ -42,6 +42,7 @@ pub fn install_request(
         capabilities: request.capabilities.lines(),
         operations: request.operations,
         update: false,
+        window: None,
         local: request.local,
         decide,
     }
@@ -79,8 +80,8 @@ impl PluginsServices for WindowServices {
         self.service()?.remove(id)
     }
 
-    fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
-        self.service()?.confirm_update(id)
+    fn confirm_update(&self, id: &str, expected_sha256: &str) -> Result<(), PluginActionError> {
+        self.service()?.confirm_update(id, expected_sha256)
     }
 
     fn refresh(&self) {
@@ -137,6 +138,7 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                     version: update.version.to_string(),
                     added: update.lines(),
                     operations: update.operations,
+                    package_sha256: update.package_sha256,
                 }),
                 id: p.id,
             })
@@ -290,6 +292,7 @@ mod tests {
                             operations: Vec::new(),
                         },
                         operations: Vec::new(),
+                        package_sha256: "ab".repeat(32),
                     }),
                 },
             ],
@@ -333,6 +336,7 @@ mod tests {
                 version: "2.1.0".to_owned(),
                 added: vec![CapabilityLine::Files],
                 operations: Vec::new(),
+                package_sha256: "ab".repeat(32),
             })
         );
         assert!(shown.available[0].needed && shown.available[0].needed_by.is_none());

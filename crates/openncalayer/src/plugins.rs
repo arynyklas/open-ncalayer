@@ -192,6 +192,9 @@ pub struct PendingView {
     /// All the operations of the update, said from checked fields, with what is new or
     /// wider marked.
     pub operations: Vec<OperationConsent>,
+    /// The sha256 of the package of this update (hex, from the signed index): the answer the
+    /// user gives is for this package ([`PluginService::confirm_update`]).
+    pub package_sha256: String,
 }
 
 impl PendingView {
@@ -451,6 +454,7 @@ impl PluginService {
                     version: p.release.version.clone(),
                     added: p.added.clone(),
                     operations: p.package.manifest.operation_consents(Some(&p.added)),
+                    package_sha256: p.release.package.sha256.to_string(),
                 };
                 (id.clone(), view)
             })
@@ -1065,15 +1069,28 @@ impl PluginService {
     }
 
     /// Installs the update of `id` waiting for the user ([`PluginNotice::UpdateNeedsConfirmation`]):
-    /// the user has seen what more it may do and agrees.
+    /// the user has seen what more it may do and agrees. `expected_sha256` is the package
+    /// the user was shown ([`PendingView::package_sha256`]): a newer update that took its
+    /// place meanwhile is not installed unseen.
     ///
     /// # Errors
     ///
-    /// No update of `id` waits, or it failed (also told in the tray); the plugin changed
-    /// meanwhile: nothing is done.
-    pub fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
-        let Some(pending) = lock(&self.pending).remove(id) else {
-            return Err(PluginActionError::NothingToConfirm);
+    /// No update of `id` waits ([`PluginActionError::NothingToConfirm`]); another package
+    /// waits than the one shown ([`PluginActionError::Superseded`], it stays waiting); or
+    /// it failed (also told in the tray); the plugin changed meanwhile: nothing is done.
+    pub fn confirm_update(&self, id: &str, expected_sha256: &str) -> Result<(), PluginActionError> {
+        let pending = {
+            let mut waiting = lock(&self.pending);
+            match waiting.get(id) {
+                None => return Err(PluginActionError::NothingToConfirm),
+                Some(p) if p.release.package.sha256.to_string() != expected_sha256 => {
+                    return Err(PluginActionError::Superseded);
+                }
+                Some(_) => {}
+            }
+            waiting
+                .remove(id)
+                .ok_or(PluginActionError::NothingToConfirm)?
         };
         info!(plugin = id, version = %pending.release.version, "the user agrees to the plugin's update");
         self.install_update(

@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use oncl_flows::Locale;
-use oncl_flows::capabilities::{CapabilityLine, OperationConsent, capability_text};
+use oncl_flows::capabilities::{
+    CapabilityLine, OperationConsent, capability_text, is_operation_name,
+};
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, PlatformError, SharedString, VecModel,
 };
@@ -40,6 +42,10 @@ pub const INSTALL_DELAY: Duration = Duration::from_millis(1500);
 /// allows 80, the frame a little less so that it stays a note, not a paragraph.
 pub const MAX_UNTRUSTED_LABEL: usize = 60;
 
+/// The most characters of a plugin's own XPath the frame shows (then `…`): the manifest
+/// allows 1024 bytes.
+pub const MAX_UNTRUSTED_XPATH: usize = 120;
+
 /// A plugin about to be installed, and what to do with the user's answer.
 pub struct InstallPluginRequest {
     /// The page that asked for it, if one did.
@@ -55,6 +61,8 @@ pub struct InstallPluginRequest {
     pub operations: Vec<OperationConsent>,
     /// An update held for consent, not a first install: the window says so.
     pub update: bool,
+    /// The plugin window that asked (an update): its closing withdraws the request.
+    pub window: Option<u64>,
     /// From a file the user chose, not from the catalog.
     pub local: bool,
     /// Called once with the answer (`true`: install), on a thread of its own: it may take
@@ -75,6 +83,7 @@ pub struct InstalledVersion {
 
 /// The open window and the answer it waits for.
 struct Open {
+    window: Option<u64>,
     ui: InstallPluginWindow,
     decide: RefCell<Option<Decide>>,
 }
@@ -121,6 +130,22 @@ pub(crate) fn enqueue(request: InstallPluginRequest) {
     WAITING.with_borrow_mut(|waiting| waiting.push_back(request));
     if !is_open() {
         show_next();
+    }
+}
+
+/// The plugin window `window` is closing: the requests it made are declined, the one on
+/// screen too (its answer would have nobody to tell).
+pub(crate) fn withdraw(window: u64) {
+    let (kept, dropped): (Vec<_>, Vec<_>) = WAITING
+        .with_borrow_mut(std::mem::take)
+        .into_iter()
+        .partition(|r| r.window != Some(window));
+    WAITING.with_borrow_mut(|waiting| waiting.extend(kept));
+    for request in dropped {
+        answer_with(request.decide, false);
+    }
+    if OPEN.with_borrow(|open| open.as_ref().is_some_and(|o| o.window == Some(window))) {
+        answer(false);
     }
 }
 
@@ -172,6 +197,12 @@ fn create(desktop: &Rc<Desktop>, request: InstallPluginRequest) -> Result<(), Pl
             )),
             calls: b.calls.into(),
             label: b.label.into(),
+            plugin_lines: ModelRc::new(VecModel::from(
+                b.plugin_lines
+                    .into_iter()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>(),
+            )),
         })
         .collect();
     ui.set_operations(ModelRc::new(VecModel::from(blocks)));
@@ -182,6 +213,7 @@ fn create(desktop: &Rc<Desktop>, request: InstallPluginRequest) -> Result<(), Pl
         CloseRequestResponse::HideWindow
     });
     let open = Rc::new(Open {
+        window: request.window,
         ui: ui.clone_strong(),
         decide: RefCell::new(Some(request.decide)),
     });
@@ -258,15 +290,21 @@ struct BlockTexts {
     lines: Vec<String>,
     calls: String,
     label: String,
+    /// More of the plugin's own text (its XPaths), each captioned and cut.
+    plugin_lines: Vec<String>,
 }
 
 /// A plugin's own text for the frame: control characters and bidirectional controls gone
 /// ([`page_text`]), at most [`MAX_UNTRUSTED_LABEL`] characters, then `…`. Drawn as plain
 /// text: there is no markup in a Slint `Text`.
 fn untrusted_label(text: &str) -> String {
-    let cleaned = page_text(text);
-    let mut chars = cleaned.chars();
-    let mut shown: String = chars.by_ref().take(MAX_UNTRUSTED_LABEL).collect();
+    cut(&page_text(text), MAX_UNTRUSTED_LABEL)
+}
+
+/// `text` of at most `max` characters, then `…` if it was longer.
+fn cut(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let mut shown: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
         shown.push('…');
     }
@@ -276,8 +314,13 @@ fn untrusted_label(text: &str) -> String {
 fn block(operation: &OperationConsent, l: Locale) -> BlockTexts {
     let t = Texts::of(l);
     BlockTexts {
-        // The identifier was checked at parse (`^[a-z][a-z0-9-]{0,31}$`).
-        heading: t.operation.replace("{name}", &operation.name),
+        // The identifier was checked at parse and is checked again here: a name that is not
+        // one (a caller that skipped the parse) is not drawn.
+        heading: if is_operation_name(&operation.name) {
+            t.operation.replace("{name}", &operation.name)
+        } else {
+            t.operation_invalid.to_owned()
+        },
         lines: operation
             .lines
             .iter()
@@ -285,6 +328,14 @@ fn block(operation: &OperationConsent, l: Locale) -> BlockTexts {
             .collect(),
         calls: t.calls.to_owned(),
         label: untrusted_label(operation.label(l)),
+        plugin_lines: operation
+            .xpaths
+            .iter()
+            .map(|x| {
+                t.xpath
+                    .replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH))
+            })
+            .collect(),
     }
 }
 
@@ -383,6 +434,10 @@ struct Texts {
     operations: &'static str,
     /// `{name}`: an operation's identifier.
     operation: &'static str,
+    /// An operation whose name is not an identifier.
+    operation_invalid: &'static str,
+    /// `{0}`: the plugin's XPath.
+    xpath: &'static str,
     /// The frame of the plugin's own label.
     calls: &'static str,
     /// `{version}`, `{source}`: [`Texts::installed_local`] or [`Texts::installed_catalog`].
@@ -408,8 +463,10 @@ impl Texts {
                 confirm_install: "Орнату",
                 confirm_update: "Жаңарту",
                 may_update: "Жаңарту қосымша мыналарды істей алады:",
-                operations: "Плагин қолмен жұмыс терезесінде мына әрекеттерді ұсынады (әрқайсысын хост сипаттайды):",
+                operations: "Плагин қолмен жұмыс терезесінде мына әрекеттерді ұсынады (әрқайсысын бағдарлама сипаттайды):",
                 operation: "Әрекет {name}",
+                operation_invalid: "Атауы жарамсыз әрекет",
+                xpath: "Плагиннің XPath мәтіні: {0}",
                 calls: "Плагин оны былай атайды (плагиннің өз сөзі, тексерілмеген):",
                 replacing: "Орнатылған {version} нұсқасын ({source}) алмастырады",
                 installed_local: "жергілікті, файлдан",
@@ -430,6 +487,8 @@ impl Texts {
                 may_update: "Обновление сможет ещё:",
                 operations: "Плагин предлагает в окне ручных инструментов такие действия (каждое описывает программа):",
                 operation: "Действие {name}",
+                operation_invalid: "Действие с недопустимым именем",
+                xpath: "XPath от плагина: {0}",
                 calls: "Плагин называет его так (слова самого плагина, не проверены):",
                 replacing: "Заменит установленную версию {version} ({source})",
                 installed_local: "локальную, из файла",
@@ -450,6 +509,8 @@ impl Texts {
                 may_update: "The update will also be able to:",
                 operations: "The plugin offers these operations in the manual-tools window (the program describes each):",
                 operation: "Operation {name}",
+                operation_invalid: "An operation with an invalid name",
+                xpath: "The plugin's XPath: {0}",
                 calls: "The plugin calls it (the plugin's own words, not checked):",
                 replacing: "Replaces the installed version {version} ({source})",
                 installed_local: "local, from a file",
@@ -493,6 +554,7 @@ mod tests {
                 CapabilityLine::OperationServer(false),
             ],
             label: [label.to_owned(), label.to_owned(), label.to_owned()],
+            xpaths: Vec::new(),
         }
     }
 
@@ -534,6 +596,7 @@ mod tests {
             replacing: None,
             operations: Vec::new(),
             update: false,
+            window: None,
             capabilities: vec![
                 CapabilityLine::Keys,
                 CapabilityLine::Dialogs,
@@ -869,6 +932,65 @@ mod tests {
             );
             assert_ne!(block.calls, "");
         }
+    }
+
+    #[test]
+    fn a_plugins_xpath_is_framed_cut_and_never_a_host_line() {
+        let crafted = format!("/a/Install / Allow / Core verified {}", "x".repeat(200));
+        let mut op = operation("sign-file", "Sign");
+        op.xpaths = vec![crafted];
+        let request = with_operations(vec![op], false);
+        for l in ALL {
+            let b = &texts(&request, l).operations[0];
+            let host = format!("{}\n{}", b.heading, b.lines.join("\n"));
+            assert!(
+                !host.contains("Core verified") && !host.contains("Allow"),
+                "{host}"
+            );
+            assert_eq!(b.plugin_lines.len(), 1);
+            assert!(b.plugin_lines[0].contains("Core verified"));
+            assert!(b.plugin_lines[0].ends_with('…'));
+            assert!(b.plugin_lines[0].chars().count() < MAX_UNTRUSTED_XPATH + 40);
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_an_identifier_is_not_drawn() {
+        let request = with_operations(
+            vec![
+                operation("Sign: Install now\u{202E}", "x"),
+                operation("sign-ok", "x"),
+            ],
+            false,
+        );
+        for l in ALL {
+            let t = texts(&request, l);
+            assert_eq!(t.operations[0].heading, Texts::of(l).operation_invalid);
+            assert!(!t.operations[0].heading.contains("Install"));
+            assert!(t.operations[1].heading.contains("sign-ok"));
+        }
+    }
+
+    #[test]
+    fn withdrawing_a_plugin_window_declines_its_requests_only() {
+        let dir = tempfile::tempdir().unwrap();
+        desktop(dir.path(), Locale::Ru);
+        let (mut first, first_rx) = request(false, None);
+        first.window = Some(7);
+        let (mut second, second_rx) = request(false, None);
+        second.window = Some(7);
+        let (third, third_rx) = request(false, None);
+        enqueue(first);
+        enqueue(second);
+        enqueue(third);
+        withdraw(7);
+        assert!(!answered(&first_rx));
+        assert!(!answered(&second_rx));
+        // The one that was not asked by that window is on screen now.
+        assert!(is_open());
+        assert!(third_rx.try_recv().is_err());
+        the_window().invoke_answer(false);
+        assert!(!answered(&third_rx));
     }
 
     #[test]

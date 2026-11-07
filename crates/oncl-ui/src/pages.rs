@@ -324,6 +324,7 @@ fn install_plugin_window_installs_only_on_a_deliberate_press() {
             ])),
             calls: long_error().into(),
             label: long_name().into(),
+            plugin_lines: ModelRc::new(VecModel::from(vec![SharedString::from(long_name())])),
         })
         .collect();
     ui.set_operations(ModelRc::new(VecModel::from(blocks)));
@@ -631,6 +632,53 @@ fn the_consent_of_a_plugin_is_in_the_first_screenful() {
         scale::apply_to(ui.window(), 1.0, step);
         assert!(ui.get_consent_in_view(), "at {}%", step.percent());
     }
+}
+
+#[test]
+fn many_operations_and_capabilities_are_read_by_keyboard_and_the_operations_come_first() {
+    offscreen::install();
+    let ui = InstallPluginWindow::new().unwrap();
+    ui.set_plugin("Plugin 1.0".into());
+    ui.set_may("It may:".into());
+    ui.set_operations_heading("The plugin offers:".into());
+    let lines: Vec<SharedString> = (0..30).map(|i| format!("capability {i}").into()).collect();
+    ui.set_capabilities(ModelRc::new(VecModel::from(lines)));
+    let blocks: Vec<OperationBlock> = (0..12)
+        .map(|i| OperationBlock {
+            heading: format!("Operation op-{i}").into(),
+            lines: ModelRc::new(VecModel::from(vec![SharedString::from(
+                "signs with your key",
+            )])),
+            calls: "The plugin calls it:".into(),
+            label: "label".into(),
+            plugin_lines: ModelRc::new(VecModel::from(Vec::<SharedString>::new())),
+        })
+        .collect();
+    ui.set_operations(ModelRc::new(VecModel::from(blocks)));
+    open(&ui, narrowest(Class::Dialog));
+    for step in UiScale::ALL {
+        scale::apply_to(ui.window(), 1.0, step);
+        assert!(ui.get_operations_in_view(), "at {}%", step.percent());
+    }
+    scale::apply_to(ui.window(), 1.0, UiScale::default());
+    assert_eq!(ui.get_body_y(), 0.0);
+    // Tab to the body's strip, then page down: the text moves; nothing is answered.
+    let answers = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = Rc::clone(&answers);
+    ui.on_answer(move |yes| seen.borrow_mut().push(yes));
+    let mut scrolled = false;
+    for _ in 0..4 {
+        tap(&ui, Key::Tab);
+        tap(&ui, Key::PageDown);
+        if ui.get_body_y() < 0.0 {
+            scrolled = true;
+            break;
+        }
+    }
+    assert!(scrolled, "a long consent cannot be read by keyboard");
+    tap(&ui, Key::End);
+    assert!(ui.get_body_y() < -500.0);
+    assert!(answers.borrow().is_empty());
 }
 
 #[test]

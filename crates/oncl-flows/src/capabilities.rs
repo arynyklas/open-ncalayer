@@ -87,11 +87,61 @@ pub enum ProfileFact {
     NoSigningTime,
     /// XML: the whole document is signed.
     XmlWholeDocument,
-    /// XML: this element (a validated XPath written in the manifest).
-    XmlElement(String),
+    /// XML: one element the plugin names (its XPath is the plugin's own text, framed apart:
+    /// [`OperationConsent::xpaths`]).
+    XmlElementFixed,
     /// XML: the element the user types in.
     XmlElementParam,
+    /// XML: the signature goes into an element the plugin names (framed apart).
+    XmlParentFixed,
+    /// XML: the signature goes into an element the user types in.
+    XmlParentParam,
+    /// XML: where the signature is placed, when not at the end of the document element.
+    XmlPlacement(PlacementKind),
+    /// XML: this many namespace bindings of the plugin's XPaths.
+    XmlNamespaces(usize),
+    /// XML: an extra prefix/URI pair is set (the plugin's text; not shown).
+    XmlOtherPrefixUri,
+    /// The signature algorithm, a method URI of the core's known list.
+    SignatureMethod(String),
+    /// The digest algorithm, a method URI of the core's known list.
+    DigestMethod(String),
+    /// The canonicalisation, by the core's name for it.
+    C14n(String),
+    XmlStripWhitespace,
+    /// The base64 of the signature has (`true`) or lacks line breaks.
+    XmlBase64LineBreaks(bool),
+    /// The output is re-serialised by the core.
+    XmlSerialized,
+    /// CMS: the content is signed as it is, even if it is a CMS itself (`cosign = never`).
+    ContentAsIs,
+    /// CMS: the output is not DER.
+    CmsOutput(OutputForm),
+    /// CMS: a signed attribute that is normally there is left out.
+    AttributeOff(CmsAttribute),
     Xades(XadesLevelKind),
+}
+
+/// A non-DER output form of a CMS signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputForm {
+    Base64,
+    Pem,
+}
+
+/// A signed attribute of a CMS signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmsAttribute {
+    ContentType,
+    MessageDigest,
+    SigningCertificate,
+}
+
+/// Where an XML signature goes, when not at the end of the document element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlacementKind {
+    FirstChildOfDocument,
+    Parent,
 }
 
 /// The network of an operation.
@@ -128,6 +178,18 @@ pub struct OperationConsent {
     pub lines: Vec<CapabilityLine>,
     /// The plugin's label: Russian, Kazakh, English. Untrusted.
     pub label: [String; 3],
+    /// The XPaths its profile names (elements to sign, where the signature goes): free text
+    /// of the manifest, untrusted, shown in the plugin's frame only.
+    pub xpaths: Vec<String>,
+}
+
+/// Whether `name` is an operation identifier: `^[a-z][a-z0-9-]{0,31}$`. Checked at parse and
+/// again where it is drawn.
+pub fn is_operation_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 impl OperationConsent {
@@ -228,8 +290,31 @@ fn fact_text(fact: &ProfileFact, l: Locale) -> String {
         ProfileFact::ChainCertificates => o.chain.to_owned(),
         ProfileFact::NoSigningTime => o.no_signing_time.to_owned(),
         ProfileFact::XmlWholeDocument => o.xml_whole.to_owned(),
-        ProfileFact::XmlElement(xpath) => o.xml_element.replace("{0}", xpath),
+        ProfileFact::XmlElementFixed => o.xml_element_fixed.to_owned(),
         ProfileFact::XmlElementParam => o.xml_element_param.to_owned(),
+        ProfileFact::XmlParentFixed => o.xml_parent_fixed.to_owned(),
+        ProfileFact::XmlParentParam => o.xml_parent_param.to_owned(),
+        ProfileFact::XmlPlacement(PlacementKind::FirstChildOfDocument) => {
+            o.xml_placement_first.to_owned()
+        }
+        ProfileFact::XmlPlacement(PlacementKind::Parent) => o.xml_placement_parent.to_owned(),
+        ProfileFact::XmlNamespaces(n) => o.xml_namespaces.replace("{0}", &n.to_string()),
+        ProfileFact::XmlOtherPrefixUri => o.xml_other_prefix_uri.to_owned(),
+        ProfileFact::SignatureMethod(m) => o.signature_method.replace("{0}", m),
+        ProfileFact::DigestMethod(m) => o.digest_method.replace("{0}", m),
+        ProfileFact::C14n(name) => o.c14n.replace("{0}", name),
+        ProfileFact::XmlStripWhitespace => o.xml_strip.to_owned(),
+        ProfileFact::XmlBase64LineBreaks(true) => o.b64_breaks_on.to_owned(),
+        ProfileFact::XmlBase64LineBreaks(false) => o.b64_breaks_off.to_owned(),
+        ProfileFact::XmlSerialized => o.xml_serialized.to_owned(),
+        ProfileFact::ContentAsIs => o.content_as_is.to_owned(),
+        ProfileFact::CmsOutput(OutputForm::Base64) => o.out_base64.to_owned(),
+        ProfileFact::CmsOutput(OutputForm::Pem) => o.out_pem.to_owned(),
+        ProfileFact::AttributeOff(CmsAttribute::ContentType) => o.off_content_type.to_owned(),
+        ProfileFact::AttributeOff(CmsAttribute::MessageDigest) => o.off_message_digest.to_owned(),
+        ProfileFact::AttributeOff(CmsAttribute::SigningCertificate) => {
+            o.off_signing_cert.to_owned()
+        }
         ProfileFact::Xades(XadesLevelKind::B) => o.xades_b.to_owned(),
         ProfileFact::Xades(XadesLevelKind::T) => o.xades_t.to_owned(),
         ProfileFact::Xades(XadesLevelKind::Lt) => o.xades_lt.to_owned(),
@@ -256,9 +341,31 @@ struct OpTexts {
     chain: &'static str,
     no_signing_time: &'static str,
     xml_whole: &'static str,
-    /// `{0}`: the XPath.
-    xml_element: &'static str,
+    xml_element_fixed: &'static str,
     xml_element_param: &'static str,
+    xml_parent_fixed: &'static str,
+    xml_parent_param: &'static str,
+    xml_placement_first: &'static str,
+    xml_placement_parent: &'static str,
+    /// `{0}`: how many.
+    xml_namespaces: &'static str,
+    xml_other_prefix_uri: &'static str,
+    /// `{0}`: the method URI.
+    signature_method: &'static str,
+    /// `{0}`: the method URI.
+    digest_method: &'static str,
+    /// `{0}`: the core's name of the method.
+    c14n: &'static str,
+    xml_strip: &'static str,
+    b64_breaks_on: &'static str,
+    b64_breaks_off: &'static str,
+    xml_serialized: &'static str,
+    content_as_is: &'static str,
+    out_base64: &'static str,
+    out_pem: &'static str,
+    off_content_type: &'static str,
+    off_message_digest: &'static str,
+    off_signing_cert: &'static str,
     xades_b: &'static str,
     xades_t: &'static str,
     xades_lt: &'static str,
@@ -284,7 +391,7 @@ impl OpTexts {
         match l {
             Locale::Kk => &OpTexts {
                 no_key: "сіздің кілтіңізді пайдаланбайды",
-                key_raw: "кілтіңізбен қол қояды: мазмұнға шикі қолтаңба",
+                key_raw: "кілтіңізбен қол қояды: мазмұнға өңделмеген қолтаңба",
                 key_cms: "кілтіңізбен қол қояды: CMS (PKCS#7) қолтаңбасы",
                 key_cms_ex: "кілтіңізбен қол қояды: кеңейтілген баптаулары бар CMS (PKCS#7) қолтаңбасы",
                 key_xml: "кілтіңізбен қол қояды: XML қолтаңбасы (XMLDSig)",
@@ -293,15 +400,34 @@ impl OpTexts {
                 profile: "қолтаңба түрі (өзек белгілейді): {0}",
                 detached: "бөлек (мазмұн ішінде емес)",
                 attached: "тіркелген (мазмұн ішінде)",
-                digest_only: "құжаттың хэшіне қол қойылады",
+                digest_only: "құжаттың дайджестіне қол қойылады",
                 no_timestamp: "уақыт таңбасыз",
                 ts_basics: "basics TSA уақыт таңбасымен",
                 ts_kalkan: "Kalkan-ның әдепкі TSA уақыт таңбасымен",
                 chain: "кілттің сертификаттар тізбегімен",
                 no_signing_time: "қол қою уақытынсыз",
                 xml_whole: "бүкіл құжат",
-                xml_element: "{0} элементі",
                 xml_element_param: "өзіңіз енгізетін элемент",
+                xml_element_fixed: "плагин атаған бір элемент (оның XPath-ы төмендегі плагин жақтауында)",
+                xml_parent_fixed: "қолтаңба плагин атаған элементке салынады (төмендегі жақтауда)",
+                xml_parent_param: "қолтаңба өзіңіз енгізетін элементке салынады",
+                xml_placement_first: "қолтаңба құжаттың бірінші түйінінің соңына салынады",
+                xml_placement_parent: "қолтаңба таңдалған ата-ана элементінің соңына салынады",
+                xml_namespaces: "XPath үшін аттар кеңістігінің байланыстары: {0}",
+                xml_other_prefix_uri: "қосымша префикс/URI жұбы бар (плагиннің өз мәтіні)",
+                signature_method: "қолтаңба алгоритмі: {0}",
+                digest_method: "дайджест алгоритмі: {0}",
+                c14n: "канонизация: {0}",
+                xml_strip: "бос орындар алынып тасталады",
+                b64_breaks_on: "base64 жол үзілістерімен",
+                b64_breaks_off: "base64 жол үзілістерісіз",
+                xml_serialized: "нәтижені өзек қайта сериализациялайды",
+                content_as_is: "мазмұнға CMS болса да, сол күйінде қол қойылады",
+                out_base64: "нәтиже DER емес, base64 түрінде",
+                out_pem: "нәтиже DER емес, PEM түрінде",
+                off_content_type: "contentType атрибуты жоқ",
+                off_message_digest: "messageDigest атрибуты жоқ",
+                off_signing_cert: "signingCertificateV2 атрибуты жоқ",
                 xades_b: "XAdES, B деңгейі",
                 xades_t: "XAdES, T деңгейі",
                 xades_lt: "XAdES, LT деңгейі",
@@ -336,8 +462,27 @@ impl OpTexts {
                 chain: "с цепочкой сертификатов ключа",
                 no_signing_time: "без времени подписания",
                 xml_whole: "весь документ",
-                xml_element: "элемент {0}",
                 xml_element_param: "элемент, который вы введёте",
+                xml_element_fixed: "один элемент, который называет плагин (его XPath — в рамке плагина ниже)",
+                xml_parent_fixed: "подпись кладётся в элемент, который называет плагин (в рамке ниже)",
+                xml_parent_param: "подпись кладётся в элемент, который вы введёте",
+                xml_placement_first: "подпись кладётся в конец первого узла документа",
+                xml_placement_parent: "подпись кладётся в конец выбранного родительского элемента",
+                xml_namespaces: "привязки пространств имён для XPath: {0}",
+                xml_other_prefix_uri: "задана дополнительная пара префикс/URI (текст плагина)",
+                signature_method: "алгоритм подписи: {0}",
+                digest_method: "алгоритм дайджеста: {0}",
+                c14n: "каноникализация: {0}",
+                xml_strip: "пробельные символы убираются",
+                b64_breaks_on: "base64 с переносами строк",
+                b64_breaks_off: "base64 без переносов строк",
+                xml_serialized: "результат заново сериализует ядро",
+                content_as_is: "содержимое подписывается как есть, даже если это CMS",
+                out_base64: "результат не DER, а base64",
+                out_pem: "результат не DER, а PEM",
+                off_content_type: "без атрибута contentType",
+                off_message_digest: "без атрибута messageDigest",
+                off_signing_cert: "без атрибута signingCertificateV2",
                 xades_b: "XAdES, уровень B",
                 xades_t: "XAdES, уровень T",
                 xades_lt: "XAdES, уровень LT",
@@ -372,8 +517,27 @@ impl OpTexts {
                 chain: "with the key's certificate chain",
                 no_signing_time: "no signing time",
                 xml_whole: "the whole document",
-                xml_element: "the element {0}",
                 xml_element_param: "the element you type in",
+                xml_element_fixed: "one element the plugin names (its XPath is in the plugin's frame below)",
+                xml_parent_fixed: "the signature goes into an element the plugin names (in the frame below)",
+                xml_parent_param: "the signature goes into an element you type in",
+                xml_placement_first: "the signature goes at the end of the document's first node",
+                xml_placement_parent: "the signature goes at the end of the chosen parent element",
+                xml_namespaces: "namespace bindings for the XPaths: {0}",
+                xml_other_prefix_uri: "an extra prefix/URI pair is set (the plugin's own text)",
+                signature_method: "signature algorithm: {0}",
+                digest_method: "digest algorithm: {0}",
+                c14n: "canonicalisation: {0}",
+                xml_strip: "whitespace is stripped",
+                b64_breaks_on: "base64 with line breaks",
+                b64_breaks_off: "base64 without line breaks",
+                xml_serialized: "the output is re-serialised by the core",
+                content_as_is: "the content is signed as it is, even if it is a CMS",
+                out_base64: "the output is base64, not DER",
+                out_pem: "the output is PEM, not DER",
+                off_content_type: "without the contentType attribute",
+                off_message_digest: "without the messageDigest attribute",
+                off_signing_cert: "without the signingCertificateV2 attribute",
                 xades_b: "XAdES level B",
                 xades_t: "XAdES level T",
                 xades_lt: "XAdES level LT",
@@ -541,8 +705,27 @@ mod tests {
                 ProfileFact::ChainCertificates,
                 ProfileFact::NoSigningTime,
                 ProfileFact::XmlWholeDocument,
-                ProfileFact::XmlElement("/X1".to_owned()),
+                ProfileFact::XmlElementFixed,
                 ProfileFact::XmlElementParam,
+                ProfileFact::XmlParentFixed,
+                ProfileFact::XmlParentParam,
+                ProfileFact::XmlPlacement(PlacementKind::FirstChildOfDocument),
+                ProfileFact::XmlPlacement(PlacementKind::Parent),
+                ProfileFact::XmlNamespaces(2),
+                ProfileFact::XmlOtherPrefixUri,
+                ProfileFact::SignatureMethod("X1".to_owned()),
+                ProfileFact::DigestMethod("X1".to_owned()),
+                ProfileFact::C14n("X1".to_owned()),
+                ProfileFact::XmlStripWhitespace,
+                ProfileFact::XmlBase64LineBreaks(true),
+                ProfileFact::XmlBase64LineBreaks(false),
+                ProfileFact::XmlSerialized,
+                ProfileFact::ContentAsIs,
+                ProfileFact::CmsOutput(OutputForm::Base64),
+                ProfileFact::CmsOutput(OutputForm::Pem),
+                ProfileFact::AttributeOff(CmsAttribute::ContentType),
+                ProfileFact::AttributeOff(CmsAttribute::MessageDigest),
+                ProfileFact::AttributeOff(CmsAttribute::SigningCertificate),
                 ProfileFact::Xades(XadesLevelKind::B),
                 ProfileFact::Xades(XadesLevelKind::T),
                 ProfileFact::Xades(XadesLevelKind::Lt),
@@ -609,11 +792,31 @@ mod tests {
     }
 
     #[test]
+    fn operation_names_are_checked_where_they_are_drawn() {
+        assert!(is_operation_name("sign-file2"));
+        assert!(is_operation_name(&"a".repeat(32)));
+        for bad in [
+            "",
+            "Sign",
+            "1a",
+            "a_b",
+            "a b",
+            "а",
+            "a\u{202E}",
+            &"a".repeat(33),
+            "-a",
+        ] {
+            assert!(!is_operation_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn a_consent_label_is_chosen_by_language() {
         let consent = OperationConsent {
             name: "sign-it".to_owned(),
             lines: Vec::new(),
             label: ["ру".to_owned(), "кк".to_owned(), "en".to_owned()],
+            xpaths: Vec::new(),
         };
         assert_eq!(consent.label(Locale::Ru), "ру");
         assert_eq!(consent.label(Locale::Kk), "кк");

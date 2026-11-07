@@ -1969,8 +1969,213 @@ fn the_abi_option_structs_are_all_classified() {
 mod consent {
     use super::*;
     use oncl_flows::capabilities::{
-        AddedLine, CapabilityLine, KeyUseKind, NetworkLine, ProfileFact, TsaFamily, XadesLevelKind,
+        AddedLine, CapabilityLine, CmsAttribute, KeyUseKind, NetworkLine, OutputForm,
+        PlacementKind, ProfileFact, TsaFamily, XadesLevelKind,
     };
+    use oncl_plugin::operations::{AddedOperation, DIGEST_METHODS, SIGNATURE_METHODS};
+
+    fn facts_of(text: &str) -> Vec<ProfileFact> {
+        let manifest = parse(text).unwrap();
+        let lines = manifest.operations()[0].consent(None).lines;
+        lines
+            .into_iter()
+            .find_map(|l| match l {
+                CapabilityLine::KeyProfile(f) => Some(f),
+                _ => None,
+            })
+            .expect("a profile line")
+    }
+
+    #[test]
+    fn every_cms_ex_field_is_shown_or_default() {
+        // The default profile: only the essentials (and the fixed cosign).
+        assert_eq!(
+            facts_of(&op_of("cms_ex", "keys_sign_cms_ex", "\"none\"", "")),
+            [
+                ProfileFact::Detached,
+                ProfileFact::ContentAsIs,
+                ProfileFact::NoTimestamp
+            ]
+        );
+        // Every field away from its default.
+        let facts = facts_of(&op_of(
+            "cms_ex",
+            "keys_sign_cms_ex",
+            "\"pki\"",
+            "content_form = \"digest\"\ntimestamp = \"kalkan\"\ncertificates = \"chain\"\n\
+             output = \"pem\"\ncontent_type = false\nmessage_digest = false\n\
+             signing_certificate_v2 = false\nsigning_time = \"none\"",
+        ));
+        assert_eq!(
+            facts,
+            [
+                ProfileFact::Detached,
+                ProfileFact::ContentAsIs,
+                ProfileFact::DigestOnly,
+                ProfileFact::Timestamp(TsaFamily::Kalkan),
+                ProfileFact::ChainCertificates,
+                ProfileFact::CmsOutput(OutputForm::Pem),
+                ProfileFact::AttributeOff(CmsAttribute::ContentType),
+                ProfileFact::AttributeOff(CmsAttribute::MessageDigest),
+                ProfileFact::AttributeOff(CmsAttribute::SigningCertificate),
+                ProfileFact::NoSigningTime,
+            ]
+        );
+        let facts = facts_of(&op_of(
+            "cms_ex",
+            "keys_sign_cms_ex",
+            "\"none\"",
+            "encapsulate = true\noutput = \"base64\"",
+        ));
+        assert_eq!(facts[0], ProfileFact::Attached);
+        assert!(facts.contains(&ProfileFact::CmsOutput(OutputForm::Base64)));
+    }
+
+    #[test]
+    fn every_xml_ex_field_is_shown_or_default() {
+        assert_eq!(
+            facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"none\"", "")),
+            [ProfileFact::XmlWholeDocument]
+        );
+        let profile = format!(
+            "element = \"/a\"\nparent = \"param:path\"\nplacement = \"parent\"\n\
+             namespaces = [{{ prefix = \"a\", uri = \"urn:x\" }}]\nother_prefix_uri = \"urn:y\"\n\
+             signature_method = \"{}\"\ndigest_method = \"{}\"\nc14n = \"exclusive\"\n\
+             strip_whitespace = true\nbase64_line_breaks = false\n\
+             output = {{ serialize = {{ declaration = true, standalone_no = false, trim = true }} }}",
+            SIGNATURE_METHODS[0], DIGEST_METHODS[0]
+        );
+        let facts = facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"none\"", &profile));
+        assert_eq!(
+            facts,
+            [
+                ProfileFact::XmlElementFixed,
+                ProfileFact::XmlParentParam,
+                ProfileFact::XmlPlacement(PlacementKind::Parent),
+                ProfileFact::XmlNamespaces(1),
+                ProfileFact::XmlOtherPrefixUri,
+                ProfileFact::SignatureMethod(SIGNATURE_METHODS[0].to_owned()),
+                ProfileFact::DigestMethod(DIGEST_METHODS[0].to_owned()),
+                ProfileFact::C14n("exclusive".to_owned()),
+                ProfileFact::XmlStripWhitespace,
+                ProfileFact::XmlBase64LineBreaks(false),
+                ProfileFact::XmlSerialized,
+            ]
+        );
+        let facts = facts_of(&op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"none\"",
+            "element = \"param:path\"\nparent = \"/p\"\nplacement = \"parent\"\nbase64_line_breaks = true",
+        ));
+        assert_eq!(facts[0], ProfileFact::XmlElementParam);
+        assert_eq!(facts[1], ProfileFact::XmlParentFixed);
+        assert!(facts.contains(&ProfileFact::XmlBase64LineBreaks(true)));
+        let facts = facts_of(&op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"none\"",
+            "placement = \"first_child_of_document\"",
+        ));
+        assert!(facts.contains(&ProfileFact::XmlPlacement(
+            PlacementKind::FirstChildOfDocument
+        )));
+    }
+
+    #[test]
+    fn xades_methods_are_shown() {
+        let facts = facts_of(&op_of(
+            "xades",
+            "keys_sign_xades",
+            "\"none\"",
+            &format!(
+                "signature_method = \"{}\"\ndigest_method = \"{}\"",
+                SIGNATURE_METHODS[1], DIGEST_METHODS[1]
+            ),
+        ));
+        assert!(facts.contains(&ProfileFact::SignatureMethod(
+            SIGNATURE_METHODS[1].to_owned()
+        )));
+        assert!(facts.contains(&ProfileFact::DigestMethod(DIGEST_METHODS[1].to_owned())));
+    }
+
+    #[test]
+    fn a_crafted_xpath_is_the_plugins_text_and_never_a_host_line() {
+        let crafted = "/a/Install / Allow / Core verified; no network";
+        let text = op_of(
+            "xml",
+            "keys_sign_xml",
+            "\"none\"",
+            &format!("element = \"{crafted}\"\nparent = \"/p/Core verified\""),
+        );
+        let consent = parse(&text).unwrap().operations()[0].consent(None);
+        assert_eq!(consent.xpaths, [crafted, "/p/Core verified"]);
+        let host = format!("{:?}", consent.lines);
+        assert!(
+            !host.contains("Core verified") && !host.contains("Allow"),
+            "{host}"
+        );
+    }
+
+    #[test]
+    fn each_added_reason_maps_to_its_own_line() {
+        let manifest = parse(&with(OP)).unwrap();
+        let reasons = vec![
+            AddedReason::New,
+            AddedReason::Changed,
+            AddedReason::KeyUse,
+            AddedReason::Imports(vec!["http_request"]),
+            AddedReason::Network,
+            AddedReason::Server,
+        ];
+        let added = AddedOperation {
+            name: "sign-file".to_owned(),
+            reasons,
+        };
+        let lines = manifest.operations()[0].consent(Some(&added)).lines;
+        assert_eq!(
+            lines[..6],
+            [
+                CapabilityLine::Added(AddedLine::New),
+                CapabilityLine::Added(AddedLine::Changed),
+                CapabilityLine::Added(AddedLine::KeyUse),
+                CapabilityLine::Added(AddedLine::Imports(vec!["http_request".to_owned()])),
+                CapabilityLine::Added(AddedLine::Network),
+                CapabilityLine::Added(AddedLine::Server),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_manifests_consents_mark_only_the_added_operations() {
+        let two = format!("{}{}", with(OP), OP.replace("sign-file", "other-op"));
+        let new = parse(&two).unwrap();
+        let old = parse(&with(OP)).unwrap();
+        let added = new.added_over(&old);
+        let consents = new.operation_consents(Some(&added));
+        assert_eq!(consents.len(), 2);
+        assert_eq!(consents[0].name, "sign-file");
+        assert!(
+            !consents[0]
+                .lines
+                .iter()
+                .any(|l| matches!(l, CapabilityLine::Added(_)))
+        );
+        assert_eq!(consents[1].name, "other-op");
+        assert!(
+            consents[1]
+                .lines
+                .contains(&CapabilityLine::Added(AddedLine::New))
+        );
+        // Without `added`, nothing is marked; a manifest without operations has none.
+        assert!(
+            !new.operation_consents(None)[1]
+                .lines
+                .iter()
+                .any(|l| matches!(l, CapabilityLine::Added(_)))
+        );
+        assert!(parse(HEAD).unwrap().operation_consents(None).is_empty());
+    }
 
     fn lines_of(text: &str) -> Vec<CapabilityLine> {
         parse(text).unwrap().operations()[0].consent(None).lines
@@ -1987,6 +2192,7 @@ mod consent {
                 CapabilityLine::KeyUse(KeyUseKind::CmsEx),
                 CapabilityLine::KeyProfile(vec![
                     ProfileFact::Detached,
+                    ProfileFact::ContentAsIs,
                     ProfileFact::Timestamp(TsaFamily::Basics)
                 ]),
                 CapabilityLine::OperationNetwork(NetworkLine::Pki),
@@ -2122,7 +2328,7 @@ mod consent {
         ));
         assert!(lines.iter().any(|l| matches!(
             l,
-            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::XmlElement("/a/b".to_owned()))
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::XmlElementFixed)
         )));
         let lines = lines_of(&op_of("xml", "keys_sign_xml", "\"none\"", ""));
         assert!(lines.iter().any(|l| matches!(

@@ -1145,14 +1145,14 @@ fn an_update_that_may_do_more_waits_for_the_user() {
     service.check_now();
     assert_eq!(service.view().installed[0].pending_update, None);
     assert_eq!(
-        service.confirm_update(ID),
+        service.confirm_update(ID, &pending_sha(&service)),
         Err(PluginActionError::NothingToConfirm)
     );
     // Offered again, and allowed.
     sandbox.publish(4, vec![old, wider]);
     service.check_now();
     assert_eq!(sandbox.notices(), [waits]);
-    service.confirm_update(ID).unwrap();
+    service.confirm_update(ID, &pending_sha(&service)).unwrap();
     assert_eq!(
         sandbox.notices(),
         [PluginNotice::Updated {
@@ -1164,7 +1164,7 @@ fn an_update_that_may_do_more_waits_for_the_user() {
     assert_eq!(sandbox.modules.loaded()[0].version, v("0.2.0"));
     assert_eq!(service.view().installed[0].pending_update, None);
     assert_eq!(
-        service.confirm_update(ID),
+        service.confirm_update(ID, &pending_sha(&service)),
         Err(PluginActionError::NothingToConfirm)
     );
 }
@@ -1231,6 +1231,18 @@ fn updated(old: &[String], new: &[String]) -> (Vec<PluginNotice>, Version) {
     sandbox.publish(2, vec![release, newer]);
     service.check_now();
     (sandbox.notices(), sandbox.installed_version().unwrap())
+}
+
+/// The package hash of the update waiting for `ID`, as the window would pass it back; empty
+/// if none waits.
+fn pending_sha(service: &PluginService) -> String {
+    service
+        .view()
+        .installed
+        .first()
+        .and_then(|p| p.pending_update.as_ref())
+        .map(|u| u.package_sha256.clone())
+        .unwrap_or_default()
 }
 
 fn waits() -> Vec<PluginNotice> {
@@ -1365,7 +1377,7 @@ fn a_confirmed_operation_update_is_installed_and_the_view_names_the_operation() 
             "sign".to_owned()
         ])]
     );
-    service.confirm_update(ID).unwrap();
+    service.confirm_update(ID, &pending_sha(&service)).unwrap();
     assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
 }
 
@@ -1406,7 +1418,7 @@ fn a_removal_during_a_wider_updates_download_leaves_nothing_waiting() {
     assert!(sandbox.notices().is_empty());
     assert!(service.view().installed.is_empty());
     assert_eq!(
-        service.confirm_update(ID),
+        service.confirm_update(ID, &pending_sha(&service)),
         Err(PluginActionError::NothingToConfirm)
     );
 }
@@ -1645,7 +1657,7 @@ fn the_manual_registry_leaves_the_legacy_modules_alone() {
     let new = sandbox.release("0.2.0", &bytes);
     sandbox.publish(2, vec![old, new]);
     service.check_now();
-    service.confirm_update(ID).unwrap();
+    service.confirm_update(ID, &pending_sha(&service)).unwrap();
     assert_eq!(sandbox.modules.loaded()[0].version, v("0.2.0"));
     let manual = service.manual_plugins();
     assert_eq!(manual.operations.len(), 1);
@@ -1697,6 +1709,45 @@ mod consent {
         );
         // The plugin's own label stays apart.
         assert_eq!(sign.label[2], "Sign");
+    }
+
+    #[test]
+    fn an_update_replaced_while_the_dialog_is_open_is_not_installed_unseen() {
+        let sandbox = Sandbox::new(true);
+        let service = sandbox.service();
+        let old = example_ops("0.1.0", &[operation("keep", "Keep", true, false)]);
+        let release = sandbox.release("0.1.0", &old);
+        sandbox.publish(1, vec![release.clone()]);
+        service.install_from_catalog(ID, None).unwrap();
+        let held = |version: &str| {
+            example_ops(
+                version,
+                &[
+                    operation("keep", "Keep", true, false),
+                    operation("sign", "Sign", true, true),
+                ],
+            )
+        };
+        sandbox.publish(
+            2,
+            vec![release.clone(), sandbox.release("0.2.0", &held("0.2.0"))],
+        );
+        service.check_now();
+        let shown = pending_sha(&service);
+        assert!(!shown.is_empty());
+        // A newer update takes its place while the dialog is open.
+        sandbox.publish(3, vec![release, sandbox.release("0.3.0", &held("0.3.0"))]);
+        service.check_now();
+        let now = pending_sha(&service);
+        assert_ne!(now, shown);
+        assert_eq!(
+            service.confirm_update(ID, &shown),
+            Err(PluginActionError::Superseded)
+        );
+        assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+        // It still waits; seen, it installs.
+        service.confirm_update(ID, &now).unwrap();
+        assert_eq!(sandbox.installed_version(), Some(v("0.3.0")));
     }
 
     #[test]
