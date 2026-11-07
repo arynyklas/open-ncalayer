@@ -521,8 +521,15 @@ pub(super) enum Failure {
     Abort(ProcessingError),
     Typed(ApiError),
 }
-pub(super) fn classify(error: OperationError, applied_any: bool) -> Failure {
-    let failure = crate::service::operation_failure(&error);
+pub(super) fn classify(
+    error: OperationError,
+    applied_any: bool,
+    subcode: Option<&'static str>,
+) -> Failure {
+    let mut failure = crate::service::operation_failure(&error);
+    if let Some(subcode) = subcode {
+        failure = failure.with_subcode(subcode);
+    }
     let applied = failure.applied != oncl_api::error::AppliedState::NotApplied;
     match error {
         OperationError::Processing(e)
@@ -576,6 +583,18 @@ pub(super) struct Env<'a> {
     pub staging: Option<&'a oncl_pki::io::TemporaryStore>,
     pub host: &'a super::HostPolicy,
     pub caller: &'a oncl_core::plugins::CallerContext,
+    /// The subcode of the plugin refusal of the item that just failed, for [`classify`].
+    pub subcode: Option<&'static str>,
+}
+/// The stable subcode of why a plugin call was refused, if Core or the server's ticket policy
+/// named a reason (docs/design/manual-plugins.md 4.8): the policy's refusal of this very
+/// invocation first, otherwise Core's own (an undeclared operation).
+fn plugin_subcode(host: &super::HostPolicy, ctx: &OperationContext) -> Option<&'static str> {
+    use oncl_core::plugins::PluginRefusalCode;
+    host.plugin_policy
+        .take_refusal(ctx.id())
+        .map(|refusal| PluginRefusalCode::from(refusal).id())
+        .or_else(|| ctx.plugin_refusal_code().map(PluginRefusalCode::id))
 }
 fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState {
     match value {
@@ -1521,7 +1540,13 @@ fn run_item(
             };
             let bound = oncl_core::plugins::PluginBindings::new(env.caller, &bindings);
             // The ORIGINAL admitted context: no new budget, grant or deadline.
-            let result = env.engine.plugin_call(&call, &bound, ctx)?;
+            let result = match env.engine.plugin_call(&call, &bound, ctx) {
+                Ok(result) => result,
+                Err(error) => {
+                    env.subcode = plugin_subcode(env.host, ctx);
+                    return Err(error);
+                }
+            };
             let state = result.applied_state();
             let response = result.response().to_owned();
             let projection = after_use(
@@ -1569,6 +1594,7 @@ mod tests {
             tsa: None,
             jwt_issuer: None,
             jwt_audience: None,
+            plugin_policy: Default::default(),
             plugin_grants: vec![crate::service::operations::PluginGrantRuntime {
                 token: token.into(),
                 plugin: "vendor.x".into(),

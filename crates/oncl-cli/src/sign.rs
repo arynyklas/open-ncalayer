@@ -16,24 +16,50 @@ pub struct Authority {
     pub key: KeyId,
     pub action: Action,
     pub operation: AtomicU64,
+    /// The `--plugin-bytes` grant of a declared plugin operation; without it a ticketed key
+    /// use is refused.
+    pub plugin: Option<crate::plugin::BytesGrant>,
+    plugin_used: std::sync::atomic::AtomicBool,
+}
+impl Authority {
+    pub fn new(key: KeyId, action: Action, plugin: Option<crate::plugin::BytesGrant>) -> Self {
+        Self {
+            key,
+            action,
+            operation: AtomicU64::new(0),
+            plugin,
+            plugin_used: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 impl KeyUseGuard for Authority {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
-        // A ticketed use is a declared plugin operation's key use; the CLI has no
-        // `--plugin-bytes` grant to check it against yet (stage MP9), so it is refused, and
-        // the refusal is told with its stable subcode (the plugin sees PermissionDenied only).
-        // Plugins without declarations carry no ticket and are authorized as before.
+        // A ticketed use is a declared plugin operation's key use: allowed only under the
+        // `--plugin-bytes` grant, once, for the declared options. Plugins without
+        // declarations carry no ticket and are authorized as before.
         if let Some(ticket) = event.plugin() {
-            crate::diagnostic(format_args!(
-                "oncl: plugin_refused operation_id={} subcode={} plugin={} operation={}",
-                event.operation_id,
-                oncl_core::plugins::PluginRefusalCode::from(
-                    oncl_core::plugins::TicketRefusal::NotGranted
-                ),
-                ticket.identity().id,
-                ticket.operation()
-            ));
-            return Err(OperationError::PermissionDenied);
+            let verdict = match &self.plugin {
+                None => Err(oncl_core::plugins::TicketRefusal::NotGranted),
+                Some(grant) => grant.check(ticket).and_then(|()| {
+                    if self.plugin_used.swap(true, Ordering::SeqCst) {
+                        Err(oncl_core::plugins::TicketRefusal::AlreadyUsed)
+                    } else {
+                        Ok(())
+                    }
+                }),
+            };
+            if let Err(refusal) = verdict {
+                let subcode = oncl_core::plugins::PluginRefusalCode::from(refusal).id();
+                crate::plugin::record_subcode(subcode);
+                // The operator's own line; the plugin sees only PermissionDenied.
+                crate::diagnostic(format_args!(
+                    "oncl: plugin_refused operation_id={} subcode={subcode} plugin={} operation={}",
+                    event.operation_id,
+                    ticket.identity().id,
+                    ticket.operation()
+                ));
+                return Err(OperationError::PermissionDenied);
+            }
         }
         if event.operation_id.get() != self.operation.load(Ordering::SeqCst)
             || event.key_id != self.key

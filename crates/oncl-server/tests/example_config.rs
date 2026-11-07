@@ -118,10 +118,26 @@ fn is_toml_line(line: &str) -> bool {
 #[test]
 fn every_commented_sample_is_valid_configuration() {
     let samples = samples(&example());
-    // tokens, keys, pki + endpoints, tls, trusted proxy, telemetry
-    assert!(samples.len() >= 7, "found only {} samples", samples.len());
+    // tokens, keys, pki + endpoints, tls, trusted proxy, telemetry, plugins
+    assert!(samples.len() >= 8, "found only {} samples", samples.len());
     for sample in &samples {
         toml::from_str::<ServerConfig>(sample)
             .unwrap_or_else(|e| panic!("the sample\n{sample}\nis not valid: {e}"));
     }
+}
+
+#[test]
+fn the_plugin_sample_shows_plugin_bytes_off_and_on() {
+    let samples = samples(&example());
+    let plugin = samples
+        .iter()
+        .filter_map(|s| toml::from_str::<ServerConfig>(s).ok())
+        .find(|c| !c.plugins.is_empty())
+        .expect("the example documents a plugin with grants");
+    let grants = &plugin.plugins[0].permissions;
+    assert!(grants.iter().any(|g| !g.plugin_bytes), "a keyless grant");
+    assert!(
+        grants.iter().any(|g| g.plugin_bytes && !g.keys.is_empty()),
+        "a key grant with plugin_bytes = true"
+    );
 }

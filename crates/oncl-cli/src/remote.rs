@@ -52,6 +52,8 @@ use zeroize::Zeroizing;
 /// The failure shown as `oncl: <code>; applied=<state>` (the local contract) with its exit.
 pub struct Failure {
     pub code: String,
+    /// The stable subcode of a plugin refusal (`oncl: <code>; subcode=<id>; applied=<state>`).
+    pub subcode: Option<String>,
     pub applied: AppliedState,
     pub cancelled: bool,
 }
@@ -59,6 +61,7 @@ impl From<OperationError> for Failure {
     fn from(error: OperationError) -> Self {
         Self {
             code: format!("{:?}", error.code()),
+            subcode: crate::plugin::take_subcode().map(str::to_owned),
             applied: error.applied_state(),
             cancelled: error.code() == oncl_core::ErrorCode::Cancelled,
         }
@@ -80,6 +83,7 @@ impl Failure {
     fn protocol(applied: AppliedState) -> Self {
         Self {
             code: FailureKind::Protocol.code().into(),
+            subcode: None,
             applied,
             cancelled: false,
         }
@@ -90,11 +94,14 @@ impl Failure {
             // A local staging failure keeps its own code; what the key did stays honest.
             Some(local) if error.kind == FailureKind::Artifact => Self {
                 code: format!("{:?}", local.code()),
+                subcode: None,
                 applied: applied.combine(local.applied_state()),
                 cancelled: local.code() == oncl_core::ErrorCode::Cancelled,
             },
+            // `describe` already carries the service's `; subcode=<id>` of a typed refusal.
             _ => Self {
                 code: error.describe(),
+                subcode: None,
                 applied,
                 cancelled: error.kind == FailureKind::Cancelled,
             },
@@ -104,6 +111,7 @@ impl Failure {
     fn record(error: &oncl_api::error::ApiError) -> Self {
         Self {
             code: format!("{:?}", error.code),
+            subcode: error.subcode().map(str::to_owned),
             applied: core_applied(error.applied),
             cancelled: error.code == oncl_api::error::ErrorCode::Cancelled,
         }

@@ -102,6 +102,31 @@ inline_pkcs12 = false
 # origin = "https://ca.example:443"
 # addresses = ["203.0.113.10:443"]
 
+# A WASM plugin is installed by the operator (code availability only; installation grants
+# nothing) and reached through one exact grant per (token, operation); see docs/user/server.md,
+# "Plugins". `imports` are the exact host imports the operation may use and `keys` the named
+# operator keys above. A plugin that declares its operations (`[[operations]]` in its manifest)
+# is granted only under a declared name with `server = true`, its imports must be among the
+# declared ones (an empty list means all of them) and Core forces the declared signature
+# options. Because the server cannot bind the signed bytes to a document, a key may be used
+# only when the grant says `plugin_bytes = true`: "the plugin or its client chooses what the key
+# signs". Without it the key use is refused before the key is touched (`not-granted`).
+#
+# [[plugins]]
+# id = "vendor.sign"
+# manifest = "/etc/oncl-server/plugins/sign.toml"
+# wasm = "/etc/oncl-server/plugins/sign.wasm"
+# [[plugins.permissions]]
+# token = "accounting-service"
+# operation = "sign-file"
+# imports = ["keys_sign_cms_ex", "hash"]
+# keys = ["corporate-signing"]
+# plugin_bytes = true
+# [[plugins.permissions]]
+# token = "accounting-service"
+# operation = "digest"
+# imports = ["hash"]
+
 # LAN exposure is a deliberate choice: real TLS with an operator PEM chain and key ...
 #
 # bind = "0.0.0.0:13579"
