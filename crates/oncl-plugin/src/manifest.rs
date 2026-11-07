@@ -3,6 +3,10 @@
 //! written for a later format is not read as a weaker one.
 
 use crate::PackageError;
+use crate::operations::{
+    AddedOperation, MAX_OPERATIONS, Operation, OperationError, RawOperation, added,
+    operations_min_core,
+};
 use oncl_flows::Locale;
 use oncl_flows::capabilities::CapabilityLine;
 use semver::Version;
@@ -59,6 +63,25 @@ pub struct Manifest {
     /// A module built into the core (`builtin = true`): only a manifest embedded in the
     /// core is read with it ([`Manifest::from_toml_builtin`]).
     pub builtin: bool,
+    /// The operations the manual-tools window offers; empty for a plugin that declares
+    /// none (see [`Manifest::operations`]).
+    operations: Vec<Operation>,
+}
+
+/// What an update asks for beyond the installed version: [`Manifest::added_over`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    /// The new capabilities.
+    pub capabilities: Capabilities,
+    /// The new or wider operations.
+    pub operations: Vec<AddedOperation>,
+}
+
+impl Added {
+    /// Whether nothing is new.
+    pub fn is_empty(&self) -> bool {
+        self.capabilities.is_empty() && self.operations.is_empty()
+    }
 }
 
 /// A text in the three languages of the dialogs.
@@ -568,6 +591,22 @@ fn parse_url(text: &str, scheme: &'static str) -> Result<Url, &'static str> {
 }
 
 impl Manifest {
+    /// The operations the manual-tools window may offer: empty for a plugin that declares
+    /// none, and then the window offers nothing of it (deny by default).
+    pub fn operations(&self) -> &[Operation] {
+        &self.operations
+    }
+
+    /// What this manifest asks for over the installed `old`: new capabilities
+    /// ([`Capabilities::added_over`]) and the operations that are new or wider
+    /// ([`AddedOperation`]). An update that adds anything needs the user's consent.
+    pub fn added_over(&self, old: &Manifest) -> Added {
+        Added {
+            capabilities: self.capabilities.added_over(&old.capabilities),
+            operations: added(&self.operations, &old.operations),
+        }
+    }
+
     /// Parses and checks the `plugin.toml` of a plugin package: neither `builtin = true` nor
     /// an id under [`crate::BUILTIN_ID_PREFIX`], both reserved for the core's own modules.
     pub fn from_toml(text: &str) -> Result<Manifest, PackageError> {
@@ -615,6 +654,8 @@ struct RawManifest {
     capabilities: RawCapabilities,
     #[serde(default)]
     builtin: bool,
+    #[serde(default)]
+    operations: Vec<RawOperation>,
 }
 
 #[derive(Default, Deserialize)]
@@ -746,6 +787,26 @@ impl RawManifest {
                 page_files_ext.push(ext);
             }
         }
+        let capabilities = Capabilities {
+            keys: caps.keys,
+            dialogs: caps.dialogs,
+            files: caps.files,
+            http,
+            origins,
+            http_insecure,
+            key_files: caps.key_files,
+            page_files: caps.page_files,
+            page_files_ext,
+            settings: caps.settings,
+            shared: caps.shared,
+            builtin: caps.builtin,
+        };
+        let operations = check_operations(
+            self.operations,
+            &self.min_core,
+            &self.modules,
+            &capabilities,
+        )?;
         Ok(Manifest {
             id: self.id,
             version: self.version,
@@ -754,23 +815,44 @@ impl RawManifest {
             min_core: self.min_core,
             modules: self.modules,
             replaces: self.replaces,
-            capabilities: Capabilities {
-                keys: caps.keys,
-                dialogs: caps.dialogs,
-                files: caps.files,
-                http,
-                origins,
-                http_insecure,
-                key_files: caps.key_files,
-                page_files: caps.page_files,
-                page_files_ext,
-                settings: caps.settings,
-                shared: caps.shared,
-                builtin: caps.builtin,
-            },
+            capabilities,
             builtin: self.builtin,
+            operations,
         })
     }
+}
+
+/// `[[operations]]`: at most [`MAX_OPERATIONS`], distinct names, each checked against the
+/// modules and capabilities; `min_core` at [`operations_min_core`] or later.
+fn check_operations(
+    raw: Vec<RawOperation>,
+    min_core: &Version,
+    modules: &[String],
+    capabilities: &Capabilities,
+) -> Result<Vec<Operation>, PackageError> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    if raw.len() > MAX_OPERATIONS {
+        return Err(OperationError::TooMany.into());
+    }
+    let needed = operations_min_core();
+    if *min_core < needed {
+        return Err(OperationError::MinCore {
+            needed,
+            found: min_core.clone(),
+        }
+        .into());
+    }
+    let mut names = HashSet::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for op in raw {
+        if !names.insert(op.name().to_owned()) {
+            return Err(OperationError::DuplicateName(op.name().to_owned()).into());
+        }
+        out.push(op.check(modules, capabilities)?);
+    }
+    Ok(out)
 }
 
 /// `^[a-z0-9][a-z0-9.-]{1,62}[a-z0-9]$` with at least one dot.

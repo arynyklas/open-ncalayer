@@ -123,6 +123,12 @@ pub enum LoadError {
     /// A host function of a capability the manifest does not declare is imported.
     #[error("the plugin module imports {0}, whose capability the manifest does not declare")]
     Undeclared(String),
+    /// An operation of the manifest may import a host function the module does not import.
+    #[error("the operation {operation} lists the import {name}, which the module does not import")]
+    OperationImport {
+        operation: String,
+        name: &'static str,
+    },
     /// `oncl_abi_version` returned another version.
     #[error("the plugin is built for ABI version {0}, not {ABI_VERSION}")]
     AbiVersion(i32),
@@ -225,6 +231,19 @@ impl Engine {
             }
             if !imports.contains(&host_fn) {
                 imports.push(host_fn);
+            }
+        }
+        for operation in manifest.operations() {
+            if let Some(import) = operation
+                .uses()
+                .imports()
+                .iter()
+                .find(|i| !imports.contains(i))
+            {
+                return Err(LoadError::OperationImport {
+                    operation: operation.name().to_owned(),
+                    name: import.name(),
+                });
             }
         }
         Ok(Compiled {

@@ -134,6 +134,62 @@ Query и fragment запроса не проверяются. Адреса ра�
 
 Префикс `http_insecure` — как префикс `http`, но `http://`, только точный хост (без `*.`), порт без указания — 80: `http://ncalayer.uchet.kz:8080/`.
 
+### `[[operations]]`: операции ручного окна
+
+Необязательная таблица. Плагин без неё в окне ручных инструментов **не виден** (deny by default; `Manifest::operations()` пуст). Операция — не имя: это шаблон запроса, который строит хост, список импортов, сеть и для каждого применения ключа **профиль** (вид, откуда содержимое, опции, которые принуждает Core). Модель разрешений — [manual-plugins.md](manual-plugins.md); код — `crates/oncl-plugin/src/operations.rs`.
+
+```toml
+min_core = "0.1.0-alpha.7"          # не ниже: старое ядро таблицу отвергает (deny_unknown_fields), новое — по min_core
+
+[[operations]]
+name    = "sign-file"               # ^[a-z][a-z0-9-]{0,31}$, уникально; до 32 операций
+module  = "example.sign"            # из `modules`
+manual  = true                      # показывать в ручном окне (по умолчанию false)
+server  = false                     # допускать grant сервера/CLI (по умолчанию false); оба false — ошибка
+request = '{"module":"example.sign","method":"signFile","args":["{file:base64}"]}'
+label   = { ru = "…", kk = "…", en = "…" }   # недоверенный текст автора: 1–80 символов, без управляющих и bidi
+
+[[operations.params]]               # до 16; ^[a-z][a-z0-9_]{0,31}$, уникальны, все используются в request
+name = "file"
+kind = "document"                   # document | text | choice | flag | locale
+max_bytes = 16777216                # document: 1..=256 МиБ (по умолчанию 16 МиБ); text: max_chars 1..=65536 (256); choice: choices (1–32)
+
+[operations.uses]
+imports     = ["keys_select", "keys_sign_cms_ex", "hash"]   # известные имена импортов; capability манифеста обязана их объявлять
+network     = "pki"                 # "none" (по умолчанию) | "pki" | ["https://…/"] (каждый под capabilities.http)
+interactive = ["keys_select"]       # ⊆ {keys_select, keys_choose, keys_flow_open, keys_flow_pick} и ⊆ imports
+
+[[operations.uses.key]]             # до 8
+kind     = "cms_ex"                 # raw | cms | cms_ex | xml | xml_ex | xades
+content  = "param:file"             # param:<имя> (bound) | "derived"
+max_uses = 1                        # единственное допустимое значение (по умолчанию 1)
+[operations.uses.key.profile]       # поля зависят от вида; неизвестное поле — отказ
+timestamp = "basics"
+```
+
+**Шаблон `request`.** JSON-объект ровно с `module` (равен `module` операции), `method` и `args` (массив). Строка внутри `args`, в которой есть `{` или `}`, обязана целиком быть одним плейсхолдером объявленного параметра: `"{имя}"` (text, choice, locale — строка JSON; flag — булево) или `"{имя:base64}"` (document, обязательно с `:base64`). Экранирования фигурных скобок нет. Хост строит запрос из разобранного JSON, а не подстановкой в текст. Размер шаблона ≤ 16 КиБ; сверка с `max_transfer` — на этапе вызова.
+
+**Импорты.** Запрещены всегда (R6, §3.5): `dialog_*`, `file_*`, `keystore_*`, `core_open_window`, `keys_open`. Каждый ключевой импорт (`keys_sign_*`) требует строки `[[operations.uses.key]]` того же вида и наоборот; применение ключа требует `capabilities.keys`. При компиляции пакета `uses.imports` обязан входить в импорты WASM (`LoadError::OperationImport`).
+
+**`derived`.** Разбирается, но хост его не выполняет до этапа MP3b: `Operation::runnable()` равно `false`. Запрещено для `raw` и для `content_form = "digest"`.
+
+**Профили** (значения по умолчанию — Core; незаданное поле значит значение по умолчанию, отклонение от него — отказ). Полей вне списка нет, значит, их нельзя задать вовсе:
+
+| Вид | Поля (по умолчанию) | Запрещено |
+|---|---|---|
+| `raw` | нет | любые опции |
+| `cms` | `attached` (false), `timestamp` (`none`; `basics`) | `kalkan` |
+| `cms_ex` | `encapsulate` (false), `cosign` (`never`), `content_form` (`data`; `digest` — только bound и без `encapsulate`), `timestamp` (`none`/`basics`/`kalkan`), `certificates` (`signer`/`chain`), `output` (`der`/`base64`/`pem`), `content_type`, `message_digest`, `signing_certificate_v2` (true), `signing_time` (`now`/`none`) | `cosign` кроме `never`, `attrs.extra`, `econtent_type`, `digest`, `timestamp = custom`, `certificates = extra` |
+| `xml` | `element`, `parent` (только с `element`) | — |
+| `xml_ex` | `element`, `parent`, `placement` (`document_element`/`first_child_of_document`/`parent`; `parent` ⇔ задан `parent`), `namespaces`, `other_prefix_uri`, `signature_method`, `digest_method` (из известных URI), `c14n`, `strip_whitespace`, `base64_line_breaks`, `output` (`as_is` / `{ serialize = { declaration, standalone_no, trim } }`) | `transforms`, `signature_id`, `signing_time_object`, чужие URI методов |
+| `xades` | `level` (`b`/`t`/`lt`), `tsa` (`basics`/`kalkan`), `signature_method`, `digest_method` | `chain`, custom TSA, чужие URI |
+
+`element` и `parent` — абсолютный XPath (начинается с `/`) либо `param:<имя>` (text-параметр: введённый пользователем текст показывается в согласии).
+
+**Каноническое кодирование** (вход `options_sha256` билета `PluginUse`). `KeyUse::options_canonical(values)`: магия `ONCLOPT1\0`, вид (1 raw, 2 cms, 3 cms_ex, 4 xml, 5 xml_ex, 6 xades), затем поля вида в порядке номеров таблицы выше: `id u8` и самоограниченное значение (bool — байт 0/1; перечисление — один байт, порядок в `oncl_plugin::operations`; строка — `u32` BE длина и UTF-8; необязательное — 0 или 1 и значение; список — `u32` счётчик). Записываются **все** поля, значения по умолчанию тоже, поэтому незаданное поле и явное значение по умолчанию кодируются одинаково; набор и порядок полей фиксированы, двух разных профилей с одинаковой записью нет. Поле `param:<имя>` кодируется текстом, который дал `values`, как фиксированное значение (без значения — `None`). Версия кодирования — в магии. `Operation::canonical()` кодирует всё объявление, кроме `label` (импорты и сеть — как множества), для обнаружения изменений.
+
+**Обновления (`Manifest::added_over`).** К `Capabilities::added_over` добавлены `AddedOperation`: требует явного согласия, если у операции появилось применение ключа (вид, содержимое или профиль, которого не было у установленной одноимённой операции), изменились `module`/`request`/параметры/`manual` у операции с ключом, добавлен импорт с capability, расширена сеть, включён `server`. Не требуют согласия: смена `label` и сужение. Подключение вызова в `crates/openncalayer/src/plugins.rs` (сейчас вызывает `Capabilities::added_over`) — этапы MP5c/MP7.
+
 ## ABI
 
 Версия ABI — `1` (`oncl_pdk::abi::ABI_VERSION`). Плагин — модуль WebAssembly для `wasm32`: 32-битная линейная память, без `start`-функции. Модуль экспортирует:
