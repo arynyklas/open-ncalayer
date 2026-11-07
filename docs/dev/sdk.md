@@ -389,9 +389,13 @@ among them is reported (at or before `P`: `Invalid`/`Revoked`; after `P`:
 otherwise the status stays `Unavailable`. An unacceptable status (stale, wrong issuer or
 responder, other certificate, `unknown`) is ignored as before and never turns `Unavailable`
 into `Good`. A `good` answer listed first no longer hides a later `revoked` one.
-The status fetched online (`check_path_revocation`) never holds two statuses for one certificate
-(the CRL is fetched only when OCSP gave no `good`/`revoked`), so no `good` can hide a `revoked`
-there; it is unchanged.
+The status fetched online (`check_path_revocation`) uses ONE source per certificate (the CRL
+is fetched only when OCSP gave neither `good` nor `revoked`). That is a residual weakness, not
+a fix: an OCSP `good` from a responder is accepted without consulting a CRL that may say
+`revoked`. EN 319 102-1 requires acceptable status information, not every available source, so
+this is a policy choice, recorded as open. Also, `offline_revocation` has no work/deadline
+checkpoint inside the status loop (a bound by the evidence store limits only; the worst case
+equals the old no-acceptable-status case).
 
 **Standard basis (ETSI EN 319 102-1 V1.3.1, read from the published text).** 5.2.5.4 (Revocation
 freshness checker): status is fresh when `issuance time > validation time - maximum accepted
