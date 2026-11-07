@@ -40,6 +40,7 @@ fn an_args_array_is_not_the_args_object_the_dispatcher_reads() {
             )
         })),
         key: None,
+        ..RunOptions::default()
     };
     let run = run_port_operation(
         "fhs",

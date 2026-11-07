@@ -41,6 +41,7 @@ fn the_template_shape_does_not_reach_the_port_s_top_level_fields() {
             )
         })),
         key: None,
+        ..RunOptions::default()
     };
     let run = run_port_operation(
         "esf-osdkz",

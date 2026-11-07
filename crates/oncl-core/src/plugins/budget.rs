@@ -112,22 +112,21 @@ pub fn manual_call_budget(
 /// the one definition the window (`openncalayer`) and the port tests
 /// (`docs/dev/plugins-manual-tests.md`) share.
 ///
-/// They are sized for documents of up to [`ManualLimits::max_document`] bytes: the form of
-/// an operation takes a document up to its declared size (16 MiB unless the manifest says
-/// less), and [`Engine::plugin_prepare`] refuses a larger one for this window, before the
-/// user is asked ([`PluginPrepareError::ResourceBudget`]).
+/// They are sized for documents of up to [`ManualLimits::max_document`] bytes, which the
+/// desktop caps below the 16 MiB a manifest's `max_bytes` may say: a plugin holds the whole
+/// document in its linear memory several times over and the core admits every key import at
+/// 128 bytes of metadata per byte, so the size of the document is what the memory of the
+/// program is spent on. [`Engine::plugin_prepare`] refuses a larger document before the user
+/// is asked ([`PluginPrepareError::ResourceBudget`]). [`ManualLimits::for_max_document`]
+/// derives everything else from it:
 ///
-/// | | 64-bit | 32-bit | needed at the largest document (measured) |
-/// |---|---|---|---|
-/// | `max_transfer` | 32 MiB | 2 MiB | 4/3 of the document and its template: 21.4 MiB / 0.7 MiB |
-/// | `max_memory` | 512 MiB | 16 MiB | the guest's linear memory, 12.1 bytes per byte of document in the worst port operation: 194 MiB / 6.1 MiB |
-/// | `metadata_bytes` | 3 GiB | 256 MiB | [`manual_call_budget`]: 2.09 GiB / 131 MiB |
-/// | `memory_bytes` | 4 GiB | 512 MiB | [`manual_call_budget`]: 2.85 GiB / 169 MiB |
-///
-/// The transfer and the linear memory carry a margin of 1.5 and 2 over the measurement, the
-/// budgets of about 1.3 over a bound that is itself above the measurement. Budgets count
-/// what is reserved, not what is allocated: the largest call allocates a fraction of
-/// them. The 32-bit column is what [`oncl_plugin::MAX_MEMORY`] allows there.
+/// * `max_transfer`: the document as base64 (the request, and the reply of the attached CMS)
+///   and the template, times 1.5, in whole MiB;
+/// * `max_memory`: the guest's linear memory, measured at up to 12.1 bytes per byte of
+///   document and 3 MiB (13 and 4 MiB as a bound), times 2, in whole MiB, at most what the
+///   target allows ([`oncl_plugin::MAX_MEMORY`]: 16 MiB on 32-bit);
+/// * `metadata_bytes`, `memory_bytes`: [`manual_call_budget`] of the largest XML call, times
+///   1.1, in whole 64 MiB. Budgets count what is reserved, not what is allocated.
 #[derive(Clone, Debug)]
 pub struct ManualLimits {
     /// The limits every plugin is registered with ([`crate::plugins::PluginRegistry::install`]).
@@ -140,6 +139,12 @@ pub struct ManualLimits {
     pub max_document: u64,
 }
 
+/// The largest document of the desktop's manual window on a 64-bit target.
+pub const DESKTOP_MAX_DOCUMENT: u64 = 4 << 20;
+/// The largest document of the desktop's manual window on a 32-bit target, where a plugin's
+/// linear memory is at most [`oncl_plugin::MAX_MEMORY`] (16 MiB).
+pub const DESKTOP_MAX_DOCUMENT_32: u64 = 512 << 10;
+
 impl ManualLimits {
     /// The limits of this platform's desktop.
     pub fn desktop() -> Self {
@@ -150,32 +155,35 @@ impl ManualLimits {
         }
     }
 
-    /// 64-bit: documents of up to 16 MiB, the manifest's default `max_bytes`.
+    /// 64-bit: [`DESKTOP_MAX_DOCUMENT`].
     pub(super) fn wide() -> Self {
-        Self::sized(16 << 20, 32 << 20, 512 << 20, 3 << 30, 4 << 30)
+        Self::for_max_document(DESKTOP_MAX_DOCUMENT, 1 << 30)
     }
 
-    /// 32-bit: [`oncl_plugin::MAX_MEMORY`] is 16 MiB there, which holds 512 KiB documents.
+    /// 32-bit: [`DESKTOP_MAX_DOCUMENT_32`], the linear memory at most 16 MiB.
     pub(super) fn narrow() -> Self {
-        Self::sized(512 << 10, 2 << 20, 16 << 20, 256 << 20, 512 << 20)
+        Self::for_max_document(DESKTOP_MAX_DOCUMENT_32, 16 << 20)
     }
 
-    fn sized(
-        max_document: u64,
-        max_transfer: usize,
-        max_memory: usize,
-        metadata_bytes: u64,
-        memory_bytes: u64,
-    ) -> Self {
+    /// The limits sized for documents of up to `max_document` bytes, a plugin's linear memory
+    /// at most `memory_cap` bytes (see the type's documentation for the rules).
+    pub fn for_max_document(max_document: u64, memory_cap: usize) -> Self {
+        const MIB: u64 = 1 << 20;
+        let round = |n: u64, unit: u64| n.div_ceil(unit) * unit;
+        let transfer = round((max_document.div_ceil(3) * 4 + 16 * 1024) * 3 / 2, MIB);
+        let memory = round(2 * (13 * max_document + 4 * MIB), MIB).min(memory_cap as u64);
+        let instance = InstanceLimits {
+            max_memory: memory as usize,
+            max_transfer: transfer as usize,
+            ..InstanceLimits::default()
+        };
+        let need = manual_call_budget(&instance, KeyKind::XmlEx, max_document)
+            .expect("the limits of a document fit u64");
         ManualLimits {
-            instance: InstanceLimits {
-                max_memory,
-                max_transfer,
-                ..InstanceLimits::default()
-            },
+            instance,
             resources: oncl_pki::resource::ResourceLimits {
-                metadata_bytes,
-                memory_bytes,
+                metadata_bytes: round(need.metadata / 10 * 11, 64 * MIB),
+                memory_bytes: round(need.memory / 10 * 11, 64 * MIB),
                 ..oncl_pki::resource::ResourceLimits::default()
             },
             max_document,
@@ -220,6 +228,24 @@ mod tests {
                 "{limits:?}"
             );
         }
+    }
+
+    /// The chosen values (docs/dev/plugins-manual-tests.md, the trade-off table): the
+    /// accounting caps of the 64-bit desktop stay under the 1 GiB control-process budget.
+    #[test]
+    fn the_desktop_budgets_stay_under_the_control_process_budget() {
+        const MIB: u64 = 1 << 20;
+        let wide = ManualLimits::wide();
+        assert_eq!(wide.max_document, 4 * MIB);
+        assert_eq!(wide.instance.max_transfer as u64, 9 * MIB);
+        assert_eq!(wide.instance.max_memory as u64, 112 * MIB);
+        assert_eq!(wide.resources.metadata_bytes, 704 * MIB);
+        assert_eq!(wide.resources.memory_bytes, 896 * MIB);
+        assert!(wide.resources.memory_bytes < 1 << 30);
+        let narrow = ManualLimits::narrow();
+        assert_eq!(narrow.max_document, 512 << 10);
+        assert_eq!(narrow.instance.max_memory as u64, 16 * MIB);
+        assert!(narrow.resources.memory_bytes <= 256 * MIB, "{narrow:?}");
     }
 
     /// The narrow limits are what a 32-bit target can install, and the limits of this target
