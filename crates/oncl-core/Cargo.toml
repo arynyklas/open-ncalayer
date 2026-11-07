@@ -34,7 +34,10 @@ tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
 jose = ["dep:base64", "dep:serde", "dep:serde_json"]
-plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing", "dep:serde_json", "dep:base64", "dep:sha2"]
+plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing", "dep:serde_json", "dep:base64", "dep:sha2", "dep:getrandom"]
+# Constructors of approvals and tickets for the tests of guards and of the manual call path (no host builds them
+# this way: Core issues approvals from a confirmed consent summary). Never part of a release.
+testing = ["plugins"]
 # Every SDK feature above. It brings no desktop, updater, UI, server or async runtime;
 # `oncl-plugin`'s `distribution` (package store) stays a separate opt-in of that crate.
 full = ["tokens", "xml", "pdf", "jose", "plugins"]
@@ -53,6 +56,7 @@ base64 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true, features = ["raw_value"] }
 sha2 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 der.workspace = true
 
 [dev-dependencies]
@@ -82,7 +86,11 @@ required-features = ["plugins", "tokens"]
 
 [[test]]
 name = "plugin_ticket"
-required-features = ["plugins", "tokens"]
+required-features = ["plugins", "tokens", "testing"]
+
+[[test]]
+name = "plugin_approval"
+required-features = ["plugins", "tokens", "testing"]
 
 [[test]]
 name = "key_sources"

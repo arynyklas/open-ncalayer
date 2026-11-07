@@ -212,7 +212,8 @@ normalized. The output is compact JSON with object keys sorted (the template's k
 not kept), integers as written; a template number that is not an `i64`/`u64` is refused
 (`InvalidTemplate`) rather than re-printed. Undeclared, non-manual, `derived` and URL-network
 operations and bad parameters are refused with `PluginRequestError`, always `NotApplied`,
-before any key is used. Consent is not part of this API; the key-use ticket and its guard follow.
+before any key is used. Consent is not part of this API; the key-use ticket, its guard and the
+approved manual call (below) follow.
 
 #### Key-use ticket and `PluginConsentGuard` (`plugins`)
 
@@ -242,9 +243,12 @@ operation binds at most one key; every key-taking import (`keys_describe`, `keys
 and `keys_release` of the bound handle is idempotent. A ticket allows exactly one use
 (`max_uses = 1`).
 
-`KeyUseEvent::plugin()` exists only with the `plugins` feature of `oncl-core`. A `KeyUseGuard` of
-a host that registers plugins with declared operations MUST check it (a build that cannot see it
-authorizes a ticketed use as a document use); `oncl-server` and `oncl-cli` do.
+`KeyUseEvent::plugin()` exists only with the `plugins` feature of `oncl-core`; the featureless
+`KeyUseEvent::is_plugin()` says whether the event carries a ticket (always `false` without the
+feature). A `KeyUseGuard` of a host that registers plugins with declared operations MUST refuse
+every event for which `is_plugin()` is true unless it is the plugin guard (a document guard that
+ignores it would authorize a ticketed use as a document use); `oncl-server`, `oncl-cli` and
+`oncl-ui`'s `ConsentGuard` do.
 
 `PluginConsentGuard` (a `KeyUseGuard`) is the guard of a plugin engine. `before_use` refuses
 (`PermissionDenied`, key not applied; the reason is recorded per `OperationId` in a bounded log of
@@ -253,11 +257,75 @@ ticket and the guard holds an unexpired `PluginApproval` for the same invocation
 identity, operation, caller, key and handle with one unspent `ApprovedUse` whose kind, content
 and options hash equal the ticket's; the use is then spent. With no approval it refuses
 everything, and a document key use (no ticket) too: give documents their own engine. A
-`PluginApproval` (not `Clone`, not `Deserialize`) is built by the host from the consent it
-collected and armed with `grant`; its nonce is accepted once. Building approvals from the
-declared profile and the frozen input is the next stage. The server (`DurableAuditGuard`) and
-CLI (`Authority`) guards refuse every ticketed use until their own grants exist (`plugin_bytes`
-in MP8/MP9); plugins without declarations are unchanged.
+`PluginApproval` (not `Clone`, not `Deserialize`, no public constructor) is issued by Core
+(below); its nonce is accepted once. The server (`DurableAuditGuard`) and CLI (`Authority`)
+guards refuse every ticketed use until their own grants exist (`plugin_bytes` in MP8/MP9);
+plugins without declarations are unchanged.
+
+#### Manual window: consent summary, approval, approved call (`plugins`)
+
+Three Core steps, in this order (`docs/design/manual-plugins.md` 4.2, 4.3, 4.8). Both
+`plugin_prepare` and `plugin_call_approved` take the same `ManualCall { plugin_id, operation,
+params, key: &PluginKeyBinding, caller: &CallerContext }`:
+
+1. `Engine::plugin_prepare(&ManualCall, &OperationContext)` returns a `PluginPrepared` or a
+   `PluginPrepareError` (always `NotApplied`; nothing is opened).
+   It validates the parameters like `plugin_request`, freezes what is signed (the bytes of the
+   bound parameter, SHA-256 and length; for a `cms_ex` profile whose `content_form` is `digest`
+   the digest Core itself computes with the hash algorithm of the bound key's signature
+   algorithm, by the same function the signer later uses: GOST 34.311, Streebog or SHA-2 by
+   the certificate and the context's policy, never a digest a plugin names), and the options
+   (`KeyUse::options_sha256` with the `param:` sources of the profile filled from the typed
+   text parameters: the very encoder the ticket side uses). `caller` must be a
+   `CallerContext::LocalOperator` (the manual window has no origin) and the key binding must
+   carry its public metadata (`with_public_metadata`: alias and certificate). The metadata
+   is the host's statement about the key it signs with: Core shows it and gives it to the plugin
+   (`BoundKey`, `keys_describe`) but does not re-read it from the key store, so the host builds
+   the binding from the one key source it signs with.
+   `PluginPrepared::summary()` is a `ConsentSummary`: the **trusted** description to render
+   (identity `{id, PackageHash, version}`, operation name, kind, number of uses, the declared
+   profile with the user's text resolved, the options hash, the content parameter name, length,
+   SHA-256 and prehashed digest, the key's alias, serial, subject CN, SHA-256 fingerprint and
+   `not_after`, and the PKI endpoints the host registered). It holds no plugin text (`name`,
+   `description`, `label` stay in the plugin's own frame); `key.alias` and `key.subject_cn` are
+   the host's and the certificate's strings and must be escaped by the renderer.
+2. `UserConfirmation::after_user_confirmed(&ConsentSummary)` is the only way to make the token
+   `PluginPrepared::approve(confirmation, ttl)` takes. **Host duty:** call it only from the
+   handler of the user's own action on the confirm control, after rendering that very summary;
+   never auto-confirm, never ahead of time, never from a stored answer (nothing is stored). It
+   names the SHA-256 of the summary shown, so confirming one summary approves no other. The
+   token is neither `Clone` nor `Copy`. `approve` returns the `PluginApproval`: kind, content
+   binding and options hash from the prepare step, one use (`max_uses = 1`), the invocation of
+   the context it was prepared with, a deadline `ttl` on the monotonic clock from now (`None` is
+   `APPROVAL_TTL` = 120 s; a longer ask is cut to it, zero is refused), and a nonce of 16
+   bytes of the operating system's CSPRNG (an RNG failure issues nothing).
+3. `Engine::plugin_call_approved(&ManualCall, PluginApproval, &ManualHost, &mut OperationContext)
+   -> ApprovedCall` runs the module in the manual window. It re-derives the use from the parameters it is handed **now** and refuses,
+   before the module runs, an approval that is not for exactly them (another document, text,
+   key or handle, caller, operation, invocation, expired): the module never sees a document
+   the user did not approve. Then it builds the request (`plugin_request`), grants the approval
+   to the engine's `PluginConsentGuard`, and runs `oncl_plugin::Compiled::call_manual` with a
+   fresh `BoundInteraction` (the `BoundKey` is built from the very `PluginKeyBinding` the
+   backend signs with; the clock is the validation clock read at the call; the transport and
+   `OcspCache` are the host's, from `ManualHost`; no origin). The guard stays the authoritative
+   check at the key use. The approval is revoked when the call ends (a `Drop`, so also on a
+   trap, an error and a panic). The engine must be built with
+   `EngineServices::with_plugin_keys(provider, Arc<PluginConsentGuard>)`: its only key guard is
+   that one (`with_keys` clears it and an approved call then refuses with
+   `TicketRefusal::NoGuard`); one approved call runs at a time (`Busy`). Keep documents on
+   another engine: the desktop `ConsentGuard` refuses a ticketed event and the plugin guard
+   refuses an event without one.
+
+`ApprovedCall` is the honest outcome: `result()`/`response()` (the module's reply string),
+`applied()` (`Applied` also when the module failed after the key use, `Unknown` when the
+application itself did not report, `NotApplied` for every refusal) and `refusals()` (the
+typed `TicketRefusal`s of this invocation: from the guard, or from the checks before the
+module ran, plus `NoGuard`, `Busy`, `Replayed`, `UndeclaredOperation`, `Caller`).
+
+`PluginApproval::new`, `ApprovedUse::new` and the other constructors are not public. With the
+`testing` feature of `oncl-core` (never part of a release) `PluginApproval::for_tests`,
+`ApprovedUse::for_tests`, `PluginUse::for_tests` and `KeyUseEvent::with_plugin_ticket_for_tests`
+forge what Core never would, for tests of guards.
 
 ## 6. Semver, versions and migration
 

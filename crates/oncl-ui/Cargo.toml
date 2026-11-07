@@ -61,6 +61,9 @@ zbus.workspace = true
 slint-build.workspace = true
 
 [dev-dependencies]
+# A plugin ticket on a key-use event, to test that the document guard refuses it.
+oncl-core = { workspace = true, features = ["testing"] }
+oncl-plugin.workspace = true
 oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 # A fake mkcert CA in the TLS wizard's tests.

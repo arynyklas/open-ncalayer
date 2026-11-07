@@ -63,7 +63,8 @@ struct Grant {
 }
 
 /// Lets the engine apply the key exactly for the consent the user gave: one operation, one
-/// key, one action, one application per approved document.
+/// key, one action, one application per approved document. It refuses every key use that
+/// carries a plugin ticket (`KeyUseEvent::is_plugin`): plugins are approved by their own guard.
 #[derive(Default)]
 pub struct ConsentGuard {
     grant: Mutex<Option<Grant>>,
@@ -102,6 +103,12 @@ impl ConsentGuard {
 
 impl KeyUseGuard for ConsentGuard {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
+        // The user's consent to a document is not consent to a plugin's key use (which has
+        // its own engine and guard): a ticketed event is refused whatever is granted, and
+        // spends none of it.
+        if event.is_plugin() {
+            return Err(OperationError::PermissionDenied);
+        }
         let mut grant = self.grant.lock().unwrap_or_else(PoisonError::into_inner);
         match grant.as_mut() {
             Some(g)
@@ -1240,5 +1247,60 @@ mod tests {
         let earlier = now() - time::Duration::days(365 * 300);
         let candidates = open_key_store(&w.store, PASSWORD, earlier).unwrap();
         assert_eq!(candidates[0].unsuitable, Some(Unsuitable::NotYetValid));
+    }
+
+    /// Consent to a document is not consent to a plugin: an event with a plugin ticket is
+    /// refused even when everything else matches the grant, and the grant stays whole.
+    #[test]
+    fn a_plugin_ticket_is_refused_and_spends_no_consent() {
+        use oncl_core::keys::KeyId;
+        use oncl_core::plugins::{
+            CallerContext, ContentBinding, PackageHash, PluginIdentity, PluginUse,
+        };
+        use oncl_core::{ExecutionGrant, OperationPolicy};
+        use oncl_plugin::operations::KeyKind;
+
+        let w = world();
+        let (engine, guard) = engine(&w);
+        let key = KeyId::new("k").unwrap();
+        let ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign]).with_keys([key.clone()]),
+                OperationPolicy::strict_online(),
+                Arc::new(crate::workspace::JobControl::default()),
+            )
+            .unwrap();
+        guard.allow_for_tests(ctx.id().get(), key.clone(), Action::Sign, 1);
+        let plain = KeyUseEvent::new(&ctx, key.clone(), Action::Sign);
+        let ticket = PluginUse::for_tests(
+            PluginIdentity {
+                id: "t.p".to_owned(),
+                package: PackageHash::Loose([7; 32]),
+                version: "1.0.0".to_owned(),
+            },
+            "sign",
+            CallerContext::LocalOperator("manual".to_owned()),
+            KeyKind::Raw,
+            1,
+            key,
+            ContentBinding::bytes(b"document"),
+            [0; 32],
+        );
+        let ticketed = plain.clone().with_plugin_ticket_for_tests(ticket);
+        assert!(!plain.is_plugin());
+        assert!(ticketed.is_plugin());
+        assert!(matches!(
+            guard.before_use(&ticketed),
+            Err(OperationError::PermissionDenied)
+        ));
+        assert_eq!(guard.applications(), 0);
+        guard
+            .before_use(&plain)
+            .expect("the consent of the document is untouched");
+        assert_eq!(guard.applications(), 1);
+        assert!(matches!(
+            guard.before_use(&plain),
+            Err(OperationError::PermissionDenied)
+        ));
     }
 }

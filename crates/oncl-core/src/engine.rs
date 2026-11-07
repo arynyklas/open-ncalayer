@@ -25,6 +25,8 @@ pub struct EngineServices {
     inspection_limits: oncl_pki::info::InspectionLimits,
     #[cfg(feature = "plugins")]
     plugins: Option<crate::plugins::PluginRegistry>,
+    #[cfg(feature = "plugins")]
+    plugin_guard: Option<Arc<crate::plugins::PluginConsentGuard>>,
 }
 impl EngineServices {
     pub fn hash_only(limits: ResourceLimits) -> Self {
@@ -39,6 +41,8 @@ impl EngineServices {
             inspection_limits: oncl_pki::info::InspectionLimits::default(),
             #[cfg(feature = "plugins")]
             plugins: None,
+            #[cfg(feature = "plugins")]
+            plugin_guard: None,
         }
     }
     pub fn with_shared_budget(mut self, budget: Arc<SharedBudget>) -> Self {
@@ -52,6 +56,32 @@ impl EngineServices {
         guard: Arc<dyn crate::keys::KeyUseGuard>,
     ) -> Self {
         self.keys = Some(crate::keys::KeyServices { provider, guard });
+        #[cfg(feature = "plugins")]
+        {
+            // The last key configuration wins as a whole: a document guard here means no
+            // plugin guard (an approved plugin call needs `with_plugin_keys`).
+            self.plugin_guard = None;
+        }
+        self
+    }
+    /// Key sources for an engine whose key uses are those of plugins in the manual window: the
+    /// only guard is `guard`, which refuses every key use that is not for an unspent,
+    /// unexpired [`crate::plugins::PluginApproval`] granted to it. [`Engine::plugin_call_approved`]
+    /// grants Core-issued approvals to this guard and revokes them when the call ends; an
+    /// engine configured with [`EngineServices::with_keys`] cannot run an approved call.
+    /// Keep documents on another engine (their guard refuses a plugin ticket, this one
+    /// refuses everything without one).
+    #[cfg(feature = "plugins")]
+    pub fn with_plugin_keys(
+        mut self,
+        provider: Arc<dyn crate::keys::KeyProvider>,
+        guard: Arc<crate::plugins::PluginConsentGuard>,
+    ) -> Self {
+        self.keys = Some(crate::keys::KeyServices {
+            provider,
+            guard: guard.clone(),
+        });
+        self.plugin_guard = Some(guard);
         self
     }
     pub fn with_validation(mut self, services: crate::ValidationServices) -> Self {
@@ -99,6 +129,11 @@ pub struct Engine {
     pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
     #[cfg(feature = "plugins")]
     pub(crate) plugins: Option<crate::plugins::PluginRegistry>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_guard: Option<Arc<crate::plugins::PluginConsentGuard>>,
+    /// Held for the whole of an approved plugin call: the guard has one approval slot.
+    #[cfg(feature = "plugins")]
+    pub(crate) approved_call: std::sync::Mutex<()>,
     activity: Option<Arc<crate::activity::ActivityGate>>,
 }
 
@@ -149,6 +184,10 @@ impl Engine {
             inspection_limits: services.inspection_limits,
             #[cfg(feature = "plugins")]
             plugins: services.plugins,
+            #[cfg(feature = "plugins")]
+            plugin_guard: services.plugin_guard,
+            #[cfg(feature = "plugins")]
+            approved_call: std::sync::Mutex::new(()),
             activity: None,
         })
     }

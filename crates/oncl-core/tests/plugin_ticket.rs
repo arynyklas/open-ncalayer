@@ -267,7 +267,7 @@ fn nonce() -> [u8; 16] {
 }
 /// The approval of the (single) use the declared operation describes.
 fn approval(rig: &Rig, id: OperationId, op: &str, uses: Vec<ApprovedUse>) -> PluginApproval {
-    PluginApproval::new(
+    PluginApproval::for_tests(
         rig.engine.plugin_identity(ID).unwrap().clone(),
         op,
         caller(),
@@ -288,11 +288,7 @@ fn declared_options(rig: &Rig, op: &str, text: &str) -> [u8; 32] {
         .unwrap()
 }
 fn used(rig: &Rig, op: &str, kind: KeyKind, content: ContentBinding) -> ApprovedUse {
-    ApprovedUse {
-        kind,
-        content,
-        options_sha256: declared_options(rig, op, "/r"),
-    }
+    ApprovedUse::for_tests(kind, content, declared_options(rig, op, "/r"))
 }
 fn raw_call(handle: u32, data: &[u8]) -> (Import, Vec<u8>) {
     (
@@ -857,8 +853,10 @@ fn options_mismatch_refused() {
     // The approval of other options than the declared ones does not cover the declared call.
     let case = cases().remove(2);
     let r = declared_rig(&case, true);
-    let mut wrong = used(&r, case.op, case.kind, case.content);
-    wrong.options_sha256[0] ^= 1;
+    let right = used(&r, case.op, case.kind, case.content);
+    let mut options = *right.options_sha256();
+    options[0] ^= 1;
+    let wrong = ApprovedUse::for_tests(case.kind, case.content, options);
     assert!(denied(go(&r, &case, vec![wrong]).unwrap_err()));
     assert_eq!(last(&r), Some(TicketRefusal::Options));
 }
@@ -1098,7 +1096,7 @@ fn approval_binds_operation_plugin_key_and_time() {
         f(&mut p);
         r.guard
             .consent()
-            .grant(PluginApproval::new(
+            .grant(PluginApproval::for_tests(
                 p.identity,
                 p.op,
                 p.caller,
@@ -1190,7 +1188,7 @@ fn approval_binds_operation_plugin_key_and_time() {
     // A nonce is granted once; an approval needs exactly one use.
     let guard = PluginConsentGuard::new();
     let mk = |n: [u8; 16], uses: usize| {
-        PluginApproval::new(
+        PluginApproval::for_tests(
             r.engine.plugin_identity(ID).unwrap().clone(),
             case.op,
             caller(),
