@@ -18,6 +18,7 @@ getrandom.workspace = true
 oncl-api = { path = "../oncl-api", features = ["server"] }
 oncl-core = { workspace = true, features = ["tokens", "xml", "pdf", "jose", "plugins"] }
 oncl-token.workspace = true
+tracing.workspace = true
 axum.workspace = true
 hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "service"] }
@@ -53,6 +54,7 @@ bytes = "=1.12.1"
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }
+oncl-core = { workspace = true, features = ["testing"] }
 oncl-testkit.workspace = true
 tempfile.workspace = true
 rsa.workspace = true

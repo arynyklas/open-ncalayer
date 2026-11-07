@@ -196,6 +196,36 @@ foreign/old journal formats and live ownership. It does not silently migrate or
 repair another journal. Audit identity/lock/rotation/quota and opaque actor/key
 labels retain the audit library's existing semantics.
 
+### Plugin records in the audit journal
+
+The journal format stays `ONCLAU02`, 160-byte checksummed frames, and a journal that contains no
+plugin ticket is **byte-identical** to what earlier versions wrote. The same version reads every
+journal an earlier version wrote (tested with a journal produced by the previous code). Plugin
+operations that declare their key uses (`[[operations]]` in the manifest, "declared") add two
+frame kinds, which **an earlier version cannot read** (it reports the journal as damaged and asks
+for operator inspection): do not run an older server over a journal that holds them.
+
+* **Use (authorised).** Before the `BEGIN` of the key use, one to a few `PluginDetail` frames
+  carry: plugin id, package hash (kind `1` file / `2` loose, and SHA-256), version, operation
+  name, the ticket digest, the SHA-256 of the approval nonce when a user approved (never the nonce),
+  the content SHA-256 and length, whether the content was a prehashed digest, the options SHA-256,
+  the caller kind (`browser` / `local-operator` / `service-client`), `declared`, and the operator
+  grant that covered it. They are written in the same single write and sync as the `BEGIN`, so a
+  crash between them leaves details with no `BEGIN`: the use never began, the key was not applied.
+  Key id and principal are the journal's existing opaque labels on the `BEGIN`. The `FINAL` is the
+  existing one: `Applied`, `NotApplied` or `Unknown` honestly; no `FINAL` is `Unknown`.
+* **Refusal.** A ticketed key use that is refused writes the same `PluginDetail` frames and a
+  `PluginRefusal` frame, carrying the stable subcode id (for example `content-mismatch`,
+  `not-granted`, `no-consent-guard`). It writes **no `BEGIN`**: the key was not applied. At most
+  four refusals per operation are journaled (a plugin that keeps asking cannot push earlier
+  records out); all are also logged as `warn` events (target `oncl::plugin_audit`). The caller
+  receives `PermissionDenied`; the subcode is for the operator and, where the HTTP contract
+  exposes it, the API client, never the plugin.
+
+Plugins without declarations are unchanged: no ticket, no plugin record (the absence of one is
+`declared=false`). No document bytes, parameters, secrets or nonces are ever journaled.
+`DurableAuditGuard::plugin_records()` reads these records back for tools.
+
 Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global
 `inline_pkcs12 = true` and the token's own `inline_pkcs12 = true` right (both off
 by default; see [the HTTP contract](http-api.md), "Keys and secret roles"). The host

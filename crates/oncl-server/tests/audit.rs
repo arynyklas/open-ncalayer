@@ -11,7 +11,7 @@ use oncl_pki::resource::ResourceLimits;
 use oncl_server::audit::{
     AuditConfig, AuditHealth, AuditLabel, DurableAuditGuard, FRAME_BYTES, FaultPoint, RecordKind,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use support::{Control, Rig};
 fn context() -> OperationContext {
     Engine::new(EngineServices::hash_only(ResourceLimits::default()))
@@ -1615,4 +1615,441 @@ fn deadline_expiry_before_use_refuses_that_request_without_poisoning_service_hea
         AuditHealth::Healthy,
         "a slow request must not poison every signer"
     );
+}
+
+// ---- MP3a-3: plugin records -------------------------------------------------------------
+use oncl_core::plugins::CallerContext;
+use oncl_core::plugins::{
+    ContentBinding, PackageHash, PluginIdentity, PluginRefusalCode, PluginUse, TicketRefusal,
+};
+use oncl_plugin::operations::KeyKind;
+use oncl_server::audit::{PluginGrantFacts, PluginTicketPolicy};
+
+/// An old-format (no plugin record) journal written by the code before MP3a-3: Header,
+/// BEGIN, FINAL(Applied) and a second BEGIN left unfinished, identity file = first frame.
+const OLD_JOURNAL_HEX: [&str; 13] = [
+    "4f4e434c4155303202ac9c19f0b48833f0939df9f469b2630000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000002c63a9cefcc4bbd28ed12a3caa0d3366bf64dbd7f588",
+    "9d038a29c395d019a4474f4e434c4155303202ac9c19f0b48833f0939df9f469b26301000000000000000100000000000000",
+    "0100000000000000207bd0fbb64b4c19812344b19f13bd440101010101010101010101010101010102020202020202020202",
+    "020202020202deae85b5a101000001020000000000000000000000000000000000000000000004ae93ddbfbe07114e8523b4",
+    "1428c55ecd073e96c0ac89f66e2a42288ada37434f4e434c4155303202ac9c19f0b48833f0939df9f469b263020000000000",
+    "000001000000000000000100000000000000207bd0fbb64b4c19812344b19f13bd4401010101010101010101010101010101",
+    "02020202020202020202020202020202eeae85b5a10100000202010100000000000000000000000000000000000000005919",
+    "0c01152eb155d46c011dc5856c8b5cc31f1faf772462efcf4e4a00fc7e4f4f4e434c4155303202ac9c19f0b48833f0939df9",
+    "f469b263030000000000000003000000000000000100000000000000207bd0fbb64b4c19812344b19f13bd44010101010101",
+    "0101010101010101010102020202020202020202020202020202feae85b5a101000001020000000000000000000000000000",
+    "00000000000000003d236af3e06fefc25a666c60768c397394abe11805cbdbbf9c1b2c2221c87b5c",
+];
+
+struct Policy(Mutex<Vec<Result<PluginGrantFacts, TicketRefusal>>>);
+impl PluginTicketPolicy for Policy {
+    fn check(
+        &self,
+        _operation_id: oncl_core::OperationId,
+        _ticket: &PluginUse,
+    ) -> Result<PluginGrantFacts, TicketRefusal> {
+        self.0.lock().unwrap().remove(0)
+    }
+}
+fn granted() -> Result<PluginGrantFacts, TicketRefusal> {
+    Ok(PluginGrantFacts {
+        grant_id: "tok-1/org.example.sign/sign".to_owned(),
+        declared: true,
+    })
+}
+fn ticket(key: &KeyId, content: &[u8]) -> PluginUse {
+    PluginUse::for_tests(
+        PluginIdentity {
+            id: "org.example.sign".to_owned(),
+            package: PackageHash::File([7; 32]),
+            version: "1.2.3".to_owned(),
+        },
+        "sign",
+        CallerContext::ServiceClient("tok-1".to_owned()),
+        KeyKind::Raw,
+        1,
+        key.clone(),
+        ContentBinding::prehashed(content),
+        [9; 32],
+        [8; 32],
+    )
+}
+fn plugin_event(ctx: &OperationContext, key: &KeyId, content: &[u8]) -> KeyUseEvent {
+    event(ctx, key).with_plugin_ticket_for_tests(ticket(key, content))
+}
+fn policy_guard(
+    path: &std::path::Path,
+    answers: Vec<Result<PluginGrantFacts, TicketRefusal>>,
+) -> DurableAuditGuard {
+    DurableAuditGuard::create(config(path))
+        .unwrap()
+        .with_plugin_policy(Arc::new(Policy(Mutex::new(answers))))
+}
+
+#[test]
+fn authorised_plugin_use_records_identity_facts_and_final_without_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = policy_guard(&temp.path().join("audit"), vec![granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let marker = b"DOCUMENT-BYTES-SECRET-MARKER";
+    let ev = plugin_event(&ctx, &key, marker);
+    let receipt = guard.before_use(&ev).unwrap();
+    guard
+        .finish(
+            receipt,
+            KeyUseOutcome {
+                applied: AppliedState::Unknown,
+                succeeded: false,
+            },
+        )
+        .unwrap();
+    let records = guard.plugin_records().unwrap();
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r.refusal, None);
+    assert_eq!(r.finished, Some((AppliedState::Unknown, false)));
+    let f = &r.facts;
+    assert_eq!(f.plugin_id, "org.example.sign");
+    assert_eq!((f.package_kind, f.package_sha256), (1, [7; 32]));
+    assert_eq!(f.version, "1.2.3");
+    assert_eq!(f.operation, "sign");
+    assert_eq!(f.ticket_digest, ev.plugin().unwrap().digest());
+    assert_eq!(f.approval_nonce_sha256, None);
+    assert_eq!(f.content_sha256, ev.plugin().unwrap().content().sha256);
+    assert_eq!(f.content_len, marker.len() as u64);
+    assert!(f.prehashed);
+    assert_eq!(f.options_sha256, [9; 32]);
+    assert_eq!(f.caller.as_str(), "service-client");
+    assert!(f.declared);
+    assert_eq!(f.grant_id.as_deref(), Some("tok-1/org.example.sign/sign"));
+    // The key label of the binding is on the BEGIN; the BEGIN follows its chunks.
+    let frames = guard.records().unwrap();
+    let kinds: Vec<_> = frames.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds[0], RecordKind::Header);
+    assert!(
+        kinds[1..kinds.len() - 2]
+            .iter()
+            .all(|k| *k == RecordKind::PluginDetail)
+    );
+    assert_eq!(kinds[kinds.len() - 2], RecordKind::Begin);
+    assert_eq!(kinds[kinds.len() - 1], RecordKind::Final);
+    assert_eq!(frames[frames.len() - 2].key, AuditLabel::new([2; 16]));
+    let bytes = std::fs::read(journal(&temp.path().join("audit"))).unwrap();
+    assert!(!bytes.windows(marker.len()).any(|w| w == marker));
+}
+
+#[test]
+fn final_states_of_a_plugin_use_are_honest_in_all_three_cases() {
+    for applied in [
+        AppliedState::Applied,
+        AppliedState::Unknown,
+        AppliedState::NotApplied,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = policy_guard(&temp.path().join("audit"), vec![granted()]);
+        let ctx = context();
+        let key = KeyId::new("key").unwrap();
+        let _bound = binding(&guard, &ctx, &key);
+        let receipt = guard.before_use(&plugin_event(&ctx, &key, b"x")).unwrap();
+        let succeeded = applied == AppliedState::Applied;
+        guard
+            .finish(receipt, KeyUseOutcome { applied, succeeded })
+            .unwrap();
+        assert_eq!(
+            guard.plugin_records().unwrap()[0].finished,
+            Some((applied, succeeded))
+        );
+    }
+    // No FINAL is Unknown: the journal says nothing more than the BEGIN.
+    let temp = tempfile::tempdir().unwrap();
+    let guard = policy_guard(&temp.path().join("audit"), vec![granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let _receipt = guard.before_use(&plugin_event(&ctx, &key, b"x")).unwrap();
+    assert_eq!(guard.plugin_records().unwrap()[0].finished, None);
+}
+
+/// Every TicketRefusal the policy can name is refused as PermissionDenied before the key,
+/// writes no BEGIN, and is journaled with its subcode id.
+#[test]
+fn every_refusal_is_permission_denied_without_begin_and_journaled_with_its_subcode() {
+    let reasons = [
+        TicketRefusal::NoTicket,
+        TicketRefusal::NoApproval,
+        TicketRefusal::Uses,
+        TicketRefusal::Expired,
+        TicketRefusal::OperationId,
+        TicketRefusal::Identity,
+        TicketRefusal::Operation,
+        TicketRefusal::Caller,
+        TicketRefusal::Key,
+        TicketRefusal::Action,
+        TicketRefusal::Kind,
+        TicketRefusal::Content,
+        TicketRefusal::Options,
+        TicketRefusal::AlreadyUsed,
+        TicketRefusal::UndeclaredOperation,
+        TicketRefusal::CertificateChanged,
+        TicketRefusal::NoGuard,
+        TicketRefusal::Busy,
+        TicketRefusal::Replayed,
+        TicketRefusal::NotGranted,
+    ];
+    for reason in reasons {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = policy_guard(&temp.path().join("audit"), vec![Err(reason)]);
+        let ctx = context();
+        let key = KeyId::new("key").unwrap();
+        let _bound = binding(&guard, &ctx, &key);
+        let error = guard
+            .before_use(&plugin_event(&ctx, &key, b"doc"))
+            .err()
+            .expect("refused");
+        // What the plugin gets: PermissionDenied, key not applied, nothing of the subcode.
+        assert_eq!(error.code(), ErrorCode::PermissionDenied, "{reason:?}");
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert_eq!(guard.health(), AuditHealth::Healthy);
+        let frames = guard.records().unwrap();
+        assert!(
+            frames.iter().all(|r| r.kind != RecordKind::Begin),
+            "{reason:?}"
+        );
+        assert_eq!(frames.last().unwrap().kind, RecordKind::PluginRefusal);
+        let records = guard.plugin_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].refusal.as_deref(),
+            Some(PluginRefusalCode::from(reason).id())
+        );
+        assert_eq!(records[0].facts.operation, "sign");
+        assert_eq!(records[0].finished, None);
+        assert_eq!(guard.plugin_refusals(ctx.id()), vec![reason]);
+        assert_eq!(guard.take_plugin_refusals(ctx.id()), vec![reason]);
+        assert!(guard.take_plugin_refusals(ctx.id()).is_empty());
+        // The guard stays usable: a later grant works.
+    }
+}
+
+#[test]
+fn a_ticket_without_a_policy_is_refused_as_no_guard_and_a_plain_use_is_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = DurableAuditGuard::create(config(&temp.path().join("audit"))).unwrap();
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let error = guard
+        .before_use(&plugin_event(&ctx, &key, b"doc"))
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(
+        guard.plugin_records().unwrap()[0].refusal.as_deref(),
+        Some("no-consent-guard")
+    );
+    // A use without a ticket (a plugin that declares nothing, or a document) is as before:
+    // a plain BEGIN with no plugin record.
+    let plain = guard.before_use(&event(&ctx, &key)).unwrap();
+    guard.finish(plain, done()).unwrap();
+    assert_eq!(guard.plugin_records().unwrap().len(), 1);
+}
+
+#[test]
+fn refusals_of_one_operation_are_journaled_at_most_four_times() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = policy_guard(
+        &temp.path().join("audit"),
+        (0..9).map(|_| Err(TicketRefusal::Content)).collect(),
+    );
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    for _ in 0..9 {
+        assert!(guard.before_use(&plugin_event(&ctx, &key, b"d")).is_err());
+    }
+    assert_eq!(guard.plugin_records().unwrap().len(), 4);
+    assert_eq!(guard.plugin_refusals(ctx.id()).len(), 9);
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+}
+
+#[test]
+fn a_refusal_of_an_unbound_operation_is_traced_not_journaled() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = policy_guard(
+        &temp.path().join("audit"),
+        vec![Err(TicketRefusal::Content)],
+    );
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    assert!(guard.before_use(&plugin_event(&ctx, &key, b"d")).is_err());
+    assert!(guard.plugin_records().unwrap().is_empty());
+    assert_eq!(
+        guard.plugin_refusals(ctx.id()),
+        vec![TicketRefusal::Content]
+    );
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+}
+
+#[test]
+fn plugin_frames_survive_every_write_fault_recovery_and_reopen() {
+    for point in [
+        FaultPoint::BeforeWrite,
+        FaultPoint::PartialWrite,
+        FaultPoint::BeforeSync,
+        FaultPoint::AfterSync,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        let guard = policy_guard(&path, vec![granted(), granted()]);
+        let ctx = context();
+        let key = KeyId::new("key").unwrap();
+        let bound = binding(&guard, &ctx, &key);
+        guard.inject_fault(point);
+        let error = guard
+            .before_use(&plugin_event(&ctx, &key, b"doc"))
+            .err()
+            .expect("refused");
+        assert_eq!(error.code(), ErrorCode::AuditFailed, "{point:?}");
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert_eq!(guard.health(), AuditHealth::Failed);
+        guard.recover().unwrap();
+        assert_eq!(guard.health(), AuditHealth::Healthy, "{point:?}");
+        for r in guard
+            .records()
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind.is_final())
+        {
+            assert_eq!(r.applied, AppliedState::NotApplied);
+            assert!(!r.succeeded);
+        }
+        // A fresh use after recovery works and its record is whole.
+        let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+        guard.finish(receipt, done()).unwrap();
+        let last = guard.plugin_records().unwrap().pop().unwrap();
+        assert_eq!(last.finished, Some((AppliedState::Applied, true)));
+        drop(bound);
+        drop(guard);
+        // A restart reads the same records and demands recovery only if a use is open.
+        let reopened = DurableAuditGuard::open(config(&path)).unwrap();
+        assert_eq!(
+            reopened
+                .plugin_records()
+                .unwrap()
+                .last()
+                .unwrap()
+                .facts
+                .operation,
+            "sign"
+        );
+    }
+}
+
+#[test]
+fn a_crash_between_chunks_and_begin_means_the_key_was_never_applied() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+    guard.finish(receipt, done()).unwrap();
+    drop(_bound);
+    drop(guard);
+    // Cut the journal after the chunks of the use, before its BEGIN: what a crash during the
+    // one write could leave (whole frames only).
+    let file = journal(&path);
+    let bytes = std::fs::read(&file).unwrap();
+    let frames = bytes.len() / FRAME_BYTES as usize;
+    // Header, k chunks, BEGIN, FINAL.
+    let cut = (frames - 2) * FRAME_BYTES as usize;
+    std::fs::write(&file, &bytes[..cut]).unwrap();
+    let reopened = DurableAuditGuard::open(config(&path)).unwrap();
+    assert!(reopened.plugin_records().unwrap().is_empty());
+    assert_eq!(reopened.health(), AuditHealth::RecoveryRequired);
+    reopened.recover().unwrap();
+    assert_eq!(reopened.health(), AuditHealth::Healthy);
+    assert!(
+        reopened
+            .records()
+            .unwrap()
+            .iter()
+            .all(|r| r.kind != RecordKind::Begin && r.kind != RecordKind::Final)
+    );
+}
+
+#[test]
+fn an_incomplete_chunk_run_before_a_begin_is_damage_not_a_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+    guard.finish(receipt, done()).unwrap();
+    drop(_bound);
+    drop(guard);
+    let file = journal(&path);
+    let mut bytes = std::fs::read(&file).unwrap();
+    let frames = bytes.len() / FRAME_BYTES as usize;
+    assert!(frames >= 5, "several chunks");
+    // Remove the last chunk frame (the one before the BEGIN): sequence breaks.
+    let at = (frames - 3) * FRAME_BYTES as usize;
+    bytes.drain(at..at + FRAME_BYTES as usize);
+    std::fs::write(&file, &bytes).unwrap();
+    let reopened = DurableAuditGuard::open(config(&path)).unwrap();
+    assert!(reopened.recover().is_err() || reopened.records().is_err());
+}
+
+#[test]
+fn an_old_format_journal_is_still_read_recovered_and_extended() {
+    let hex: String = OLD_JOURNAL_HEX.concat();
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+        .collect();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    {
+        // The directory must be a private one with the files an older version left.
+        let created = DurableAuditGuard::create(config(&path)).unwrap();
+        drop(created);
+    }
+    std::fs::write(
+        path.join("oncl-audit.identity"),
+        &bytes[..FRAME_BYTES as usize],
+    )
+    .unwrap();
+    std::fs::write(path.join("oncl-audit-0000000000000000.log"), &bytes).unwrap();
+    let guard = DurableAuditGuard::open(config(&path)).unwrap();
+    // The unfinished BEGIN needs the explicit recovery, as before.
+    assert_eq!(guard.health(), AuditHealth::RecoveryRequired);
+    let kinds: Vec<_> = guard.records().unwrap().iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            RecordKind::Header,
+            RecordKind::Begin,
+            RecordKind::Final,
+            RecordKind::Begin
+        ]
+    );
+    let finals: Vec<_> = guard
+        .records()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind.is_final())
+        .collect();
+    assert_eq!(finals[0].applied, AppliedState::Applied);
+    assert!(guard.plugin_records().unwrap().is_empty());
+    guard.recover().unwrap();
+    let last = guard.records().unwrap().pop().unwrap();
+    assert!(last.kind.is_final());
+    assert_eq!(last.applied, AppliedState::Unknown);
+    assert_eq!(guard.health(), AuditHealth::Healthy);
 }

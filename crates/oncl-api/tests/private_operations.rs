@@ -3407,7 +3407,17 @@ content = "param:file"
     let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(error["code"], "PermissionDenied");
     assert_eq!(error["applied"], "NotApplied");
-    assert_eq!(begins(&service), 0, "the journal is never touched");
+    assert_eq!(begins(&service), 0, "the key is never authorised: no BEGIN");
+    // The refusal itself is a durable record of its own (MP3a-3) with its stable subcode.
+    let refusals = service.host.audit.plugin_records().unwrap();
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert_eq!(refusals[0].refusal.as_deref(), Some("no-consent-guard"));
+    assert_eq!(refusals[0].facts.plugin_id, "test.declared");
+    assert_eq!(refusals[0].facts.operation, "run");
+    assert!(refusals[0].facts.declared);
+    assert_eq!(refusals[0].finished, None);
+    // The plugin and the client see PermissionDenied only: no subcode in the body.
+    assert!(!String::from_utf8_lossy(&response).contains("no-consent-guard"));
     // The grant under an operation the plugin does not declare was skipped at startup (a
     // plugin with declarations is granted only under declared names): refused, no journal.
     let body = body.replace(r#""operation":"run""#, r#""operation":"legacy""#);
@@ -3417,6 +3427,8 @@ content = "param:file"
     assert_eq!(error["code"], "PermissionDenied");
     assert_eq!(error["applied"], "NotApplied");
     assert_eq!(begins(&service), 0);
+    // Refused before the module ran: the guard was never asked, so no further record.
+    assert_eq!(service.host.audit.plugin_records().unwrap().len(), 1);
     service.stop().await;
 }
 fn sha256(bytes: &[u8]) -> Vec<u8> {

@@ -1183,6 +1183,15 @@ fn approval_binds_operation_plugin_key_and_time() {
         );
         assert_eq!(last(&r), Some(reason), "{name}");
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "{name}");
+        let id = match reason {
+            TicketRefusal::Identity => "package-changed",
+            TicketRefusal::Operation => "operation-mismatch",
+            TicketRefusal::Caller => "caller-mismatch",
+            TicketRefusal::Key => "key-mismatch",
+            TicketRefusal::Expired => "approval-expired",
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(last(&r).map(|r| r.subcode().id()), Some(id), "{name}");
     }
     // Another invocation id.
     let r = declared_rig(case, true);
@@ -1443,6 +1452,11 @@ fn undeclared_label_of_a_declaring_plugin_is_refused_before_the_module_runs() {
     let error = run(&r, "legacy", &[], &mut c).unwrap_err();
     assert!(denied(error));
     assert_eq!(c.plugin_refusal(), Some(TicketRefusal::UndeclaredOperation));
+    assert_eq!(
+        c.plugin_refusal_code()
+            .map(oncl_core::plugins::PluginRefusalCode::id),
+        Some("not-declared")
+    );
     assert_eq!(r.guard.before.load(Ordering::SeqCst), 0);
     assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
     assert_eq!(r.provider.opens.load(Ordering::SeqCst), 0);

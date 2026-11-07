@@ -1548,3 +1548,334 @@ fn guard_decides_on_lease_certificate_not_on_metadata() {
     assert_eq!(rig.guard.applications(), 0);
     assert_eq!(result.applied(), AppliedState::NotApplied);
 }
+
+// ---- MP3a-3: stable subcodes and the audit facts ---------------------------------------
+
+/// The call was refused with exactly this subcode, the plugin saw plain `PermissionDenied`
+/// (never the subcode: the error is the bare variant), and the key was not applied.
+fn refused_with(result: &ApprovedCall, id: &str, label: &str) {
+    assert_eq!(
+        result.subcode().map(PluginRefusalCode::id),
+        Some(id),
+        "{label}: {result:?}"
+    );
+    assert!(
+        matches!(result.error(), Some(OperationError::PermissionDenied)),
+        "{label}: {:?}",
+        result.error()
+    );
+    assert_eq!(
+        result.error().unwrap().code(),
+        result.subcode().unwrap().error_code(),
+        "{label}: the subcode's ErrorCode is the one the caller gets"
+    );
+    assert_eq!(result.applied(), AppliedState::NotApplied, "{label}");
+    // The text of the error carries nothing of the subcode.
+    let shown = format!("{:?}", result.error().unwrap());
+    assert!(!shown.contains(id) || id == "busy", "{label}");
+}
+
+/// Every refusal path that can run end to end with real synthetic WASM, in one table:
+/// (case, expected subcode id).
+#[test]
+fn every_reachable_refusal_path_yields_its_stable_subcode() {
+    let params = doc(DOC);
+    // content-mismatch: another document at the call.
+    {
+        let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
+        let mut c = ctx(&rig, "sign-cms-ex");
+        let approved = confirm(prepare(&rig, "sign-cms-ex", &params, &mut c));
+        let result = call(&rig, "sign-cms-ex", &doc(OTHER), approved, &mut c);
+        refused_with(&result, "content-mismatch", "other document");
+    }
+    // content-mismatch at the guard: the plugin signs bytes it chose.
+    {
+        let rig = rigged(&[cms_call(cms_ex_args(data(OTHER)))], "");
+        let (_c, result) = flow(&rig, "sign-cms-ex", &params);
+        refused_with(&result, "content-mismatch", "plugin-chosen bytes");
+    }
+    // options-mismatch.
+    {
+        let mut args = cms_ex_args(data(DOC));
+        args.encapsulate = true;
+        let rig = rigged(&[cms_call(args)], "");
+        let (_c, result) = flow(&rig, "sign-cms-ex", &params);
+        refused_with(&result, "options-mismatch", "attached cms");
+    }
+    // operation-id-mismatch, operation-mismatch, key-mismatch.
+    {
+        let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
+        let mut c1 = ctx(&rig, "sign-cms-ex");
+        let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &mut c1));
+        let mut c2 = ctx(&rig, "sign-cms-ex");
+        let result = call(&rig, "sign-cms-ex", &params, approval, &mut c2);
+        refused_with(&result, "operation-id-mismatch", "another invocation");
+        let mut c = ctx(&rig, "sign-cms-ex");
+        let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
+        let result = call(&rig, "sign-cms-ex", &params, approval, &mut c);
+        refused_with(&result, "operation-mismatch", "another operation");
+        let mut c = ctx(&rig, "sign-cms-ex");
+        let approval = confirm(prepare(&rig, "sign-cms-ex", &params, &mut c));
+        let rebound = binding(&rig.key, 2).with_public_metadata(&rig.alias, &rig.cert, &[]);
+        let result = call_with(&rig, "sign-cms-ex", &params, &rebound, approval, &mut c);
+        refused_with(&result, "key-mismatch", "another handle");
+    }
+    // approval-expired before the module runs.
+    {
+        let rig = rigged(&[cms_call(cms_ex_args(data(DOC)))], "");
+        let mut c = ctx(&rig, "sign-cms-ex");
+        let p = prepare(&rig, "sign-cms-ex", &params, &mut c);
+        let conf = UserConfirmation::after_user_confirmed(p.summary());
+        let approval = p.approve(conf, Some(Duration::from_millis(1))).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let result = call(&rig, "sign-cms-ex", &params, approval, &mut c);
+        refused_with(&result, "approval-expired", "expired");
+    }
+    // key-use-spent: the first use is applied, the second refused; the subcode names the
+    // refusal while the applied state stays honest.
+    {
+        let one = cms_call(cms_ex_args(data(DOC)));
+        let rig = rigged(&[one.clone(), one], "");
+        let (_c, result) = flow(&rig, "sign-cms-ex", &params);
+        assert_eq!(
+            result.subcode().map(PluginRefusalCode::id),
+            Some("key-use-spent")
+        );
+        assert_eq!(result.applied(), AppliedState::Applied);
+    }
+    // no-consent-guard.
+    {
+        let rig = rig_with(&[raw_call(DOC)], "", false, "user-rsa-sign");
+        let (_c, result) = flow(&rig, "sign-raw", &params);
+        refused_with(&result, "no-consent-guard", "document guard engine");
+    }
+    // approval-replayed.
+    {
+        let rig = rigged(&[raw_call(DOC)], "");
+        let forge = |c: &mut OperationContext| {
+            let p = prepare(&rig, "sign-raw", &params, c);
+            let s = p.summary();
+            PluginApproval::for_tests(
+                s.plugin.clone(),
+                "sign-raw",
+                manual(),
+                c.id(),
+                rig.key.key_id(),
+                1,
+                vec![ApprovedUse::for_tests(
+                    s.kind,
+                    ContentBinding::bytes(DOC),
+                    s.options_sha256,
+                    s.key.fingerprint_sha256,
+                )],
+                Instant::now() + APPROVAL_TTL,
+                [5; 16],
+            )
+        };
+        let mut c = ctx(&rig, "sign-raw");
+        let first = call(&rig, "sign-raw", &params, forge(&mut c), &mut c);
+        assert_eq!(first.applied(), AppliedState::Applied);
+        assert_eq!(
+            first.subcode(),
+            None,
+            "a use that was applied is no refusal"
+        );
+        let mut c = ctx(&rig, "sign-raw");
+        let second = call(&rig, "sign-raw", &params, forge(&mut c), &mut c);
+        refused_with(&second, "approval-replayed", "replayed nonce");
+    }
+    // busy: a second approved call while one is in flight.
+    {
+        let rig = rigged(&[raw_call(DOC)], "");
+        let mut c = ctx(&rig, "sign-raw");
+        let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c));
+        let (tx, rx) = channel();
+        *rig.provider.entered.lock().unwrap() = Some(tx);
+        let (release_tx, release_rx) = channel();
+        *rig.provider.release.lock().unwrap() = Some(release_rx);
+        let (first, second) = std::thread::scope(|s| {
+            let (rig, params) = (&rig, &params);
+            let busy = s.spawn(move || {
+                rx.recv().unwrap();
+                let mut c2 = ctx(rig, "sign-raw");
+                let approval2 = confirm(prepare(rig, "sign-raw", params, &mut c2));
+                let second = call(rig, "sign-raw", params, approval2, &mut c2);
+                release_tx.send(()).unwrap();
+                second
+            });
+            let first = call(rig, "sign-raw", params, approval, &mut c);
+            (first, busy.join().unwrap())
+        });
+        assert_eq!(first.applied(), AppliedState::Applied);
+        refused_with(&second, "busy", "concurrent approved call");
+    }
+    // not-declared at the call (the undeclared label): the approved call's own subcode and
+    // the context's.
+    {
+        let rig = rigged(&[raw_call(DOC)], "");
+        let mut c0 = ctx(&rig, "sign-raw");
+        let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c0));
+        let mut c = ctx(&rig, "sign-raw");
+        let undeclared = call(&rig, "nope", &params, approval, &mut c);
+        refused_with(&undeclared, "not-declared", "undeclared label");
+    }
+}
+
+/// Every way `plugin_prepare` can fail (reachable here) names its subcode, and it is the
+/// one whose ErrorCode is the `OperationError`'s.
+#[test]
+fn every_reachable_prepare_failure_yields_its_stable_subcode() {
+    let rig = rigged(&[raw_call(DOC)], "");
+    let params = doc(DOC);
+    let key = bound(&rig);
+    let mut c = ctx(&rig, "sign-raw");
+    let service = CallerContext::ServiceClient("svc".to_owned());
+    let bare = binding(&rig.key, 1);
+    let table: Vec<(&str, PluginPrepareError, &str)> = vec![
+        (
+            "undeclared",
+            try_prepare(&rig, "nope", &params, &key, &manual(), &mut c).unwrap_err(),
+            "not-declared",
+        ),
+        (
+            "derived",
+            try_prepare(&rig, "derive-op", &params, &key, &manual(), &mut c).unwrap_err(),
+            "derived-unsupported",
+        ),
+        (
+            "server-only",
+            try_prepare(&rig, "server-only", &params, &key, &manual(), &mut c).unwrap_err(),
+            "not-manual",
+        ),
+        (
+            "keyless",
+            try_prepare(&rig, "no-key", &[], &key, &manual(), &mut c).unwrap_err(),
+            "no-key-use",
+        ),
+        (
+            "service caller",
+            try_prepare(&rig, "sign-raw", &params, &key, &service, &mut c).unwrap_err(),
+            "caller-not-manual",
+        ),
+        (
+            "no metadata",
+            try_prepare(&rig, "sign-raw", &params, &bare, &manual(), &mut c).unwrap_err(),
+            "key-metadata-missing",
+        ),
+        (
+            "unknown param",
+            try_prepare(
+                &rig,
+                "sign-raw",
+                &[
+                    ("file", PluginParam::Document(DOC)),
+                    ("x", PluginParam::Flag(true)),
+                ],
+                &key,
+                &manual(),
+                &mut c,
+            )
+            .unwrap_err(),
+            "unknown-param",
+        ),
+        (
+            "missing param",
+            try_prepare(&rig, "sign-raw", &[], &key, &manual(), &mut c).unwrap_err(),
+            "missing-param",
+        ),
+        (
+            "wrong kind",
+            try_prepare(
+                &rig,
+                "sign-raw",
+                &[("file", PluginParam::Text("text"))],
+                &key,
+                &manual(),
+                &mut c,
+            )
+            .unwrap_err(),
+            "param-wrong-kind",
+        ),
+    ];
+    for (case, error, id) in table {
+        assert_eq!(error.subcode().id(), id, "{case}: {error:?}");
+        assert_eq!(
+            error.subcode().error_code(),
+            OperationError::from(error.clone()).code(),
+            "{case}"
+        );
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    }
+    // And through the approved call, which reports the same subcode as the prepare error.
+    let mut c0 = ctx(&rig, "sign-raw");
+    let approval = confirm(prepare(&rig, "sign-raw", &params, &mut c0));
+    let mut c = ctx(&rig, "sign-raw");
+    let derived = call(&rig, "derive-op", &params, approval, &mut c);
+    assert_eq!(
+        derived.subcode().map(PluginRefusalCode::id),
+        Some("derived-unsupported")
+    );
+    assert!(
+        derived.refusals().is_empty(),
+        "no guard refusal: before the module"
+    );
+}
+
+/// The audit facts of an approved use name the approval by a hash of its nonce, never the
+/// nonce, and nothing of the document.
+#[test]
+fn audit_facts_carry_the_nonce_hash_not_the_nonce_or_the_document() {
+    let rig = rigged(&[raw_call(DOC)], "");
+    let params = doc(DOC);
+    let mut c = ctx(&rig, "sign-raw");
+    let p = prepare(&rig, "sign-raw", &params, &mut c);
+    let s = p.summary();
+    let nonce = [0xA5u8; 16];
+    let approval = PluginApproval::for_tests(
+        s.plugin.clone(),
+        "sign-raw",
+        manual(),
+        c.id(),
+        rig.key.key_id(),
+        1,
+        vec![ApprovedUse::for_tests(
+            s.kind,
+            ContentBinding::bytes(DOC),
+            s.options_sha256,
+            s.key.fingerprint_sha256,
+        )],
+        Instant::now() + APPROVAL_TTL,
+        nonce,
+    );
+    let ticket = PluginUse::for_tests(
+        s.plugin.clone(),
+        "sign-raw",
+        manual(),
+        s.kind,
+        1,
+        rig.key.key_id(),
+        ContentBinding::bytes(DOC),
+        s.options_sha256,
+        s.key.fingerprint_sha256,
+    );
+    let facts = approval.audit_record(&ticket);
+    let hash = facts.approval_nonce_sha256.expect("a user approved it");
+    assert_ne!(hash.as_slice(), &nonce[..]);
+    assert!(!hash.windows(16).any(|w| w == nonce));
+    assert_eq!(facts.plugin_id, ID);
+    assert_eq!(facts.package_kind, 1);
+    assert_eq!(facts.package_sha256, [9; 32]);
+    assert_eq!(facts.operation, "sign-raw");
+    assert_eq!(facts.ticket_digest, ticket.digest());
+    assert_eq!(facts.content_sha256, Sha256::digest(DOC).as_slice());
+    assert_eq!(facts.content_len, DOC.len() as u64);
+    assert_eq!(facts.caller, PluginCallerKind::LocalOperator);
+    assert!(facts.declared);
+    assert_eq!(facts.grant_id, None);
+    // Another nonce, another hash; the same nonce the same.
+    let other = PluginAuditRecord::from_ticket(&ticket, Some(&[0xA6; 16]), None);
+    assert_ne!(other.approval_nonce_sha256, facts.approval_nonce_sha256);
+    let none = PluginAuditRecord::from_ticket(&ticket, None, Some("g".into()));
+    assert_eq!(none.approval_nonce_sha256, None);
+    assert_eq!(none.grant_id.as_deref(), Some("g"));
+}
