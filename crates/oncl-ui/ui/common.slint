@@ -377,8 +377,12 @@ export component Disclosure inherits Button {
 }
 
 // Escape: the window's own way out, from wherever the focus is (a field, a list and a combo
-// box's open list keep their Escape for themselves). It reports and does nothing else.
+// box's open list keep their Escape for themselves). It reports and does nothing else. It is
+// not a stop of the Tab ring: it has no focus ring and no name, so a stop on it is a silent
+// one that a screen reader announces as the unnamed window; the window's initial focus
+// still goes through it (`forward-focus`) and keys reach it from the focused control.
 export component EscapeScope inherits FocusScope {
+    focus-on-tab-navigation: false;
     callback escape();
     key-pressed(event) => {
         if event.text == Key.Escape {
