@@ -387,10 +387,13 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             let request = verify_request(opts)?;
             let mut detached_input = opts.detached.as_deref().map(Input::open).transpose()?;
             let mut detached_lock;
-            let detached = if let Some(input) = detached_input.as_mut() {
-                Some(source!(input, false, detached_lock))
-            } else {
-                None
+            let detached = match detached_input.as_mut() {
+                None => None,
+                Some(Input::File(file, len)) => Some(Source::seekable(file, Some(*len))),
+                Some(Input::Stdin(stdin)) => {
+                    detached_lock = stdin.lock();
+                    Some(Source::sequential(&mut detached_lock, None))
+                }
             };
             let source = source!(&mut input, opts.unknown_length, stdin_lock);
             let report = engine.verify(&request, source, detached, &mut ctx)?;
