@@ -57,6 +57,8 @@ export component WorkspaceWindow inherits Window {
     // ring too.
     forward-focus: keys;
     keys := FocusScope {
+        // Not a stop of the Tab ring (it has no focus ring and no name): see `EscapeScope`.
+        focus-on-tab-navigation: false;
         forward-focus: sidebar;
         key-pressed(event) => {
             if event.text == Key.Escape && root.busy {

@@ -15,9 +15,11 @@ use std::cell::{Cell, RefCell};
 
 use oncl_desktop::UiScale;
 use slint::platform::WindowEvent;
+use slint::winit_030::winit::dpi::PhysicalPosition;
 use slint::winit_030::winit::event::WindowEvent as WinitEvent;
+use slint::winit_030::winit::window::Window as WinitWindow;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
-use slint::{ComponentHandle, Window};
+use slint::{ComponentHandle, PhysicalSize, Window};
 
 thread_local! {
     /// The step the windows of this thread (the event loop's) are at.
@@ -38,9 +40,36 @@ struct Tracked {
 /// The least a window of the program can be, in logical pixels (the tools window's minimum, the
 /// largest): the scale is kept low enough that such a window fits the screen.
 const LARGEST_MINIMUM: (f32, f32) = (720.0, 480.0);
-/// What the taskbar and the title bar take of a monitor's height, in pixels; the work area is
-/// approximated as the monitor less this.
+/// What the taskbar and the title bar take of a monitor's height, in pixels: the usable pixels
+/// for a window's content are approximated as the monitor less this.
 const CHROME: u32 = 96;
+/// What the taskbar alone takes: the frame of a window (title bar included) is kept above it.
+const TASKBAR: u32 = 48;
+
+/// A monitor's pixels: where its top left is on the desktop, and how big it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    /// The monitor without the strip the taskbar may take at the bottom.
+    fn less_taskbar(self) -> Rect {
+        Rect {
+            height: self.height.saturating_sub(TASKBAR),
+            ..self
+        }
+    }
+}
+
+/// Whether `work` is a size a monitor can have: a monitor that reports nothing, or an absurd
+/// size (a virtual display, a broken driver), is as good as unknown.
+fn plausible(work: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    work.filter(|&(w, h)| (320..=32_768).contains(&w) && (240..=32_768).contains(&h))
+}
 
 /// The scale a window really gets: the display's `os` times the `step`, but never so large
 /// that the largest minimum window ([`LARGEST_MINIMUM`]) is bigger than `work` (the usable
@@ -48,23 +77,81 @@ const CHROME: u32 = 96;
 /// content scrolls instead of the window leaving the screen. `work` unknown: no clamp.
 pub(crate) fn effective_scale(os: f32, step: UiScale, work: Option<(u32, u32)>) -> f32 {
     let wanted = os * step.factor();
-    // A monitor that reports nothing, or an absurd size (a virtual display, a broken driver), is
-    // as good as unknown: no clamp.
-    let Some((width, height)) =
-        work.filter(|&(w, h)| (320..=32_768).contains(&w) && (240..=32_768).contains(&h))
-    else {
+    let Some((width, height)) = plausible(work) else {
         return wanted;
     };
     let room = (width as f32 / LARGEST_MINIMUM.0).min(height as f32 / LARGEST_MINIMUM.1);
     wanted.min(room).max(os)
 }
 
+/// A window's scale and its size in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Sizing {
+    pub scale: f32,
+    pub size: (u32, u32),
+}
+
+/// What a window of `logical` size (in logical pixels) is at the display's scale `os` and the
+/// `step`: its scale ([`effective_scale`]) and the `logical` size at that scale, cut to `work`
+/// (the usable pixels of the monitor) if the monitor cannot hold it. The window's own minimum
+/// is not touched: the scale leaves room for the largest one, so a window cut to `work` is
+/// still not smaller than its minimum, and past that its content scrolls. `work` unknown: the
+/// plain product, not cut.
+pub(crate) fn sizing(
+    logical: (f32, f32),
+    os: f32,
+    step: UiScale,
+    work: Option<(u32, u32)>,
+) -> Sizing {
+    let scale = effective_scale(os, step, work);
+    let mut size = (
+        (logical.0 * scale).round() as u32,
+        (logical.1 * scale).round() as u32,
+    );
+    if let Some((width, height)) = plausible(work) {
+        size = (size.0.min(width), size.1.min(height));
+    }
+    Sizing { scale, size }
+}
+
+/// Where a window whose frame is `outer` pixels and whose top left is at `at` goes to be inside
+/// `area`: `None` if it is inside already (the user's place stays), else the middle of `area`,
+/// or its top left where the window is bigger than it.
+pub(crate) fn origin_inside(at: (i32, i32), outer: (u32, u32), area: Rect) -> Option<(i32, i32)> {
+    let fits = |origin: i64, size: u32, low: i32, extent: u32| {
+        origin >= i64::from(low) && origin + i64::from(size) <= i64::from(low) + i64::from(extent)
+    };
+    if fits(i64::from(at.0), outer.0, area.x, area.width)
+        && fits(i64::from(at.1), outer.1, area.y, area.height)
+    {
+        return None;
+    }
+    let centre = |size: u32, low: i32, extent: u32| {
+        let spare = (i64::from(extent) - i64::from(size)).max(0);
+        (i64::from(low) + spare / 2).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    Some((
+        centre(outer.0, area.x, area.width),
+        centre(outer.1, area.y, area.height),
+    ))
+}
+
+/// The monitor `window` is on.
+fn monitor_rect(window: &WinitWindow) -> Option<Rect> {
+    let monitor = window.current_monitor()?;
+    let (at, size) = (monitor.position(), monitor.size());
+    Some(Rect {
+        x: at.x,
+        y: at.y,
+        width: size.width,
+        height: size.height,
+    })
+}
+
 /// The usable pixels of the monitor of `window`, if it has a system window.
 fn work_area(window: &Window) -> Option<(u32, u32)> {
-    window.with_winit_window(|w| {
-        let size = w.current_monitor()?.size();
-        Some((size.width, size.height.saturating_sub(CHROME)))
-    })?
+    let monitor = window.with_winit_window(monitor_rect)??;
+    Some((monitor.width, monitor.height.saturating_sub(CHROME)))
 }
 
 /// The step the windows are at.
@@ -139,31 +226,103 @@ fn os_scale(window: &Window) -> Option<f32> {
 }
 
 /// Gives `window` the scale `base` (the system's) × `scale`, keeping its size in logical
-/// pixels: its pixels grow or shrink with the step. Idempotent.
+/// pixels (its pixels grow or shrink with the step), and keeps it on the screen: a size the
+/// monitor cannot hold is cut to what it can ([`sizing`]) and a window that then sticks out
+/// of the monitor's usable area is put back in it ([`origin_inside`]). Idempotent.
+///
+/// A window whose system window is yet to come is left alone: Slint gives such a window a
+/// placeholder size and takes any size set on it for the window's own, which would replace the
+/// size the window asks for, and the system window starts at the system's scale anyway. It
+/// is brought to the step when it first gets the focus ([`on_event`]).
 pub(crate) fn apply_to(window: &Window, base: f32, scale: UiScale) {
-    if std::env::var_os("SLINT_SCALE_FACTOR").is_some() {
+    if std::env::var_os("SLINT_SCALE_FACTOR").is_some() || waits_for_system_window(window) {
         return;
     }
-    let wanted = effective_scale(base, scale, work_area(window));
+    let work = work_area(window);
     let old = window.scale_factor();
-    if (wanted - old).abs() < 1e-4 {
+    let before = window.size();
+    let logical = before.to_logical(old);
+    let fit = sizing((logical.width, logical.height), base, scale, work);
+    let rescaled = (fit.scale - old).abs() >= 1e-4;
+    let resized = fit.size != (before.width, before.height);
+    if !rescaled && !resized {
         return;
     }
-    let logical = window.size().to_logical(old);
-    window.dispatch_event(WindowEvent::ScaleFactorChanged {
-        scale_factor: wanted,
-    });
-    let physical = logical.to_physical(wanted);
-    if physical.width > 0 && physical.height > 0 {
-        window.set_size(physical);
+    // A maximized or full-screen window is the system's to size: only the scale reaches it.
+    let held = window
+        .with_winit_window(|w| w.is_maximized() || w.fullscreen().is_some())
+        .unwrap_or(false);
+    let frame = system_frame(window);
+    if rescaled {
+        window.dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: fit.scale,
+        });
+    }
+    if !held && fit.size.0 > 0 && fit.size.1 > 0 {
+        window.set_size(PhysicalSize::new(fit.size.0, fit.size.1));
     }
     // Whatever size the platform gave the window, the layout is told in the new scale.
     let size = window.size();
     if size.width > 0 && size.height > 0 {
         window.dispatch_event(WindowEvent::Resized {
-            size: size.to_logical(wanted),
+            size: size.to_logical(fit.scale),
         });
     }
+    if !held {
+        put_inside(window, fit.size, frame);
+    }
+}
+
+/// Whether the window will get its system window later, so that it cannot be sized yet. A
+/// window of the tests has none and never will: it is sized at once.
+fn waits_for_system_window(window: &Window) -> bool {
+    #[cfg(test)]
+    {
+        let _ = window;
+        false
+    }
+    #[cfg(not(test))]
+    {
+        !window.has_winit_window()
+    }
+}
+
+/// The window's frame, the pixels of its title bar and borders around its content, and where
+/// the window is; `None` where the system does not say.
+fn system_frame(window: &Window) -> Option<((u32, u32), (i32, i32))> {
+    window
+        .with_winit_window(|w| {
+            let (outer, inner) = (w.outer_size(), w.inner_size());
+            let at = w.outer_position().ok()?;
+            Some((
+                (
+                    outer.width.saturating_sub(inner.width),
+                    outer.height.saturating_sub(inner.height),
+                ),
+                (at.x, at.y),
+            ))
+        })
+        .flatten()
+}
+
+/// Moves `window`, whose content is now `inner` pixels, back into the usable area of its
+/// monitor if its frame sticks out of it.
+fn put_inside(window: &Window, inner: (u32, u32), frame: Option<((u32, u32), (i32, i32))>) {
+    let Some(((frame_w, frame_h), at)) = frame else {
+        return;
+    };
+    window.with_winit_window(|w| {
+        let Some(monitor) = monitor_rect(w) else {
+            return;
+        };
+        let outer = (
+            inner.0.saturating_add(frame_w),
+            inner.1.saturating_add(frame_h),
+        );
+        if let Some((x, y)) = origin_inside(at, outer, monitor.less_taskbar()) {
+            w.set_outer_position(PhysicalPosition::new(x, y));
+        }
+    });
 }
 
 /// The system says the monitor of `window` has scale `os` now: the window takes `os` × the
@@ -240,6 +399,126 @@ mod tests {
         );
         // No screen known: the plain product.
         assert_eq!(effective_scale(1.5, UiScale::P200, None), 3.0);
+    }
+
+    /// The sizes (logical) the program's windows ask for: the tools window, a plugin or wizard
+    /// window, About, a request dialog, and the largest minimum.
+    const ASKED: [(f32, f32); 6] = [
+        (900.0, 580.0),
+        (640.0, 520.0),
+        (640.0, 480.0),
+        (640.0, 560.0),
+        (420.0, 260.0),
+        (720.0, 480.0),
+    ];
+
+    /// The usable pixels of 2560 × 1440 (as the monitor less `CHROME`, and as the system's own
+    /// work area, 1392 high), of 1920 × 1080 and of 1366 × 768.
+    const WORK: [(u32, u32); 4] = [(2560, 1344), (2560, 1392), (1920, 984), (1366, 672)];
+
+    #[test]
+    fn a_window_never_leaves_the_usable_area_at_any_display_scale_and_step() {
+        for work in WORK {
+            for os in [1.0, 1.25, 1.5, 2.0] {
+                for step in UiScale::ALL {
+                    for logical in ASKED {
+                        let fit = sizing(logical, os, step, Some(work));
+                        let what = format!("{logical:?} at {os} x {}% on {work:?}", step.percent());
+                        assert!(
+                            fit.size.0 <= work.0 && fit.size.1 <= work.1,
+                            "{what}: {fit:?}"
+                        );
+                        // Never below the display's own scale, never above the asked-for one.
+                        assert!(fit.scale >= os - 1e-6, "{what}: {fit:?}");
+                        assert!(fit.scale <= os * step.factor() + 1e-6, "{what}: {fit:?}");
+                        // The largest minimum window still fits at that scale, so whatever the
+                        // window asks for, it is not cut below its own minimum, which then
+                        // scrolls: where the screen has the room for it at the display's scale.
+                        let least = (
+                            (LARGEST_MINIMUM.0 * fit.scale).round() as u32,
+                            (LARGEST_MINIMUM.1 * fit.scale).round() as u32,
+                        );
+                        let room = LARGEST_MINIMUM.0 * os <= work.0 as f32
+                            && LARGEST_MINIMUM.1 * os <= work.1 as f32;
+                        if room && logical.0 >= LARGEST_MINIMUM.0 && logical.1 >= LARGEST_MINIMUM.1
+                        {
+                            assert!(
+                                fit.size.0 >= least.0 && fit.size.1 >= least.1,
+                                "{what}: {fit:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tools_window_is_cut_to_the_monitor_at_the_high_steps() {
+        let tools = (900.0, 580.0);
+        // 2560 × 1440 at 100%: every step fits, nothing is cut.
+        assert_eq!(
+            sizing(tools, 1.0, UiScale::P100, Some((2560, 1344))).size,
+            (900, 580)
+        );
+        assert_eq!(
+            sizing(tools, 1.0, UiScale::P175, Some((2560, 1344))).size,
+            (1575, 1015)
+        );
+        assert_eq!(
+            sizing(tools, 1.0, UiScale::P200, Some((2560, 1344))).size,
+            (1800, 1160)
+        );
+        // At the display's 200% × the step 200% the scale stops at what the minimum window
+        // allows (2.8), the width fits (2520) and the height is cut to the monitor's.
+        let fit = sizing(tools, 2.0, UiScale::P200, Some((2560, 1344)));
+        assert!((fit.scale - 2.8).abs() < 1e-4, "{fit:?}");
+        assert_eq!(fit.size, (2520, 1344));
+        // 1366 × 768: the scale stops at 1.4, the window is cut to 1260 × 672.
+        let fit = sizing(tools, 1.0, UiScale::P200, Some((1366, 672)));
+        assert!((fit.scale - 1.4).abs() < 1e-4, "{fit:?}");
+        assert_eq!(fit.size, (1260, 672));
+        // No monitor known (or an absurd one): the plain product, not cut.
+        assert_eq!(sizing(tools, 1.0, UiScale::P200, None).size, (1800, 1160));
+        assert_eq!(
+            sizing(tools, 1.0, UiScale::P200, Some((0, 0))).size,
+            (1800, 1160)
+        );
+    }
+
+    #[test]
+    fn a_window_that_sticks_out_is_put_back_in_the_middle_of_the_area() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1392,
+        };
+        // Inside: stays where the user put it.
+        assert_eq!(origin_inside((346, 369), (916, 619), area), None);
+        assert_eq!(origin_inside((0, 0), (2560, 1392), area), None);
+        // Sticking out at the right and bottom: centred.
+        assert_eq!(
+            origin_inside((1000, 900), (1800, 1000), area),
+            Some((380, 196))
+        );
+        // Left or above the area: brought back.
+        assert_eq!(origin_inside((-50, 10), (900, 600), area), Some((830, 396)));
+        // Bigger than the area: its top left.
+        assert_eq!(origin_inside((300, 300), (2896, 1959), area), Some((0, 0)));
+        // A second monitor to the right and one above: the area has its own origin.
+        let second = Rect {
+            x: 2560,
+            y: -300,
+            width: 1366,
+            height: 720,
+        };
+        assert_eq!(origin_inside((2600, -280), (900, 580), second), None);
+        assert_eq!(
+            origin_inside((3500, 200), (900, 580), second),
+            Some((2793, -230))
+        );
+        assert_eq!(second.less_taskbar().height, 672);
     }
 
     #[test]
