@@ -196,6 +196,15 @@ pub fn registry(
         .map_err(|_| ProcessingError::InvalidInput("manifest is not UTF-8"))?;
     let manifest = oncl_plugin::Manifest::from_toml(text)
         .map_err(|_| ProcessingError::InvalidInput("invalid plugin manifest"))?;
+    // A plugin that declares operations is called only under a declared name.
+    if !manifest.operations().is_empty()
+        && !manifest
+            .operations()
+            .iter()
+            .any(|o| o.name() == args.operation)
+    {
+        return Err(OperationError::PermissionDenied);
+    }
     let id = manifest.id.clone();
     let mut registry = PluginRegistry::new();
     registry.install(

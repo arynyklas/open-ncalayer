@@ -38,6 +38,8 @@ pub struct OperationContext {
     pub(crate) plugin_pki: Option<crate::plugins::InvocationPkiAuthority>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_xml_output_limit: Option<u64>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_refusal: Option<crate::plugins::TicketRefusal>,
     /// The ticket of the plugin key use in flight (see [`crate::plugins::PluginUse`]). Only
     /// the plugin backend of this crate sets it, and `AuthorizedSigner::sign_digest` takes
     /// it into the [`crate::keys::KeyUseEvent`]: one ticket, one use.
@@ -64,6 +66,12 @@ impl OperationContext {
                 .ok_or(oncl_pki::resource::ProcessingError::InputLimit)?,
         )?;
         Ok(())
+    }
+    /// Why `plugin_call` refused this context's call before the module ran (an operation
+    /// label the plugin does not declare), for audit. The caller sees `PermissionDenied`.
+    #[cfg(feature = "plugins")]
+    pub fn plugin_refusal(&self) -> Option<crate::plugins::TicketRefusal> {
+        self.plugin_refusal
     }
     pub fn id(&self) -> OperationId {
         self.id

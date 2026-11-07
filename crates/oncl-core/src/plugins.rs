@@ -30,7 +30,7 @@ pub use manual::{
 };
 pub use ticket::{
     ApprovalRejected, ApprovedUse, ContentBinding, PluginApproval, PluginConsentGuard, PluginUse,
-    TicketRefusal,
+    REFUSAL_LOG, TicketRefusal,
 };
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
@@ -616,11 +616,18 @@ impl Engine {
                 ProcessingError::InvalidInput("duplicate or zero plugin key handle").into(),
             );
         }
+        // A plugin that declares operations runs only under a declared operation name,
+        // whoever chose the label (manual window, server grant, CLI flag): its key uses are
+        // ticketed and its options forced to the profile. One that declares none is unchanged.
         let declared = installed
             .manifest
             .operations()
             .iter()
             .any(|o| o.name() == call.operation);
+        if !installed.manifest.operations().is_empty() && !declared {
+            ctx.plugin_refusal = Some(TicketRefusal::UndeclaredOperation);
+            return Err(OperationError::PermissionDenied);
+        }
         if declared && bindings.keys.len() > 1 {
             return Err(OperationError::PermissionDenied);
         }

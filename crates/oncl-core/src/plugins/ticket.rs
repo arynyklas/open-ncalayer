@@ -21,7 +21,7 @@ use oncl_plugin::operations::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     sync::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
@@ -240,10 +240,14 @@ pub enum TicketRefusal {
     Options,
     /// The approved use is spent.
     AlreadyUsed,
+    /// The plugin declares operations and the call's operation is none of them (refused
+    /// in `plugin_call`, before the module runs; see `OperationContext::plugin_refusal`).
+    UndeclaredOperation,
 }
 
 /// Why [`PluginConsentGuard::grant`] did not take an approval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApprovalRejected {
     /// The nonce was granted before.
     Replayed,
@@ -259,8 +263,12 @@ struct Armed {
 struct GuardState {
     armed: Option<Armed>,
     nonces: HashSet<[u8; 16]>,
-    last_refusal: Option<TicketRefusal>,
+    /// Newest last; at most [`REFUSAL_LOG`] entries, the oldest dropped first.
+    refusals: VecDeque<(OperationId, TicketRefusal)>,
 }
+
+/// How many refusals a guard remembers for the host to drain.
+pub const REFUSAL_LOG: usize = 64;
 
 /// The key-use guard of a plugin engine: it refuses every key use unless the event's ticket
 /// matches an unspent use of the granted [`PluginApproval`]. It also refuses an event
@@ -304,12 +312,35 @@ impl PluginConsentGuard {
     pub fn applications(&self) -> usize {
         self.applications.load(Ordering::SeqCst)
     }
-    /// The reason of the most recent refusal.
-    pub fn last_refusal(&self) -> Option<TicketRefusal> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .last_refusal
+    /// The refusals recorded for `operation`, oldest first, without removing them. A later
+    /// success or refusal of another operation never hides one.
+    pub fn refusals(&self, operation: OperationId) -> Vec<TicketRefusal> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .refusals
+            .iter()
+            .filter(|(id, _)| *id == operation)
+            .map(|(_, reason)| *reason)
+            .collect()
+    }
+    /// Removes and returns the refusals recorded for `operation`, oldest first: what an
+    /// audit record of the finished call names.
+    pub fn take_refusals(&self, operation: OperationId) -> Vec<TicketRefusal> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut taken = Vec::new();
+        state.refusals.retain(|(id, reason)| {
+            let mine = *id == operation;
+            if mine {
+                taken.push(*reason);
+            }
+            !mine
+        });
+        taken
+    }
+    /// Every remembered refusal, oldest first (at most [`REFUSAL_LOG`]).
+    pub fn refusal_log(&self) -> Vec<(OperationId, TicketRefusal)> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.refusals.iter().copied().collect()
     }
     fn check(state: &mut GuardState, event: &KeyUseEvent) -> Result<(), TicketRefusal> {
         let ticket = event.plugin().ok_or(TicketRefusal::NoTicket)?;
@@ -390,12 +421,19 @@ impl KeyUseGuard for PluginConsentGuard {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match Self::check(&mut state, event) {
             Ok(()) => {
-                state.last_refusal = None;
                 self.applications.fetch_add(1, Ordering::SeqCst);
                 Ok(KeyUseReceipt::new(event.clone()))
             }
             Err(reason) => {
-                state.last_refusal = Some(reason);
+                tracing::warn!(
+                    operation = event.operation_id.get(),
+                    reason = ?reason,
+                    "a plugin key use was refused before the key"
+                );
+                if state.refusals.len() == REFUSAL_LOG {
+                    state.refusals.pop_front();
+                }
+                state.refusals.push_back((event.operation_id, reason));
                 Err(OperationError::PermissionDenied)
             }
         }
@@ -667,4 +705,696 @@ pub(super) fn xades_profile(args: &abi::XadesArgs) -> Option<Profile> {
         signature_method: signature_method.clone(),
         digest_method: digest_method.clone(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oncl_pdk::abi;
+    use oncl_plugin::operations::Timestamp;
+
+    fn enc(profile: Option<Profile>, kind: KeyKind) -> Option<Vec<u8>> {
+        profile.and_then(|p| p.encode(kind, None))
+    }
+    /// The encodings of one field's values (the base value included) must be pairwise
+    /// different; a value no profile can say must be refused (`None`).
+    fn field(kind: KeyKind, name: &str, values: Vec<(&str, Option<Profile>)>) {
+        let mut seen: Vec<(&str, Vec<u8>)> = Vec::new();
+        for (label, profile) in values {
+            if let Some(bytes) = enc(profile, kind) {
+                for (other, prior) in &seen {
+                    assert_ne!(*prior, bytes, "{name}: {label} encodes like {other}");
+                }
+                seen.push((label, bytes));
+            }
+        }
+    }
+    fn refused(kind: KeyKind, name: &str, profile: Option<Profile>) {
+        assert!(enc(profile, kind).is_none(), "{name} must be refused");
+    }
+
+    fn cms_ex() -> abi::SignCmsExArgs {
+        abi::SignCmsExArgs {
+            handle: 1,
+            content: abi::CmsContent::Data(vec![1].into()),
+            encapsulate: false,
+            cosign: abi::CoSign::Never,
+            econtent_type: None,
+            digest: None,
+            attrs: abi::SignedAttrs {
+                content_type: true,
+                message_digest: true,
+                signing_certificate_v2: true,
+                signing_time: Some(abi::SigningTime {
+                    at: abi::TimeSource::Now,
+                    form: abi::TimeForm::Auto,
+                }),
+                extra: Vec::new(),
+            },
+            certificates: abi::CmsCerts::Signer,
+            timestamp: None,
+            output: abi::CmsOutput::Der,
+        }
+    }
+    fn custom_tsa() -> abi::TsaSpec {
+        abi::TsaSpec {
+            url: abi::PkiUrl::Default,
+            method: abi::PkiMethod::Get,
+            hash: abi::HashAlg::Sha256,
+            policy: None,
+            nonce: abi::Nonce::None,
+            cert_req: true,
+            retries: 0,
+            timeout_ms: 1000,
+            check_skew_ms: None,
+            require_tsa_eku: false,
+        }
+    }
+
+    #[test]
+    fn every_cms_ex_field_changes_the_options_or_is_refused() {
+        let k = KeyKind::CmsEx;
+        let p = |f: &dyn Fn(&mut abi::SignCmsExArgs)| {
+            let mut a = cms_ex();
+            f(&mut a);
+            cms_ex_profile(&a)
+        };
+        field(
+            k,
+            "encapsulate",
+            vec![("off", p(&|_| {})), ("on", p(&|a| a.encapsulate = true))],
+        );
+        field(
+            k,
+            "content form",
+            vec![
+                ("data", p(&|_| {})),
+                (
+                    "digest",
+                    p(&|a| a.content = abi::CmsContent::Digest(vec![1].into())),
+                ),
+            ],
+        );
+        refused(
+            k,
+            "cosign into",
+            p(&|a| a.cosign = abi::CoSign::Into(vec![1].into())),
+        );
+        refused(k, "cosign auto", p(&|a| a.cosign = abi::CoSign::Auto));
+        refused(
+            k,
+            "econtent_type",
+            p(&|a| a.econtent_type = Some("1.2.3".into())),
+        );
+        refused(k, "digest", p(&|a| a.digest = Some(abi::HashAlg::Sha256)));
+        refused(
+            k,
+            "extra attribute",
+            p(&|a| {
+                a.attrs.extra.push(abi::RawAttribute {
+                    oid: "1.2.3".into(),
+                    values: Vec::new(),
+                })
+            }),
+        );
+        field(
+            k,
+            "content_type",
+            vec![
+                ("on", p(&|_| {})),
+                ("off", p(&|a| a.attrs.content_type = false)),
+            ],
+        );
+        field(
+            k,
+            "message_digest",
+            vec![
+                ("on", p(&|_| {})),
+                ("off", p(&|a| a.attrs.message_digest = false)),
+            ],
+        );
+        field(
+            k,
+            "signing_certificate_v2",
+            vec![
+                ("on", p(&|_| {})),
+                ("off", p(&|a| a.attrs.signing_certificate_v2 = false)),
+            ],
+        );
+        field(
+            k,
+            "signing_time",
+            vec![
+                ("now", p(&|_| {})),
+                ("none", p(&|a| a.attrs.signing_time = None)),
+            ],
+        );
+        refused(
+            k,
+            "signing_time unix",
+            p(&|a| {
+                a.attrs.signing_time = Some(abi::SigningTime {
+                    at: abi::TimeSource::UnixMs(0),
+                    form: abi::TimeForm::Auto,
+                })
+            }),
+        );
+        refused(
+            k,
+            "signing_time form",
+            p(&|a| {
+                a.attrs.signing_time = Some(abi::SigningTime {
+                    at: abi::TimeSource::Now,
+                    form: abi::TimeForm::Generalized,
+                })
+            }),
+        );
+        field(
+            k,
+            "certificates",
+            vec![
+                ("signer", p(&|_| {})),
+                ("chain", p(&|a| a.certificates = abi::CmsCerts::Chain)),
+                (
+                    "extra",
+                    p(&|a| a.certificates = abi::CmsCerts::Extra(Vec::new())),
+                ),
+            ],
+        );
+        refused(
+            k,
+            "extra certs",
+            p(&|a| a.certificates = abi::CmsCerts::Extra(Vec::new())),
+        );
+        field(
+            k,
+            "timestamp",
+            vec![
+                ("none", p(&|_| {})),
+                ("basics", p(&|a| a.timestamp = Some(abi::TsaChoice::Basics))),
+                ("kalkan", p(&|a| a.timestamp = Some(abi::TsaChoice::Kalkan))),
+                (
+                    "custom",
+                    p(&|a| a.timestamp = Some(abi::TsaChoice::Custom(custom_tsa()))),
+                ),
+            ],
+        );
+        refused(
+            k,
+            "custom tsa",
+            p(&|a| a.timestamp = Some(abi::TsaChoice::Custom(custom_tsa()))),
+        );
+        field(
+            k,
+            "output",
+            vec![
+                ("der", p(&|_| {})),
+                ("base64", p(&|a| a.output = abi::CmsOutput::Base64)),
+                ("pem", p(&|a| a.output = abi::CmsOutput::Pem)),
+            ],
+        );
+    }
+
+    #[test]
+    fn every_plain_cms_field_changes_the_options() {
+        let k = KeyKind::Cms;
+        let p = |attached: bool, timestamp: bool| {
+            let mut a = cms_ex();
+            a.encapsulate = attached;
+            a.timestamp = timestamp.then_some(abi::TsaChoice::Basics);
+            Some(cms_profile(&a))
+        };
+        field(
+            k,
+            "attached/timestamp",
+            vec![
+                ("detached", p(false, false)),
+                ("attached", p(true, false)),
+                ("stamped", p(false, true)),
+                ("both", p(true, true)),
+            ],
+        );
+        // The timestamp of the plain import is the basics TSA.
+        assert!(matches!(
+            cms_profile(&{
+                let mut a = cms_ex();
+                a.timestamp = Some(abi::TsaChoice::Basics);
+                a
+            }),
+            Profile::Cms(CmsProfile {
+                timestamp: Timestamp::Basics,
+                ..
+            })
+        ));
+    }
+
+    fn xml() -> abi::SignXmlArgs {
+        abi::SignXmlArgs {
+            handle: 1,
+            xml: vec![b'<', b'a', b'/', b'>'].into(),
+            element: None,
+            parent: None,
+        }
+    }
+    #[test]
+    fn every_xml_field_changes_the_options() {
+        let k = KeyKind::Xml;
+        let p = |f: &dyn Fn(&mut abi::SignXmlArgs)| {
+            let mut a = xml();
+            f(&mut a);
+            Some(xml_profile(&a))
+        };
+        field(
+            k,
+            "element",
+            vec![
+                ("none", p(&|_| {})),
+                ("a", p(&|a| a.element = Some("/a".into()))),
+                ("b", p(&|a| a.element = Some("/b".into()))),
+            ],
+        );
+        field(
+            k,
+            "parent",
+            vec![
+                ("none", p(&|_| {})),
+                ("a", p(&|a| a.parent = Some("/a".into()))),
+                ("b", p(&|a| a.parent = Some("/b".into()))),
+            ],
+        );
+        // element and parent are different fields.
+        field(
+            k,
+            "element vs parent",
+            vec![
+                ("element", p(&|a| a.element = Some("/a".into()))),
+                ("parent", p(&|a| a.parent = Some("/a".into()))),
+            ],
+        );
+    }
+
+    fn xml_ex() -> abi::SignXmlExArgs {
+        abi::SignXmlExArgs {
+            handle: 1,
+            xml: vec![b'<', b'a', b'/', b'>'].into(),
+            element: None,
+            parent: None,
+            namespaces: Vec::new(),
+            other_prefix_uri: None,
+            placement: abi::Placement::DocumentElement,
+            signature_method: None,
+            digest_method: None,
+            signed_info_c14n: None,
+            transforms: None,
+            signature_id: None,
+            signing_time_object: None,
+            strip_whitespace: false,
+            base64_line_breaks: None,
+            output: abi::XmlOutput::AsIs,
+        }
+    }
+    #[test]
+    fn every_xml_ex_field_changes_the_options_or_is_refused() {
+        let k = KeyKind::XmlEx;
+        let p = |f: &dyn Fn(&mut abi::SignXmlExArgs)| {
+            let mut a = xml_ex();
+            f(&mut a);
+            xml_ex_profile(&a)
+        };
+        let ns = |prefix: &str, uri: &str| abi::NsBinding {
+            prefix: prefix.into(),
+            uri: uri.into(),
+        };
+        field(
+            k,
+            "element/parent",
+            vec![
+                ("none", p(&|_| {})),
+                ("element", p(&|a| a.element = Some("/a".into()))),
+                ("parent", p(&|a| a.parent = Some("/a".into()))),
+            ],
+        );
+        field(
+            k,
+            "namespaces",
+            vec![
+                ("none", p(&|_| {})),
+                ("p=u", p(&|a| a.namespaces = vec![ns("p", "u")])),
+                ("p=v", p(&|a| a.namespaces = vec![ns("p", "v")])),
+                ("q=u", p(&|a| a.namespaces = vec![ns("q", "u")])),
+                (
+                    "two",
+                    p(&|a| a.namespaces = vec![ns("p", "u"), ns("q", "u")]),
+                ),
+            ],
+        );
+        field(
+            k,
+            "other_prefix_uri",
+            vec![
+                ("none", p(&|_| {})),
+                ("u", p(&|a| a.other_prefix_uri = Some("u".into()))),
+                ("v", p(&|a| a.other_prefix_uri = Some("v".into()))),
+            ],
+        );
+        field(
+            k,
+            "placement",
+            vec![
+                ("document", p(&|_| {})),
+                (
+                    "first",
+                    p(&|a| a.placement = abi::Placement::FirstChildOfDocument),
+                ),
+                ("parent", p(&|a| a.placement = abi::Placement::Parent)),
+            ],
+        );
+        field(
+            k,
+            "signature_method",
+            vec![
+                ("none", p(&|_| {})),
+                ("m", p(&|a| a.signature_method = Some("m".into()))),
+            ],
+        );
+        field(
+            k,
+            "digest_method",
+            vec![
+                ("none", p(&|_| {})),
+                ("m", p(&|a| a.digest_method = Some("m".into()))),
+            ],
+        );
+        // Method and digest are different fields.
+        field(
+            k,
+            "signature vs digest",
+            vec![
+                ("signature", p(&|a| a.signature_method = Some("m".into()))),
+                ("digest", p(&|a| a.digest_method = Some("m".into()))),
+            ],
+        );
+        field(
+            k,
+            "c14n",
+            vec![
+                ("none", p(&|_| {})),
+                (
+                    "inc",
+                    p(&|a| a.signed_info_c14n = Some(abi::C14n::Inclusive)),
+                ),
+                (
+                    "incc",
+                    p(&|a| a.signed_info_c14n = Some(abi::C14n::InclusiveWithComments)),
+                ),
+                (
+                    "exc",
+                    p(&|a| a.signed_info_c14n = Some(abi::C14n::Exclusive)),
+                ),
+                (
+                    "excc",
+                    p(&|a| a.signed_info_c14n = Some(abi::C14n::ExclusiveWithComments)),
+                ),
+            ],
+        );
+        refused(k, "transforms", p(&|a| a.transforms = Some(Vec::new())));
+        refused(k, "signature_id", p(&|a| a.signature_id = Some("s".into())));
+        refused(
+            k,
+            "signing_time_object",
+            p(&|a| {
+                a.signing_time_object = Some(abi::SigningTimeObject {
+                    property_id: "p".into(),
+                    target_ref: false,
+                    text: "t".into(),
+                })
+            }),
+        );
+        field(
+            k,
+            "strip_whitespace",
+            vec![
+                ("off", p(&|_| {})),
+                ("on", p(&|a| a.strip_whitespace = true)),
+            ],
+        );
+        field(
+            k,
+            "base64_line_breaks",
+            vec![
+                ("none", p(&|_| {})),
+                ("on", p(&|a| a.base64_line_breaks = Some(true))),
+                ("off", p(&|a| a.base64_line_breaks = Some(false))),
+            ],
+        );
+        let ser = |declaration, standalone_no, trim| abi::XmlOutput::Serialize {
+            declaration,
+            standalone_no,
+            trim,
+        };
+        field(
+            k,
+            "output",
+            vec![
+                ("as_is", p(&|_| {})),
+                ("none", p(&|a| a.output = ser(false, false, false))),
+                ("declaration", p(&|a| a.output = ser(true, false, false))),
+                ("standalone", p(&|a| a.output = ser(false, true, false))),
+                ("trim", p(&|a| a.output = ser(false, false, true))),
+            ],
+        );
+    }
+
+    #[test]
+    fn every_xades_field_changes_the_options_or_is_refused() {
+        let k = KeyKind::Xades;
+        let base = || abi::XadesArgs {
+            handle: 1,
+            xml: vec![b'<', b'a', b'/', b'>'].into(),
+            level: abi::XadesLevel::B,
+            tsa: abi::TsaChoice::Basics,
+            chain: Vec::new(),
+            signature_method: None,
+            digest_method: None,
+        };
+        let p = |f: &dyn Fn(&mut abi::XadesArgs)| {
+            let mut a = base();
+            f(&mut a);
+            xades_profile(&a)
+        };
+        field(
+            k,
+            "level",
+            vec![
+                ("b", p(&|_| {})),
+                ("t", p(&|a| a.level = abi::XadesLevel::T)),
+                ("lt", p(&|a| a.level = abi::XadesLevel::Lt)),
+            ],
+        );
+        field(
+            k,
+            "tsa",
+            vec![
+                ("basics", p(&|_| {})),
+                ("kalkan", p(&|a| a.tsa = abi::TsaChoice::Kalkan)),
+            ],
+        );
+        refused(
+            k,
+            "custom tsa",
+            p(&|a| a.tsa = abi::TsaChoice::Custom(custom_tsa())),
+        );
+        refused(k, "chain", p(&|a| a.chain = vec![vec![1].into()]));
+        field(
+            k,
+            "signature_method",
+            vec![
+                ("none", p(&|_| {})),
+                ("m", p(&|a| a.signature_method = Some("m".into()))),
+            ],
+        );
+        field(
+            k,
+            "digest_method",
+            vec![
+                ("none", p(&|_| {})),
+                ("m", p(&|a| a.digest_method = Some("m".into()))),
+            ],
+        );
+        field(
+            k,
+            "signature vs digest",
+            vec![
+                ("signature", p(&|a| a.signature_method = Some("m".into()))),
+                ("digest", p(&|a| a.digest_method = Some("m".into()))),
+            ],
+        );
+    }
+
+    // The ticket of one use is moved into the event by `sign_digest`: a second use in the same
+    // operation finds none, whatever the plugin backend does between imports.
+    #[test]
+    fn one_ticket_is_taken_by_the_first_key_use() {
+        use crate::keys::{KeyRequest, KeySelector, KeySources};
+        use crate::{Engine, EngineServices, ExecutionGrant, OperationPolicy};
+        use oncl_pki::{
+            digest::DigestValue,
+            resource::{OperationControl, ProcessingError, Progress, ResourceLimits},
+        };
+        struct Control;
+        impl OperationControl for Control {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                Ok(())
+            }
+        }
+        struct Record(Mutex<Vec<bool>>);
+        impl KeyUseGuard for Record {
+            fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
+                self.0.lock().unwrap().push(event.plugin().is_some());
+                Ok(KeyUseReceipt::new(event.clone()))
+            }
+            fn finish(&self, _: KeyUseReceipt, _: KeyUseOutcome) -> Result<(), OperationError> {
+                Ok(())
+            }
+        }
+        let fixture = oncl_testkit::synthetic("user-rsa-sign");
+        let selector = KeySelector::inline(oncl_testkit::read(fixture.path), None);
+        let guard = Arc::new(Record(Mutex::new(Vec::new())));
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_keys(Arc::new(KeySources::new()), guard.clone()),
+        )
+        .unwrap();
+        let mut policy = OperationPolicy::ncalayer_compatibility();
+        policy.allow_prehashed = true;
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign, Action::SignDigest])
+                    .with_keys([selector.key_id()]),
+                policy,
+                Arc::new(Control),
+            )
+            .unwrap();
+        let ticket = PluginUse {
+            identity: PluginIdentity {
+                id: "t".into(),
+                package: PackageHash::File([0; 32]),
+                version: "1".into(),
+            },
+            operation: "op".into(),
+            caller: CallerContext::LocalOperator("o".into()),
+            kind: KeyKind::Raw,
+            handle: 1,
+            key: selector.key_id(),
+            content: ContentBinding::bytes(b"x"),
+            options_sha256: [0; 32],
+            max_uses: MAX_USES,
+        };
+        *ctx.plugin_ticket.lock().unwrap() = Some(ticket);
+        let request = KeyRequest::new(&selector, Some(&fixture.password));
+        let mut signer = engine.signer(&request, &mut ctx).unwrap();
+        let alg = signer.algorithm().hash_alg();
+        let mut hash = oncl_pki::digest::HashState::new(alg);
+        hash.update(b"x");
+        let digest: DigestValue = hash.finish();
+        signer.sign_digest(&digest).unwrap();
+        signer.sign_digest(&digest).unwrap();
+        assert_eq!(*guard.0.lock().unwrap(), [true, false]);
+    }
+
+    #[test]
+    fn guard_refuses_an_action_that_does_not_fit_the_content() {
+        use crate::keys::{KeyRequest, KeySelector, KeySources};
+        use crate::{Engine, EngineServices, ExecutionGrant, OperationPolicy};
+        use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceLimits};
+        struct Control;
+        impl OperationControl for Control {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                Ok(())
+            }
+        }
+        let fixture = oncl_testkit::synthetic("user-rsa-sign");
+        let selector = KeySelector::inline(oncl_testkit::read(fixture.path), None);
+        let guard = Arc::new(PluginConsentGuard::new());
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_keys(Arc::new(KeySources::new()), guard.clone()),
+        )
+        .unwrap();
+        let mut policy = OperationPolicy::ncalayer_compatibility();
+        policy.allow_prehashed = true;
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign, Action::SignDigest])
+                    .with_keys([selector.key_id()]),
+                policy,
+                Arc::new(Control),
+            )
+            .unwrap();
+        let identity = PluginIdentity {
+            id: "t".into(),
+            package: PackageHash::File([0; 32]),
+            version: "1".into(),
+        };
+        // A document-bytes ticket (a `Sign` use) reaches the key as `SignDigest`.
+        let content = ContentBinding::bytes(b"x");
+        let ticket = PluginUse {
+            identity: identity.clone(),
+            operation: "op".into(),
+            caller: CallerContext::LocalOperator("o".into()),
+            kind: KeyKind::Raw,
+            handle: 1,
+            key: selector.key_id(),
+            content,
+            options_sha256: [0; 32],
+            max_uses: MAX_USES,
+        };
+        guard
+            .grant(PluginApproval::new(
+                identity,
+                "op",
+                CallerContext::LocalOperator("o".into()),
+                ctx.id(),
+                selector.key_id(),
+                1,
+                vec![ApprovedUse {
+                    kind: KeyKind::Raw,
+                    content,
+                    options_sha256: [0; 32],
+                }],
+                Instant::now() + std::time::Duration::from_secs(60),
+                [1; 16],
+            ))
+            .unwrap();
+        *ctx.plugin_ticket.lock().unwrap() = Some(ticket);
+        let id = ctx.id();
+        let request = KeyRequest::new(&selector, Some(&fixture.password));
+        let mut signer = engine.signer(&request, &mut ctx).unwrap();
+        let alg = signer.algorithm().hash_alg();
+        let mut hash = oncl_pki::digest::HashState::new(alg);
+        hash.update(b"x");
+        assert!(signer.sign_digest(&hash.finish()).is_err());
+        assert_eq!(guard.refusals(id), [TicketRefusal::Action]);
+    }
+
+    #[test]
+    fn refusal_log_is_bounded_and_per_operation() {
+        let guard = PluginConsentGuard::new();
+        let mut state = guard.state.lock().unwrap();
+        for n in 0..REFUSAL_LOG as u64 + 5 {
+            if state.refusals.len() == REFUSAL_LOG {
+                state.refusals.pop_front();
+            }
+            state
+                .refusals
+                .push_back((OperationId(n % 2), TicketRefusal::NoApproval));
+        }
+        drop(state);
+        assert_eq!(guard.refusal_log().len(), REFUSAL_LOG);
+        let mine = guard.refusals(OperationId(1));
+        assert!(!mine.is_empty() && mine.len() < REFUSAL_LOG);
+        assert_eq!(guard.take_refusals(OperationId(1)), mine);
+        assert!(guard.refusals(OperationId(1)).is_empty());
+        assert!(!guard.refusals(OperationId(0)).is_empty());
+    }
 }

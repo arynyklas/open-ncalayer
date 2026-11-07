@@ -298,6 +298,17 @@ content = "param:file"
         "{text}"
     );
     assert!(denied.stdout.is_empty());
+    // A label the plugin does not declare is refused too: no key use at all.
+    let mut other = base(&declared, &extra);
+    let at = other.iter().position(|a| *a == "sign").unwrap();
+    other[at] = "legacy";
+    let denied = run(&other, b"");
+    assert_eq!(denied.status.code(), Some(1), "{denied:?}");
+    let text = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        text.contains("PermissionDenied") && !text.contains("private_use"),
+        "{text}"
+    );
 }
 #[test]
 fn mandatory_prompt_is_typed_interaction_required_without_a_ui() {

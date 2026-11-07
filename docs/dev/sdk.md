@@ -216,8 +216,13 @@ before any key is used. Consent is not part of this API; the key-use ticket and 
 
 #### Key-use ticket and `PluginConsentGuard` (`plugins`)
 
-A plugin call of an operation the manifest **declares** (any `[[operations]]` with that name,
-however the grant was made) is ticketed. For each of `keys_sign_raw/cms/cms_ex/xml/xml_ex/
+A plugin whose manifest declares any `[[operations]]` is called through `plugin_call` only under
+a declared operation name, whoever chose the label (manual window, server grant, CLI flag): any
+other label is refused before the module runs (`PermissionDenied`, `NotApplied`,
+`OperationContext::plugin_refusal() == Some(TicketRefusal::UndeclaredOperation)`). The server
+skips (and logs an error for) a grant naming an undeclared operation of such a plugin, and the
+CLI refuses the call. A plugin without declarations is unchanged. A call under a declared name
+is ticketed. For each of `keys_sign_raw/cms/cms_ex/xml/xml_ex/
 xades` Core decodes the arguments once, builds a `plugins::PluginUse` from that same decoded
 value and parks it in the operation context; `AuthorizedSigner::sign_digest` moves it into the
 `KeyUseEvent` (`KeyUseEvent::plugin()`, `None` for every document use and for plugin
@@ -237,8 +242,13 @@ operation binds at most one key; every key-taking import (`keys_describe`, `keys
 and `keys_release` of the bound handle is idempotent. A ticket allows exactly one use
 (`max_uses = 1`).
 
+`KeyUseEvent::plugin()` exists only with the `plugins` feature of `oncl-core`. A `KeyUseGuard` of
+a host that registers plugins with declared operations MUST check it (a build that cannot see it
+authorizes a ticketed use as a document use); `oncl-server` and `oncl-cli` do.
+
 `PluginConsentGuard` (a `KeyUseGuard`) is the guard of a plugin engine. `before_use` refuses
-(`PermissionDenied`, key not applied; the reason is `last_refusal()`) unless the event carries a
+(`PermissionDenied`, key not applied; the reason is recorded per `OperationId` in a bounded log of
+`REFUSAL_LOG` entries: `refusals(id)`, `take_refusals(id)`, `refusal_log()`) unless the event carries a
 ticket and the guard holds an unexpired `PluginApproval` for the same invocation, plugin
 identity, operation, caller, key and handle with one unspent `ApprovedUse` whose kind, content
 and options hash equal the ticket's; the use is then spent. With no approval it refuses

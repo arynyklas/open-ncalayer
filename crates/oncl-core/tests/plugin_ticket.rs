@@ -312,6 +312,13 @@ const RAW_IMPORTS: [Import; 4] = [
     Import::KeysChain,
     Import::KeysRelease,
 ];
+fn last(rig: &Rig) -> Option<TicketRefusal> {
+    rig.guard
+        .consent()
+        .refusal_log()
+        .last()
+        .map(|(_, reason)| *reason)
+}
 fn denied(error: OperationError) -> bool {
     error.code() == ErrorCode::PermissionDenied && error.applied_state() == AppliedState::NotApplied
 }
@@ -534,10 +541,7 @@ fn ticket_missing_refuses_before_key() {
     let error = run(&r, "sign-raw", &[], &mut c).unwrap_err();
     assert!(denied(error), "no declaration means no ticket");
     assert_eq!(r.guard.before.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::NoTicket)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::NoTicket));
     assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
     assert_eq!(r.guard.consent().applications(), 0);
     drop(c);
@@ -561,10 +565,7 @@ fn ticket_missing_refuses_before_key() {
         )
         .unwrap_err();
     assert!(denied(error));
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::NoTicket)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::NoTicket));
     assert!(out.is_empty());
     assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
     // Without an approval even a ticketed use is refused.
@@ -573,10 +574,7 @@ fn ticket_missing_refuses_before_key() {
     let mut c = ctx(&r, case.op, &[case.import]);
     let error = run(&r, case.op, &[case.import], &mut c).unwrap_err();
     assert!(denied(error));
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::NoApproval)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::NoApproval));
     assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
 }
 
@@ -598,12 +596,7 @@ fn content_hash_mismatch_refused() {
         )
         .unwrap_err();
         assert!(denied(error), "{}", case.op);
-        assert_eq!(
-            r.guard.consent().last_refusal(),
-            Some(TicketRefusal::Content),
-            "{}",
-            case.op
-        );
+        assert_eq!(last(&r), Some(TicketRefusal::Content), "{}", case.op);
         assert_eq!(r.guard.before.load(Ordering::SeqCst), 1, "{}", case.op);
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "{}", case.op);
         // The same digest with another length is another content.
@@ -613,10 +606,7 @@ fn content_hash_mismatch_refused() {
         assert!(denied(
             go(&r, &case, vec![used(&r, case.op, case.kind, lying)]).unwrap_err()
         ));
-        assert_eq!(
-            r.guard.consent().last_refusal(),
-            Some(TicketRefusal::Content)
-        );
+        assert_eq!(last(&r), Some(TicketRefusal::Content));
         // A digest input is not the same content as the bytes.
         let mut prehashed = case.content;
         prehashed.prehashed = true;
@@ -756,11 +746,7 @@ fn options_mismatch_refused() {
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "{name}");
         assert_eq!(r.guard.consent().applications(), 0, "{name}");
         if representable {
-            assert_eq!(
-                r.guard.consent().last_refusal(),
-                Some(TicketRefusal::Options),
-                "{name}"
-            );
+            assert_eq!(last(&r), Some(TicketRefusal::Options), "{name}");
         } else {
             assert_eq!(r.guard.before.load(Ordering::SeqCst), 0, "{name}");
             assert_eq!(r.provider.opens.load(Ordering::SeqCst), 0, "{name}");
@@ -830,11 +816,7 @@ fn options_mismatch_refused() {
         assert!(denied(error), "xml {name}");
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "xml {name}");
         if representable {
-            assert_eq!(
-                r.guard.consent().last_refusal(),
-                Some(TicketRefusal::Options),
-                "xml {name}"
-            );
+            assert_eq!(last(&r), Some(TicketRefusal::Options), "xml {name}");
         } else {
             assert_eq!(r.guard.before.load(Ordering::SeqCst), 0, "xml {name}");
         }
@@ -867,11 +849,7 @@ fn options_mismatch_refused() {
         assert!(denied(error), "xades {name}");
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "xades {name}");
         if representable {
-            assert_eq!(
-                r.guard.consent().last_refusal(),
-                Some(TicketRefusal::Options),
-                "xades {name}"
-            );
+            assert_eq!(last(&r), Some(TicketRefusal::Options), "xades {name}");
         } else {
             assert_eq!(r.guard.before.load(Ordering::SeqCst), 0, "xades {name}");
         }
@@ -882,10 +860,7 @@ fn options_mismatch_refused() {
     let mut wrong = used(&r, case.op, case.kind, case.content);
     wrong.options_sha256[0] ^= 1;
     assert!(denied(go(&r, &case, vec![wrong]).unwrap_err()));
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::Options)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::Options));
 }
 
 #[test]
@@ -1037,10 +1012,7 @@ fn second_use_refused() {
         1,
         "only the first use passed"
     );
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::AlreadyUsed)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::AlreadyUsed));
     drop(c);
     // The same approval does not cover another call of the same context.
     let r = declared_rig(case, true);
@@ -1057,10 +1029,7 @@ fn second_use_refused() {
     run(&r, case.op, &[], &mut c).unwrap();
     let error = run(&r, case.op, &[], &mut c).unwrap_err();
     assert!(denied(error));
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::AlreadyUsed)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::AlreadyUsed));
     assert_eq!(r.guard.consent().applications(), 1);
 }
 
@@ -1105,7 +1074,7 @@ fn kind_mismatch_refused() {
     )
     .unwrap_err();
     assert!(denied(error));
-    assert_eq!(r.guard.consent().last_refusal(), Some(TicketRefusal::Kind));
+    assert_eq!(last(&r), Some(TicketRefusal::Kind));
     assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
 }
 
@@ -1198,7 +1167,7 @@ fn approval_binds_operation_plugin_key_and_time() {
             denied(error.err().unwrap_or_else(|| panic!("{name}"))),
             "{name}"
         );
-        assert_eq!(r.guard.consent().last_refusal(), Some(reason), "{name}");
+        assert_eq!(last(&r), Some(reason), "{name}");
         assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0, "{name}");
     }
     // Another invocation id.
@@ -1217,10 +1186,7 @@ fn approval_binds_operation_plugin_key_and_time() {
         ))
         .unwrap();
     assert!(denied(run(&r, case.op, &[], &mut c2).unwrap_err()));
-    assert_eq!(
-        r.guard.consent().last_refusal(),
-        Some(TicketRefusal::OperationId)
-    );
+    assert_eq!(last(&r), Some(TicketRefusal::OperationId));
     // A nonce is granted once; an approval needs exactly one use.
     let guard = PluginConsentGuard::new();
     let mk = |n: [u8; 16], uses: usize| {
@@ -1442,4 +1408,107 @@ fn release_idempotent() {
     );
     let mut c = ctx(&r, "sign-raw", &RAW_IMPORTS);
     assert!(denied(run(&r, "sign-raw", &[], &mut c).unwrap_err()));
+}
+
+#[test]
+fn undeclared_label_of_a_declaring_plugin_is_refused_before_the_module_runs() {
+    // The reviewer's reproduction: a manifest with [[operations]], an exact grant under the
+    // label "legacy", a plugin that signs keys_sign_cms_ex with an eContentType no profile can
+    // say. The label is not declared, so the call is refused before the module runs: no key
+    // opened, no guard consulted, no use.
+    let mut args = cms_ex_args(MESSAGE);
+    args.econtent_type = Some("1.2.840.113549.1.7.1".into());
+    let r = rig(
+        &[(Import::KeysSignCmsEx, abi::encode(&args))],
+        &[],
+        &[("legacy", &[Import::KeysSignCmsEx])],
+        false,
+        true,
+    );
+    let mut c = ctx(&r, "legacy", &[Import::KeysSignCmsEx]);
+    let error = run(&r, "legacy", &[], &mut c).unwrap_err();
+    assert!(denied(error));
+    assert_eq!(c.plugin_refusal(), Some(TicketRefusal::UndeclaredOperation));
+    assert_eq!(r.guard.before.load(Ordering::SeqCst), 0);
+    assert_eq!(r.guard.finished.load(Ordering::SeqCst), 0);
+    assert_eq!(r.provider.opens.load(Ordering::SeqCst), 0);
+    assert!(r.guard.events.lock().unwrap().is_empty());
+    // A declared label of the same plugin is not refused for that reason.
+    let r = rig(
+        &[raw_call(1, MESSAGE)],
+        &[],
+        &[("sign-raw", &[Import::KeysSignRaw])],
+        false,
+        true,
+    );
+    let mut c = ctx(&r, "sign-raw", &[Import::KeysSignRaw]);
+    run(&r, "sign-raw", &[], &mut c).unwrap();
+    assert_eq!(c.plugin_refusal(), None);
+}
+
+#[test]
+fn a_ticket_nobody_took_does_not_reach_a_later_key_use() {
+    // An import arms its ticket and fails before the key is used (XAdES-T without a TSA
+    // configuration); a document key use on the same context afterwards carries no ticket.
+    let mut args = xades_args();
+    args.level = abi::XadesLevel::T;
+    let r = rig(
+        &[(Import::KeysSignXades, abi::encode(&args))],
+        &["sign-xades"],
+        &[],
+        false,
+        true,
+    );
+    let mut c = ctx(&r, "sign-xades", &[Import::KeysSignXades]);
+    assert!(run(&r, "sign-xades", &[], &mut c).is_err());
+    assert!(r.guard.events.lock().unwrap().is_empty());
+    let request = oncl_core::SignRequest::raw_message(oncl_core::keys::KeyRequest::new(
+        &r.key,
+        Some(crypto::PASSWORD),
+    ));
+    let mut out = Vec::new();
+    r.engine
+        .sign(
+            request,
+            oncl_pki::io::Source::sequential(
+                &mut std::io::Cursor::new(MESSAGE),
+                Some(MESSAGE.len() as u64),
+            ),
+            &mut out,
+            &mut c,
+        )
+        .unwrap();
+    let events = r.guard.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].plugin().is_none(), "a stale ticket was attached");
+}
+
+#[test]
+fn refusals_are_kept_per_operation_not_last_writer_wins() {
+    // A refusal stays readable after a later success of the guard and is drained per id.
+    let case = &cases()[0];
+    let r = declared_rig(case, true);
+    let mut c = ctx(&r, case.op, &[case.import]);
+    let id = c.id();
+    assert!(denied(run(&r, case.op, &[], &mut c).unwrap_err()));
+    drop(c);
+    let mut c2 = ctx(&r, case.op, &[case.import]);
+    let id2 = c2.id();
+    r.guard
+        .consent()
+        .grant(approval(
+            &r,
+            id2,
+            case.op,
+            vec![used(&r, case.op, case.kind, case.content)],
+        ))
+        .unwrap();
+    run(&r, case.op, &[], &mut c2).unwrap();
+    assert_eq!(r.guard.consent().refusals(id), [TicketRefusal::NoApproval]);
+    assert!(r.guard.consent().refusals(id2).is_empty());
+    assert_eq!(
+        r.guard.consent().take_refusals(id),
+        [TicketRefusal::NoApproval]
+    );
+    assert!(r.guard.consent().refusals(id).is_empty());
 }

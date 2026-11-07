@@ -3379,17 +3379,19 @@ content = "param:file"
         wasm,
         max_memory: 1 << 20,
         max_transfer: 1 << 18,
-        permissions: vec![PluginGrant {
-            token: "test".into(),
-            operation: "run".into(),
-            imports: vec!["keys_sign_raw".into()],
-            keys: vec!["ops-key".into()],
-            pki_endpoints: vec![
-                format!("{}/ocsp", pki.origin),
-                format!("{}/root.crl", pki.origin),
-                format!("{}/inter.crl", pki.origin),
-            ],
-        }],
+        permissions: ["run", "legacy"]
+            .map(|operation| PluginGrant {
+                token: "test".into(),
+                operation: operation.into(),
+                imports: vec!["keys_sign_raw".into()],
+                keys: vec!["ops-key".into()],
+                pki_endpoints: vec![
+                    format!("{}/ocsp", pki.origin),
+                    format!("{}/root.crl", pki.origin),
+                    format!("{}/inter.crl", pki.origin),
+                ],
+            })
+            .into(),
     };
     let service = Running::start_with(|config, dir| {
         config.pki = pki.config(dir);
@@ -3406,6 +3408,15 @@ content = "param:file"
     assert_eq!(error["code"], "PermissionDenied");
     assert_eq!(error["applied"], "NotApplied");
     assert_eq!(begins(&service), 0, "the journal is never touched");
+    // The grant under an operation the plugin does not declare was skipped at startup (a
+    // plugin with declarations is granted only under declared names): refused, no journal.
+    let body = body.replace(r#""operation":"run""#, r#""operation":"legacy""#);
+    let (status, _, response) = service.post(FORM, multipart(&body, &[])).await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(error["code"], "PermissionDenied");
+    assert_eq!(error["applied"], "NotApplied");
+    assert_eq!(begins(&service), 0);
     service.stop().await;
 }
 fn sha256(bytes: &[u8]) -> Vec<u8> {
