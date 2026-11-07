@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(sign.pki_endpoints, granted);
         assert!(
             sign.pki_endpoints
-                .contains(&(HttpMethod::Get, DEFAULT_OCSP.to_owned()))
+                .contains(&(HttpMethod::Get, oncl_plugin::DEFAULT_OCSP.to_owned()))
         );
         assert!(listing.operations[1].pki_endpoints.is_empty());
         assert!(sign.uses_key);

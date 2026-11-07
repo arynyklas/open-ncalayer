@@ -343,7 +343,9 @@ impl From<&PluginPrepareError> for PluginRefusalCode {
             PluginPrepareError::Options => Self::OptionsInvalid,
             PluginPrepareError::KeyUnavailable => Self::KeyUnavailable,
             PluginPrepareError::CertificateMismatch => Self::CertificateMismatch,
-            PluginPrepareError::ResourceBudget => Self::ResourceBudget,
+            PluginPrepareError::ResourceBudget | PluginPrepareError::DocumentTooLarge => {
+                Self::ResourceBudget
+            }
             PluginPrepareError::NoTemporaryStore => Self::NoTemporaryStore,
         }
     }
@@ -504,6 +506,7 @@ mod tests {
             PluginPrepareError::KeyUnavailable,
             PluginPrepareError::CertificateMismatch,
             PluginPrepareError::ResourceBudget,
+            PluginPrepareError::DocumentTooLarge,
             PluginPrepareError::NoTemporaryStore,
         ]);
         all
@@ -569,6 +572,13 @@ mod tests {
             );
         }
         for e in prepares() {
+            if e == PluginPrepareError::DocumentTooLarge {
+                // The one subcode `resource-budget` is `MemoryLimit` for an engine whose
+                // budgets are too small for the module, `InputLimit` for a too large document.
+                assert_eq!(e.subcode(), PluginRefusalCode::ResourceBudget);
+                assert_eq!(OperationError::from(e).code(), ErrorCode::InputLimit);
+                continue;
+            }
             assert_eq!(
                 e.subcode().error_code(),
                 OperationError::from(e.clone()).code(),

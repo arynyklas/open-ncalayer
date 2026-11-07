@@ -169,7 +169,13 @@ fn the_estimate_signs_and_one_byte_less_is_refused_before_the_key() {
             let error = try_run_port_operation(PORT, operation, &params, &with(metadata, memory))
                 .err()
                 .unwrap_or_else(|| panic!("{operation}: not refused"));
-            assert_eq!(error, PluginPrepareError::ResourceBudget, "{operation}");
+            assert!(
+                matches!(
+                    error,
+                    PluginPrepareError::ResourceBudget | PluginPrepareError::DocumentTooLarge
+                ),
+                "{operation}"
+            );
             assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
         }
     }
@@ -209,7 +215,9 @@ fn a_document_over_the_limit_is_refused_before_the_key() {
     assert!(
         matches!(
             error,
-            PluginPrepareError::ResourceBudget | PluginPrepareError::Request(_)
+            PluginPrepareError::ResourceBudget
+                | PluginPrepareError::DocumentTooLarge
+                | PluginPrepareError::Request(_)
         ),
         "{error:?}"
     );

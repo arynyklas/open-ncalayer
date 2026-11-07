@@ -2084,29 +2084,6 @@ fn a_signed_text_holds_nothing_a_window_could_hide() {
         .unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
     }
 }
-    // Pinned: the domain-separated hash of the nonce, so a change of the prefix is deliberate.
-    let mut expected = Sha256::new();
-    expected.update(b"ONCLNONCE1\0");
-    expected.update(nonce);
-    assert_eq!(hash.as_slice(), expected.finalize().as_slice());
-    assert!(!hash.windows(16).any(|w| w == nonce));
-    assert_eq!(facts.plugin_id, ID);
-    assert_eq!(facts.package_kind, 1);
-    assert_eq!(facts.package_sha256, [9; 32]);
-    assert_eq!(facts.operation, "sign-raw");
-    assert_eq!(facts.ticket_digest, ticket.digest());
-    assert_eq!(facts.content_sha256, Sha256::digest(DOC).as_slice());
-    assert_eq!(facts.content_len, DOC.len() as u64);
-    assert_eq!(facts.caller, PluginCallerKind::LocalOperator);
-    assert!(facts.declared);
-    assert_eq!(facts.grant_id, None);
-    // Another nonce, another hash; the same nonce the same.
-    let other = PluginAuditRecord::from_ticket(&ticket, Some(&[0xA6; 16]), None);
-    assert_ne!(other.approval_nonce_sha256, facts.approval_nonce_sha256);
-    let none = PluginAuditRecord::from_ticket(&ticket, None, Some("g".into()));
-    assert_eq!(none.approval_nonce_sha256, None);
-    assert_eq!(none.grant_id.as_deref(), Some("g"));
-}
 
 // ---- the engine's budgets (MP7b) --------------------------------------------------------------
 
@@ -2159,6 +2136,7 @@ fn an_xml_signature_the_budgets_cannot_hold_is_refused_before_the_key_is_opened(
         &mut c,
     )
     .unwrap_err();
+    // The budgets cannot hold even an XML signature of an empty document: the engine is wrong.
     assert_eq!(error, PluginPrepareError::ResourceBudget);
     assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
     assert_eq!(error.subcode().id(), "resource-budget");
@@ -2222,7 +2200,14 @@ fn the_estimate_is_enough_and_one_byte_less_is_refused_before_the_key() {
             let mut c = ctx(&rig, op);
             let error =
                 try_prepare(&rig, op, &params, &bound(&rig), &manual(), &mut c).unwrap_err();
-            assert_eq!(error, PluginPrepareError::ResourceBudget, "{op}");
+            assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget, "{op}");
+            assert!(
+                matches!(
+                    error,
+                    PluginPrepareError::ResourceBudget | PluginPrepareError::DocumentTooLarge
+                ),
+                "{op}"
+            );
             assert_eq!(rig.guard.applications(), 0, "{op}");
         }
     }
@@ -2282,4 +2267,24 @@ fn an_engine_without_a_temporary_store_refuses_xml_but_not_a_cms_before_the_key(
     );
     let (_c, result) = flow(&rig, "sign-cms-ex", &doc(DOC));
     assert_eq!(result.applied(), AppliedState::Applied, "{result:?}");
+}
+
+/// A budget that holds the module but not this document is a too large DOCUMENT (`InputLimit`,
+/// design 4.8), with the same subcode; a host whose `max_transfer` is large and whose document
+/// is small is held by the reply term of the sum, not slipped past it.
+#[test]
+fn a_document_over_the_budgets_is_input_limit_and_a_wrong_engine_is_memory_limit() {
+    let need_empty = manual_call_budget(&rig_instance(), KeyKind::Raw, 0).unwrap();
+    let limits = budgets(
+        need_empty.metadata + (1 << 10),
+        need_empty.memory + (1 << 10),
+    );
+    let rig = rig_budgeted(&[raw_call(DOC)], "", true, "user-rsa-sign", limits, true);
+    let mut c = ctx(&rig, "sign-raw");
+    let error =
+        try_prepare(&rig, "sign-raw", &doc(DOC), &bound(&rig), &manual(), &mut c).unwrap_err();
+    assert_eq!(error, PluginPrepareError::DocumentTooLarge);
+    assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
+    assert_eq!(OperationError::from(error).code(), ErrorCode::InputLimit);
+    assert_eq!(rig.guard.applications(), 0);
 }

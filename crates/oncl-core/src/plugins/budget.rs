@@ -99,8 +99,11 @@ pub fn manual_call_budget(
     metadata = metadata
         .checked_add(work)
         .ok_or(ProcessingError::MemoryLimit)?;
+    // The reply the module returns is reserved as memory after the key was used, up to
+    // `max_transfer`: it is part of the sum, whatever the size of the document.
     let memory = call_scratch(limits)?
         .checked_add(MEMORY_SLACK)
+        .and_then(|n| n.checked_add(limits.max_transfer as u64))
         .and_then(|n| n.checked_add(metadata))
         .ok_or(ProcessingError::MemoryLimit)?;
     Ok(CallBudget { memory, metadata })
@@ -169,16 +172,36 @@ impl ManualLimits {
     /// at most `memory_cap` bytes (see the type's documentation for the rules).
     pub fn for_max_document(max_document: u64, memory_cap: usize) -> Self {
         const MIB: u64 = 1 << 20;
-        let round = |n: u64, unit: u64| n.div_ceil(unit) * unit;
-        let transfer = round((max_document.div_ceil(3) * 4 + 16 * 1024) * 3 / 2, MIB);
-        let memory = round(2 * (13 * max_document + 4 * MIB), MIB).min(memory_cap as u64);
+        let round = |n: u64, unit: u64| n.saturating_add(unit - 1) / unit * unit;
+        let transfer = round(
+            (max_document
+                .div_ceil(3)
+                .saturating_mul(4)
+                .saturating_add(16 * 1024))
+            .saturating_mul(3)
+                / 2,
+            MIB,
+        );
+        let memory = round(
+            max_document
+                .saturating_mul(13)
+                .saturating_add(4 * MIB)
+                .saturating_mul(2),
+            MIB,
+        )
+        .min(memory_cap as u64);
+        // Saturating: limits that do not fit the target are refused by the registry's
+        // `install`, never truncated into ones that look valid.
         let instance = InstanceLimits {
-            max_memory: memory as usize,
-            max_transfer: transfer as usize,
+            max_memory: usize::try_from(memory).unwrap_or(usize::MAX),
+            max_transfer: usize::try_from(transfer).unwrap_or(usize::MAX),
             ..InstanceLimits::default()
         };
-        let need = manual_call_budget(&instance, KeyKind::XmlEx, max_document)
-            .expect("the limits of a document fit u64");
+        let need =
+            manual_call_budget(&instance, KeyKind::XmlEx, max_document).unwrap_or(CallBudget {
+                memory: u64::MAX / 2,
+                metadata: u64::MAX / 2,
+            });
         ManualLimits {
             instance,
             resources: oncl_pki::resource::ResourceLimits {
@@ -230,6 +253,34 @@ mod tests {
         }
     }
 
+    /// Limits for a document no target can hold are not truncated into valid-looking ones.
+    #[test]
+    fn a_huge_document_saturates_instead_of_truncating() {
+        let limits = ManualLimits::for_max_document(u64::MAX, usize::MAX);
+        assert!(limits.instance.max_transfer > oncl_plugin::MAX_TRANSFER);
+    }
+
+    /// A host whose `max_transfer` is large and whose document is small: the reply memory
+    /// is in the sum (I1), so the sum grows with the transfer, not only with the document.
+    #[test]
+    fn the_sum_holds_the_reply_of_a_large_transfer_buffer_and_a_small_document() {
+        let small = InstanceLimits {
+            max_memory: 1 << 20,
+            max_transfer: 1 << 16,
+            ..InstanceLimits::default()
+        };
+        let large = InstanceLimits {
+            max_transfer: 64 << 20,
+            ..small
+        };
+        let a = manual_call_budget(&small, KeyKind::CmsEx, 10).unwrap();
+        let b = manual_call_budget(&large, KeyKind::CmsEx, 10).unwrap();
+        let dt = (64u64 << 20) - (1 << 16);
+        // 8 transfers of scratch, one of metadata and one of reply memory (metadata is memory).
+        assert_eq!(b.memory - a.memory, 10 * dt);
+        assert_eq!(b.metadata - a.metadata, dt);
+    }
+
     /// The chosen values (docs/dev/plugins-manual-tests.md, the trade-off table): the
     /// accounting caps of the 64-bit desktop stay under the 1 GiB control-process budget.
     #[test]
@@ -275,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             cms.memory,
-            call_scratch(&limits).unwrap() + MEMORY_SLACK + cms.metadata
+            call_scratch(&limits).unwrap() + MEMORY_SLACK + (1 << 16) + cms.metadata
         );
         let xml = manual_call_budget(&limits, KeyKind::XmlEx, 1000).unwrap();
         let bound =

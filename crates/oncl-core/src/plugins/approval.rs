@@ -62,6 +62,9 @@ pub enum PluginPrepareError {
     /// ([`crate::plugins::manual_call_budget`]): a call that would fail, for the XML
     /// signatures after the key was used, so it is refused before.
     ResourceBudget,
+    /// The engine's budgets could hold the module, but not a document of this size
+    /// (the same subcode, `resource-budget`; reported as `InputLimit`).
+    DocumentTooLarge,
     /// The operation signs XML, which is spooled through the engine's temporary store
     /// ([`crate::EngineServices::with_temporary_store`]), and the engine has none.
     NoTemporaryStore,
@@ -89,6 +92,9 @@ impl std::fmt::Display for PluginPrepareError {
             Self::ResourceBudget => {
                 f.write_str("the engine's memory and metadata budgets cannot hold this call")
             }
+            Self::DocumentTooLarge => {
+                f.write_str("the document is too large for the engine's budgets")
+            }
             Self::NoTemporaryStore => {
                 f.write_str("the engine has no temporary store for the XML signature")
             }
@@ -114,6 +120,7 @@ impl From<PluginPrepareError> for OperationError {
             }
             PluginPrepareError::KeyUnavailable => OperationError::MissingKeyProvider,
             PluginPrepareError::ResourceBudget => ProcessingError::MemoryLimit.into(),
+            PluginPrepareError::DocumentTooLarge => ProcessingError::InputLimit.into(),
             PluginPrepareError::NoTemporaryStore => OperationError::MissingTemporaryStore,
             PluginPrepareError::CallerNotManual
             | PluginPrepareError::CertificateMismatch
@@ -603,7 +610,10 @@ impl Engine {
     /// cannot run to its end: no temporary store for an XML signature, or budgets that cannot
     /// hold what the call reserves over a document of `content_len` bytes
     /// ([`manual_call_budget`]). The reservations are taken and released at once, from the
-    /// context's own scope, so the answer is the one the call itself will get; the XML
+    /// context's own scope, so the answer is the one the call itself will get (the dry run
+    /// holds nothing afterwards: that no other reservation takes the room between this and the
+    /// key use is the engine's `max_in_flight = 1` for a manual window, which the desktop's
+    /// limits keep); the XML
     /// signatures check their output after the key was used, and without this a budget that is
     /// too small for that check fails the call with the key applied.
     fn plugin_preflight(
@@ -616,8 +626,9 @@ impl Engine {
         if budget::checks_own_output(kind) && self.temporary.is_none() {
             return Err(PluginPrepareError::NoTemporaryStore);
         }
-        let need = manual_call_budget(&installed.compiled.limits(), kind, content_len)
-            .map_err(|_| PluginPrepareError::ResourceBudget)?;
+        let limits = installed.compiled.limits();
+        let need = manual_call_budget(&limits, kind, content_len)
+            .map_err(|_| PluginPrepareError::DocumentTooLarge)?;
         // A budget that is short is what is refused; a cancelled or expired operation is
         // reported by the call's own first checkpoint.
         let short = |r: &Result<_, ProcessingError>| {
@@ -626,13 +637,22 @@ impl Engine {
                 Err(ProcessingError::MemoryLimit | ProcessingError::MetadataLimit)
             )
         };
-        let memory = ctx.scope.reserve_memory(need.direct_memory());
-        if short(&memory) {
-            return Err(PluginPrepareError::ResourceBudget);
-        }
-        let metadata = ctx.scope.reserve_metadata(need.metadata);
-        if short(&metadata) {
-            return Err(PluginPrepareError::ResourceBudget);
+        let fits = |need: CallBudget| {
+            let memory = ctx.scope.reserve_memory(need.direct_memory());
+            let metadata = ctx.scope.reserve_metadata(need.metadata);
+            !short(&memory) && !short(&metadata)
+        };
+        if !fits(need) {
+            // The budgets cannot hold even this module with an empty document: the
+            // engine is sized wrong (`MemoryLimit`); else the document is too large for them
+            // (`InputLimit`). One subcode, `resource-budget`, for both.
+            let empty = manual_call_budget(&limits, kind, 0)
+                .map_err(|_| PluginPrepareError::ResourceBudget)?;
+            return Err(if fits(empty) {
+                PluginPrepareError::DocumentTooLarge
+            } else {
+                PluginPrepareError::ResourceBudget
+            });
         }
         Ok(())
     }

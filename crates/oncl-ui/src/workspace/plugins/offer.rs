@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oncl_core::keys::KeySources;
-use oncl_core::plugins::{CallerContext, PluginConsentGuard, PluginRegistry};
+use oncl_core::plugins::{CallerContext, ManualLimits, PluginConsentGuard, PluginRegistry};
 use oncl_core::{Engine, EngineServices, OperationError};
 use oncl_pki::http::{HttpMethod, HttpTransport};
 use oncl_pki::io::TemporaryStore;
@@ -144,6 +144,17 @@ pub struct PluginEngineKit {
     pub spool: PathBuf,
 }
 
+/// The limits of the plugins' engine: the desktop's own for the manual window
+/// ([`ManualLimits::desktop`]: the SDK's defaults cannot hold an XML signature or a document
+/// of more than about 0.4 MiB, and Core refuses those up front), with the deadline that covers
+/// preparing, reading and the call.
+pub(crate) fn engine_limits() -> ResourceLimits {
+    ResourceLimits {
+        operation_timeout: PREPARE_ALLOWANCE + CONSENT_IDLE + RUN_LIMIT,
+        ..ManualLimits::desktop().resources
+    }
+}
+
 /// The offer for `registry` (the host's, with `caller` registered for each listed operation).
 ///
 /// The engine's operation deadline covers preparing, the user's reading time
@@ -165,10 +176,7 @@ pub fn plugin_offer(
     let store = TemporaryStore::new(&kit.spool)
         .map_err(OperationError::from)
         .map_err(OfferError::Engine)?;
-    let limits = ResourceLimits {
-        operation_timeout: PREPARE_ALLOWANCE + CONSENT_IDLE + RUN_LIMIT,
-        ..ResourceLimits::default()
-    };
+    let limits = engine_limits();
     let services = EngineServices::hash_only(limits)
         .with_plugin_keys(Arc::new(KeySources::new()), Arc::clone(&guard))
         .with_validation(validation)
@@ -197,4 +205,25 @@ pub fn plugin_offer(
         caller,
         listing,
     })
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    /// The engine is not built on the SDK's default budgets: it has the desktop's, with only
+    /// the deadline its own.
+    #[test]
+    fn the_plugins_engine_has_the_desktops_budgets_and_not_the_defaults() {
+        let limits = engine_limits();
+        let desktop = ManualLimits::desktop().resources;
+        let default = ResourceLimits::default();
+        assert_eq!(limits.metadata_bytes, desktop.metadata_bytes);
+        assert_eq!(limits.memory_bytes, desktop.memory_bytes);
+        assert_ne!(limits.metadata_bytes, default.metadata_bytes);
+        assert_eq!(
+            limits.operation_timeout,
+            PREPARE_ALLOWANCE + CONSENT_IDLE + RUN_LIMIT
+        );
+    }
 }

@@ -448,8 +448,7 @@ pub(crate) struct Guest<T> {
 }
 
 /// The limits of an instance's memory and tables: wasmi's [`StoreLimits`] with a trap when a
-/// growth is denied ([`PluginError::MemoryLimit`]), except that a `memory.grow` or
-/// `table.grow` that ran out of fuel is not a failed growth. `StoreLimits` reports every
+/// growth is denied ([`PluginError::MemoryLimit`]), except that a `memory.grow` that ran out of fuel is not a failed growth. `StoreLimits` reports every
 /// failed growth to its `*_grow_failed` hook, and with `trap_on_grow_failure` that hook
 /// traps even for `OutOfFuel`, which the host resumes after refuelling (the fuel is handed
 /// out in slices, `host::call_guest`): without this a call whose `memory.grow` fell on the
@@ -486,11 +485,10 @@ impl ResourceLimiter for GuestLimits {
     ) -> Result<bool, LimiterError> {
         self.0.table_growing(current, desired, maximum)
     }
+    // A `table.grow` that ran out of fuel stays a trap: wasmi does not re-execute it after
+    // the refuel as it does `memory.grow`, so it is not resumable.
     fn table_grow_failed(&mut self, error: &TableError) -> Result<(), LimiterError> {
-        match error {
-            TableError::OutOfFuel { .. } => Ok(()),
-            other => self.0.table_grow_failed(other),
-        }
+        self.0.table_grow_failed(error)
     }
     fn instances(&self) -> usize {
         self.0.instances()

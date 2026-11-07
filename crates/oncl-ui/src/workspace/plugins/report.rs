@@ -99,6 +99,8 @@ pub(super) fn code_words(code: PluginRefusalCode, l: Locale) -> Option<&'static 
         C::UnsupportedKey => t.p_unsupported_key,
         C::NoKeyUse => t.p_no_key_use,
         C::OptionsInvalid => t.p_options,
+        C::ResourceBudget => t.p_budget,
+        C::NoTemporaryStore => t.p_no_store,
         _ => return None,
     })
 }
