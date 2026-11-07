@@ -41,6 +41,14 @@ pub const MAX_IMPORTS: usize = 64;
 pub const MAX_USES: u8 = 1;
 /// Longest `label`, in characters: it is shown framed as the plugin's own words.
 pub const MAX_LABEL: usize = 80;
+/// Most values (nodes) of a request template.
+pub const MAX_TEMPLATE_NODES: usize = 2048;
+/// Deepest nesting of a request template, the root being 1.
+pub const MAX_TEMPLATE_DEPTH: usize = 16;
+/// Most keys of one object of a request template.
+pub const MAX_TEMPLATE_KEYS: usize = 64;
+/// Longest key of a request template, in bytes.
+pub const MAX_TEMPLATE_KEY: usize = 128;
 /// Longest request template, in bytes.
 pub const MAX_REQUEST: usize = 16 * 1024;
 /// Longest `max_bytes` of a `document` parameter, in bytes: the most whose base64 form and
@@ -317,7 +325,7 @@ impl Operation {
     /// network prefixes are encoded as sorted sets, the rest in the manifest's order. The
     /// request is the template as written, byte for byte.
     pub fn canonical(&self) -> Vec<u8> {
-        let mut w = Writer::new(b"ONCLOP1\0");
+        let mut w = Writer::new(b"ONCLOP2\0");
         w.str(&self.name);
         w.str(&self.module);
         w.bool(self.manual);
@@ -573,9 +581,6 @@ impl KeyKind {
         ]
         .into_iter()
         .find(|k| k.import() == import)
-    }
-    fn is_xml(self) -> bool {
-        matches!(self, KeyKind::Xml | KeyKind::XmlEx | KeyKind::Xades)
     }
 }
 
@@ -1869,31 +1874,36 @@ impl RawOperation {
         }
         let StrictJson(value) =
             serde_json::from_str(&self.request).map_err(|e| bad(format!("not JSON: {e}")))?;
-        let serde_json::Value::Object(map) = &value else {
+        let serde_json::Value::Object(root) = &value else {
             return Err(bad("not a JSON object".to_owned()));
         };
-        if map.len() != 3 {
-            return Err(bad(
-                "must have exactly `module`, `method` and `args`".to_owned()
-            ));
-        }
-        match map.get("module") {
+        // `module` and `method`, when the plugin reads them at the root, are fixed text: the
+        // host routes by the declared module and the plugin must not be steered by a typed
+        // value into another method.
+        match root.get("module") {
+            None => {}
             Some(serde_json::Value::String(m)) if *m == self.module => {}
-            _ => return Err(bad("`module` must be the operation's module".to_owned())),
+            Some(_) => return Err(bad("`module` must be the operation's module".to_owned())),
         }
-        match map.get("method") {
+        match root.get("method") {
+            None => {}
             Some(serde_json::Value::String(m))
                 if plain_text_problem(m, 128).is_none() && !m.contains(['{', '}']) => {}
-            _ => {
+            Some(_) => {
                 return Err(bad("`method` must be plain text without braces".to_owned()));
             }
         }
-        let Some(serde_json::Value::Array(args)) = map.get("args") else {
-            return Err(bad("`args` must be an array".to_owned()));
-        };
         let mut used = HashSet::new();
-        let mut stack: Vec<&serde_json::Value> = args.iter().collect();
-        while let Some(v) = stack.pop() {
+        let mut nodes = 0usize;
+        let mut stack: Vec<(&serde_json::Value, usize)> = vec![(&value, 1)];
+        while let Some((v, depth)) = stack.pop() {
+            nodes += 1;
+            if nodes > MAX_TEMPLATE_NODES {
+                return Err(bad(format!("more than {MAX_TEMPLATE_NODES} values")));
+            }
+            if depth > MAX_TEMPLATE_DEPTH {
+                return Err(bad(format!("nested deeper than {MAX_TEMPLATE_DEPTH}")));
+            }
             match v {
                 serde_json::Value::String(s) if s.contains(['{', '}']) => {
                     let inner = s
@@ -1917,12 +1927,31 @@ impl RawOperation {
                     }
                     used.insert(name);
                 }
-                serde_json::Value::Array(items) => stack.extend(items),
+                // Only integers: the host prints numbers back, and a float it would change
+                // cannot be built.
+                serde_json::Value::Number(n) if !(n.is_u64() || n.is_i64()) => {
+                    return Err(bad(format!("{n} is not an integer")));
+                }
+                serde_json::Value::Array(items) => {
+                    stack.extend(items.iter().map(|i| (i, depth + 1)));
+                }
                 serde_json::Value::Object(map) => {
-                    if let Some(k) = map.keys().find(|k| k.contains(['{', '}'])) {
-                        return Err(bad(format!("key {k:?} has braces")));
+                    if map.len() > MAX_TEMPLATE_KEYS {
+                        return Err(bad(format!(
+                            "an object with more than {MAX_TEMPLATE_KEYS} keys"
+                        )));
                     }
-                    stack.extend(map.values());
+                    // A key is never a placeholder: what is typed must not name a field.
+                    if let Some(k) = map.keys().find(|k| {
+                        k.contains(['{', '}'])
+                            || k.len() > MAX_TEMPLATE_KEY
+                            || k.chars().any(|c| c.is_control() || is_invisible(c))
+                    }) {
+                        return Err(bad(format!(
+                            "key {k:?} has braces, is too long or is not plain text"
+                        )));
+                    }
+                    stack.extend(map.values().map(|i| (i, depth + 1)));
                 }
                 _ => {}
             }
@@ -2062,6 +2091,12 @@ impl RawUses {
                 });
             }
         }
+        if !key.is_empty() && network != Network::Pki {
+            return Err(OperationError::NetworkNeeded {
+                operation: op.to_owned(),
+                why: "a key operation needs network = \"pki\" (the manual window signs only with the PKI hosts reachable)".to_owned(),
+            });
+        }
         if network == Network::None {
             if let Some(import) = imports.iter().find(|i| reaches_network(**i)) {
                 return Err(OperationError::NetworkNeeded {
@@ -2107,12 +2142,13 @@ impl RawKeyUse {
             })?;
             let ok = match param.kind {
                 ParamKind::Document { .. } => true,
-                ParamKind::Text { .. } => kind.is_xml(),
+                // Text signs as its UTF-8 bytes: for every kind.
+                ParamKind::Text { .. } => true,
                 _ => false,
             };
             if !ok {
                 return Err(content_error(format!(
-                    "param {name:?} cannot be the content of {}: a document (a text for xml, xml_ex, xades)",
+                    "param {name:?} cannot be the content of {}: a document or a text",
                     kind.as_str()
                 )));
             }

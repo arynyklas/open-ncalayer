@@ -560,6 +560,7 @@ name = "f"
 kind = "document"
 [operations.uses]
 imports = ["keys_sign_raw"]
+network = "pki"
 [[operations.uses.key]]
 kind = "raw"
 content = "param:f"

@@ -197,6 +197,7 @@ kind = "text"
 max_chars = 64
 [operations.uses]
 imports = ["keys_sign_xml"]
+network = "pki"
 [[operations.uses.key]]
 kind = "xml"
 content = "param:doc"
@@ -204,14 +205,48 @@ content = "param:doc"
 element = "param:path"
 
 [[operations]]
-name = "num"
+name = "obj"
 module = "test.l01.module"
 manual = true
-request = '{"module":"test.l01.module","method":"n","args":["{on}", 12345678901234567890123]}'
+request = '{"module":"test.l01.module","method":"o","args":{"data":"{doc:base64}","who":{"name":"{t}","n":7}}}'
 label = { ru = "з", kk = "ә", en = "h" }
+[[operations.params]]
+name = "doc"
+kind = "document"
+max_bytes = 64
+[[operations.params]]
+name = "t"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["hash"]
+
+[[operations]]
+name = "rooted"
+module = "test.l01.module"
+manual = true
+request = '{"method":"signPlainData","storageName":"PKCS12","data":"{text}","list":["{on}",null,-3]}'
+label = { ru = "и", kk = "ә", en = "i" }
+[[operations.params]]
+name = "text"
+kind = "text"
+max_chars = 64
 [[operations.params]]
 name = "on"
 kind = "flag"
+[operations.uses]
+imports = ["hash"]
+
+[[operations]]
+name = "bare"
+module = "test.l01.module"
+manual = true
+request = '{"type":"text","data":"{text}"}'
+label = { ru = "й", kk = "ә", en = "j" }
+[[operations.params]]
+name = "text"
+kind = "text"
+max_chars = 64
 [operations.uses]
 imports = ["hash"]
 
@@ -256,7 +291,7 @@ fn rig(
         manifest,
         sha,
         handle,
-        operations.contains("note"),
+        operations.contains("note") || operations.contains(r#"imports = ["hash"]"#),
     );
     prepare(&mut plugins);
     let guard = Arc::new(crypto::Guard::default());
@@ -463,7 +498,12 @@ fn plugin_operations_lists_only_runnable_declared() {
         .iter()
         .map(|o| o.name().to_owned())
         .collect();
-    assert_eq!(names, ["sign-raw", "note", "big", "pad", "sign-xml", "num"]);
+    assert_eq!(
+        names,
+        [
+            "sign-raw", "note", "big", "pad", "sign-xml", "obj", "rooted", "bare"
+        ]
+    );
     assert_eq!(
         r.engine.plugin_operations("nobody").unwrap_err(),
         PluginRequestError::UnknownPlugin
@@ -813,9 +853,8 @@ fn base64_padding_and_empty_document() {
 }
 
 #[test]
-fn xpath_text_is_checked_and_template_numbers_are_not_rewritten() {
-    // Break caught: a text that feeds an XPath source skips Source::check_value; a number
-    // JSON re-printing would change reaches the module.
+fn xpath_text_is_checked() {
+    // Break caught: a text that feeds an XPath source skips Source::check_value;
     let r = rig("p", &all_operations(), SHA, 1, |_| {});
     let sign = |path: &str| {
         r.engine.plugin_request(
@@ -834,12 +873,6 @@ fn xpath_text_is_checked_and_template_numbers_are_not_rewritten() {
             PluginRequestError::InvalidValue("path".into())
         );
     }
-    assert_eq!(
-        r.engine
-            .plugin_request(ID, "num", &[("on", PluginParam::Flag(true))])
-            .unwrap_err(),
-        PluginRequestError::InvalidTemplate
-    );
 }
 
 #[test]
@@ -943,4 +976,107 @@ fn urls_operation_is_not_offered_or_built_and_other_refusals() {
             .unwrap_err(),
         PluginRequestError::UnknownPlugin
     );
+}
+
+#[test]
+fn the_three_template_shapes_build_exact_bytes() {
+    // Break caught: only the array shape builds, a typed value lands in a key, or an
+    // absent `module`/`args` is invented. Keys come out sorted, numbers as written.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    // Array args: the original `{"module","method","args":[..]}`.
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "pad", &[("t", PluginParam::Text("x"))])
+            .unwrap(),
+        r#"{"args":["x"],"method":"p","module":"test.l01.module"}"#
+    );
+    // Object args.
+    assert_eq!(
+        r.engine
+            .plugin_request(
+                ID,
+                "obj",
+                &[
+                    ("doc", PluginParam::Document(&[0, 1, 2, 255])),
+                    ("t", PluginParam::Text("a\"b"))
+                ]
+            )
+            .unwrap(),
+        r#"{"args":{"data":"AAEC/w==","who":{"n":7,"name":"a\"b"}},"method":"o","module":"test.l01.module"}"#
+    );
+    // Root-keyed: no module, no args.
+    assert_eq!(
+        r.engine
+            .plugin_request(
+                ID,
+                "rooted",
+                &[
+                    ("text", PluginParam::Text("héllo")),
+                    ("on", PluginParam::Flag(false))
+                ]
+            )
+            .unwrap(),
+        r#"{"data":"héllo","list":[false,null,-3],"method":"signPlainData","storageName":"PKCS12"}"#
+    );
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "bare", &[("text", PluginParam::Text("t"))])
+            .unwrap(),
+        r#"{"data":"t","type":"text"}"#
+    );
+    // A hostile text stays one string value in every shape.
+    for hostile in [r#"","type":"x"#, "{text}", "\u{0}"] {
+        let text = r
+            .engine
+            .plugin_request(ID, "bare", &[("text", PluginParam::Text(hostile))])
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 2);
+        assert_eq!(value["type"], "text");
+        assert_eq!(value["data"], hostile);
+    }
+}
+
+#[test]
+fn the_object_and_root_keyed_shapes_keep_the_allocation_bound() {
+    // Break caught: expanding a placeholder before the size is known, in any shape.
+    let placeholders = vec![r#""{f:base64}""#; 400].join(",");
+    let big = |shape: &str| {
+        let request = match shape {
+            "object" => format!(
+                r#"{{"module":"test.l01.module","method":"b","args":{{"list":[{placeholders}]}}}}"#
+            ),
+            _ => format!(r#"{{"method":"b","list":[{placeholders}]}}"#),
+        };
+        format!(
+            r#"
+[[operations]]
+name = "big"
+module = "test.l01.module"
+manual = true
+request = '{request}'
+label = {{ ru = "д", kk = "ә", en = "e" }}
+[[operations.params]]
+name = "f"
+kind = "document"
+max_bytes = 1048576
+[operations.uses]
+imports = ["hash"]
+"#
+        )
+    };
+    for shape in ["object", "root"] {
+        let r = rig("p", &big(shape), SHA, 1, |_| {});
+        let doc = vec![7u8; 1 << 20];
+        let (result, bytes) = allocated(|| {
+            r.engine
+                .plugin_request(ID, "big", &[("f", PluginParam::Document(&doc))])
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            PluginRequestError::RequestTooLarge,
+            "{shape}"
+        );
+        assert!(bytes < 256 << 10, "{shape}: allocated {bytes} bytes");
+    }
 }
