@@ -196,6 +196,26 @@ impl Engine {
         }
     }
 
+    /// [`Engine::new`] with every function translated when the module is compiled, not on its
+    /// first call. Wasmi charges the translation of a function to the fuel of the call that
+    /// first reaches it, and a call that runs out of fuel that way fails and cannot be resumed;
+    /// the headless and manual calls of `oncl-core` meter their fuel in slices (see
+    /// [`Compiled::call_headless`]) and a real port's entry function costs more to translate
+    /// than a slice, so they run modules compiled by this engine. The cost is paid once, at
+    /// load, and no call's fuel depends on which function ran first.
+    pub fn eager() -> Engine {
+        let mut config = Config::default();
+        config
+            .consume_fuel(true)
+            .allow_start_fn(false)
+            .enforced_limits(EnforcedLimits::strict())
+            .compilation_mode(CompilationMode::Eager);
+        Engine {
+            engine: wasmi::Engine::new(&config),
+            process_fuel: PROCESS_FUEL,
+        }
+    }
+
     /// The same engine giving each request `fuel` instead of [`PROCESS_FUEL`].
     #[must_use]
     pub fn with_process_fuel(self, fuel: u64) -> Engine {

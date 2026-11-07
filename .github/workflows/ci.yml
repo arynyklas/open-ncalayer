@@ -157,11 +157,14 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo xtask sdk closure
       # Offline and read-only (under 1 s warm): the lint of the `[[operations]]` of every
-      # `plugins/*/plugin.toml`. The modules are not built in this job, so the imports rule is
-      # skipped with a warning (`--require-wasm` is for a job that has packed the ports).
+      # `plugins/*/plugin.toml` against the modules the Test step above built (the port tests
+      # of oncl-port-tests and `plugin_ports_manual` build `plugins/` into target/plugin-ports);
+      # a missing module is an error. The same ports run under the manual window's call path in
+      # `plugin_ports_manual` (docs/dev/plugins-manual-tests.md): its `#[ignore]`d tests are
+      # among those `--include-ignored` runs in the Test step, so nothing there is skipped.
       - name: Plugin operations lint
         if: runner.os == 'Linux'
-        run: cargo xtask plugin-ops-check
+        run: cargo xtask plugin-ops-check --require-wasm --wasm-dir target/plugin-ports/wasm32-unknown-unknown/release
 
   # The built-in modules' limits in a 32-bit process, where their memory is smallest.
   builtins-x86:

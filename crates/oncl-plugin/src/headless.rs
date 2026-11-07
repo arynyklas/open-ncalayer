@@ -613,6 +613,14 @@ dialogs=true
         }
     }
     fn allocator_guest(allocator: &str, process: &str, fuel: u64) -> Compiled {
+        allocator_guest_in(&crate::Engine::new(), allocator, process, fuel)
+    }
+    fn allocator_guest_in(
+        engine: &crate::Engine,
+        allocator: &str,
+        process: &str,
+        fuel: u64,
+    ) -> Compiled {
         let manifest = crate::Manifest::from_toml(
             r#"id="test.allocator"
 version="1.0.0"
@@ -657,7 +665,7 @@ name.en="test"
             abi::pack(128, output.len() as u32)
         ))
         .unwrap();
-        crate::Engine::new()
+        engine
             .compile(&manifest, &wasm)
             .unwrap()
             .with_limits(crate::InstanceLimits {
@@ -720,6 +728,32 @@ name.en="test"
         );
         assert_eq!(backend.calls, 1);
         assert_eq!(backend.checks, 5);
+    }
+    /// Wasmi translates a function on its first call and charges the translation to that call;
+    /// run in slices of 100 000 fuel, a large entry function (every real port's `oncl_process`)
+    /// fails with `OutOfFuel` that cannot be resumed. `Engine::eager` translates at compile.
+    #[test]
+    fn an_entry_function_costing_more_than_a_slice_to_translate_runs_in_an_eager_engine() {
+        let large = "i32.const 0 drop ".repeat(120_000);
+        let run = |engine: &crate::Engine| {
+            allocator_guest_in(engine, "", &large, 20_000_000_000).call_headless(
+                &mut Effects {
+                    checks: 0,
+                    cancel_at: None,
+                    calls: 0,
+                },
+                HeadlessBindings {
+                    caller: &CallerContext::LocalOperator("allocator".into()),
+                    imports: &[Import::Log],
+                },
+                "{}",
+            )
+        };
+        assert_eq!(run(&crate::Engine::eager()), Ok("complete".to_owned()));
+        assert_eq!(
+            run(&crate::Engine::new()),
+            Err(HeadlessError::Plugin(PluginError::OutOfFuel))
+        );
     }
     #[test]
     fn allocator_and_process_share_one_total_fuel_bank() {

@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-rating1c"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
