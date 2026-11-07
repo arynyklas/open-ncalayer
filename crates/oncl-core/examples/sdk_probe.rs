@@ -13,6 +13,12 @@ mod i01_probe;
 #[cfg(feature = "jose")]
 #[path = "sdk_probe/jose.rs"]
 mod jose_probe;
+#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+#[path = "sdk_probe/large_pki.rs"]
+mod large_pki;
+#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+#[path = "sdk_probe/large.rs"]
+mod large_probe;
 #[cfg(feature = "pdf")]
 #[path = "sdk_probe/pades.rs"]
 mod pades_probe;
@@ -36,12 +42,6 @@ mod xml_probe;
 #[cfg(feature = "xml")]
 #[path = "sdk_probe/xml_sign.rs"]
 mod xml_sign_probe;
-#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
-#[path = "sdk_probe/large.rs"]
-mod large_probe;
-#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
-#[path = "sdk_probe/large_pki.rs"]
-mod large_pki;
 
 struct Control;
 impl OperationControl for Control {
