@@ -350,7 +350,10 @@ is deliberate. `error_code()` is the `ErrorCode` the refusal is reported with (a
 Every reason has one: `From<TicketRefusal>`, `From<&PluginRequestError>`,
 `From<&PluginPrepareError>`, `From<ApprovalIssueError>`, `From<ApprovalRejected>` and the
 `subcode()` method of each. `TicketRefusal::NotGranted` is for a server or CLI key use that no
-operator grant covers.
+operator grant covers; `TicketRefusal::AuditFactTooLong` for a use whose version or grant id
+cannot be audited (over 255 bytes), refused before the journal is touched.
+`DurableAuditGuard::with_plugin_policy` returns `io::Result<Self>` (an error if the guard was
+already shared).
 
 Where a host reads it: `ApprovedCall::subcode()` (the first guard refusal, else the reason the
 call could not be prepared; `None` when nothing was refused, also after an error that came after

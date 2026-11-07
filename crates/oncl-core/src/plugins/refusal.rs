@@ -94,11 +94,15 @@ pub enum PluginRefusalCode {
     ConfirmationMismatch,
     ApprovalTtlInvalid,
     ApprovalRandomUnavailable,
+    // Appended later.
+    /// A fact of the use (a version or grant id) is too long to be audited, so the use
+    /// does not run.
+    AuditFactTooLong,
 }
 
 impl PluginRefusalCode {
     /// Every subcode, in a fixed order. New subcodes are appended, never inserted.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::TicketMissing,
         Self::ApprovalMissing,
         Self::TicketUses,
@@ -144,6 +148,7 @@ impl PluginRefusalCode {
         Self::ConfirmationMismatch,
         Self::ApprovalTtlInvalid,
         Self::ApprovalRandomUnavailable,
+        Self::AuditFactTooLong,
     ];
 }
 
@@ -196,6 +201,7 @@ impl PluginRefusalCode {
             Self::ConfirmationMismatch => "confirmation-mismatch",
             Self::ApprovalTtlInvalid => "approval-ttl-invalid",
             Self::ApprovalRandomUnavailable => "approval-random-unavailable",
+            Self::AuditFactTooLong => "audit-fact-too-long",
         }
     }
     /// The subcode of an id, if it is one.
@@ -220,7 +226,37 @@ impl PluginRefusalCode {
             Self::UnsupportedKey => ErrorCode::UnsupportedAlgorithm,
             Self::KeyUnavailable => ErrorCode::MissingKeyProvider,
             Self::ApprovalRandomUnavailable => ErrorCode::Io,
-            _ => ErrorCode::PermissionDenied,
+            Self::TicketMissing
+            | Self::ApprovalMissing
+            | Self::TicketUses
+            | Self::ApprovalExpired
+            | Self::OperationIdMismatch
+            | Self::PackageChanged
+            | Self::OperationMismatch
+            | Self::CallerMismatch
+            | Self::KeyMismatch
+            | Self::ActionMismatch
+            | Self::KindMismatch
+            | Self::ContentMismatch
+            | Self::OptionsMismatch
+            | Self::KeyUseSpent
+            | Self::NotDeclared
+            | Self::CertificateChanged
+            | Self::NoConsentGuard
+            | Self::Busy
+            | Self::ApprovalReplayed
+            | Self::NotGranted
+            | Self::AuditFactTooLong
+            | Self::UnknownPlugin
+            | Self::NotManual
+            | Self::DerivedUnsupported
+            | Self::NetworkUnsupported
+            | Self::NetworkNotDeclared
+            | Self::CallerNotManual
+            | Self::NoKeyUse
+            | Self::KeyMetadataMissing
+            | Self::CertificateMismatch
+            | Self::ConfirmationMismatch => ErrorCode::PermissionDenied,
         }
     }
 }
@@ -252,6 +288,7 @@ impl From<TicketRefusal> for PluginRefusalCode {
             TicketRefusal::Busy => Self::Busy,
             TicketRefusal::Replayed => Self::ApprovalReplayed,
             TicketRefusal::NotGranted => Self::NotGranted,
+            TicketRefusal::AuditFactTooLong => Self::AuditFactTooLong,
         }
     }
 }
@@ -337,7 +374,7 @@ mod tests {
 
     /// The whole list of ids. Adding a subcode means appending here on purpose; an id is
     /// never edited, removed or reordered (clients and journals keep the strings).
-    const PINNED: [&str; 45] = [
+    const PINNED: [&str; 46] = [
         "ticket-missing",
         "approval-missing",
         "ticket-uses",
@@ -383,6 +420,7 @@ mod tests {
         "confirmation-mismatch",
         "approval-ttl-invalid",
         "approval-random-unavailable",
+        "audit-fact-too-long",
     ];
 
     #[test]
@@ -445,7 +483,7 @@ mod tests {
         ]);
         all
     }
-    const TICKETS: [TicketRefusal; 20] = [
+    const TICKETS: [TicketRefusal; 21] = [
         TicketRefusal::NoTicket,
         TicketRefusal::NoApproval,
         TicketRefusal::Uses,
@@ -466,6 +504,7 @@ mod tests {
         TicketRefusal::Busy,
         TicketRefusal::Replayed,
         TicketRefusal::NotGranted,
+        TicketRefusal::AuditFactTooLong,
     ];
 
     /// Every reason of every source enum has a subcode, and together they cover ALL.

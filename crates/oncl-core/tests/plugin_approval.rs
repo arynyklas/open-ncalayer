@@ -1861,6 +1861,11 @@ fn audit_facts_carry_the_nonce_hash_not_the_nonce_or_the_document() {
     let facts = approval.audit_record(&ticket);
     let hash = facts.approval_nonce_sha256.expect("a user approved it");
     assert_ne!(hash.as_slice(), &nonce[..]);
+    // Pinned: the domain-separated hash of the nonce, so a change of the prefix is deliberate.
+    let mut expected = Sha256::new();
+    expected.update(b"ONCLNONCE1\0");
+    expected.update(nonce);
+    assert_eq!(hash.as_slice(), expected.finalize().as_slice());
     assert!(!hash.windows(16).any(|w| w == nonce));
     assert_eq!(facts.plugin_id, ID);
     assert_eq!(facts.package_kind, 1);

@@ -28,6 +28,8 @@ const MAX_NAME: usize = 128;
 const MAX_DESCRIPTION: usize = 2048;
 /// Longest `replaces.version`, in characters.
 const MAX_REPLACES_VERSION: usize = 64;
+/// Longest `version`, in characters: it is written to audit records.
+const MAX_VERSION: usize = 64;
 /// Most URL prefixes of `capabilities.http`.
 const MAX_HTTP_PREFIXES: usize = 32;
 /// Most origin patterns of `capabilities.origins`.
@@ -736,6 +738,11 @@ impl RawManifest {
             description
                 .check("description", MAX_DESCRIPTION, false)
                 .map_err(bad)?;
+        }
+        if self.version.to_string().chars().count() > MAX_VERSION {
+            return Err(bad(format!(
+                "version is longer than {MAX_VERSION} characters"
+            )));
         }
         if let Some(replaces) = &self.replaces {
             if !is_symbolic_name(&replaces.symname) {
