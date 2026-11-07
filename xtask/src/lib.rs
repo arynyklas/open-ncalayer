@@ -16,6 +16,7 @@ pub mod platform;
 #[path = "platform/interop.rs"]
 pub mod platform_interop;
 pub mod plugin;
+pub mod plugin_ops;
 pub mod privacy;
 pub mod registry;
 pub mod sdk_delivery;

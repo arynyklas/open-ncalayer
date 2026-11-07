@@ -131,6 +131,22 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Lint the `[[operations]]` of every `plugins/*/plugin.toml` (and the extra paths):
+    /// schema rules via the manifest parser, declared imports against the built module's.
+    /// Exit 1 on errors; a missing module is a warning, an error with `--require-wasm`.
+    PluginOpsCheck {
+        /// Extra `plugin.toml` files or plugin directories.
+        paths: Vec<PathBuf>,
+        /// Where the built modules are [default: target/plugin-build/wasm32-unknown-unknown/release].
+        #[arg(long)]
+        wasm_dir: Option<PathBuf>,
+        /// A missing module is an error.
+        #[arg(long)]
+        require_wasm: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Fail on what must never reach the public repository (docs/dev/release.md,
     /// «Приватность»): transcript files and headers, paths with a drive letter outside the
     /// listed test literals, certificates issued by an NCA test CA; with `--denylist`, lines
@@ -842,6 +858,30 @@ fn main() -> anyhow::Result<()> {
                 bail!("{} privacy findings", findings.len());
             }
             println!("privacy: nothing found");
+            Ok(())
+        }
+        Command::PluginOpsCheck {
+            paths,
+            wasm_dir,
+            require_wasm,
+            json,
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let wasm_dir = wasm_dir.unwrap_or_else(|| root.join(xtask::plugin_ops::WASM_DIR));
+            let options = xtask::plugin_ops::Options {
+                extra: &paths,
+                wasm_dir: &wasm_dir,
+                require_wasm,
+            };
+            let report = xtask::plugin_ops::check(&root, &options)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+            } else {
+                print!("{}", report.to_text());
+            }
+            if report.exit_code() != 0 {
+                std::process::exit(report.exit_code());
+            }
             Ok(())
         }
         Command::Registry { command } => registry(command),
