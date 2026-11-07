@@ -70,7 +70,14 @@ pub(crate) struct Manual<'a> {
     interaction: &'a dyn PluginInteraction,
     /// `keys_flow_open`s of the call: whether the bound key matched.
     flows: Vec<bool>,
+    /// The evaluations of the call so far. The bound key and the clock are fixed within a
+    /// call, so the result is a pure function of the filter: asked twice, answered once.
+    evaluated: Vec<(Option<KeyFilter>, Option<Vec<KncaCertType>>, bool)>,
 }
+
+/// At most this many DIFFERENT filters are evaluated in a call (each may cost an OCSP
+/// request of up to six seconds); the same filter again is answered from memory.
+pub const MAX_EVALUATIONS: usize = 16;
 
 /// What [`Manual::answer`] did with an import.
 pub(crate) enum Answer {
@@ -87,6 +94,7 @@ impl<'a> Manual<'a> {
         Self {
             interaction,
             flows: Vec::new(),
+            evaluated: Vec::new(),
         }
     }
 
@@ -121,6 +129,30 @@ impl<'a> Manual<'a> {
     }
 
     fn matches(
+        &mut self,
+        filter: Option<&KeyFilter>,
+        kinds: Option<&[KncaCertType]>,
+    ) -> HostResult<bool> {
+        if let Some((_, _, known)) = self
+            .evaluated
+            .iter()
+            .find(|(f, k, _)| f.as_ref() == filter && k.as_deref() == kinds)
+        {
+            return Ok(*known);
+        }
+        if self.evaluated.len() >= MAX_EVALUATIONS {
+            return Err(HostError::new(
+                ErrorCode::Limit,
+                format!("at most {MAX_EVALUATIONS} different key filters in a call"),
+            ));
+        }
+        let answer = self.evaluate(filter, kinds)?;
+        self.evaluated
+            .push((filter.cloned(), kinds.map(<[_]>::to_vec), answer));
+        Ok(answer)
+    }
+
+    fn evaluate(
         &self,
         filter: Option<&KeyFilter>,
         kinds: Option<&[KncaCertType]>,
@@ -157,7 +189,7 @@ impl<'a> Manual<'a> {
         }
     }
 
-    fn choose(&self, filter: &KeyFilter) -> HostResult<Option<Chosen>> {
+    fn choose(&mut self, filter: &KeyFilter) -> HostResult<Option<Chosen>> {
         Ok(self.matches(Some(filter), None)?.then(|| self.chosen()))
     }
 

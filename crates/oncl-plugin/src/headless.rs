@@ -67,6 +67,11 @@ impl HeadlessState<'_, '_> {
         import: Import,
         args: &[u8],
     ) -> Option<Result<Vec<u8>, HeadlessError>> {
+        self.manual.as_ref()?;
+        // Before an evaluation that may wait for a responder, not only after it.
+        if let Err(error) = self.backend.checkpoint() {
+            return Some(Err(error));
+        }
         let manual = self.manual.as_mut()?;
         match manual.answer(import, args) {
             Answer::Other => None,

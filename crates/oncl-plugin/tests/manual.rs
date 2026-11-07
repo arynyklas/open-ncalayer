@@ -10,6 +10,8 @@ use oncl_pdk::abi::{
     FlowFile, FlowNone, FlowOrder, FlowOutcome, FlowReaders, FlowStart, HostResult, Import,
     KeyOrder, PickArgs, SelectArgs, TerminalsArgs, TokenScan,
 };
+use oncl_pki::http::RouteTransport;
+use oncl_pki::ocsp::{CertStatus, MockOcsp};
 use oncl_pki::pkcs12::load;
 use oncl_plugin::Engine;
 use oncl_plugin::headless::{CallerContext, CapabilityBackend, HeadlessBindings, HeadlessError};
@@ -17,6 +19,7 @@ use oncl_plugin::manual::{BoundInteraction, BoundKey};
 use oncl_testkit::{read, synthetic};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use time::macros::datetime;
 
 const CAPS: &str = "keys = true\ndialogs = true\nfiles = true";
 
@@ -36,6 +39,14 @@ impl CapabilityBackend for Spy {
 }
 
 fn bound(name: &str) -> BoundInteraction {
+    bound_with(name, Arc::new(Offline), NOW)
+}
+
+fn bound_with(
+    name: &str,
+    http: Arc<dyn oncl_pki::http::HttpTransport>,
+    now: time::OffsetDateTime,
+) -> BoundInteraction {
     let key = synthetic(name);
     let entry = load(&read(&key.path), &key.password)
         .unwrap()
@@ -48,8 +59,8 @@ fn bound(name: &str) -> BoundInteraction {
             alias: entry.alias.clone(),
             certificate: der::Encode::to_der(&entry.cert).unwrap(),
         },
-        now: NOW,
-        http: Arc::new(Offline),
+        now,
+        http,
         ocsp_cache: Arc::new(OcspCache::new()),
     }
 }
@@ -373,4 +384,217 @@ fn reply_drop_is_allowed_and_harmless() {
     let (reply, spy) = manual(&me, &[(Import::ReplyDrop, abi::encode(&()))]);
     assert_eq!(result::<()>(reply).unwrap(), ());
     assert!(spy.invoked.is_empty());
+}
+
+// The filter's own conditions, through the dialogs' functions.
+
+fn filter_args(filter: Filter) -> Vec<u8> {
+    abi::encode(&SelectArgs {
+        action: Action::Sign,
+        storages: Vec::new(),
+        filter,
+        more: FilterMore::default(),
+        detail: None,
+        initial_path: None,
+        order: KeyOrder::NewestFirst,
+    })
+}
+
+fn permissive() -> Filter {
+    Filter {
+        chain: Some(Vec::new()),
+        allow_expired: true,
+        ..Filter::default()
+    }
+}
+
+fn selected(me: &BoundInteraction, filter: Filter) -> bool {
+    let (reply, _) = manual(me, &[(Import::KeysSelect, filter_args(filter))]);
+    result::<Option<Chosen>>(reply).unwrap().is_some()
+}
+
+#[test]
+fn an_expired_key_matches_only_when_expired_keys_are_allowed() {
+    let me = bound("expired-gost2015-sign");
+    let strict = Filter {
+        allow_expired: false,
+        ..permissive()
+    };
+    assert!(!selected(&me, strict));
+    assert!(selected(&me, permissive()));
+}
+
+#[test]
+fn the_default_chain_is_not_permissive() {
+    let me = bound("user-gost2015-sign");
+    let default = Filter {
+        allow_expired: true,
+        ..Filter::default()
+    };
+    assert!(!selected(&me, default));
+}
+
+fn revoked_pki() -> (Arc<MockOcsp>, Arc<dyn oncl_pki::http::HttpTransport>) {
+    let key = synthetic("inter-revoked-gost2015-sign");
+    let leaf = load(&read(&key.path), &key.password)
+        .unwrap()
+        .remove(0)
+        .cert;
+    let serial: String = leaf
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let responder = {
+        let k = synthetic("ocsp-gost2015");
+        load(&read(&k.path), &k.password).unwrap().remove(0)
+    };
+    let ocsp = Arc::new(MockOcsp::new(responder).status(
+        &serial,
+        CertStatus::Revoked {
+            time: datetime!(2026-01-15 08:00 UTC),
+            reason: Some(1),
+        },
+    ));
+    let http: Arc<dyn oncl_pki::http::HttpTransport> = Arc::new(RouteTransport::new(vec![(
+        "http://".to_owned(),
+        Arc::clone(&ocsp) as Arc<dyn oncl_pki::http::HttpTransport>,
+    )]));
+    (ocsp, http)
+}
+
+fn custom_chain() -> Option<Vec<abi::Bytes>> {
+    Some(
+        ["root-gost2015", "inter-gost2015"]
+            .map(|n| abi::Bytes::from(oncl_testkit::synthetic_cert(n)))
+            .to_vec(),
+    )
+}
+
+#[test]
+fn a_revoked_key_is_asked_once_and_does_not_match() {
+    let (ocsp, http) = revoked_pki();
+    let me = bound_with(
+        "inter-revoked-gost2015-sign",
+        http,
+        time::OffsetDateTime::now_utc(),
+    );
+    let strict = Filter {
+        chain: custom_chain(),
+        ..Filter::default()
+    };
+    assert!(!selected(&me, strict.clone()));
+    let calls = ocsp.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    // allow_revoked: matched, and the responder is not asked.
+    let (ocsp, http) = revoked_pki();
+    let me = bound_with(
+        "inter-revoked-gost2015-sign",
+        http,
+        time::OffsetDateTime::now_utc(),
+    );
+    let lax = Filter {
+        allow_revoked: true,
+        ..strict
+    };
+    assert!(selected(&me, lax));
+    assert!(ocsp.calls().is_empty());
+    // chain []: neither path nor OCSP.
+    assert!(selected(&me, permissive()));
+    assert!(ocsp.calls().is_empty());
+}
+
+#[test]
+fn many_selects_ask_the_responder_at_most_once() {
+    let (ocsp, http) = revoked_pki();
+    let me = bound_with(
+        "inter-revoked-gost2015-sign",
+        http,
+        time::OffsetDateTime::now_utc(),
+    );
+    let call = (
+        Import::KeysSelect,
+        filter_args(Filter {
+            chain: custom_chain(),
+            ..Filter::default()
+        }),
+    );
+    let calls = vec![call; 900];
+    let (reply, _) = manual(&me, &calls);
+    assert_eq!(result::<Option<Chosen>>(reply).unwrap(), None);
+    assert_eq!(ocsp.calls().len(), 1);
+}
+
+#[test]
+fn different_filters_per_call_are_capped() {
+    let me = bound("user-gost2015-sign");
+    let calls: Vec<_> = (0..=oncl_plugin::manual::MAX_EVALUATIONS)
+        .map(|i| {
+            let filter = Filter {
+                serial_number: format!("{i:02x}"),
+                ..permissive()
+            };
+            (Import::KeysSelect, filter_args(filter))
+        })
+        .collect();
+    let (reply, _) = manual(&me, &calls);
+    assert_eq!(
+        result::<Option<Chosen>>(reply).unwrap_err().code,
+        ErrorCode::Limit
+    );
+    let (reply, _) = manual(&me, &calls[..oncl_plugin::manual::MAX_EVALUATIONS]);
+    assert_eq!(result::<Option<Chosen>>(reply).unwrap(), None);
+}
+
+#[test]
+fn flows_respect_types_the_limit_and_unmatched_picks() {
+    let me = bound("user-gost2015-auth");
+    let with_types = |types: Option<Vec<&str>>| {
+        let mut args = flow_args(FlowChecks::Settled);
+        args.knca_types = types.map(|t| t.into_iter().map(str::to_owned).collect());
+        abi::encode(&args)
+    };
+    // A type the key is not: nothing opens (Settled checks, so only the type decides).
+    let (reply, _) = manual(
+        &me,
+        &[(Import::KeysFlowOpen, with_types(Some(vec!["SIGNATURE"])))],
+    );
+    assert_eq!(result::<FlowOutcome>(reply).unwrap().opened, None);
+    let (reply, _) = manual(&me, &[(Import::KeysFlowOpen, with_types(None))]);
+    assert!(result::<FlowOutcome>(reply).unwrap().opened.is_some());
+    let (reply, _) = manual(
+        &me,
+        &[(Import::KeysFlowOpen, with_types(Some(vec!["NO_SUCH_TYPE"])))],
+    );
+    assert_eq!(
+        result::<FlowOutcome>(reply).unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    // The fifth open in a call is over the limit.
+    let open = (Import::KeysFlowOpen, with_types(None));
+    let (reply, _) = manual(&me, &vec![open.clone(); 5]);
+    assert_eq!(
+        result::<FlowOutcome>(reply).unwrap_err().code,
+        ErrorCode::Limit
+    );
+    let (reply, _) = manual(&me, &vec![open; 4]);
+    assert!(result::<FlowOutcome>(reply).is_ok());
+    // A pick of a flow that did not match is invalid.
+    let pick = abi::encode(&PickArgs {
+        flow: 0,
+        error: None,
+    });
+    let (reply, _) = manual(
+        &me,
+        &[
+            (Import::KeysFlowOpen, with_types(Some(vec!["SIGNATURE"]))),
+            (Import::KeysFlowPick, pick),
+        ],
+    );
+    assert_eq!(
+        result::<Option<Chosen>>(reply).unwrap_err().code,
+        ErrorCode::Invalid
+    );
 }
