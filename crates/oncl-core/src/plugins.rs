@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 mod approval;
 mod audit_record;
+mod budget;
 mod capabilities;
 mod cms;
 mod manual;
@@ -34,6 +35,7 @@ pub use approval::{
     UserConfirmation,
 };
 pub use audit_record::{PluginAuditRecord, PluginCallerKind};
+pub use budget::{CallBudget, ManualLimits, manual_call_budget};
 pub use manual::{
     PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
 };
@@ -206,6 +208,10 @@ impl std::fmt::Debug for PluginRegistry {
 impl PluginRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// The instance limits the plugin `id` was installed with.
+    pub fn instance_limits(&self, id: &str) -> Option<InstanceLimits> {
+        self.installed.get(id).map(|i| i.compiled.limits())
     }
     /// `package` is [`PackageHash::File`] of the package file as read by
     /// `oncl_plugin::Package::read` (prefer [`PluginRegistry::install_package`]) or, for a
@@ -563,10 +569,7 @@ impl CapabilityBackend for Backend<'_, '_> {
             declared: self.declared,
         };
         let result = (|| {
-            let workspace = (args.len() as u64)
-                .checked_mul(128)
-                .and_then(|n| n.checked_add(65536))
-                .ok_or(ProcessingError::MemoryLimit)?;
+            let workspace = budget::host_call_metadata(args.len() as u64)?;
             scoped.state.admission = Some(CapabilityAdmission {
                 metadata: scoped.ctx.scope.reserve_metadata(workspace)?,
                 base: workspace,
@@ -669,10 +672,7 @@ impl Engine {
                 oncl_plugin::PluginError::TooLarge.into(),
             ));
         }
-        let scratch = (limits.max_transfer as u64)
-            .checked_mul(8)
-            .and_then(|n| n.checked_add(limits.max_memory as u64))
-            .ok_or(ProcessingError::MemoryLimit)?;
+        let scratch = budget::call_scratch(&limits)?;
         let _workspace = ctx.scope.reserve_memory(scratch)?;
         ctx.scope.account_container(call.args.len() as u64)?;
         let _metadata = ctx.scope.reserve_metadata(limits.max_transfer as u64)?;

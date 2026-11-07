@@ -12,10 +12,12 @@ use oncl_protocol::{AddInfo, Reply, SessionId};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::sync::Arc;
+use wasmi::errors::{MemoryError, TableError};
 use wasmi::{
-    CompilationMode, Config, EnforcedLimits, ExternType, FuncType, Linker, Memory, Module, Store,
-    StoreLimitsBuilder, TrapCode, TypedFunc, ValType,
+    CompilationMode, Config, EnforcedLimits, ExternType, FuncType, Linker, Memory, Module,
+    ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder, TrapCode, TypedFunc, ValType,
 };
+use wasmi_core::LimiterError;
 
 /// The largest linear memory of an instance: 1 GiB on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
@@ -445,16 +447,72 @@ pub(crate) struct Guest<T> {
     pub(crate) limits: InstanceLimits,
 }
 
+/// The limits of an instance's memory and tables: wasmi's [`StoreLimits`] with a trap when a
+/// growth is denied ([`PluginError::MemoryLimit`]), except that a `memory.grow` that ran out of fuel is not a failed growth. `StoreLimits` reports every
+/// failed growth to its `*_grow_failed` hook, and with `trap_on_grow_failure` that hook
+/// traps even for `OutOfFuel`, which the host resumes after refuelling (the fuel is handed
+/// out in slices, `host::call_guest`): without this a call whose `memory.grow` fell on the
+/// end of a slice failed with `MemoryLimit` whatever the memory limit was, depending on the
+/// size of the document and nothing else.
+pub(crate) struct GuestLimits(StoreLimits);
+
+impl GuestLimits {
+    pub(crate) fn new(limits: StoreLimits) -> Self {
+        Self(limits)
+    }
+}
+
+impl ResourceLimiter for GuestLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, LimiterError> {
+        self.0.memory_growing(current, desired, maximum)
+    }
+    fn memory_grow_failed(&mut self, error: &MemoryError) -> Result<(), LimiterError> {
+        match error {
+            MemoryError::OutOfFuel { .. } => Ok(()),
+            other => self.0.memory_grow_failed(other),
+        }
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, LimiterError> {
+        self.0.table_growing(current, desired, maximum)
+    }
+    // A `table.grow` that ran out of fuel stays a trap: wasmi does not re-execute it after
+    // the refuel as it does `memory.grow`, so it is not resumable.
+    fn table_grow_failed(&mut self, error: &TableError) -> Result<(), LimiterError> {
+        self.0.table_grow_failed(error)
+    }
+    fn instances(&self) -> usize {
+        self.0.instances()
+    }
+    fn tables(&self) -> usize {
+        self.0.tables()
+    }
+    fn memories(&self) -> usize {
+        self.0.memories()
+    }
+}
+
 impl Compiled {
-    pub(crate) fn store_limits(&self) -> wasmi::StoreLimits {
-        StoreLimitsBuilder::new()
-            .memory_size(self.limits.max_memory)
-            .table_elements(MAX_TABLE_ELEMENTS)
-            .instances(1)
-            .memories(1)
-            .tables(1)
-            .trap_on_grow_failure(true)
-            .build()
+    pub(crate) fn store_limits(&self) -> GuestLimits {
+        GuestLimits::new(
+            StoreLimitsBuilder::new()
+                .memory_size(self.limits.max_memory)
+                .table_elements(MAX_TABLE_ELEMENTS)
+                .instances(1)
+                .memories(1)
+                .tables(1)
+                .trap_on_grow_failure(true)
+                .build(),
+        )
     }
     pub fn limits(&self) -> InstanceLimits {
         self.limits

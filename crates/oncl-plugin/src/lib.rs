@@ -40,7 +40,7 @@ pub use builtins::{
 };
 pub use caps::{
     DEFAULT_OCSP, DEFAULT_TSA, HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES,
-    MAX_SECRETS, NCA_PKI_HOSTS, SharedState, nca_pki_hosts,
+    MAX_SECRETS, NCA_PKI_ENDPOINTS, NCA_PKI_HOSTS, SharedState, nca_pki_hosts,
 };
 pub use host::HostServices;
 pub use manifest::{

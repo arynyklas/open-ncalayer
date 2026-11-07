@@ -4,9 +4,10 @@
 pub use crate::caps::{LegacyRules, apply_validation};
 use crate::host::{AbiState, Phase, trap};
 use crate::manual::{Answer, Manual, PluginInteraction};
+use crate::runtime::GuestLimits;
 use crate::runtime::{Compiled, Guest, LoadError, PluginError};
 use oncl_pdk::abi::{self, Import};
-use wasmi::{Memory, StoreLimits, TypedFunc};
+use wasmi::{Memory, TypedFunc};
 
 /// Trusted caller identity supplied by the embedding host, never deserialized from guest input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +50,7 @@ pub trait CapabilityBackend {
     fn invoke(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, HeadlessError>;
 }
 struct HeadlessState<'a, 'b> {
-    limits: StoreLimits,
+    limits: GuestLimits,
     max_transfer: usize,
     phase: Phase,
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
@@ -81,7 +82,7 @@ impl HeadlessState<'_, '_> {
     }
 }
 impl AbiState for HeadlessState<'_, '_> {
-    fn limits(&mut self) -> &mut StoreLimits {
+    fn limits(&mut self) -> &mut GuestLimits {
         &mut self.limits
     }
     fn phase(&self) -> Phase {
@@ -753,6 +754,46 @@ name.en="test"
         assert_eq!(
             run(&crate::Engine::new()),
             Err(HeadlessError::Plugin(PluginError::OutOfFuel))
+        );
+    }
+    /// `memory.grow` is charged fuel like any instruction. When the fuel of a slice ends in the
+    /// middle of one, the host refuels and resumes it: that is no failed growth, and must not
+    /// be reported as the memory limit being hit. (The sizes of real documents decide where
+    /// the guest's allocator grows its memory, so without this a call failed or not by the
+    /// length of its input.)
+    #[test]
+    fn memory_growth_crossing_a_fuel_slice_is_resumed_not_a_memory_limit() {
+        let grow = "(local.set $n (i32.const 400)) (loop $g (drop (memory.grow (i32.const 1))) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br_if $g (local.get $n)))";
+        let guest = allocator_guest("", grow, 20_000_000_000);
+        let limits = guest.limits();
+        let guest = guest.with_limits(crate::InstanceLimits {
+            max_memory: 64 << 20,
+            ..limits
+        });
+        let caller = CallerContext::LocalOperator("allocator".into());
+        let run = |guest: &Compiled| {
+            guest.call_headless(
+                &mut Effects {
+                    checks: 0,
+                    cancel_at: None,
+                    calls: 0,
+                },
+                HeadlessBindings {
+                    caller: &caller,
+                    imports: &[Import::Log],
+                },
+                "{}",
+            )
+        };
+        assert_eq!(run(&guest), Ok("complete".to_owned()));
+        // A growth the limit denies is still the memory limit.
+        let small = guest.with_limits(crate::InstanceLimits {
+            max_memory: 1 << 20,
+            ..limits
+        });
+        assert_eq!(
+            run(&small),
+            Err(HeadlessError::Plugin(PluginError::MemoryLimit))
         );
     }
     #[test]

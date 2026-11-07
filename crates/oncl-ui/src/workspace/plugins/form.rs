@@ -3,12 +3,13 @@
 //! limit. Nothing here touches Slint or the engine.
 //!
 //! The declaration (`oncl_plugin::operations::Param`) is the only source of fields: a field has
-//! the kind and the limit the manifest gave it, the window adds none and widens none. The engine
+//! the kind and the limit the manifest gave it; the window never widens it and narrows a document to what this desktop's plugin window can run. The engine
 //! checks the same limits again when it builds the request ([`oncl_core::Engine::plugin_request`]);
 //! this is the early, friendly refusal, not the authority.
 
 use std::path::{Path, PathBuf};
 
+use oncl_core::plugins::ManualLimits;
 use oncl_flows::Locale;
 use oncl_pki::resource::{OperationControl, Progress};
 use oncl_plugin::operations::{Param, ParamKind};
@@ -63,8 +64,11 @@ pub(super) fn fields_of(params: &[Param]) -> Vec<FormField> {
         .map(|p| FormField {
             name: p.name.clone(),
             kind: match &p.kind {
+                // What the manifest allows, and no more than this desktop's plugin window
+                // can run (`ManualLimits::max_document`): the label shows the limit, and a
+                // larger file is refused before it is read.
                 ParamKind::Document { max_bytes } => FieldKind::Document {
-                    max_bytes: *max_bytes,
+                    max_bytes: (*max_bytes).min(ManualLimits::desktop().max_document),
                 },
                 ParamKind::Text { max_chars } => FieldKind::Text {
                     max_chars: *max_chars,
@@ -351,6 +355,25 @@ mod tests {
         values[1] = FieldValue::Text("/a/b".to_owned());
         values[2] = FieldValue::Index(Some(1));
         (fields, values)
+    }
+
+    #[test]
+    fn a_document_limit_is_the_smaller_of_the_manifests_and_the_desktops() {
+        let desktop = ManualLimits::desktop().max_document;
+        let field = |max_bytes| {
+            fields_of(&[Param {
+                name: "file".to_owned(),
+                kind: ParamKind::Document { max_bytes },
+            }])
+            .remove(0)
+            .kind
+        };
+        assert_eq!(field(16 << 20), FieldKind::Document { max_bytes: desktop });
+        assert_eq!(
+            field(desktop + 1),
+            FieldKind::Document { max_bytes: desktop }
+        );
+        assert_eq!(field(1000), FieldKind::Document { max_bytes: 1000 });
     }
 
     #[test]

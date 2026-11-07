@@ -4408,6 +4408,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasmi",
+ "wasmi_core",
  "wat",
  "windows-sys 0.61.2",
  "x509-cert",
