@@ -270,10 +270,14 @@ reserved or read) the per-key right, the global/token inline right and the
 the bounded container has been read. `hash` accepts only `document` roles.
 
 Statuses before response headers: 400 InvalidRequest, 403 PermissionDenied, 404
-unknown route (there are no plugin-route, encryption or NCANode routes; `/v1/batch` exists), 405 with
+unknown route (there are no plugin-route, encryption or NCANode routes; `/v1/batch`
+exists) or `KeyNotFound` (Core could not resolve a key selector the token is
+allowed to use; the token's key right is checked first, so a name outside the
+token's `keys` is 403, never a 404 existence oracle), 405 with
 `Allow`, 408 Cancelled, 413 resource limits, 422 ValidationFailed/OperationFailed,
 500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration, 504
-DeadlineExceeded. After headers only the terminal `final` record or a transport
+DeadlineExceeded. The two 404 causes differ by the JSON `code` (`InvalidRequest` on
+`NotApplied` for a route, `KeyNotFound` for a key). After headers only the terminal `final` record or a transport
 abort can report failure.
 
 Progress parts are coalesced from a single latest-value channel (at most one frame

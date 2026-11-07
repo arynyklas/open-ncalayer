@@ -1,5 +1,5 @@
-//! F02 behavioral contract. Intentionally references the proposed, unimplemented API.
-//! The controller owns RED/GREEN execution; these tests do not use user keys.
+//! F02 behavioral contract for digest signing (`DigestSigner`, `HashState`); these tests
+//! use synthetic keys only, never user keys.
 
 use oncl_pki::digest::{DigestValue, HashState};
 use oncl_pki::key::{DigestSigner, HashAlg, KeyError, PrivateKey, PublicKey, SigAlg};

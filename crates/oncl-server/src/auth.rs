@@ -248,8 +248,8 @@ impl AccessPolicy {
         let keys = key.map(KeyId::new).transpose().map_err(|_| denied())?;
         Ok(ExecutionGrant::new([action]).with_keys(keys))
     }
-    /// Host-only source-specific authority for already bounded SDK inputs. S02
-    /// deliberately has no inline HTTP body/secret endpoint (that belongs to S03).
+    /// Host-only source-specific authority for already bounded SDK inputs; a client
+    /// request never supplies it (inline transport: docs/user/server.md).
     pub fn authorize_inline(
         &self,
         principal: &Principal,

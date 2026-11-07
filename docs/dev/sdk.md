@@ -165,6 +165,15 @@ size 1024 items, 8 signatures per JOSE token, inspection KDF iterations 10_000, 
 documented on the corresponding modules. Legacy NCALayer plugin interfaces keep their own
 contractual string/Base64 limits; these SDK limits do not extend to them implicitly.
 
+**Container surcharge for signed PDFs.** The document allowance above is not the whole
+bound of a signed-PDF readback: reading a PDF that already carries signatures may exceed
+the document allowance by a bounded surcharge. The cap is
+`min(container_bytes, (max_revisions - 1) * 4 * max_object_bytes + PdfLimits::max_evidence_bytes)`
+(`crates/oncl-pdf/src/verify.rs`, `lib.rs`): about 188 MiB at the defaults, with
+`PdfLimits::max_evidence_bytes` defaulting to 128 MiB. `max_evidence_bytes` is a PDF-layer
+field; no shipped host (CLI, server, desktop) derives it from
+`EvidenceLimits.max_total_bytes` yet, so every shipped host keeps the 128 MiB default.
+
 ## 6. Semver, versions and migration
 
 - The version is shared by all SDK crates and applications (`[workspace.package]`). Plugins keep
@@ -173,8 +182,8 @@ contractual string/Base64 limits; these SDK limits do not extend to them implici
   needs a version bump and a migration note below; internal modules are not stable contracts
   just because they are `pub` for the workspace.
 - The SDK version is the **next unreleased** version at the time of the change, read from the
-  tags and manifests, not guessed. The newest tag is `v0.1.0-alpha.6` (182 commits behind this
-  tree), so this tree is `0.1.0-alpha.7`. A bump changes together: `[workspace.package]
+  tags and manifests, not guessed. The newest tag is `v0.1.0-alpha.6`, and this tree is
+  `0.1.0-alpha.7`, which is not released. A bump changes together: `[workspace.package]
   version`, the `=0.1.0-alpha.N` pins of the SDK chain in `[workspace.dependencies]` (needed by
   `cargo package`), the four built-in `plugin.toml` (`version`, `min_core`), the lock files
   (`Cargo.lock`, `plugins/Cargo.lock`, `crates/oncl-pdk/example/Cargo.lock`) and the README
@@ -284,7 +293,8 @@ Hosts: the CLI admits CRLs up to 32 MiB (16/1 MiB for other evidence, 48 MiB tot
 document-sized coverage ceiling. `oncl-server` (2 MiB per CRL) and `oncl-ui` (1 MiB) keep
 the earlier bounds and therefore refuse sign/extend with a complete NCA CRL (about 20 MB);
 a host that wants it sets the `max_crl_*` fields. A host that also bounds PDF evidence
-separately should derive that bound from `EvidenceLimits.max_total_bytes`. PDF DSS evidence
+separately should derive that bound from `EvidenceLimits.max_total_bytes` (no shipped host
+does yet; see the container surcharge in section 5). PDF DSS evidence
 streams are read as regions: they are no longer limited by `PdfLimits::max_object_bytes`,
 only by the scope's container and memory accounting and the evidence quotas.
 
@@ -293,7 +303,7 @@ an embedded complete CRL. Not covered: online CRL download (`crl::fetch_for`, st
 in full at 128x), operator CRL files (`--evidence-crl` is limited to 256 KiB per file),
 PAdES-LT online fetch, and the SIGN side of XAdES (below). The structural PAdES guards
 (trailer `/ID`, object-0 free head) are fixed; PAdES-LT verification of real NCANode files is
-bounded by the DSS region reading and the surcharge cap described above.
+bounded by the DSS region reading and the container surcharge cap (section 5, Limits).
 
 ### XAdES with a complete CRL (verify side)
 

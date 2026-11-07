@@ -160,8 +160,8 @@ impl KeyProvider for OperatorKeys {
                 .sources
                 .open(&KeyRequest::new(request.selector(), Some(secret)), ctx);
         }
-        // The host must additionally have granted this exact source identity.
-        // S02 exposes no inline transport; no request can mint that authority.
+        // The host must additionally have granted this exact source identity; no
+        // request can mint that authority (inline transport is a double opt-in).
         if self.inline && request.selector().is_inline() && request.secret().is_some() {
             return self.sources.open(request, ctx);
         }

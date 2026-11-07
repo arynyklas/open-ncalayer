@@ -433,8 +433,10 @@ pub fn serial_status(
 
 /// [`serial_status`] for a CRL a signature carries, once the signature's proof time (the
 /// control time of ETSI EN 319 102-1) is verified: everything is checked as there except
-/// currency. thisUpdate must not be before `proof` less [`crate::ocsp::CLOCK_SKEW`]
-/// ([`CrlError::Outdated`]) nor after `now` ([`CrlError::NotYetValid`]); nextUpdate is not
+/// currency. A CRL with a nextUpdate is fresh iff `proof < nextUpdate` (thisUpdate may be
+/// days before the proof; otherwise [`CrlError::Outdated`]); only a CRL with no nextUpdate
+/// must have thisUpdate within [`crate::ocsp::CLOCK_SKEW`] (300 s, exclusive) before
+/// `proof`. thisUpdate after `now` is [`CrlError::NotYetValid`]; nextUpdate is not
 /// compared with `now`.
 ///
 /// # Errors
