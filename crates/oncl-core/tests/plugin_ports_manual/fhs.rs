@@ -1,3 +1,4 @@
+//! Probe: replace it with the declaration when MP1b's template lands.
 //! `kz.fhs.cabinet.FHSCabinetSigner` (V1 `signXml`, `signText`): NOT declared in the first
 //! release. The module's dispatcher (`oncl_pdk::invoker::java::invoke_with`,
 //! crates/oncl-protocol/src/invoker/java.rs:125-176) reads `args` with `optJSONObject`: the
@@ -35,10 +36,7 @@ fn an_args_array_is_not_the_args_object_the_dispatcher_reads() {
         tamper: Some(Box::new(|text| {
             format!(
                 "{}\n{PROBE}",
-                text.replace(
-                    "min_core = \"0.1.0-alpha.6\"",
-                    "min_core = \"0.1.0-alpha.7\""
-                )
+                crate::ports::with_min_core(text, "0.1.0-alpha.7")
             )
         })),
         key: None,

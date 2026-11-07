@@ -41,7 +41,7 @@ oracle::verify_raw_rsa(&cert, data, signature)
 oracle::verify_xml(signed, &cert, n) -> XmlFacts;  oracle::assert_xml_rejected(doc, &cert)
 ```
 
-Что делает `run_port_operation`: читает `plugins/<порт>/plugin.toml` и модуль; ставит их в `PluginRegistry` (`PackageHash::Loose` через `loose_package_hash`) с теми же `InstanceLimits`, что должен иметь рабочий стол (см. ниже); регистрирует политику объявленных операций `allow_declared_with_pki` с эндпоинтами **как в проводке рабочего стола** — GET и POST для OCSP и TSA (`DEFAULT_OCSP`, `DEFAULT_TSA`); готовит ключ (фикстура `user-rsa-sign`, сертификат перевыпущен временным корнем, AIA — OCSP-ответчик по умолчанию, ответчики OCSP и TSA — моки под тем же корнем, часы — `NOW` фикстур); затем `plugin_prepare` → `ConsentSummary` → `UserConfirmation::after_user_confirmed` (публичный конструктор: единственный способ, как делает его интерфейс) → `approve` → `plugin_call_approved`. Ничего со стороны плагина не подменяется.
+Что делает `run_port_operation`: читает `plugins/<порт>/plugin.toml` и модуль; ставит их в `PluginRegistry` (`PackageHash::Loose` через `loose_package_hash`) с теми же `InstanceLimits`, что должен иметь рабочий стол (см. ниже); регистрирует политику объявленных операций `allow_declared_with_pki` с эндпоинтами **(то, что показали прогоны; проводка рабочего стола на tip выдаёт только POST и `InstanceLimits::default()` — её правит MP7b, после чего харнесс переключается на общее определение в одном месте)** — GET и POST для OCSP и TSA (`DEFAULT_OCSP`, `DEFAULT_TSA`); готовит ключ (фикстура `user-rsa-sign`, сертификат перевыпущен временным корнем, AIA — OCSP-ответчик по умолчанию, ответчики OCSP и TSA — моки под тем же корнем, часы — `NOW` фикстур); затем `plugin_prepare` → `ConsentSummary` → `UserConfirmation::after_user_confirmed` (публичный конструктор: единственный способ, как делает его интерфейс) → `approve` → `plugin_call_approved`. Ничего со стороны плагина не подменяется.
 
 Негативный тест на порт: `RunOptions::tampered(операция, "поле = значение", "поле = другое")` правит манифест (ТАМПЕР), и вызов обязан быть отвергнут `options-mismatch` (`TicketRefusal::Options`), `NotApplied`, ключ не применён.
 
@@ -63,3 +63,13 @@ oracle::verify_xml(signed, &cert, n) -> XmlFacts;  oracle::assert_xml_rejected(d
 * Операция с `uses.key` без `network = "pki"` не подписывает никогда (`network.rs`).
 
 Волна 1: `rating1c` (7 операций). `fhs` и `esf-osdkz` не объявлены: шаблон `[[operations]]` не выражает форму их запроса (инвентаризация §8–9); пробы `fhs.rs` и `esf_osdkz.rs` фиксируют поведение порта на ближайшем шаблоне.
+
+## Границы проверок (что оракулы НЕ доказывают)
+
+* Метка времени: проверяется наличие `signatureTimeStampToken` в CMS (отчёт `oncl_pki::cms::report`), но сам токен независимым инструментом не проверяется.
+* GOST: ключи ГОСТ проверяют только верификаторы репозитория; `openssl`, `xmldsig_verify.py` — только RSA. В тестах волны 1 ГОСТ-ключ не используется (метка «сырая подпись» без «ГОСТ»).
+* `create-raw-sign` проверяет RSA PKCS#1 v1.5 SHA-256.
+* Оракул XML отвергает неизвестные преобразования, неоднозначный `Id` (два элемента с одним `Id`) и подпись без ссылок (`the_xml_oracle_rejects_wrapping_shapes`).
+* `sign-xml-element`: оба XPath (`tbs`, `parent`) — абсолютные и вводятся текстом; подписываемый элемент обязан иметь атрибут `Id`; форма оригинала «tbs с пустым parent» не покрыта (родитель обязателен: профиль `placement = parent` ⇔ задан `parent`).
+* `create-raw-sign` не имеет опций, поэтому негативный тест подмены профиля для него невозможен; остальные 6 операций покрыты.
+* `PluginRegistry::install` сам не ограничивает размер wasm (`MAX_WASM` = 16 МиБ проверяет только `Package::read`): хост, ставящий модуль не из пакета, обязан проверить размер сам.

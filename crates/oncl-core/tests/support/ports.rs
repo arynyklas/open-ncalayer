@@ -34,7 +34,6 @@ use oncl_core::{
 use oncl_pdk::abi::Import;
 use oncl_pki::{
     cert::Certificate,
-    crl::MockCrl,
     http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, RouteTransport},
     ocsp::MockOcsp,
     pkcs12,
@@ -215,7 +214,6 @@ pub fn world(name: &str) -> World {
     let ocsp: Arc<dyn HttpTransport> =
         Arc::new(MockOcsp::new(under_root("ocsp-gost2015")).with_now(NOW));
     let tsa: Arc<dyn HttpTransport> = Arc::new(MockTsa::new(tsa_entry).with_gen_time(NOW));
-    let _crl = MockCrl::new(root.clone());
     let transport = Arc::new(Logged {
         routes: RouteTransport::new(vec![
             (DEFAULT_OCSP.to_owned(), ocsp),
@@ -733,12 +731,25 @@ pub mod oracle {
     /// The oracle REFUSES `document` (a signed document that was changed after signing): the
     /// check that the oracle can say no.
     pub fn assert_xml_rejected(document: &[u8], cert: &Certificate) {
+        assert_xml_rejected_for(document, cert, "");
+    }
+
+    /// [`assert_xml_rejected`], and the oracle's problems name `reason`.
+    pub fn assert_xml_rejected_for(document: &[u8], cert: &Certificate, reason: &str) {
         let (ok, text) = run_xml_oracle(document, cert);
         assert!(!ok, "the oracle accepted a changed document: {text}");
+        assert!(text.contains(reason), "expected {reason:?} in {text}");
     }
 }
 
 /// `Certificate` from DER (for a test that has only bytes).
 pub fn certificate(der: &[u8]) -> Certificate {
     Certificate::from_der(der).unwrap()
+}
+
+/// `text` with its `min_core` set to `version`, whatever it was.
+pub fn with_min_core(text: &str, version: &str) -> String {
+    let start = text.find("min_core = \"").expect("a min_core");
+    let end = start + text[start..].find('\n').unwrap();
+    format!("{}min_core = \"{version}\"{}", &text[..start], &text[end..])
 }

@@ -54,13 +54,14 @@ def canonicalize(node, uri):
 
 
 def find_by_id(root, ident):
+    """The ONE element with this Id; none or several (signature wrapping) is None."""
+    found = []
     for el in root.iter():
         if not isinstance(el.tag, str):
             continue
-        for name in ("Id", "ID", "id"):
-            if el.get(name) == ident:
-                return el
-    return None
+        if any(el.get(name) == ident for name in ("Id", "ID", "id")):
+            found.append(el)
+    return found[0] if len(found) == 1 else None
 
 
 def verify_signature(xml_bytes, index, public_key, cert):
@@ -80,6 +81,9 @@ def verify_signature(xml_bytes, index, public_key, cert):
         result["problems"].append("unsupported signature method (unsupported): " + sig_method)
         return result
     all_ok = True
+    if not signed_info.findall("ds:Reference", NS):
+        result["problems"].append("no references")
+        all_ok = False
     for ref in signed_info.findall("ds:Reference", NS):
         uri = ref.get("URI", "")
         entry = {"uri": uri, "transforms": [], "digest_ok": False, "node": None}
@@ -94,7 +98,7 @@ def verify_signature(xml_bytes, index, public_key, cert):
         else:
             node = None
         if node is None:
-            result["problems"].append("unresolvable reference " + uri)
+            result["problems"].append("unresolvable or ambiguous reference " + uri)
             all_ok = False
             continue
         entry["node"] = etree.QName(node).localname
@@ -117,6 +121,7 @@ def verify_signature(xml_bytes, index, public_key, cert):
                 c14n_uri = alg
             else:
                 result["problems"].append("unsupported transform " + alg)
+                all_ok = False
         data = canonicalize(node, c14n_uri)
         method = ref.find("ds:DigestMethod", NS).get("Algorithm")
         entry["digest_method"] = method

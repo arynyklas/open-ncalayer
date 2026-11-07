@@ -1,3 +1,4 @@
+//! Probe: replace it with the declaration when MP1b's template lands.
 //! `com.osdkz.esf.signer.esfSigner` (`signPlainData`): NOT declared in the first release.
 //!
 //! The port reads `method`, `storageName` and `data` from the TOP LEVEL of the request
@@ -36,10 +37,7 @@ fn the_template_shape_does_not_reach_the_port_s_top_level_fields() {
         tamper: Some(Box::new(|text| {
             format!(
                 "{}\n{PROBE}",
-                text.replace(
-                    "min_core = \"0.1.0-alpha.4\"",
-                    "min_core = \"0.1.0-alpha.7\""
-                )
+                crate::ports::with_min_core(text, "0.1.0-alpha.7")
             )
         })),
         key: None,
