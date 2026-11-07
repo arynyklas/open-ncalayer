@@ -387,9 +387,11 @@ fn execute(opts: &Opts, out: &mut Map<String, Value>) -> Res<()> {
             let request = verify_request(opts)?;
             let mut detached_input = opts.detached.as_deref().map(Input::open).transpose()?;
             let mut detached_lock;
-            let detached = detached_input
-                .as_mut()
-                .map(|input| source!(input, false, detached_lock));
+            let detached = if let Some(input) = detached_input.as_mut() {
+                Some(source!(input, false, detached_lock))
+            } else {
+                None
+            };
             let source = source!(&mut input, opts.unknown_length, stdin_lock);
             let report = engine.verify(&request, source, detached, &mut ctx)?;
             out.insert("verdict".into(), format!("{:?}", report.verdict).into());
