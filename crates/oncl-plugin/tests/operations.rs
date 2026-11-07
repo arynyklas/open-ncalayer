@@ -2398,6 +2398,10 @@ kind = "raw"
 content = "{content}"
 "#
     ))
+    .replace(
+        r#"modules = ["example.sign", "example.other"]"#,
+        r#"modules = ["example.sign"]"#,
+    )
 }
 
 #[test]
@@ -2430,10 +2434,17 @@ fn the_three_real_request_shapes_parse() {
     ))
     .unwrap();
     // Not even a method: an empty object, for an operation with no params.
-    parse(&info_op("\"pki\"", "\"hash\"").replace(
-        r#"{"module":"example.sign","method":"info","args":[]}"#,
-        "{}",
-    ))
+    parse(
+        &info_op("\"pki\"", "\"hash\"")
+            .replace(
+                r#"{"module":"example.sign","method":"info","args":[]}"#,
+                "{}",
+            )
+            .replace(
+                r#"modules = ["example.sign", "example.other"]"#,
+                r#"modules = ["example.sign"]"#,
+            ),
+    )
     .unwrap();
 }
 
@@ -2582,17 +2593,222 @@ content = "param:text"
 {profile}
 "#
     ))
+    .replace(
+        r#"modules = ["example.sign", "example.other"]"#,
+        r#"modules = ["example.sign"]"#,
+    )
 }
 
 #[test]
-fn the_declaration_encoding_is_versioned() {
+fn the_declaration_encoding_is_versioned_and_covers_the_template() {
+    // `ONCLOP2` is the only magic written. (No production consumer of `canonical()` exists
+    // yet; when one does, it must refuse any other magic. The magic is what lets it.)
     let m = parse(&with(OP)).unwrap();
-    let bytes = m.operations()[0].canonical();
-    assert!(bytes.starts_with(b"ONCLOP2\0"));
-    assert!(!bytes.starts_with(b"ONCLOP1"));
-    // The same declaration under the old magic is another byte string, so a hash taken of
-    // it is never mistaken for a current one.
-    let mut old = bytes.clone();
-    old[6] = b'1';
-    assert_ne!(Sha256::digest(&old), Sha256::digest(&bytes));
+    assert!(m.operations()[0].canonical().starts_with(b"ONCLOP2\0"));
+    // Operations that differ only in the request template differ in their encoding:
+    // another shape, another key order, another whitespace.
+    let canonical = |request: &str| {
+        parse(&shaped(request, &[("doc", "document")], "param:doc"))
+            .unwrap()
+            .operations()[0]
+            .canonical()
+    };
+    let shapes = [
+        r#"{"module":"example.sign","method":"m","args":["{doc:base64}"]}"#,
+        r#"{"module":"example.sign","method":"m","args":{"d":"{doc:base64}"}}"#,
+        r#"{"method":"m","d":"{doc:base64}"}"#,
+        r#"{"d":"{doc:base64}","method":"m"}"#,
+        r#"{"method":"m", "d":"{doc:base64}"}"#,
+    ];
+    let all: Vec<_> = shapes.iter().map(|r| canonical(r)).collect();
+    for (i, a) in all.iter().enumerate() {
+        for b in &all[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+}
+
+#[test]
+fn golden_vectors_for_the_three_request_shapes() {
+    let cases = [
+        (
+            "array",
+            r#"{"module":"example.sign","method":"sign","args":["{doc:base64}",1]}"#,
+        ),
+        (
+            "object",
+            r#"{"module":"example.sign","method":"sign","args":{"data":"{doc:base64}","n":-2}}"#,
+        ),
+        (
+            "root",
+            r#"{"method":"signPlainData","storageName":"PKCS12","data":"{doc:base64}"}"#,
+        ),
+    ];
+    let mut got = Vec::new();
+    for (name, request) in cases {
+        let m = parse(&shaped(request, &[("doc", "document")], "param:doc")).unwrap();
+        got.push(format!("{name} {}", hex(&m.operations()[0].sha256())));
+    }
+    assert_eq!(got.join("\n"), SHAPES_GOLDEN.trim(), "\n{}", got.join("\n"));
+}
+
+const SHAPES_GOLDEN: &str = "\
+array e04e6927e539d8fb868a6b180673bfe6f196fecbe1780c5dad0390a0942dcaa7
+object b491d689aa584343f82e1b5a4bd4e7052b95161443af8ed632a55ba4e56b4fd0
+root fbd7ebfe6caa46866ad58df2694bae9d0692a11a7e94d2263b17096c42f81a80
+";
+
+#[test]
+fn method_cannot_be_a_typed_text_placeholder() {
+    let ps = [("doc", "document"), ("t", "text")];
+    for request in [
+        r#"{"method":"{t}","d":"{doc:base64}"}"#,
+        r#"{"method":"a{t}","d":"{doc:base64}"}"#,
+        r#"{"method":"{","d":"{doc:base64}"}"#,
+    ] {
+        let r = parse(&shaped(request, &ps, "param:doc"));
+        assert!(
+            matches!(
+                r,
+                Err(PackageError::Operation(OperationError::Request { .. }))
+            ),
+            "{request}: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn template_limits_hold_at_their_boundaries() {
+    let ok =
+        |request: &str| parse(&shaped(request, &[("doc", "document")], "param:doc")).map(|_| ());
+    let refused_request = |what: &str, request: &str| {
+        assert!(
+            matches!(
+                ok(request),
+                Err(PackageError::Operation(OperationError::Request { .. }))
+            ),
+            "{what}"
+        );
+    };
+    // Depth: the root is 1.
+    let nest = |n: usize| {
+        format!(
+            r#"{{"d":"{{doc:base64}}","n":{}{}}}"#,
+            "[".repeat(n),
+            "]".repeat(n)
+        )
+    };
+    ok(&nest(15)).unwrap();
+    refused_request("depth 17", &nest(16));
+    // Values: root, `d`, `n` and the items.
+    let vals = |n: usize| {
+        format!(
+            r#"{{"d":"{{doc:base64}}","n":[{}]}}"#,
+            vec!["0"; n].join(",")
+        )
+    };
+    ok(&vals(2045)).unwrap();
+    refused_request("2049 values", &vals(2046));
+    // Keys of one object.
+    let keys = |n: usize| {
+        let extra: String = (0..n).map(|i| format!(r#""k{i}":0,"#)).collect();
+        format!(r#"{{{extra}"d":"{{doc:base64}}"}}"#)
+    };
+    ok(&keys(63)).unwrap();
+    refused_request("65 keys", &keys(64));
+    // A key's length and characters.
+    let key = |k: &str| format!(r#"{{"{k}":0,"d":"{{doc:base64}}"}}"#);
+    ok(&key(&"k".repeat(128))).unwrap();
+    refused_request("key of 129", &key(&"k".repeat(129)));
+    for bad in [r"a\u0000b", r"a\u202eb", r"a\nb", r"a\u200bb", r"a\u007fb"] {
+        refused_request(bad, &key(bad));
+    }
+    // Numbers: only what `i64`/`u64` holds, as written.
+    for good in ["18446744073709551615", "-9223372036854775808", "0"] {
+        ok(&format!(r#"{{"d":"{{doc:base64}}","n":{good}}}"#)).unwrap();
+    }
+    for bad in [
+        "18446744073709551616",
+        "-9223372036854775809",
+        "1e2",
+        "0.0",
+        "1.5",
+    ] {
+        refused_request(bad, &format!(r#"{{"d":"{{doc:base64}}","n":{bad}}}"#));
+    }
+}
+
+#[test]
+fn several_modules_need_a_fixed_root_module() {
+    // The plugin serves two modules: a template that names none leaves the declared one
+    // inert, so it is refused; naming it (or the other served one when declared so) is fine.
+    let two = |request: &str, module: &str| {
+        parse(
+            &shaped(request, &[("doc", "document")], "param:doc")
+                .replace(
+                    r#"modules = ["example.sign"]"#,
+                    r#"modules = ["example.sign", "example.other"]"#,
+                )
+                .replace(
+                    r#"module = "example.sign""#,
+                    &format!(r#"module = "{module}""#),
+                ),
+        )
+        .map(|_| ())
+    };
+    assert!(matches!(
+        two(r#"{"method":"m","d":"{doc:base64}"}"#, "example.sign"),
+        Err(PackageError::Operation(OperationError::Request { why, .. })) if why.contains("several modules")
+    ));
+    two(
+        r#"{"module":"example.sign","method":"m","d":"{doc:base64}"}"#,
+        "example.sign",
+    )
+    .unwrap();
+    two(
+        r#"{"module":"example.other","method":"m","d":"{doc:base64}"}"#,
+        "example.other",
+    )
+    .unwrap();
+    // One module: the root `module` stays optional.
+    let one = shaped(
+        r#"{"method":"m","d":"{doc:base64}"}"#,
+        &[("doc", "document")],
+        "param:doc",
+    )
+    .replace(
+        r#"modules = ["example.sign", "example.other"]"#,
+        r#"modules = ["example.sign"]"#,
+    );
+    parse(&one).unwrap();
+}
+
+#[test]
+fn signed_text_refuses_what_a_window_could_hide() {
+    use oncl_plugin::operations::signed_text_problem;
+    for bad in [
+        "pay \u{202e}100\u{202c}",
+        "a\u{0}b",
+        "a\r\nb",
+        "x\u{200b}y",
+        "\u{feff}x",
+        "a\u{2028}b",
+        "a\u{85}b",
+        "a\u{7f}",
+        "\u{1b}[2J",
+        "a\u{00ad}b",
+        "a\u{2066}b",
+        "a\u{e0041}b",
+    ] {
+        assert!(signed_text_problem(bad).is_some(), "{bad:?}");
+    }
+    for good in [
+        "a\tb\nc",
+        "договор №1 \u{4e16}",
+        " x ",
+        "emoji \u{1f600}",
+        "",
+    ] {
+        assert!(signed_text_problem(good).is_none(), "{good:?}");
+    }
 }

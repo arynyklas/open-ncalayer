@@ -2016,3 +2016,47 @@ fn an_empty_text_is_not_content() {
         .is_err()
     );
 }
+
+#[test]
+fn a_signed_text_holds_nothing_a_window_could_hide() {
+    // Break caught: a text bound as content carries characters the consent could strip,
+    // reorder or not show; the user would approve other characters than the key signs.
+    let rig = rigged(&[], "");
+    let mut c = ctx(&rig, "sign-raw-text");
+    for bad in [
+        "pay \u{202e}100\u{202c}",
+        "a\u{0}b",
+        "a\r\nb",
+        "x\u{200b}y",
+        "\u{feff}x",
+        "a\u{2028}b",
+        "a\u{85}b",
+        "a\u{7f}",
+        "\u{1b}[2J",
+    ] {
+        assert_eq!(
+            try_prepare(
+                &rig,
+                "sign-raw-text",
+                &text(bad),
+                &bound(&rig),
+                &manual(),
+                &mut c
+            )
+            .unwrap_err(),
+            PluginPrepareError::Request(PluginRequestError::InvalidValue("text".into())),
+            "{bad:?}"
+        );
+    }
+    for good in ["a\tb\nc", "договор №1 \u{4e16}", " x ", "emoji \u{1f600}"] {
+        try_prepare(
+            &rig,
+            "sign-raw-text",
+            &text(good),
+            &bound(&rig),
+            &manual(),
+            &mut c,
+        )
+        .unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
+    }
+}

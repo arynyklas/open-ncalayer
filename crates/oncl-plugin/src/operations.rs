@@ -1544,6 +1544,15 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
+/// The first character that keeps `text` from being signed as typed: a control character
+/// other than line feed and tab (carriage return, NUL, DEL, C1) or a bidirectional,
+/// zero-width or other invisible format character. A text that carries none is shown by
+/// any window exactly as it is signed.
+pub fn signed_text_problem(text: &str) -> Option<char> {
+    text.chars()
+        .find(|c| !matches!(c, '\n' | '\t') && (c.is_control() || is_invisible(*c)))
+}
+
 fn plain_text_problem(text: &str, max: usize) -> Option<&'static str> {
     if text.trim().is_empty() {
         Some("is empty")
@@ -1768,7 +1777,7 @@ impl RawOperation {
             }
         }
         let params = self.check_params(&op)?;
-        self.check_request(&op, &params)?;
+        self.check_request(&op, &params, modules.len())?;
         let uses = self.uses.check(&op, &params, capabilities)?;
         Ok(Operation {
             name: self.name,
@@ -1864,7 +1873,12 @@ impl RawOperation {
     /// The template is JSON `{"module": <module>, "method": <name>, "args": [...]}` where
     /// a string of `args` that has a `{` or `}` is exactly one placeholder of a declared
     /// parameter, and every parameter is used.
-    fn check_request(&self, op: &str, params: &[Param]) -> Result<(), OperationError> {
+    fn check_request(
+        &self,
+        op: &str,
+        params: &[Param],
+        modules: usize,
+    ) -> Result<(), OperationError> {
         let bad = |why: String| OperationError::Request {
             operation: op.to_owned(),
             why,
@@ -1881,6 +1895,13 @@ impl RawOperation {
         // host routes by the declared module and the plugin must not be steered by a typed
         // value into another method.
         match root.get("module") {
+            // With several modules the declared one must be named: it is not inert.
+            None if modules > 1 => {
+                return Err(bad(
+                    "the plugin serves several modules: the template needs a fixed root `module`"
+                        .to_owned(),
+                ));
+            }
             None => {}
             Some(serde_json::Value::String(m)) if *m == self.module => {}
             Some(_) => return Err(bad("`module` must be the operation's module".to_owned())),
@@ -2094,7 +2115,8 @@ impl RawUses {
         if !key.is_empty() && network != Network::Pki {
             return Err(OperationError::NetworkNeeded {
                 operation: op.to_owned(),
-                why: "a key operation needs network = \"pki\" (the manual window signs only with the PKI hosts reachable)".to_owned(),
+                why: "a key operation needs network = \"pki\" (it signs with the PKI hosts only)"
+                    .to_owned(),
             });
         }
         if network == Network::None {

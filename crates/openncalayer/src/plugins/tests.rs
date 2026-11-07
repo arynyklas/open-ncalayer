@@ -1192,6 +1192,8 @@ kind = "document"
     }
     if pki {
         imports.push("\"http_request\"");
+    }
+    if pki || key {
         t.push_str("network = \"pki\"\n");
     }
     t.push_str(&format!("imports = [{}]\n", imports.join(", ")));

@@ -4,7 +4,9 @@ use super::{Installed, PluginPermission, PluginRegistry};
 use crate::{Engine, OperationError, plugins::CallerContext};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oncl_pki::{http::HttpMethod, key::AppliedState, resource::ProcessingError};
-use oncl_plugin::operations::{Network, Operation, Param, ParamKind, Profile, Source};
+use oncl_plugin::operations::{
+    Content, Network, Operation, Param, ParamKind, Profile, Source, signed_text_problem,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -295,7 +297,7 @@ impl Engine {
     }
 
     /// The exact request text the module receives for a declared operation: the template
-    /// parsed as JSON, each whole-string placeholder in `args` replaced by the typed value
+    /// parsed as JSON, each whole-string placeholder value (at any depth, never a key) replaced by the typed value
     /// (documents as standard base64), serialized compactly with object keys sorted and
     /// integers as written. `module` and `method` come from the manifest alone. The final
     /// length is computed before anything is substituted and refused above `max_transfer`;
@@ -348,13 +350,27 @@ impl Engine {
             }
         }
         let xpath_params = xpath_params(op);
+        let content_params: Vec<&str> = op
+            .uses()
+            .keys()
+            .iter()
+            .filter_map(|k| match k.content() {
+                Content::Bound(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
         let mut values = Vec::with_capacity(op.params().len());
         for param in op.params() {
             let (_, value) = params
                 .iter()
                 .find(|(n, _)| *n == param.name)
                 .ok_or_else(|| PluginRequestError::MissingParam(param.name.clone()))?;
-            check(param, value, xpath_params.contains(&param.name.as_str()))?;
+            check(
+                param,
+                value,
+                xpath_params.contains(&param.name.as_str()),
+                content_params.contains(&param.name.as_str()),
+            )?;
             values.push((param.name.as_str(), *value));
         }
         let template: Value = serde_json::from_str(op.request_template())
@@ -388,7 +404,12 @@ fn xpath_params(op: &Operation) -> Vec<&str> {
     names
 }
 
-fn check(param: &Param, value: &PluginParam<'_>, xpath: bool) -> Result<(), PluginRequestError> {
+fn check(
+    param: &Param,
+    value: &PluginParam<'_>,
+    xpath: bool,
+    content: bool,
+) -> Result<(), PluginRequestError> {
     let name = || param.name.clone();
     match (&param.kind, value) {
         (ParamKind::Document { max_bytes }, PluginParam::Document(bytes)) => {
@@ -406,6 +427,12 @@ fn check(param: &Param, value: &PluginParam<'_>, xpath: bool) -> Result<(), Plug
                 || text.chars().count() as u64 > u64::from(*max_chars)
             {
                 return Err(PluginRequestError::TooLarge(name()));
+            }
+            // A signed text is what the user is shown: nothing the window could hide, strip
+            // or normalise away may be in it (no control character but `\n` and `\t`, no
+            // bidirectional or invisible one). The window passes the same `&str` it renders.
+            if content && signed_text_problem(text).is_some() {
+                return Err(PluginRequestError::InvalidValue(name()));
             }
             if xpath && Source::check_value(text).is_err() {
                 return Err(PluginRequestError::InvalidValue(name()));
@@ -518,7 +545,7 @@ fn push_json(out: &mut String, s: &str) {
     out.push('"');
 }
 
-/// Writes `value` (the template; `args` placeholders replaced) as compact JSON with sorted
+/// Writes `value` (the template; placeholder values replaced) as compact JSON with sorted
 /// keys. Substituted values are written straight into the output and never rescanned.
 fn emit(
     value: &Value,
