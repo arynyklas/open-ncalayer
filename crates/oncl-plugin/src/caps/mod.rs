@@ -51,6 +51,7 @@ pub(crate) use keys::{
     keys_sign_xades, keys_sign_xml, keys_sign_xml_ex, keys_terminals, tokens_scan,
 };
 pub(crate) use keys::{cms_output, cms_spec, xades_spec, xml_spec, xml_spec_ex};
+pub(crate) use keys::{filter_more, key_filter};
 pub(crate) use keystore::{
     KeyFiles, dialog_csr, dialog_import, keystore_change_password, keystore_install_cert,
     keystore_new_key, tokens_id_card,

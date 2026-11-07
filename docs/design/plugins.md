@@ -488,6 +488,21 @@ Handle ключа токена держит PIN-код в памяти ядра 
 - `order` — `store`, `newest_first`, `oldest_first` (по notBefore); `checks` — `settled` (любой ключ можно выбрать) или `live { filter, more }` (условия `keys_select` и OCSP, окно ключа следит за проверками, которые начинаются при первом выборе);
 - `skip_blocked_reader` — считыватель, носитель которого ответил «PIN заблокирован», в этом потоке больше не пробуется.
 
+#### Интерактив ручного окна
+
+`Compiled::call_manual(backend, bindings, &dyn PluginInteraction, request)` (`oncl_plugin::manual`) — тот же прогон, что `call_headless`, но выбор ключа отвечает ядро: пользователь уже привязал в окне **один** ключ (`BoundKey { handle, alias, certificate }`, без секрета и пути к хранилищу). `PluginInteraction` — чистые данные (ключ, часы, HTTP-транспорт и кэш OCSP для фильтра; готовая `BoundInteraction`), UI не нужен.
+
+- `keys_select`/`keys_choose`/`keys_flow_open`/`keys_flow_pick`: фильтр плагина (`Filter`/`FilterMore`, `knca_types` потока) считают функции `oncl-flows` по сертификату привязанного ключа; подходит — `Chosen { handle, alias, certificate }` (у потока: один ключ в `FlowOpened`), не подходит — `None` (поток не открывается); ответ всегда про один и тот же ключ.
+- `keys_terminals` — `[]`; `tokens_scan` — `enabled = false`; `reply_drop` — разрешён и безвреден.
+- `keys_open` — трап `Denied`; `dialog_*`, `file_*`, `keystore_*`, `core_open_window` — трап `InteractionRequired`, как в `call_headless`: плагин видит один и тот же трап и не отличает ручное окно или «план» от настоящего вызова.
+- Остальные ввозы идут в `CapabilityBackend`. Сервер и CLI `call_manual` не вызывают: у них `call_headless` без изменений.
+- Текст плагина этим слоем не показывается.
+- Фильтр считается не чаще раза на разный фильтр за вызов (ключ и часы в вызове неизменны), не более `MAX_EVALUATIONS` = 16 разных фильтров (сверх — `limit`); `checkpoint()` — до вычисления. Один выбор может ждать ответчика OCSP до 6 с. Аргументы, которые окно диалогов проверяет отдельно (имена хранилищ, длина `detail`/`initial_path`/`error`, считыватели), здесь **не проверяются**: окон нет.
+- Транспорт OCSP в `BoundInteraction` обязан быть PKI-транспортом хозяина с той же политикой хостов, что у `ocsp_fetch`/`ca_*` (адрес берётся из AIA сертификата, не от плагина); `BoundInteraction` строится заново на каждый вызов (`now` не замораживается).
+- Ответ `None` не отнимает ключ у плагина: фильтр лишь совещательный, handle — число, и полномочие даёт только билет/одобрение/`before_use` (MP3a), а не `keys_select`.
+
+Что обязаны гарантировать MP2/MP3a: (MP2) `BoundKey` строится из той же привязки, что держит backend; HTTP — PKI-транспорт хозяина и общий `OcspCache`; `BoundInteraction` — свежий на вызов. (MP3a) каждый handle от плагина сверяется с единственным привязанным (для прочих — тот же `PermissionDenied`); `keys_release` привязанного handle — идемпотентный no-op; `keys_describe`/`keys_chain` отдаются из единственной привязки; `max_uses = 1` — через билет.
+
 ### `dialogs`
 
 | Функция | Аргумент | Результат |

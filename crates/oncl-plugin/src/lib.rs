@@ -21,6 +21,7 @@ pub mod core;
 pub mod headless;
 mod host;
 pub mod manifest;
+pub mod manual;
 #[cfg(feature = "distribution")]
 pub mod modules;
 pub mod operations;
