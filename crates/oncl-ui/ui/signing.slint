@@ -407,6 +407,9 @@ export component SigningPage inherits VerticalLayout {
             }
 
             FocusScope {
+                // The list is the stop of the Tab ring (it has its own name); this scope only
+                // takes Enter from it.
+                focus-on-tab-navigation: false;
                 key-pressed(event) => {
                     if event.text == "\n" && SigningState.cert-index >= 0 {
                         SigningState.cert-chosen(SigningState.cert-index);
