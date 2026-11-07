@@ -92,6 +92,12 @@ required-features = ["plugins", "tokens", "testing"]
 name = "plugin_approval"
 required-features = ["plugins", "tokens", "testing"]
 
+# The real wasm of the plugin ports under the manual window's call path; all `#[ignore]`:
+# `cargo xtask plugin-ports-manual` builds the modules and runs them (docs/dev/plugins-manual-tests.md).
+[[test]]
+name = "plugin_ports_manual"
+required-features = ["plugins"]
+
 [[test]]
 name = "key_sources"
 required-features = ["tokens"]

@@ -147,6 +147,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The plugin ports' real wasm under the manual window's call path: builds the modules,
+    /// runs `plugin-ops-check --require-wasm`, then the ignored tests of
+    /// `crates/oncl-core/tests/plugin_ports_manual.rs` (docs/dev/plugins-manual-tests.md).
+    PluginPortsManual {
+        /// The modules' directory [default: target/plugin-build/wasm32-unknown-unknown/release].
+        #[arg(long)]
+        wasm_dir: Option<PathBuf>,
+        /// Use the modules that are already built.
+        #[arg(long)]
+        no_build: bool,
+        /// Only the tests whose names contain one of these (e.g. `rating1c`).
+        filters: Vec<String>,
+    },
     /// Fail on what must never reach the public repository (docs/dev/release.md,
     /// «Приватность»): transcript files and headers, paths with a drive letter outside the
     /// listed test literals, certificates issued by an NCA test CA; with `--denylist`, lines
@@ -884,6 +897,18 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::PluginPortsManual {
+            wasm_dir,
+            no_build,
+            filters,
+        } => xtask::plugin_ports::run(
+            &oncl_testkit::workspace_root(),
+            &xtask::plugin_ports::Options {
+                wasm_dir: wasm_dir.as_deref(),
+                no_build,
+                filters: &filters,
+            },
+        ),
         Command::Registry { command } => registry(command),
         Command::TokenEmu { config, vpcd } => {
             xtask::token_emu::token_emu(&oncl_testkit::workspace_root(), &config, vpcd.as_deref())

@@ -233,7 +233,7 @@ impl PluginRegistry {
                 ProcessingError::InvalidInput("invalid plugin installation or limits").into(),
             );
         }
-        let compiled = oncl_plugin::Engine::new()
+        let compiled = oncl_plugin::Engine::eager()
             .compile(&manifest, wasm)
             .map_err(|e| OperationError::Plugin(e.into()))?
             .with_limits(limits);
