@@ -64,6 +64,8 @@ oracle::verify_xml(signed, &cert, n) -> XmlFacts;  oracle::assert_xml_rejected(d
 
 Волна 1: `rating1c` (7 операций). `fhs` и `esf-osdkz` не объявлены: шаблон `[[operations]]` не выражает форму их запроса (инвентаризация §8–9); пробы `fhs.rs` и `esf_osdkz.rs` фиксируют поведение порта на ближайшем шаблоне.
 
+Волна 3: `energy` (4 операции `sign-cms-*`), `eproc` (2), `efactoring` и `market` (по 5: `sign-text-*` ×4, `sign-xml`), `dogovor24` (`sign-cms`). `qiwi.signXml` и `efactoring.xml` с элементом не объявлены: порт передаёт `transforms`, которых профиль не выражает (инвентаризация §9, W3-1/W3-2; пробы `qiwi.rs`, `efactoring.rs`). Общие таблицы негативных тестов (подмена профиля, удаление импорта) — `plugin_ports_manual/wave3_kit.rs`.
+
 ## Границы проверок (что оракулы НЕ доказывают)
 
 * Метка времени: проверяется наличие `signatureTimeStampToken` в CMS (отчёт `oncl_pki::cms::report`), но сам токен независимым инструментом не проверяется.

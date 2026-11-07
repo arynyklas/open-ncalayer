@@ -23,3 +23,19 @@ mod rating1c;
 // The rule for key operations without a network.
 #[path = "plugin_ports_manual/network.rs"]
 mod network;
+
+// Wave 3: energy, eproc, efactoring, market, dogovor24, qiwi (undeclared: the inventory's correction).
+#[path = "plugin_ports_manual/wave3_kit.rs"]
+mod wave3_kit;
+#[path = "plugin_ports_manual/dogovor24.rs"]
+mod dogovor24;
+#[path = "plugin_ports_manual/efactoring.rs"]
+mod efactoring;
+#[path = "plugin_ports_manual/energy.rs"]
+mod energy;
+#[path = "plugin_ports_manual/eproc.rs"]
+mod eproc;
+#[path = "plugin_ports_manual/market.rs"]
+mod market;
+#[path = "plugin_ports_manual/qiwi.rs"]
+mod qiwi;
