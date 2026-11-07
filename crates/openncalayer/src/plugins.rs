@@ -31,7 +31,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use oncl_desktop::UpdateSettings;
-use oncl_flows::capabilities::CapabilityLine;
+use oncl_flows::capabilities::{CapabilityLine, OperationConsent};
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::core::Bundles;
 use oncl_plugin::operations::{AddedOperation, AddedReason};
@@ -90,6 +90,9 @@ pub struct InstallRequest {
     pub replacing: Option<(Version, Source)>,
     /// What its manifest declares it may do.
     pub capabilities: Capabilities,
+    /// What its `[[operations]]` do, said from checked fields; over the installed version
+    /// of the plugin, if any, with what is new or wider marked.
+    pub operations: Vec<OperationConsent>,
     /// From a file the user chose, not from the catalog: nobody has reviewed it.
     pub local: bool,
 }
@@ -186,6 +189,12 @@ pub struct PendingView {
     pub version: Version,
     /// What it may do that the installed version may not: capabilities and operations.
     pub added: Added,
+    /// All the operations of the update, said from checked fields, with what is new or
+    /// wider marked.
+    pub operations: Vec<OperationConsent>,
+    /// The sha256 of the package of this update (hex, from the signed index): the answer the
+    /// user gives is for this package ([`PluginService::confirm_update`]).
+    pub package_sha256: String,
 }
 
 impl PendingView {
@@ -444,6 +453,8 @@ impl PluginService {
                 let view = PendingView {
                     version: p.release.version.clone(),
                     added: p.added.clone(),
+                    operations: p.package.manifest.operation_consents(Some(&p.added)),
+                    package_sha256: p.release.package.sha256.to_string(),
                 };
                 (id.clone(), view)
             })
@@ -1058,15 +1069,28 @@ impl PluginService {
     }
 
     /// Installs the update of `id` waiting for the user ([`PluginNotice::UpdateNeedsConfirmation`]):
-    /// the user has seen what more it may do and agrees.
+    /// the user has seen what more it may do and agrees. `expected_sha256` is the package
+    /// the user was shown ([`PendingView::package_sha256`]): a newer update that took its
+    /// place meanwhile is not installed unseen.
     ///
     /// # Errors
     ///
-    /// No update of `id` waits, or it failed (also told in the tray); the plugin changed
-    /// meanwhile: nothing is done.
-    pub fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
-        let Some(pending) = lock(&self.pending).remove(id) else {
-            return Err(PluginActionError::NothingToConfirm);
+    /// No update of `id` waits ([`PluginActionError::NothingToConfirm`]); another package
+    /// waits than the one shown ([`PluginActionError::Superseded`], it stays waiting); or
+    /// it failed (also told in the tray); the plugin changed meanwhile: nothing is done.
+    pub fn confirm_update(&self, id: &str, expected_sha256: &str) -> Result<(), PluginActionError> {
+        let pending = {
+            let mut waiting = lock(&self.pending);
+            match waiting.get(id) {
+                None => return Err(PluginActionError::NothingToConfirm),
+                Some(p) if p.release.package.sha256.to_string() != expected_sha256 => {
+                    return Err(PluginActionError::Superseded);
+                }
+                Some(_) => {}
+            }
+            waiting
+                .remove(id)
+                .ok_or(PluginActionError::NothingToConfirm)?
         };
         info!(plugin = id, version = %pending.release.version, "the user agrees to the plugin's update");
         self.install_update(
@@ -1203,18 +1227,21 @@ impl PluginService {
         guard: Installing,
     ) {
         let m = &package.manifest;
+        let replacing = self
+            .store
+            .state()
+            .plugins
+            .get(&m.id)
+            .map(|installed| (installed.version.clone(), installed.source));
+        let added = replacing.is_some().then(|| self.added_over_installed(m));
         let request = InstallRequest {
             origin,
             name: m.name.clone(),
             version: m.version.clone(),
             replaces: m.replaces.clone(),
-            replacing: self
-                .store
-                .state()
-                .plugins
-                .get(&m.id)
-                .map(|installed| (installed.version.clone(), installed.source)),
+            replacing,
             capabilities: m.capabilities.clone(),
+            operations: m.operation_consents(added.as_ref()),
             local: source == Source::Local,
         };
         let service = Arc::downgrade(self);

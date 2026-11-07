@@ -8,7 +8,7 @@ use crate::operations::{
     operations_min_core,
 };
 use oncl_flows::Locale;
-use oncl_flows::capabilities::CapabilityLine;
+use oncl_flows::capabilities::{CapabilityLine, OperationConsent};
 use semver::Version;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -613,6 +613,20 @@ impl Manifest {
         self.operations
             .iter()
             .filter(|o| o.server() && o.runnable())
+    }
+
+    /// The install consent's operations: every runnable operation, in the manifest's order,
+    /// said from checked fields ([`Operation::consent`]); `added` (what an update asks for
+    /// over the installed version, [`Manifest::added_over`]) marks the ones that are new or
+    /// wider. Empty for a plugin that declares none.
+    pub fn operation_consents(&self, added: Option<&Added>) -> Vec<OperationConsent> {
+        self.operations
+            .iter()
+            .filter(|o| o.runnable())
+            .map(|o| {
+                o.consent(added.and_then(|a| a.operations.iter().find(|x| x.name == o.name())))
+            })
+            .collect()
     }
 
     /// What this manifest asks for over the installed `old`: new capabilities
