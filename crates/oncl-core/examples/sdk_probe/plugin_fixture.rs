@@ -42,10 +42,24 @@ pub(crate) fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
     wasm_with_tail(calls, "")
 }
 pub(crate) fn wasm_with_tail(calls: &[(Import, Vec<u8>)], tail: &str) -> Vec<u8> {
+    wasm_with_extra_imports(calls, tail, &[])
+}
+/// Like [`wasm_with_tail`], also importing (never calling) `extra`.
+pub(crate) fn wasm_with_extra_imports(
+    calls: &[(Import, Vec<u8>)],
+    tail: &str,
+    extra: &[Import],
+) -> Vec<u8> {
     let mut imports = String::new();
+    for import in extra {
+        imports.push_str(&format!(
+            "(import \"oncl\" \"{0}\" (func ${0} (param i32 i32) (result i64)))",
+            import.name()
+        ));
+    }
     let mut data = String::new();
     let mut body = String::new();
-    let mut seen = Vec::new();
+    let mut seen: Vec<Import> = extra.to_vec();
     let mut at = 1024;
     for (import, args) in calls {
         if !seen.contains(import) {
@@ -168,7 +182,13 @@ origins = ["https://trusted.example"]
     .unwrap();
     let mut plugins = PluginRegistry::new();
     plugins
-        .install(manifest, wasm, module_limits, vec![host_permission])
+        .install(
+            manifest,
+            [7; 32],
+            wasm,
+            module_limits,
+            vec![host_permission],
+        )
         .unwrap();
     let guard = Arc::new(crypto::Guard::default());
     let provider = Arc::new(crypto::Provider::default());

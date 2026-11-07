@@ -34,7 +34,7 @@ tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
 jose = ["dep:base64", "dep:serde", "dep:serde_json"]
-plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing"]
+plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing", "dep:serde_json", "dep:base64", "dep:sha2"]
 # Every SDK feature above. It brings no desktop, updater, UI, server or async runtime;
 # `oncl-plugin`'s `distribution` (package store) stays a separate opt-in of that crate.
 full = ["tokens", "xml", "pdf", "jose", "plugins"]
@@ -52,6 +52,7 @@ time.workspace = true
 base64 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true, features = ["raw_value"] }
+sha2 = { workspace = true, optional = true }
 der.workspace = true
 
 [dev-dependencies]
@@ -73,6 +74,10 @@ getrandom.workspace = true
 
 [[test]]
 name = "plugin_access"
+required-features = ["plugins", "tokens"]
+
+[[test]]
+name = "plugin_manual"
 required-features = ["plugins", "tokens"]
 
 [[test]]

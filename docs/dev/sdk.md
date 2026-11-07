@@ -174,6 +174,26 @@ the document allowance by a bounded surcharge. The cap is
 field; no shipped host (CLI, server, desktop) derives it from
 `EvidenceLimits.max_total_bytes` yet, so every shipped host keeps the 128 MiB default.
 
+### Plugin registry and declared operations (`plugins`)
+
+`PluginRegistry::install(manifest, package_sha256, wasm, limits, policy)` records the
+package hash with the plugin (`oncl_plugin::Package::sha256`; a host that loads manifest and
+module separately passes `plugins::loose_package_sha256(manifest_toml, wasm)`). A registered
+plugin's identity for audit is `PluginIdentity { id, package_sha256, version }` and never its
+manifest name (`Engine::plugin_identity`).
+
+A plugin without `[[operations]]` is unchanged: its grants and `PluginPermission::with_keys`
+pin the key exactly. For a plugin that declares operations, `PluginRegistry::allow_declared`
+(and `allow_declared_with_pki`) adds a registry policy built from the manifest only: the
+declared imports for one `(plugin, operation, caller)` and **any** key. The chosen key is
+checked on the per-call grant side (`PluginPermission::with_keys` there), which never accepts
+the declared policy for a key. `Engine::plugin_operations` lists the manual, runnable
+(non-`derived`) operations; `Engine::plugin_request` builds the exact request text the module
+receives from the parsed JSON template and typed `PluginParam` values (documents as base64,
+never string-pasted). Undeclared, non-manual and `derived` operations and bad parameters are
+refused with `PluginRequestError`, always `NotApplied`, before any key is used. Consent and
+key-use approval are not part of this API.
+
 ## 6. Semver, versions and migration
 
 - The version is shared by all SDK crates and applications (`[workspace.package]`). Plugins keep
