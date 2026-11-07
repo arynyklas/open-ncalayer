@@ -28,7 +28,9 @@ mod state;
 
 pub(crate) use crypto::project_report;
 pub(crate) use crypto::{CryptoHost, PkiHttp, tsa_spec, tsp_failure};
-pub use crypto::{LegacyRules, NCA_PKI_HOSTS, apply_validation, nca_pki_hosts};
+pub use crypto::{
+    DEFAULT_OCSP, DEFAULT_TSA, LegacyRules, NCA_PKI_HOSTS, apply_validation, nca_pki_hosts,
+};
 pub(crate) use crypto::{
     ca_issuer, ca_list, cert_details, cms_verify, crl_fetch, hash, ocsp_fetch, pkix_path,
     tsp_request, tsp_stamp, xml_verify,

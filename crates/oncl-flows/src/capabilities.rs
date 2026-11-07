@@ -27,6 +27,9 @@ pub enum CapabilityLine {
     Settings,
     /// Share data between sites.
     Shared,
+    /// Offer these operations (by name) in the manual-tools window, which may use your key,
+    /// the network or more of the core than the installed version's.
+    Operations(Vec<String>),
 }
 
 /// What `capability` lets a plugin do, in `l`.
@@ -55,6 +58,7 @@ pub fn capability_text(capability: &CapabilityLine, l: Locale) -> String {
         ),
         CapabilityLine::Settings => t.settings.to_owned(),
         CapabilityLine::Shared => t.shared.to_owned(),
+        CapabilityLine::Operations(names) => t.operations.replace("{0}", &names.join(", ")),
     }
 }
 
@@ -75,6 +79,8 @@ struct Texts {
     page_files: &'static str,
     settings: &'static str,
     shared: &'static str,
+    /// `{0}`: the operation names.
+    operations: &'static str,
 }
 
 impl Texts {
@@ -92,6 +98,7 @@ impl Texts {
                 page_files: "сайттар атаған файлдарды оқу және папкаларға {0} файлдарын жазу, әрқайсысын сіз рұқсат еткеннен кейін",
                 settings: "баптауларын осы компьютерде сақтау",
                 shared: "деректерді сайттар арасында бөлісу",
+                operations: "қолмен жұмыс терезесінде кілтіңізді, желіні немесе өзекті кеңірек пайдалана алатын әрекеттерді ұсыну: {0}",
             },
             Locale::Ru => &Texts {
                 keys: "выбирать ваш ключ и подписывать им",
@@ -105,6 +112,7 @@ impl Texts {
                 page_files: "читать файлы и записывать файлы {0} в папки, которые назовут сайты, — каждый файл и каждую папку после вашего разрешения",
                 settings: "хранить свои настройки на этом компьютере",
                 shared: "делить данные между сайтами",
+                operations: "предлагать в окне ручных инструментов действия, которые могут использовать ваш ключ, сеть или больше возможностей ядра: {0}",
             },
             Locale::En => &Texts {
                 keys: "choose your key and sign with it",
@@ -118,6 +126,7 @@ impl Texts {
                 page_files: "read files and write {0} files into folders the sites name, each once you allow it",
                 settings: "keep its settings on this computer",
                 shared: "share data between sites",
+                operations: "offer in the manual-tools window operations that may use your key, the network or more of the core: {0}",
             },
         }
     }
@@ -157,6 +166,7 @@ mod tests {
             CapabilityLine::PageFiles(list()),
             CapabilityLine::Settings,
             CapabilityLine::Shared,
+            CapabilityLine::Operations(list()),
         ];
         for l in [Locale::Ru, Locale::Kk, Locale::En] {
             for c in &every {
@@ -169,6 +179,7 @@ mod tests {
                         | CapabilityLine::Origins(_)
                         | CapabilityLine::HttpInsecure(_)
                         | CapabilityLine::PageFiles(_)
+                        | CapabilityLine::Operations(_)
                 ) && c != &CapabilityLine::PageFiles(Vec::new())
                 {
                     assert!(text.contains("X1"), "{c:?} {l:?}: {text}");

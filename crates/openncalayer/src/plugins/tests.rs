@@ -13,8 +13,8 @@ use std::io::Cursor;
 
 const BASE: &str = "https://example.org/updates/v1";
 const INDEX: &str = "https://example.org/updates/v1/stable.json";
-const ID: &str = "io.github.arynyklas.openncalayer.example";
-const MODULE: &str = "io.github.arynyklas.openncalayer.Example";
+pub(in crate::plugins) const ID: &str = "io.github.arynyklas.openncalayer.example";
+pub(in crate::plugins) const MODULE: &str = "io.github.arynyklas.openncalayer.Example";
 const ORIGIN: &str = "https://shop.kz";
 
 fn v(s: &str) -> Version {
@@ -36,7 +36,7 @@ fn example_at(version: &str, edit: impl FnOnce(String) -> String) -> Vec<u8> {
     })
 }
 
-fn example(version: &str) -> Vec<u8> {
+pub(in crate::plugins) fn example(version: &str) -> Vec<u8> {
     example_at(version, |m| m)
 }
 
@@ -1129,12 +1129,13 @@ fn an_update_that_may_do_more_waits_for_the_user() {
     let pending = service.view().installed[0].pending_update.clone().unwrap();
     assert_eq!(pending.version, v("0.2.0"));
     assert_eq!(
-        pending.added,
+        pending.added.capabilities,
         Capabilities {
             http: vec!["https://wider.example/".parse().unwrap()],
             ..Capabilities::default()
         }
     );
+    assert!(pending.added.operations.is_empty());
     // Told once, downloaded once.
     service.check_now();
     assert!(sandbox.notices().is_empty());
@@ -1166,6 +1167,206 @@ fn an_update_that_may_do_more_waits_for_the_user() {
         service.confirm_update(ID),
         Err(PluginActionError::NothingToConfirm)
     );
+}
+
+/// An `[[operations]]` entry of the example: `key` signs raw with the chosen file;
+/// otherwise it only hashes; `pki` reaches the PKI services too (`http_request`).
+pub(in crate::plugins) fn operation(name: &str, label: &str, key: bool, pki: bool) -> String {
+    let mut t = format!(
+        r#"
+[[operations]]
+name = "{name}"
+module = "{MODULE}"
+manual = true
+request = '{{"module":"{MODULE}","method":"{name}","args":["{{f:base64}}"]}}'
+label = {{ ru = "{label}", kk = "{label}", en = "{label}" }}
+[[operations.params]]
+name = "f"
+kind = "document"
+[operations.uses]
+"#
+    );
+    let mut imports = Vec::new();
+    if key {
+        imports.push("\"keys_sign_raw\"");
+    }
+    if pki {
+        imports.push("\"http_request\"");
+        t.push_str("network = \"pki\"\n");
+    }
+    t.push_str(&format!("imports = [{}]\n", imports.join(", ")));
+    if key {
+        t.push_str("[[operations.uses.key]]\nkind = \"raw\"\ncontent = \"param:f\"\n");
+    }
+    t
+}
+
+/// The example at `version` declaring `operations`.
+pub(in crate::plugins) fn example_ops(version: &str, operations: &[String]) -> Vec<u8> {
+    example_at(version, |m| {
+        let m = m.replacen(
+            "min_core = \"0.1.0-alpha.3\"",
+            &format!(
+                "min_core = \"{}\"",
+                oncl_plugin::operations::operations_min_core()
+            ),
+            1,
+        );
+        m + &operations.concat()
+    })
+}
+
+/// Installs `old` from the catalog, then offers `new`; the updater runs once. What the
+/// installer asked for and told, and the version that is installed.
+fn updated(old: &[String], new: &[String]) -> (Vec<PluginNotice>, Version) {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let old_bytes = example_ops("0.1.0", old);
+    let release = sandbox.release("0.1.0", &old_bytes);
+    sandbox.publish(1, vec![release.clone()]);
+    service.install_from_catalog(ID, None).unwrap();
+    sandbox.notices();
+    sandbox.requests();
+    let newer = sandbox.release("0.2.0", &example_ops("0.2.0", new));
+    sandbox.publish(2, vec![release, newer]);
+    service.check_now();
+    (sandbox.notices(), sandbox.installed_version().unwrap())
+}
+
+fn waits() -> Vec<PluginNotice> {
+    vec![PluginNotice::UpdateNeedsConfirmation {
+        name: name(),
+        version: v("0.2.0"),
+    }]
+}
+
+fn applied() -> Vec<PluginNotice> {
+    vec![PluginNotice::Updated {
+        name: name(),
+        version: v("0.2.0"),
+    }]
+}
+
+#[test]
+fn an_update_that_adds_a_key_operation_waits_for_the_user() {
+    let key = operation("sign", "Sign", true, false);
+    let (notices, installed) = updated(&[], &[key]);
+    assert_eq!(notices, waits());
+    assert_eq!(installed, v("0.1.0"));
+}
+
+#[test]
+fn an_update_that_adds_a_key_use_to_an_operation_waits_for_the_user() {
+    let (notices, installed) = updated(
+        &[operation("sign", "Sign", false, false)],
+        &[operation("sign", "Sign", true, false)],
+    );
+    assert_eq!(notices, waits());
+    assert_eq!(installed, v("0.1.0"));
+}
+
+#[test]
+fn an_update_that_widens_an_operations_network_waits_for_the_user() {
+    let (notices, installed) = updated(
+        &[operation("fetch", "Fetch", false, false)],
+        &[operation("fetch", "Fetch", false, true)],
+    );
+    assert_eq!(notices, waits());
+    assert_eq!(installed, v("0.1.0"));
+}
+
+/// The reasons the update of `old` to `new` waits for, per operation.
+fn held_reasons(
+    old: &[String],
+    new: &[String],
+) -> Vec<(String, Vec<oncl_plugin::operations::AddedReason>)> {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let release = sandbox.release("0.1.0", &example_ops("0.1.0", old));
+    sandbox.publish(1, vec![release.clone()]);
+    service.install_from_catalog(ID, None).unwrap();
+    let newer = sandbox.release("0.2.0", &example_ops("0.2.0", new));
+    sandbox.publish(2, vec![release, newer]);
+    service.check_now();
+    let pending = service.view().installed[0].pending_update.clone().unwrap();
+    pending
+        .added
+        .operations
+        .into_iter()
+        .map(|o| (o.name, o.reasons))
+        .collect()
+}
+
+#[test]
+fn switching_server_on_is_held_for_the_server_reason() {
+    use oncl_plugin::operations::AddedReason;
+    let key = operation("sign", "Sign", true, false);
+    let served = key.replacen("manual = true\n", "manual = true\nserver = true\n", 1);
+    assert_ne!(key, served);
+    assert_eq!(
+        held_reasons(&[key], &[served]),
+        [("sign".to_owned(), vec![AddedReason::Server])]
+    );
+}
+
+#[test]
+fn widening_the_network_is_held_for_the_network_reason() {
+    use oncl_plugin::operations::AddedReason;
+    let held = held_reasons(
+        &[operation("fetch", "Fetch", false, false)],
+        &[operation("fetch", "Fetch", false, true)],
+    );
+    assert_eq!(held.len(), 1);
+    assert!(held[0].1.contains(&AddedReason::Network), "{held:?}");
+}
+
+#[test]
+fn a_label_only_change_of_a_key_operation_applies_silently() {
+    let (notices, installed) = updated(
+        &[operation("sign", "Sign", true, false)],
+        &[operation("sign", "Sign a file", true, false)],
+    );
+    assert_eq!(notices, applied());
+    assert_eq!(installed, v("0.2.0"));
+}
+
+#[test]
+fn an_update_that_drops_an_operation_applies_silently() {
+    let (notices, installed) = updated(
+        &[
+            operation("sign", "Sign", true, false),
+            operation("sign2", "Sign too", true, false),
+        ],
+        &[operation("sign", "Sign", true, false)],
+    );
+    assert_eq!(notices, applied());
+    assert_eq!(installed, v("0.2.0"));
+}
+
+#[test]
+fn a_confirmed_operation_update_is_installed_and_the_view_names_the_operation() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let new = sandbox.release(
+        "0.2.0",
+        &example_ops("0.2.0", &[operation("sign", "Sign", true, false)]),
+    );
+    sandbox.publish(2, vec![old, new]);
+    service.check_now();
+    let pending = service.view().installed[0].pending_update.clone().unwrap();
+    assert!(pending.added.capabilities.is_empty());
+    assert_eq!(pending.added.operations.len(), 1);
+    assert_eq!(pending.added.operations[0].name, "sign");
+    assert_eq!(
+        pending.lines(),
+        [oncl_flows::capabilities::CapabilityLine::Operations(vec![
+            "sign".to_owned()
+        ])]
+    );
+    service.confirm_update(ID).unwrap();
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
 }
 
 #[test]
@@ -1428,4 +1629,26 @@ fn removal_failures_leave_a_consistent_state() {
     assert!(sandbox.modules.names().is_empty());
     assert!(service.view().installed.is_empty());
     assert!(Bundles::bundles(&*service).is_empty());
+}
+
+#[test]
+fn the_manual_registry_leaves_the_legacy_modules_alone() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    // Without operations: served to pages as ever, not offered to the manual window.
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    assert_eq!(sandbox.count(), 1);
+    assert!(service.manual_plugins().operations.is_empty());
+    // With: both, from the same installed package.
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let bytes = example_ops("0.2.0", &[operation("sign", "Sign", true, false)]);
+    let new = sandbox.release("0.2.0", &bytes);
+    sandbox.publish(2, vec![old, new]);
+    service.check_now();
+    service.confirm_update(ID).unwrap();
+    assert_eq!(sandbox.modules.loaded()[0].version, v("0.2.0"));
+    let manual = service.manual_plugins();
+    assert_eq!(manual.operations.len(), 1);
+    assert_eq!(manual.operations[0].plugin_version, v("0.2.0"));
+    assert_eq!(sandbox.count(), 1);
 }
