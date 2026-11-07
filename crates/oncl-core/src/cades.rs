@@ -116,6 +116,9 @@ pub(crate) fn error(error: AdesError) -> OperationError {
             error.into()
         }
         AdesError::Evidence(EvidenceError::Limit) => ProcessingError::MetadataLimit.into(),
+        AdesError::Evidence(EvidenceError::InvalidLimits(_)) => {
+            ProcessingError::InvalidLimits.into()
+        }
         AdesError::AfterKeyUse { source, applied } => OperationError::AfterKeyUse {
             source: Box::new(self::error(*source)),
             applied,

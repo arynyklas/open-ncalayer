@@ -1,0 +1,11 @@
+# The Python oracle environment of the tests that compare the workspace with tools that do not
+# share its code (pyHanko, lxml canonicalization, `cryptography` RSA, asn1crypto structure,
+# gostcrypto Streebog). The CI `test` job installs exactly this into a virtualenv and points
+# ONCL_PYHANKO_PYTHON at its interpreter. Direct dependencies are pinned to the versions the
+# oracles were last run against; their transitive packages are resolved by pip.
+pyHanko==0.38.0
+pyhanko-certvalidator==0.33.0
+lxml==6.1.3
+cryptography==50.0.2
+asn1crypto==1.5.1
+gostcrypto==1.2.5

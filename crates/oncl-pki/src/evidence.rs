@@ -70,6 +70,22 @@ pub struct EvidenceLimits {
     pub max_coverage_bytes: u64,
 }
 impl EvidenceLimits {
+    /// The stricter of two limit sets, field by field: a host's ceiling and a request's own
+    /// quotas. Each field is a `min`, so valid operands give a valid result.
+    pub fn intersect(self, other: Self) -> Self {
+        Self {
+            max_items: self.max_items.min(other.max_items),
+            max_bytes: self.max_bytes.min(other.max_bytes),
+            max_item_bytes: self.max_item_bytes.min(other.max_item_bytes),
+            max_crl_bytes: self.max_crl_bytes.min(other.max_crl_bytes),
+            max_crl_item_bytes: self.max_crl_item_bytes.min(other.max_crl_item_bytes),
+            max_total_bytes: self.max_total_bytes.min(other.max_total_bytes),
+            max_chain_len: self.max_chain_len.min(other.max_chain_len),
+            max_proofs: self.max_proofs.min(other.max_proofs),
+            max_coverage_parts: self.max_coverage_parts.min(other.max_coverage_parts),
+            max_coverage_bytes: self.max_coverage_bytes.min(other.max_coverage_bytes),
+        }
+    }
     pub fn validate(&self) -> Result<(), EvidenceError> {
         if self.max_items == 0
             || self.max_bytes == 0
@@ -81,6 +97,14 @@ impl EvidenceLimits {
         {
             return Err(EvidenceError::Limit);
         }
+        // The CRL quotas and the total, new in D1: a zero quota admits nothing, as for
+        // `max_bytes`. No ordering between the three is required: intake applies the minimum of
+        // the item cap, the CRL aggregate and the total (and clamps the item cap to
+        // `crl::MAX_CRL_LEN`), so an item cap above the aggregate only means the aggregate binds
+        // first, and a boundary test may set exactly that.
+        if self.max_crl_bytes == 0 || self.max_crl_item_bytes == 0 || self.max_total_bytes == 0 {
+            return Err(EvidenceError::InvalidLimits("a CRL or total quota is zero"));
+        }
         Ok(())
     }
 }
@@ -90,6 +114,8 @@ pub enum EvidenceError {
     Processing(#[from] ProcessingError),
     #[error("evidence size, count or work limit exceeded")]
     Limit,
+    #[error("invalid evidence limits: {0}")]
+    InvalidLimits(&'static str),
     #[error("invalid evidence owner, coverage graph or timestamp configuration")]
     InvalidBinding,
     #[error(transparent)]
