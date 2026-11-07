@@ -80,7 +80,7 @@ struct Dss {
     material: Vec<Material>,
     objects: BTreeSet<(u32, u16)>,
     vri: BTreeMap<Vec<u8>, Value>,
-    normalized_vri: BTreeMap<Vec<u8>, Value>,
+    vri_keys: BTreeSet<Vec<u8>>,
     _vri_memory: Option<oncl_pki::resource::ResourceReservation>,
     _vri_metadata: Option<oncl_pki::resource::ResourceReservation>,
 }
@@ -152,7 +152,7 @@ fn dss(
         material: Vec::new(),
         objects: BTreeSet::new(),
         vri: BTreeMap::new(),
-        normalized_vri: BTreeMap::new(),
+        vri_keys: BTreeSet::new(),
         _vri_memory: None,
         _vri_metadata: None,
     };
@@ -229,21 +229,7 @@ fn dss(
                 ));
             }
             let value = node(doc, revision, value, &mut result.objects)?;
-            let extra = value
-                .retained_bytes()?
-                .checked_mul(2)
-                .ok_or(ProcessingError::MetadataLimit)?;
-            result
-                ._vri_memory
-                .as_mut()
-                .expect("VRI admission")
-                .grow(extra)?;
-            result
-                ._vri_metadata
-                .as_mut()
-                .expect("VRI admission")
-                .grow(extra)?;
-            result.normalized_vri.insert(key.clone(), value.clone());
+            result.vri_keys.insert(key.clone());
             let vri = value.dict()?;
             if vri.get(b"Type".as_slice()).is_some_and(|v| !v.name(b"VRI"))
                 || vri.keys().any(|k| {
@@ -360,9 +346,9 @@ fn permitted(
     // (the object loop below refuses redefining any of it), and the verdict only
     // ever draws on the latest DSS.
     if old
-        .normalized_vri
-        .keys()
-        .any(|key| !current.normalized_vri.contains_key(key))
+        .vri_keys
+        .iter()
+        .any(|key| !current.vri_keys.contains(key))
     {
         return Err(PdfError::Unsupported("existing VRI entry removed"));
     }
@@ -431,6 +417,8 @@ fn permitted(
     }
     let mut pages: BTreeMap<(u32, u16), Vec<Value>> = BTreeMap::new();
     let mut appearances = BTreeSet::new();
+    let mut rewritten = BTreeSet::new();
+    let mut seen_appearances = BTreeSet::new();
     for field in new_fields.iter().skip(old_fields.len()) {
         let (field_id, field_generation, _) = direct(doc, revision, field)?;
         allowed.insert((field_id, field_generation));
@@ -505,15 +493,8 @@ fn permitted(
                     if let Some(widgets) = pages.get(&(id, generation)) {
                         let object =
                             doc.indirect(offset, Some((id, generation)), StreamMode::Reject)?;
-                        page_gains_widgets(
-                            doc,
-                            revision,
-                            prior,
-                            id,
-                            generation,
-                            &object.value,
-                            widgets,
-                        )?;
+                        page_gains_widgets(doc, prior, id, generation, &object.value, widgets)?;
+                        rewritten.insert((id, generation));
                         spans.push((offset, object.end));
                         continue;
                     }
@@ -521,6 +502,7 @@ fn permitted(
                         let object =
                             doc.indirect(offset, Some((id, generation)), StreamMode::Region)?;
                         empty_appearance(&object.value)?;
+                        seen_appearances.insert((id, generation));
                         spans.push((offset, object.end));
                         continue;
                     }
@@ -553,6 +535,14 @@ fn permitted(
                 }
             }
         }
+    }
+    // A widget is only legitimate as part of this update: its page must be
+    // rewritten to list it and its appearance must be written (and checked) here.
+    if pages.keys().any(|page| !rewritten.contains(page)) {
+        return Err(PdfError::Unsupported("signature widget page not updated"));
+    }
+    if appearances.iter().any(|a| !seen_appearances.contains(a)) {
+        return Err(PdfError::Unsupported("signature appearance not in update"));
     }
     spans.sort_unstable();
     let mut at = start;
@@ -596,9 +586,19 @@ fn invisible_widget(
         || !get(field, b"Type")?.name(b"Annot")
         || !get(field, b"Subtype")?.name(b"Widget")
         || !zero_area(get(field, b"Rect")?)
-        || !matches!(get(field, b"F")?, Value::Int(_))
+        || !get(field, b"FT")?.name(b"Sig")
+        // NCANode/Kalkan: Print (4) + Locked (128).
+        || !matches!(get(field, b"F")?, Value::Int(132))
     {
         return Err(PdfError::Unsupported("non-signature new field"));
+    }
+    let signature = doc.resolve(revision, get(field, b"V")?)?;
+    let signature = signature.dict()?;
+    if !(get(signature, b"Type")?.name(b"Sig") || get(signature, b"Type")?.name(b"DocTimeStamp"))
+        || !signature.contains_key(b"ByteRange".as_slice())
+        || !signature.contains_key(b"Contents".as_slice())
+    {
+        return Err(PdfError::Unsupported("widget value is not a signature"));
     }
     let Value::Ref(id, generation) = get(field, b"P")? else {
         return Err(PdfError::Unsupported("non-signature new field"));
@@ -641,7 +641,6 @@ fn empty_appearance(object: &Value) -> Result<()> {
 /// new widgets.
 fn page_gains_widgets(
     doc: &mut PdfDocument<'_, '_>,
-    revision: usize,
     prior: usize,
     id: u32,
     generation: u16,
@@ -650,7 +649,6 @@ fn page_gains_widgets(
 ) -> Result<()> {
     let old = doc.resolve(prior, &Value::Ref(id, generation))?;
     let (old, new) = (old.dict()?, new.dict()?);
-    let _ = revision;
     let mut expected: Vec<Value> = match old.get(b"Annots".as_slice()) {
         None => Vec::new(),
         Some(Value::Array(a)) => a.clone(),
@@ -701,7 +699,7 @@ pub(crate) fn prior_signature_contents(
     let mut seen = BTreeSet::new();
     let (mut sum, mut largest) = (0u64, 0u64);
     for revision in 0..doc.revisions.len() {
-        for candidate in doc.signature_candidates(revision, &seen, true)? {
+        for candidate in doc.signature_candidates(revision, &seen, true, false)? {
             if seen.insert(candidate.range.values()) {
                 sum = sum
                     .checked_add(candidate.contents.len)
@@ -738,7 +736,7 @@ fn parse(
         let mut seen = BTreeSet::new();
         let mut candidates = Vec::new();
         for revision in 0..doc.revisions.len() {
-            for candidate in doc.signature_candidates(revision, &seen, true)? {
+            for candidate in doc.signature_candidates(revision, &seen, true, false)? {
                 if candidate.permission_transform {
                     return Err(PdfError::Unsupported("signature permission transform"));
                 }

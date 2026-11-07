@@ -451,6 +451,7 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     let mut result = bytes.to_vec();
     result.push(b'\n');
     let mut offsets = Vec::new();
+    let objects_max = objects.iter().map(|((id, _), _)| *id).max().unwrap_or(0);
     for ((id, generation), value) in objects {
         offsets.push((id, generation, result.len()));
         result.extend_from_slice(format!("{id} {generation} obj\n").as_bytes());
@@ -466,7 +467,7 @@ fn append_objects(bytes: &[u8], objects: Vec<(lopdf::ObjectId, lopdf::Object)>) 
     result.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Prev {previous} /Root ",
-            doc.max_id + 1,
+            objects_max.max(doc.max_id) + 1,
         )
         .as_bytes(),
     );
@@ -2872,4 +2873,515 @@ fn lt_pdf_with_damaged_embedded_crl_is_not_valid_an_hour_later() {
             signer.reasons
         );
     }
+}
+
+// ---- Signature-widget append and DSS restatement grammar (always run) ----
+
+/// The shape NCANode writes for a document timestamp: an invisible widget added to the
+/// page's `/Annots`, an empty appearance, and the timestamp dictionary. Every field is a
+/// raw PDF fragment so a test can break exactly one rule.
+struct Widget {
+    ft: &'static str,
+    flags: &'static str,
+    rect: &'static str,
+    extra: &'static str,
+    ap_length: &'static str,
+    ap_body: &'static str,
+    ap_bbox: &'static str,
+    ap: bool,
+    page_extra: &'static str,
+    page_annots: Option<&'static str>,
+    rewrite_page: bool,
+    value: Option<&'static str>,
+    value_type: &'static str,
+    sub_filter: &'static str,
+}
+impl Widget {
+    fn valid() -> Self {
+        Self {
+            ft: "/Sig",
+            flags: "132",
+            rect: "[0.0 0.0 0.0 0.0]",
+            extra: "",
+            ap_length: "0",
+            ap_body: "",
+            ap_bbox: "[0.0 0.0 0.0 0.0]",
+            ap: true,
+            page_extra: "",
+            page_annots: None,
+            rewrite_page: true,
+            value: Some(""),
+            value_type: "/DocTimeStamp",
+            sub_filter: "/ETSI.RFC3161",
+        }
+    }
+}
+/// `lta` plus one revision that appends a timestamp widget as described by `w`.
+fn append_widget(lta: &[u8], w: &Widget) -> Vec<u8> {
+    let doc = lopdf::Document::load_mem(lta).unwrap();
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let catalog = doc.get_object(root).unwrap().as_dict().unwrap();
+    let form_id = catalog.get(b"AcroForm").unwrap().as_reference().unwrap();
+    let mut form = doc.get_object(form_id).unwrap().as_dict().unwrap().clone();
+    let page_id = *doc.get_pages().values().next().unwrap();
+    let page = doc.get_object(page_id).unwrap().as_dict().unwrap().clone();
+    assert!(!page.has(b"Annots"), "fixture page has no annotations");
+    let token = doc
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .find(|d| {
+            d.get(b"Type")
+                .and_then(|t| t.as_name())
+                .is_ok_and(|n| n == b"DocTimeStamp")
+        })
+        .and_then(|d| d.get(b"Contents").ok())
+        .and_then(|c| c.as_str().ok())
+        .expect("own LTA carries a document timestamp")
+        .to_vec();
+    // A VRI key is the hash of /Contents: the copy must differ from the original token
+    // (its last data byte, so the DER stays well formed).
+    let mut token = token;
+    let last = token.iter().rposition(|b| *b != 0).unwrap();
+    token[last] ^= 1;
+    let (widget, ap, stream, value) = (
+        doc.max_id + 1,
+        doc.max_id + 2,
+        doc.max_id + 3,
+        doc.max_id + 4,
+    );
+    let mut fields = form.get(b"Fields").unwrap().as_array().unwrap().clone();
+    fields.push(lopdf::Object::Reference((widget, 0)));
+    form.set("Fields", lopdf::Object::Array(fields));
+    let marker = lta.windows(9).rposition(|b| b == b"startxref").unwrap() + 9;
+    let previous: u64 = std::str::from_utf8(&lta[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut out = lta.to_vec();
+    out.push(b'\n');
+    let mut offsets = Vec::new();
+    let mut object = |out: &mut Vec<u8>, id: u32, body: &[u8]| {
+        offsets.push((id, out.len()));
+        out.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    };
+    if w.rewrite_page {
+        let mut dict = page.clone();
+        let annots = w.page_annots.map_or_else(
+            || format!("[{widget} 0 R]"),
+            |a| a.replace("{W}", &widget.to_string()),
+        );
+        let mut body = Vec::new();
+        encode_object(
+            &lopdf::Object::Dictionary(std::mem::take(&mut dict)),
+            &mut body,
+        );
+        body.truncate(body.len() - 2);
+        body.extend_from_slice(format!(" /Annots {annots} {} >>", w.page_extra).as_bytes());
+        object(&mut out, page_id.0, &body);
+    }
+    let mut body = Vec::new();
+    encode_object(&lopdf::Object::Dictionary(form), &mut body);
+    object(&mut out, form_id.0, &body);
+    let ap_entry = if w.ap {
+        format!("/AP {ap} 0 R")
+    } else {
+        String::new()
+    };
+    let widget_body = format!(
+        "<< /FT {} /Type /Annot /Subtype /Widget /F {} /T (Signature9) {} /P {} 0 R /Rect {} {} {} >>",
+        w.ft,
+        w.flags,
+        w.value.map_or(String::new(), |_| format!("/V {value} 0 R")),
+        page_id.0,
+        w.rect,
+        ap_entry,
+        w.extra,
+    );
+    object(&mut out, widget, widget_body.as_bytes());
+    if w.ap {
+        object(&mut out, ap, format!("<< /N {stream} 0 R >>").as_bytes());
+        let body = format!(
+            "<< /Length {} /Type /XObject /Subtype /Form /BBox {} >>\nstream\n{}\nendstream",
+            w.ap_length, w.ap_bbox, w.ap_body
+        );
+        object(&mut out, stream, body.as_bytes());
+    }
+    if let Some(extra) = w.value {
+        let hex: String = token.iter().map(|b| format!("{b:02X}")).collect();
+        let body = format!(
+            "<< /Type {} /Filter /Adobe.PPKLite /SubFilter {} /ByteRange [0 0000000000 0000000000 0000000000] /Contents <{hex}> {extra} >>",
+            w.value_type, w.sub_filter,
+        );
+        object(&mut out, value, body.as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n");
+    offsets.sort_unstable();
+    for (id, offset) in &offsets {
+        out.extend_from_slice(format!("{id} 1\n{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Prev {previous} /Root ",
+            doc.max_id + 5
+        )
+        .as_bytes(),
+    );
+    encode_object(doc.trailer.get(b"Root").unwrap(), &mut out);
+    for key in [b"Info".as_slice(), b"ID"] {
+        if let Ok(value) = doc.trailer.get(key) {
+            out.extend_from_slice(b" /");
+            out.extend_from_slice(key);
+            out.push(b' ');
+            encode_object(value, &mut out);
+        }
+    }
+    out.extend_from_slice(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    // Patch the ByteRange of the timestamp dictionary now that the extent is known.
+    if w.value.is_some() {
+        let start = lta.len();
+        let open = start
+            + out[start..]
+                .windows(b"/Contents <".len())
+                .position(|x| x == b"/Contents <")
+                .unwrap()
+            + b"/Contents ".len();
+        let close = open + out[open..].iter().position(|b| *b == b'>').unwrap() + 1;
+        let range = format!("[0 {open:010} {close:010} {:010}]", out.len() - close);
+        let at = out[start..]
+            .windows(b"[0 0000000000 0000000000 0000000000]".len())
+            .position(|x| x == b"[0 0000000000 0000000000 0000000000]")
+            .unwrap()
+            + start;
+        out[at..at + range.len()].copy_from_slice(range.as_bytes());
+    }
+    out
+}
+
+fn widget_lta(f: &Fixture) -> Vec<u8> {
+    f.run(None, AdesLevel::Lta).0
+}
+/// The grammar accepts `bytes` (it is then judged like any other document; a timestamp
+/// copied from another revision legitimately does not verify) or refuses with `Unsupported`.
+fn widget_grammar(f: &Fixture, bytes: &[u8]) -> Result<(), String> {
+    match f.inspect(bytes, AdesLevel::B, NOW, &f.crl) {
+        Err(oncl_pdf::PdfError::Unsupported(m)) => Err(m.to_string()),
+        Err(other) => Err(format!("{other:?}")),
+        Ok(_) => Ok(()),
+    }
+}
+#[test]
+fn invisible_timestamp_widget_append_is_accepted() {
+    let f = Fixture::new();
+    let lta = widget_lta(&f);
+    let got = widget_grammar(&f, &append_widget(&lta, &Widget::valid()));
+    assert_eq!(got, Ok(()), "{got:?}");
+}
+#[test]
+fn timestamp_widget_grammar_refuses_every_deviation() {
+    const FIELD: &str = "non-signature new field";
+    let f = Fixture::new();
+    let lta = widget_lta(&f);
+    let cases: Vec<(&str, Widget, &str)> = vec![
+        (
+            "AA",
+            Widget {
+                extra: "/AA << /E << /S /JavaScript /JS (x) >> >>",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "A",
+            Widget {
+                extra: "/A << /S /JavaScript /JS (x) >>",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "JS",
+            Widget {
+                extra: "/JS (app.alert(1))",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "Kids",
+            Widget {
+                extra: "/Kids [1 0 R]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "Tx",
+            Widget {
+                ft: "/Tx",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "Btn",
+            Widget {
+                ft: "/Btn",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "hidden",
+            Widget {
+                flags: "2",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "real flags",
+            Widget {
+                flags: "132.0",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "rect wide",
+            Widget {
+                rect: "[0 0 5 0]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "rect float",
+            Widget {
+                rect: "[0.0 0.0 0.5 0.5]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "rect negative",
+            Widget {
+                rect: "[0 0 -1 0]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "rect tiny",
+            Widget {
+                rect: "[0 0 0 0.0001]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "rect short",
+            Widget {
+                rect: "[0 0 0]",
+                ..Widget::valid()
+            },
+            FIELD,
+        ),
+        (
+            "AP content",
+            Widget {
+                ap_length: "3",
+                ap_body: "q Q",
+                ..Widget::valid()
+            },
+            "non-empty signature appearance",
+        ),
+        (
+            "AP bbox",
+            Widget {
+                ap_bbox: "[0 0 10 10]",
+                ..Widget::valid()
+            },
+            "non-empty signature appearance",
+        ),
+        (
+            "page key",
+            Widget {
+                page_extra: "/Rotate 90",
+                ..Widget::valid()
+            },
+            "page change beyond a signature widget",
+        ),
+        (
+            "annots replaced",
+            Widget {
+                page_annots: Some("[{W} 0 R {W} 0 R]"),
+                ..Widget::valid()
+            },
+            "page change beyond a signature widget",
+        ),
+        (
+            "annots foreign",
+            Widget {
+                page_annots: Some("[1 0 R {W} 0 R]"),
+                ..Widget::valid()
+            },
+            "page change beyond a signature widget",
+        ),
+        (
+            "annots empty",
+            Widget {
+                page_annots: Some("[]"),
+                ..Widget::valid()
+            },
+            "page change beyond a signature widget",
+        ),
+        (
+            "orphan page",
+            Widget {
+                rewrite_page: false,
+                ..Widget::valid()
+            },
+            "signature widget page not updated",
+        ),
+        (
+            "no value",
+            Widget {
+                value: None,
+                ..Widget::valid()
+            },
+            "missing dictionary entry",
+        ),
+        (
+            "value type",
+            Widget {
+                value_type: "/Foo",
+                ..Widget::valid()
+            },
+            "document timestamp dictionary",
+        ),
+    ];
+    for (name, widget, message) in cases {
+        let got = widget_grammar(&f, &append_widget(&lta, &widget));
+        let got = got.expect_err(name);
+        assert!(got.contains(message), "{name}: {got}");
+    }
+    // An appearance is optional.
+    assert_eq!(
+        widget_grammar(
+            &f,
+            &append_widget(
+                &lta,
+                &Widget {
+                    ap: false,
+                    ..Widget::valid()
+                }
+            )
+        ),
+        Ok(())
+    );
+    // The valid control still passes (the cases differ from it by one fragment each).
+    assert_eq!(
+        widget_grammar(&f, &append_widget(&lta, &Widget::valid())),
+        Ok(())
+    );
+}
+/// Restating the DSS in a later update (new DSS dictionary, same or refreshed
+/// evidence) is accepted; dropping an existing signature's VRI entry is not.
+#[test]
+fn dss_restatement_keeps_vri_entries() {
+    let f = Fixture::new();
+    let lta = widget_lta(&f);
+    let doc = lopdf::Document::load_mem(&lta).unwrap();
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let mut catalog = doc.get_object(root).unwrap().as_dict().unwrap().clone();
+    let dss_id = catalog.get(b"DSS").unwrap().as_reference().unwrap();
+    let dss = doc.get_object(dss_id).unwrap().as_dict().unwrap().clone();
+    assert!(dss.has(b"VRI"));
+    let fresh = doc.max_id + 1;
+    catalog.set("DSS", lopdf::Object::Reference((fresh, 0)));
+    let restate = |dss: lopdf::Dictionary| {
+        append_objects(
+            &lta,
+            vec![
+                ((fresh, 0), lopdf::Object::Dictionary(dss)),
+                (root, lopdf::Object::Dictionary(catalog.clone())),
+            ],
+        )
+    };
+    assert_eq!(widget_grammar(&f, &restate(dss.clone())), Ok(()));
+    let mut without = dss.clone();
+    without.remove(b"VRI");
+    assert_eq!(
+        widget_grammar(&f, &restate(without)),
+        Err("existing VRI entry removed".to_string())
+    );
+}
+struct NoNetwork;
+impl oncl_pki::http::HttpTransport for NoNetwork {
+    fn send(
+        &self,
+        _: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        panic!("offline PDF verification attempted network access")
+    }
+}
+fn generic(f: &Fixture, bytes: &[u8]) -> Result<oncl_pdf::PdfVerification, oncl_pdf::PdfError> {
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    oncl_pdf::verify_source(
+        Source::sequential(&mut Cursor::new(bytes), None),
+        &PdfLimits::default(),
+        &store,
+        &ValidationContext {
+            policy: ValidationPolicy::OfflineReport,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &NoNetwork,
+        },
+        &[SigAlg::RsaSha256],
+        &mut scope(),
+    )
+}
+/// The generic profile reports signers: a `DocTimeStamp` is not one (no refusal, no
+/// signer row), but a signature dictionary merely typed `DocTimeStamp` is refused.
+#[test]
+fn generic_profile_skips_a_document_timestamp_but_not_a_disguised_signature() {
+    let f = Fixture::new();
+    let lta = widget_lta(&f);
+    let verified = generic(&f, &lta).expect("a document timestamp is not a refusal");
+    let (aggregate, facts) = verified.into_aggregate(&scope()).unwrap();
+    assert_eq!(aggregate.signers.len(), 1, "only the signature is a signer");
+    assert_eq!(facts.signatures.len(), 1);
+    // The appended widget form is skipped the same way.
+    let widget = append_widget(&lta, &Widget::valid());
+    assert!(generic(&f, &widget).is_ok());
+    // A CMS signature disguised with /Type /DocTimeStamp is not a timestamp.
+    let disguised = append_widget(
+        &lta,
+        &Widget {
+            sub_filter: "/ETSI.CAdES.detached",
+            ..Widget::valid()
+        },
+    );
+    assert!(matches!(
+        generic(&f, &disguised),
+        Err(oncl_pdf::PdfError::Malformed("signature dictionary type"))
+    ));
+    // A timestamp subfilter under /Type /Sig is refused, not skipped.
+    let sig_typed = append_widget(
+        &lta,
+        &Widget {
+            value_type: "/Sig",
+            ..Widget::valid()
+        },
+    );
+    assert!(generic(&f, &sig_typed).is_err());
 }
