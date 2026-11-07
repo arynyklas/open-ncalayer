@@ -136,7 +136,7 @@ Query и fragment запроса не проверяются. Адреса ра�
 
 ### `[[operations]]`: операции ручного окна
 
-Необязательная таблица. Плагин без неё в окне ручных инструментов **не виден** (deny by default; `Manifest::operations()` пуст). Операция — не имя: это шаблон запроса, который строит хост, список импортов, сеть и для каждого применения ключа **профиль** (вид, откуда содержимое, опции, которые принуждает Core). Модель разрешений — [manual-plugins.md](manual-plugins.md); код — `crates/oncl-plugin/src/operations.rs`.
+Необязательная таблица. Плагин без неё в окне ручных инструментов **не виден** (deny by default; `Manifest::manual_operations()` пуст). Операция — не имя: это шаблон запроса, который строит хост, список импортов, сеть и для каждого применения ключа **профиль** (вид, откуда содержимое, опции, которые принуждает Core). Модель разрешений — [manual-plugins.md](manual-plugins.md); код — `crates/oncl-plugin/src/operations.rs`.
 
 ```toml
 min_core = "0.1.0-alpha.7"          # не ниже: старое ядро таблицу отвергает (deny_unknown_fields), новое — по min_core
@@ -147,19 +147,19 @@ module  = "example.sign"            # из `modules`
 manual  = true                      # показывать в ручном окне (по умолчанию false)
 server  = false                     # допускать grant сервера/CLI (по умолчанию false); оба false — ошибка
 request = '{"module":"example.sign","method":"signFile","args":["{file:base64}"]}'
-label   = { ru = "…", kk = "…", en = "…" }   # недоверенный текст автора: 1–80 символов, без управляющих и bidi
+label   = { ru = "…", kk = "…", en = "…" }   # недоверенный текст автора: 1–80 символов, без управляющих, bidi и невидимых (Cf) символов, без пробелов по краям
 
 [[operations.params]]               # до 16; ^[a-z][a-z0-9_]{0,31}$, уникальны, все используются в request
 name = "file"
 kind = "document"                   # document | text | choice | flag | locale
-max_bytes = 16777216                # document: 1..=256 МиБ (по умолчанию 16 МиБ); text: max_chars 1..=65536 (256); choice: choices (1–32)
+max_bytes = 16777216                # document: 1..=`MAX_DOCUMENT_BYTES` (около 192 МиБ: base64 и шаблон ещё входят в `max_transfer`; по умолчанию 16 МиБ); text: max_chars 1..=65536 (256); choice: choices (1–32)
 
 [operations.uses]
 imports     = ["keys_select", "keys_sign_cms_ex", "hash"]   # известные имена импортов; capability манифеста обязана их объявлять
 network     = "pki"                 # "none" (по умолчанию) | "pki" | ["https://…/"] (каждый под capabilities.http)
 interactive = ["keys_select"]       # ⊆ {keys_select, keys_choose, keys_flow_open, keys_flow_pick} и ⊆ imports
 
-[[operations.uses.key]]             # до 8
+[[operations.uses.key]]             # не больше одной: операция применяет ключ один раз (R9)
 kind     = "cms_ex"                 # raw | cms | cms_ex | xml | xml_ex | xades
 content  = "param:file"             # param:<имя> (bound) | "derived"
 max_uses = 1                        # единственное допустимое значение (по умолчанию 1)
@@ -169,7 +169,7 @@ timestamp = "basics"
 
 **Шаблон `request`.** JSON-объект ровно с `module` (равен `module` операции), `method` и `args` (массив). Строка внутри `args`, в которой есть `{` или `}`, обязана целиком быть одним плейсхолдером объявленного параметра: `"{имя}"` (text, choice, locale — строка JSON; flag — булево) или `"{имя:base64}"` (document, обязательно с `:base64`). Экранирования фигурных скобок нет. Хост строит запрос из разобранного JSON, а не подстановкой в текст. Размер шаблона ≤ 16 КиБ; сверка с `max_transfer` — на этапе вызова.
 
-**Импорты.** Запрещены всегда (R6, §3.5): `dialog_*`, `file_*`, `keystore_*`, `core_open_window`, `keys_open`. Каждый ключевой импорт (`keys_sign_*`) требует строки `[[operations.uses.key]]` того же вида и наоборот; применение ключа требует `capabilities.keys`. При компиляции пакета `uses.imports` обязан входить в импорты WASM (`LoadError::OperationImport`).
+**Импорты.** Каждый член `Import::ALL` классифицирован в `ImportPolicy::of` (исчерпывающий `match`: новый импорт не собирается, пока его не отнесли к классу). *Allowed*: базовые функции, `keys_select/choose/flow_open/flow_pick/describe/chain/release/terminals`, `tokens_scan` (хост отвечает «токены выключены», MP4), `http_request[_ex]`, `tsp_*`, `ocsp_fetch`, `crl_fetch`, `cms_verify`, `xml_verify`, `ca_*`, `pkix_path`. *NeedsProfile*: шесть `keys_sign_*`. *Forbidden* (R6, §3.5, §4.6): `dialog_*`, `file_*`, `page_file_*`, `keystore_*`, `settings_*`, `shared_*`, `core_*`, `keys_open`, `tokens_id_card`, `data_*`. `network = "none"` несовместимо с импортами, которые шлют запросы (`http_request[_ex]`, `tsp_*`, `ocsp_fetch`, `crl_fetch`, `cms_verify`, `ca_issuer`, `pkix_path`) и с профилем, который ставит метку времени (cms/cms_ex `timestamp`, xades `t`). Остальные перекрёстные проверки (`interactive` ⊆ `imports`, но не наоборот; `network`-URL только под `capabilities.http`, не `origins`/`http_insecure`) — на вызове (MP2). Каждый ключевой импорт (`keys_sign_*`) требует строки `[[operations.uses.key]]` того же вида и наоборот; применение ключа требует `capabilities.keys`. При компиляции пакета `uses.imports` обязан входить в импорты WASM (`LoadError::OperationImport`).
 
 **`derived`.** Разбирается, но хост его не выполняет до этапа MP3b: `Operation::runnable()` равно `false`. Запрещено для `raw` и для `content_form = "digest"`.
 
@@ -182,13 +182,17 @@ timestamp = "basics"
 | `cms_ex` | `encapsulate` (false), `cosign` (`never`), `content_form` (`data`; `digest` — только bound и без `encapsulate`), `timestamp` (`none`/`basics`/`kalkan`), `certificates` (`signer`/`chain`), `output` (`der`/`base64`/`pem`), `content_type`, `message_digest`, `signing_certificate_v2` (true), `signing_time` (`now`/`none`) | `cosign` кроме `never`, `attrs.extra`, `econtent_type`, `digest`, `timestamp = custom`, `certificates = extra` |
 | `xml` | `element`, `parent` (только с `element`) | — |
 | `xml_ex` | `element`, `parent`, `placement` (`document_element`/`first_child_of_document`/`parent`; `parent` ⇔ задан `parent`), `namespaces`, `other_prefix_uri`, `signature_method`, `digest_method` (из известных URI), `c14n`, `strip_whitespace`, `base64_line_breaks`, `output` (`as_is` / `{ serialize = { declaration, standalone_no, trim } }`) | `transforms`, `signature_id`, `signing_time_object`, чужие URI методов |
-| `xades` | `level` (`b`/`t`/`lt`), `tsa` (`basics`/`kalkan`), `signature_method`, `digest_method` | `chain`, custom TSA, чужие URI |
+| `xades` | `level` (`b`/`t`; `lt`/`lta` отвергаются при разборе: ядру нужен `chain` для доказательств, решение позже), `tsa` (`basics`/`kalkan`), `signature_method`, `digest_method` | `chain`, custom TSA, чужие URI |
 
 `element` и `parent` — абсолютный XPath (начинается с `/`) либо `param:<имя>` (text-параметр: введённый пользователем текст показывается в согласии).
 
-**Каноническое кодирование** (вход `options_sha256` билета `PluginUse`). `KeyUse::options_canonical(values)`: магия `ONCLOPT1\0`, вид (1 raw, 2 cms, 3 cms_ex, 4 xml, 5 xml_ex, 6 xades), затем поля вида в порядке номеров таблицы выше: `id u8` и самоограниченное значение (bool — байт 0/1; перечисление — один байт, порядок в `oncl_plugin::operations`; строка — `u32` BE длина и UTF-8; необязательное — 0 или 1 и значение; список — `u32` счётчик). Записываются **все** поля, значения по умолчанию тоже, поэтому незаданное поле и явное значение по умолчанию кодируются одинаково; набор и порядок полей фиксированы, двух разных профилей с одинаковой записью нет. Поле `param:<имя>` кодируется текстом, который дал `values`, как фиксированное значение (без значения — `None`). Версия кодирования — в магии. `Operation::canonical()` кодирует всё объявление, кроме `label` (импорты и сеть — как множества), для обнаружения изменений.
+**Поля ABI, которые профиль обязан покрыть** (тест `the_abi_option_structs_are_all_classified` разбирает эти структуры без `..`: новое поле не собирается, пока его не отнесли к профилю или к «должно быть по умолчанию»). `SignRawArgs` {handle, data}; `SignCmsArgs` {handle, data, attached, timestamp}; `SignCmsExArgs` {handle, content, encapsulate, cosign, econtent_type=None, digest=None, attrs, certificates, timestamp, output}; `SignedAttrs` {content_type, message_digest, signing_certificate_v2, signing_time, extra=пусто}; `SignXmlArgs` {handle, xml, element, parent}; `SignXmlExArgs` {handle, xml, element, parent, namespaces, other_prefix_uri, placement, signature_method, digest_method, signed_info_c14n, transforms=None, signature_id=None, signing_time_object=None, strip_whitespace, base64_line_breaks, output}; `XadesArgs` {handle, xml, level, tsa, chain=пусто, signature_method, digest_method}. `handle` связывает гард, байты документа — привязка содержимого. Вызов с `CoSign::Auto` разбор не отвергает (профиль остаётся `never`): ядро приведёт его к `Never` на вызове (MP3a-2). Построитель `options_sha256` из разобранных `args` (MP3a) обязан писать через ту же функцию `Profile::encode`; расхождения ловят golden-векторы всех шести видов.
 
-**Обновления (`Manifest::added_over`).** К `Capabilities::added_over` добавлены `AddedOperation`: требует явного согласия, если у операции появилось применение ключа (вид, содержимое или профиль, которого не было у установленной одноимённой операции), изменились `module`/`request`/параметры/`manual` у операции с ключом, добавлен импорт с capability, расширена сеть, включён `server`. Не требуют согласия: смена `label` и сужение. Подключение вызова в `crates/openncalayer/src/plugins.rs` (сейчас вызывает `Capabilities::added_over`) — этапы MP5c/MP7.
+**XPath.** `element`/`parent`: абсолютный (начинается с `/`), ≤ 1024 байт, без управляющих, bidi и невидимых символов; `param:` допустим только для text-параметра с `max_chars` ≤ 256. Текст, который ввёл пользователь, MUST пройти `Source::check_value` до `options_canonical` (тот отказывает `None` на непрошедший).
+
+**Каноническое кодирование** (вход `options_sha256` билета `PluginUse`). `KeyUse::options_canonical(values)`: магия `ONCLOPT1\0`, вид (1 raw, 2 cms, 3 cms_ex, 4 xml, 5 xml_ex, 6 xades), затем поля вида в порядке номеров таблицы выше: `id u8` и самоограниченное значение (bool — байт 0/1; перечисление — один байт с явным значением (`tag()`; `Timestamp` 0 none/1 basics/2 kalkan, `ContentForm` 0 data/1 digest, `Certificates` 0 signer/1 chain, `SigningTime` 0 now/1 none, `XadesTsa` 0 basics/1 kalkan; `output` cms 0 der/1 base64/2 pem; placement 0/1/2; c14n 0 нет, 1–4; level 0 b/1 t);  строка — `u32` BE длина и UTF-8; необязательное — 0 или 1 и значение; список — `u32` счётчик). Записываются **все** поля, значения по умолчанию тоже, поэтому незаданное поле и явное значение по умолчанию кодируются одинаково; набор и порядок полей фиксированы, двух разных профилей с одинаковой записью нет. Поле `param:<имя>` кодируется текстом, который дал `values`, как фиксированное значение (без значения — `None`). Версия кодирования — в магии. `Operation::canonical()` кодирует всё объявление, кроме `label` (импорты и сеть — как множества), для обнаружения изменений.
+
+**Обновления (`Manifest::added_over`).** К `Capabilities::added_over` добавлены `AddedOperation`: требует явного согласия, если у операции появилось применение ключа (вид, содержимое или профиль, которого не было у установленной одноимённой операции), изменились `module`/`request`/параметры/`manual` у операции с ключом, добавлен импорт с capability, расширена сеть, включён `server`. Не требуют согласия: смена `label`, пробелы в `request` (JSON сравнивается как JSON), сужение (меньшие лимиты параметров, меньше выбора, уже сеть, `manual` выключен, убранные импорты). Подключение вызова в `crates/openncalayer/src/plugins.rs` (сейчас вызывает `Capabilities::added_over`) — этапы MP5c/MP7.
 
 ## ABI
 
