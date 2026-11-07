@@ -591,10 +591,28 @@ fn parse_url(text: &str, scheme: &'static str) -> Result<Url, &'static str> {
 }
 
 impl Manifest {
-    /// The operations the manual-tools window may offer: empty for a plugin that declares
-    /// none, and then the window offers nothing of it (deny by default).
+    /// Every operation as declared, **unfiltered**: for tooling (the installer's list, the
+    /// linter). A host that offers or runs operations MUST use
+    /// [`manual_operations`](Self::manual_operations) or
+    /// [`server_operations`](Self::server_operations), which leave out what cannot run.
     pub fn operations(&self) -> &[Operation] {
         &self.operations
+    }
+
+    /// The operations the manual-tools window may offer: `manual` and runnable (not
+    /// `derived`, which waits for stage MP3b). Empty for a plugin that declares none: the
+    /// window offers nothing of it (deny by default).
+    pub fn manual_operations(&self) -> impl Iterator<Item = &Operation> {
+        self.operations
+            .iter()
+            .filter(|o| o.manual() && o.runnable())
+    }
+
+    /// The operations a server or CLI grant may name: `server` and runnable.
+    pub fn server_operations(&self) -> impl Iterator<Item = &Operation> {
+        self.operations
+            .iter()
+            .filter(|o| o.server() && o.runnable())
     }
 
     /// What this manifest asks for over the installed `old`: new capabilities

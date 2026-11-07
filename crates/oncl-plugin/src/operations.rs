@@ -27,8 +27,8 @@ use std::fmt;
 pub const MAX_OPERATIONS: usize = 32;
 /// Most `[[operations.params]]` of one operation.
 pub const MAX_PARAMS: usize = 16;
-/// Most `[[operations.uses.key]]` of one operation.
-pub const MAX_KEY_USES: usize = 8;
+/// Most `[[operations.uses.key]]` of one operation: one use of a key per operation (R9).
+pub const MAX_KEY_USES: usize = 1;
 /// Most URL prefixes of `uses.network`.
 pub const MAX_NETWORK_URLS: usize = 8;
 /// Most imports of `uses.imports`.
@@ -39,8 +39,9 @@ pub const MAX_USES: u8 = 1;
 pub const MAX_LABEL: usize = 80;
 /// Longest request template, in bytes.
 pub const MAX_REQUEST: usize = 16 * 1024;
-/// Longest `max_bytes` of a `document` parameter, in bytes ([`runtime::MAX_TRANSFER`]).
-pub const MAX_DOCUMENT_BYTES: u64 = 256 << 20;
+/// Longest `max_bytes` of a `document` parameter, in bytes: the most whose base64 form and
+/// a request template still fit [`runtime::MAX_TRANSFER`]; a larger document could never run.
+pub const MAX_DOCUMENT_BYTES: u64 = (runtime::MAX_TRANSFER as u64 - MAX_REQUEST as u64) / 4 * 3;
 /// Default `max_bytes` of a `document` parameter: 16 MiB.
 pub const DEFAULT_DOCUMENT_BYTES: u64 = 16 << 20;
 /// Longest `max_chars` of a `text` parameter.
@@ -53,6 +54,9 @@ pub const MAX_CHOICES: usize = 32;
 pub const MAX_CHOICE_CHARS: usize = 64;
 /// Longest fixed XPath of a profile, in bytes.
 pub const MAX_XPATH: usize = 1024;
+/// Longest `max_chars` of a `text` parameter that is the source of an XPath (4 bytes a
+/// character at most keep it within [`MAX_XPATH`]).
+pub const MAX_XPATH_PARAM_CHARS: u32 = (MAX_XPATH / 4) as u32;
 /// Most namespace bindings of an XML profile.
 pub const MAX_NAMESPACES: usize = 16;
 
@@ -92,6 +96,15 @@ pub enum OperationError {
     /// `min_core` is older than [`operations_min_core`]: an older core cannot read them.
     #[error("operations need min_core {needed} or later, not {found}")]
     MinCore { needed: Version, found: Version },
+    /// More than [`MAX_IMPORTS`] imports.
+    #[error("operation {0:?}: more than {MAX_IMPORTS} imports")]
+    TooManyImports(String),
+    /// More than [`MAX_KEY_USES`] `[[operations.uses.key]]`.
+    #[error("operation {0:?}: more than {MAX_KEY_USES} uses.key: an operation uses a key once")]
+    TooManyKeyUses(String),
+    /// `network = "none"` with an import or a profile that reaches the network.
+    #[error("operation {operation:?}: network is `none` but {why}")]
+    NetworkNeeded { operation: String, why: String },
     /// A name is not `^[a-z][a-z0-9-]{0,31}$`.
     #[error("operation name {0:?} is not 1 to 32 of a-z, 0-9 and `-`, starting with a letter")]
     Name(String),
@@ -254,22 +267,24 @@ impl Operation {
         w.out
     }
 
+    /// Whether `new` differs from `self` in more than being narrower: another module or
+    /// request (JSON compared as JSON, so spacing does not count), a parameter added,
+    /// changed in kind or widened (a larger limit, more choices), or `manual` newly set.
+    fn changed_beyond_narrowing(&self, new: &Operation) -> bool {
+        let template = |o: &Operation| serde_json::from_str::<serde_json::Value>(&o.request).ok();
+        self.module != new.module
+            || template(self) != template(new)
+            || (new.manual && !self.manual)
+            || new.params.len() != self.params.len()
+            || !new
+                .params
+                .iter()
+                .all(|n| self.params.iter().any(|o| n.within(o)))
+    }
+
     /// SHA-256 of [`canonical`](Self::canonical).
     pub fn sha256(&self) -> [u8; 32] {
         Sha256::digest(self.canonical()).into()
-    }
-
-    /// The encoding of everything a change can widen (uses), apart from the rest.
-    fn shape(&self) -> Vec<u8> {
-        let mut w = Writer::new(b"ONCLSH1\0");
-        w.str(&self.module);
-        w.bool(self.manual);
-        w.str(&self.request);
-        w.u32(self.params.len() as u32);
-        for p in &self.params {
-            p.encode(&mut w);
-        }
-        w.out
     }
 }
 
@@ -283,6 +298,23 @@ pub struct Param {
 }
 
 impl Param {
+    /// Whether `self` asks for no more than `old`: the same name and kind, and limits and
+    /// choices not larger.
+    fn within(&self, old: &Param) -> bool {
+        self.name == old.name
+            && match (&self.kind, &old.kind) {
+                (ParamKind::Document { max_bytes: n }, ParamKind::Document { max_bytes: o }) => {
+                    n <= o
+                }
+                (ParamKind::Text { max_chars: n }, ParamKind::Text { max_chars: o }) => n <= o,
+                (ParamKind::Choice { choices: n }, ParamKind::Choice { choices: o }) => {
+                    n.iter().all(|c| o.contains(c))
+                }
+                (ParamKind::Flag, ParamKind::Flag) | (ParamKind::Locale, ParamKind::Locale) => true,
+                _ => false,
+            }
+    }
+
     fn encode(&self, w: &mut Writer) {
         w.str(&self.name);
         match &self.kind {
@@ -578,12 +610,35 @@ impl TryFrom<String> for Source {
         if let Some(name) = text.strip_prefix("param:") {
             return Ok(Source::Param(name.to_owned()));
         }
-        if text.starts_with('/') && text.len() <= MAX_XPATH && !text.chars().any(char::is_control) {
-            return Ok(Source::Fixed(text));
+        match Source::check_value(&text) {
+            Ok(()) => Ok(Source::Fixed(text)),
+            Err(why) => Err(format!(
+                "{text:?} is neither `param:<name>` nor an XPath: {why}"
+            )),
         }
-        Err(format!(
-            "{text:?} is neither `param:<name>` nor an absolute XPath of at most {MAX_XPATH} bytes"
-        ))
+    }
+}
+
+impl Source {
+    /// Whether `text` may be an XPath of a profile, fixed or typed by the user: absolute (it
+    /// starts with `/`), at most [`MAX_XPATH`] bytes, without control, bidirectional or other
+    /// invisible format characters (it is drawn in the trusted part of the consent).
+    /// Whoever resolves a `param:` source MUST check the user's text with this before
+    /// [`KeyUse::options_canonical`], which refuses a text that fails it.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong.
+    pub fn check_value(text: &str) -> Result<(), &'static str> {
+        if !text.starts_with('/') {
+            Err("it is not absolute (it must start with `/`)")
+        } else if text.len() > MAX_XPATH {
+            Err("it is too long")
+        } else if text.chars().any(|c| c.is_control() || is_invisible(c)) {
+            Err("it has control, bidirectional or invisible characters")
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -647,6 +702,52 @@ pub enum SigningTime {
     Now,
     /// No signingTime attribute. Tag 1.
     None,
+}
+
+impl Timestamp {
+    fn tag(self) -> u8 {
+        match self {
+            Timestamp::None => 0,
+            Timestamp::Basics => 1,
+            Timestamp::Kalkan => 2,
+        }
+    }
+}
+
+impl ContentForm {
+    fn tag(self) -> u8 {
+        match self {
+            ContentForm::Data => 0,
+            ContentForm::Digest => 1,
+        }
+    }
+}
+
+impl Certificates {
+    fn tag(self) -> u8 {
+        match self {
+            Certificates::Signer => 0,
+            Certificates::Chain => 1,
+        }
+    }
+}
+
+impl SigningTime {
+    fn tag(self) -> u8 {
+        match self {
+            SigningTime::Now => 0,
+            SigningTime::None => 1,
+        }
+    }
+}
+
+impl XadesTsa {
+    fn tag(self) -> u8 {
+        match self {
+            XadesTsa::Basics => 0,
+            XadesTsa::Kalkan => 1,
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -860,8 +961,10 @@ impl Profile {
                     // Resolved: as if fixed, so a ticket's options hash is the declared
                     // profile's with the user's text filled in.
                     Some(values) => {
+                        let text = values(name)?;
+                        Source::check_value(&text).ok()?;
                         w.u8(1);
-                        w.str(&values(name)?);
+                        w.str(&text);
                     }
                     None => {
                         w.u8(2);
@@ -877,7 +980,7 @@ impl Profile {
                 w.u8(1);
                 w.bool(p.attached);
                 w.u8(2);
-                w.u8(p.timestamp as u8);
+                w.u8(p.timestamp.tag());
             }
             Profile::CmsEx(p) => {
                 w.u8(1);
@@ -885,11 +988,11 @@ impl Profile {
                 w.u8(2);
                 w.u8(0);
                 w.u8(3);
-                w.u8(p.content_form as u8);
+                w.u8(p.content_form.tag());
                 w.u8(4);
-                w.u8(p.timestamp as u8);
+                w.u8(p.timestamp.tag());
                 w.u8(5);
-                w.u8(p.certificates as u8);
+                w.u8(p.certificates.tag());
                 w.u8(6);
                 w.u8(match p.output {
                     CmsOutput::Der => 0,
@@ -903,7 +1006,7 @@ impl Profile {
                 w.u8(9);
                 w.bool(p.signing_certificate_v2);
                 w.u8(10);
-                w.u8(p.signing_time as u8);
+                w.u8(p.signing_time.tag());
             }
             Profile::Xml(p) => {
                 src(&mut w, 1, &p.element)?;
@@ -970,7 +1073,7 @@ impl Profile {
                     XadesLevel::Lt => 2,
                 });
                 w.u8(2);
-                w.u8(p.tsa as u8);
+                w.u8(p.tsa.tag());
                 w.u8(3);
                 w.opt_str(p.signature_method.as_deref());
                 w.u8(4);
@@ -978,6 +1081,16 @@ impl Profile {
             }
         }
         Some(w.out)
+    }
+
+    /// Whether the signature asks a time-stamp authority.
+    fn needs_network(&self) -> bool {
+        match self {
+            Profile::Cms(p) => p.timestamp != Timestamp::None,
+            Profile::CmsEx(p) => p.timestamp != Timestamp::None,
+            Profile::Xades(p) => p.level != XadesLevel::B,
+            _ => false,
+        }
     }
 
     /// The names of the parameters the profile reads.
@@ -1125,13 +1238,29 @@ fn is_ident(text: &str, max: usize, extra: u8) -> bool {
             .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == extra)
 }
 
-/// Bidirectional formatting and line-separating characters, which can make a text read
-/// other than it is written.
-fn is_bidi(c: char) -> bool {
+/// Characters that can make a text read other than it is written or show nothing:
+/// bidirectional formatting, the line and paragraph separators and the other format
+/// characters (Unicode category Cf: zero-width, joiners, word joiner, BOM, soft hyphen,
+/// interlinear annotation, language tags, musical formatting).
+fn is_invisible(c: char) -> bool {
     matches!(
         c,
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'
-            ..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
     )
 }
 
@@ -1140,20 +1269,124 @@ fn plain_text_problem(text: &str, max: usize) -> Option<&'static str> {
         Some("is empty")
     } else if text.chars().count() > max {
         Some("is too long")
-    } else if text.chars().any(|c| c.is_control() || is_bidi(c)) {
-        Some("has control or bidirectional characters")
+    } else if text.trim() != text {
+        Some("has leading or trailing whitespace")
+    } else if text.chars().any(|c| c.is_control() || is_invisible(c)) {
+        Some("has control, bidirectional or invisible characters")
     } else {
         None
     }
 }
 
-/// Imports the manual window never lets an operation use (design 3.5, R6).
-fn forbidden(import: Import) -> bool {
-    let name = import.name();
-    name.starts_with("dialog_")
-        || name.starts_with("file_")
-        || name.starts_with("keystore_")
-        || matches!(import, Import::CoreOpenWindow | Import::KeysOpen)
+/// What the manual window makes of a host function named by an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportPolicy {
+    /// May be listed in `uses.imports` (its capability declared).
+    Allowed,
+    /// Never: the manual window has no dialogs, files, key stores, page paths, state kept
+    /// between calls, window or bundle control (design 3.5, 4.6, R6).
+    Forbidden,
+    /// A signing function: listed only with a `[[operations.uses.key]]` of its kind, whose
+    /// profile the core enforces.
+    NeedsProfile,
+}
+
+impl ImportPolicy {
+    /// The policy for `import`. The match is exhaustive on purpose: a new host function does
+    /// not compile until it is classified here.
+    pub fn of(import: Import) -> ImportPolicy {
+        use ImportPolicy::{Allowed, Forbidden, NeedsProfile};
+        match import {
+            Import::Log
+            | Import::Now
+            | Import::Random
+            | Import::CertInfo
+            | Import::KeysChoose
+            | Import::KeysRelease
+            | Import::HttpRequest
+            | Import::ReplyDrop
+            | Import::Hash
+            | Import::CertDetails
+            | Import::LocalTime
+            | Import::Platform
+            | Import::CaList
+            | Import::CaIssuer
+            | Import::KeysSelect
+            | Import::KeysChain
+            | Import::KeysTerminals
+            | Import::TspStamp
+            | Import::TspRequest
+            | Import::OcspFetch
+            | Import::CrlFetch
+            | Import::CmsVerify
+            | Import::XmlVerify
+            | Import::HttpRequestEx
+            | Import::CallLocale
+            | Import::KeysFlowOpen
+            | Import::KeysFlowPick
+            | Import::KeysDescribe
+            | Import::TokensScan
+            | Import::PkixPath => Allowed,
+            Import::KeysSignCms
+            | Import::KeysSignRaw
+            | Import::KeysSignXml
+            | Import::KeysSignCmsEx
+            | Import::KeysSignXmlEx
+            | Import::KeysSignXades => NeedsProfile,
+            Import::DialogMessage
+            | Import::DialogConfirm
+            | Import::DialogPassword
+            | Import::DialogChoice
+            | Import::DialogReader
+            | Import::DialogCsr
+            | Import::DialogImport
+            | Import::FileOpen
+            | Import::FileSave
+            | Import::FileChoose
+            | Import::FileOpenEx
+            | Import::FileChooseKind
+            | Import::PageFileRead
+            | Import::PageFileWrite
+            | Import::KeysOpen
+            | Import::SettingsGet
+            | Import::SettingsPut
+            | Import::SharedGet
+            | Import::SharedPut
+            | Import::CoreModules
+            | Import::CoreBundles
+            | Import::CoreInstallBundle
+            | Import::CoreOpenWindow
+            | Import::KeystoreNewKey
+            | Import::KeystoreInstallCert
+            | Import::KeystoreChangePassword
+            | Import::TokensIdCard
+            | Import::DataRead
+            | Import::DataDecode
+            | Import::DataEncode
+            | Import::DataSignCms
+            | Import::DataSignXml
+            | Import::DataSignRaw
+            | Import::DataStamp
+            | Import::DataPageRead => Forbidden,
+        }
+    }
+}
+
+/// Host functions that send a request over the network (or need the clock and revocation
+/// data a request fetches): they need `network` other than `none`.
+fn reaches_network(import: Import) -> bool {
+    matches!(
+        import,
+        Import::HttpRequest
+            | Import::HttpRequestEx
+            | Import::TspStamp
+            | Import::TspRequest
+            | Import::OcspFetch
+            | Import::CrlFetch
+            | Import::CmsVerify
+            | Import::CaIssuer
+            | Import::PkixPath
+    )
 }
 
 fn is_key_choice(import: Import) -> bool {
@@ -1161,6 +1394,61 @@ fn is_key_choice(import: Import) -> bool {
         import,
         Import::KeysSelect | Import::KeysChoose | Import::KeysFlowOpen | Import::KeysFlowPick
     )
+}
+
+/// JSON that refuses an object with a repeated key: which of two readings a parser takes
+/// (the first, the last) is not for a manifest to leave open.
+struct StrictJson(serde_json::Value);
+
+impl<'de> Deserialize<'de> for StrictJson {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, MapAccess, SeqAccess, Visitor};
+        use serde_json::{Map, Number, Value};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Value;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("JSON")
+            }
+            fn visit_bool<E: Error>(self, v: bool) -> Result<Value, E> {
+                Ok(Value::Bool(v))
+            }
+            fn visit_i64<E: Error>(self, v: i64) -> Result<Value, E> {
+                Ok(Value::Number(v.into()))
+            }
+            fn visit_u64<E: Error>(self, v: u64) -> Result<Value, E> {
+                Ok(Value::Number(v.into()))
+            }
+            fn visit_f64<E: Error>(self, v: f64) -> Result<Value, E> {
+                Number::from_f64(v)
+                    .map(Value::Number)
+                    .ok_or_else(|| E::custom("a number JSON cannot hold"))
+            }
+            fn visit_str<E: Error>(self, v: &str) -> Result<Value, E> {
+                Ok(Value::String(v.to_owned()))
+            }
+            fn visit_unit<E: Error>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+                let mut items = Vec::new();
+                while let Some(StrictJson(v)) = seq.next_element()? {
+                    items.push(v);
+                }
+                Ok(Value::Array(items))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+                let mut out = Map::new();
+                while let Some((k, StrictJson(v))) = map.next_entry::<String, StrictJson>()? {
+                    if out.insert(k.clone(), v).is_some() {
+                        return Err(A::Error::custom(format!("the key {k:?} is repeated")));
+                    }
+                }
+                Ok(Value::Object(out))
+            }
+        }
+        d.deserialize_any(V).map(StrictJson)
+    }
 }
 
 impl RawOperation {
@@ -1304,7 +1592,7 @@ impl RawOperation {
         if self.request.len() > MAX_REQUEST {
             return Err(bad(format!("longer than {MAX_REQUEST} bytes")));
         }
-        let value: serde_json::Value =
+        let StrictJson(value) =
             serde_json::from_str(&self.request).map_err(|e| bad(format!("not JSON: {e}")))?;
         let serde_json::Value::Object(map) = &value else {
             return Err(bad("not a JSON object".to_owned()));
@@ -1383,10 +1671,7 @@ impl RawUses {
         caps: &Capabilities,
     ) -> Result<Uses, OperationError> {
         if self.imports.len() > MAX_IMPORTS {
-            return Err(OperationError::UnknownImport {
-                operation: op.to_owned(),
-                name: format!("more than {MAX_IMPORTS} imports"),
-            });
+            return Err(OperationError::TooManyImports(op.to_owned()));
         }
         let mut imports = Vec::new();
         for name in &self.imports {
@@ -1401,7 +1686,7 @@ impl RawUses {
                     name,
                 });
             }
-            if forbidden(import) {
+            if ImportPolicy::of(import) == ImportPolicy::Forbidden {
                 return Err(OperationError::ForbiddenImport {
                     operation: op.to_owned(),
                     name,
@@ -1464,10 +1749,7 @@ impl RawUses {
         };
 
         if self.key.len() > MAX_KEY_USES {
-            return Err(OperationError::KeyUse {
-                operation: op.to_owned(),
-                why: format!("more than {MAX_KEY_USES} uses.key"),
-            });
+            return Err(OperationError::TooManyKeyUses(op.to_owned()));
         }
         let mut key = Vec::new();
         for (index, raw) in self.key.into_iter().enumerate() {
@@ -1502,6 +1784,20 @@ impl RawUses {
                         import.name(),
                         kind.as_str()
                     ),
+                });
+            }
+        }
+        if network == Network::None {
+            if let Some(import) = imports.iter().find(|i| reaches_network(**i)) {
+                return Err(OperationError::NetworkNeeded {
+                    operation: op.to_owned(),
+                    why: format!("{} sends requests", import.name()),
+                });
+            }
+            if key.iter().any(|k| k.profile.needs_network()) {
+                return Err(OperationError::NetworkNeeded {
+                    operation: op.to_owned(),
+                    why: "the profile time-stamps".to_owned(),
                 });
             }
         }
@@ -1621,7 +1917,14 @@ impl RawKeyUse {
                         "more than {MAX_NAMESPACES} namespaces"
                     )));
                 }
+                let mut prefixes = HashSet::new();
                 for ns in &p.namespaces {
+                    if !prefixes.insert(ns.prefix.as_str()) {
+                        return Err(profile_error(format!(
+                            "namespace prefix {:?} is bound twice",
+                            ns.prefix
+                        )));
+                    }
                     if plain_text_problem(&ns.prefix, 64).is_some()
                         || plain_text_problem(&ns.uri, 512).is_some()
                     {
@@ -1640,6 +1943,12 @@ impl RawKeyUse {
             }
             KeyKind::Xades => {
                 let p: XadesProfile = table.try_into().map_err(from)?;
+                if p.level == XadesLevel::Lt {
+                    return Err(profile_error(
+                        "level `lt` is not offered yet: the core needs the chain for its evidence"
+                            .to_owned(),
+                    ));
+                }
                 methods(&p.signature_method, &p.digest_method).map_err(profile_error)?;
                 Profile::Xades(p)
             }
@@ -1648,8 +1957,14 @@ impl RawKeyUse {
             let param = params.iter().find(|p| p.name == name).ok_or_else(|| {
                 profile_error(format!("`param:{name}` names an undeclared param"))
             })?;
-            if !matches!(param.kind, ParamKind::Text { .. }) {
-                return Err(profile_error(format!("param {name:?} must be a text")));
+            match param.kind {
+                ParamKind::Text { max_chars } if max_chars <= MAX_XPATH_PARAM_CHARS => {}
+                ParamKind::Text { .. } => {
+                    return Err(profile_error(format!(
+                        "param {name:?} is an XPath: max_chars must be at most {MAX_XPATH_PARAM_CHARS}"
+                    )));
+                }
+                _ => return Err(profile_error(format!("param {name:?} must be a text"))),
             }
         }
         Ok(KeyUse {
@@ -1708,7 +2023,7 @@ impl fmt::Display for AddedReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AddedReason::New => f.write_str("a new operation"),
-            AddedReason::Changed => f.write_str("a changed request"),
+            AddedReason::Changed => f.write_str("a changed operation"),
             AddedReason::KeyUse => f.write_str("a new use of a key"),
             AddedReason::Imports(names) => write!(f, "more imports: {}", names.join(", ")),
             AddedReason::Network => f.write_str("a wider network"),
@@ -1721,9 +2036,9 @@ impl fmt::Display for AddedReason {
 ///
 /// An operation counts when it has a use of a key, an import of a capability or network
 /// that is new over the installed operation of the same name (an operation that is not
-/// installed has none); or, with a use of a key, anything but its label differs in a way
-/// that is not only narrower. Changing a label counts for nothing: it is the plugin's own
-/// words and trusted nowhere.
+/// installed has none); or, with a use of a key, its module, request, parameters or
+/// `manual` differ in a way that is not only narrower. Changing a label counts for nothing
+/// (it is the plugin's own words, trusted nowhere), and neither does narrowing.
 pub(crate) fn added(new: &[Operation], old: &[Operation]) -> Vec<AddedOperation> {
     let mut out = Vec::new();
     for op in new {
@@ -1755,7 +2070,7 @@ pub(crate) fn added(new: &[Operation], old: &[Operation]) -> Vec<AddedOperation>
         if !op.uses.key.is_empty() {
             match installed {
                 None => reasons.push(AddedReason::New),
-                Some(o) if o.shape() != op.shape() => reasons.push(AddedReason::Changed),
+                Some(o) if o.changed_beyond_narrowing(op) => reasons.push(AddedReason::Changed),
                 Some(_) => {}
             }
         } else if installed.is_none() && !reasons.is_empty() {
