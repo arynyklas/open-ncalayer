@@ -766,6 +766,9 @@ pub fn check_path_revocation(
         now,
         ocsp::TIMEOUT,
     );
+    // Online, only one status per certificate is ever fetched (the CRL only when OCSP gave
+    // none), so there is no second acceptable status for a `good` to hide; an extra fetch
+    // would also reach endpoints the host's network policy may deny.
     let status = if !matches!(status, Ok(CertStatus::Good | CertStatus::Revoked { .. })) {
         match crl::fetch_status_for(&path[0], issuer, http, ocsp::TIMEOUT, now) {
             Ok(CrlStatus::Good) => Ok(CertStatus::Good),
@@ -957,7 +960,17 @@ pub(crate) fn offline_revocation<'a>(
     for (index, pair) in path.windows(2).enumerate() {
         let cert = &pair[0];
         let issuer = &pair[1];
-        let mut status = None;
+        // ETSI EN 319 102-1 5.2.5: every acceptable status counts. One that says revoked
+        // revokes whatever order a `good` one sits in; `good` needs no revoked status.
+        let mut good = false;
+        let mut revoked: Option<OffsetDateTime> = None;
+        let mut note = |status: CertStatus| match status {
+            CertStatus::Good => good = true,
+            CertStatus::Revoked { time, .. } => {
+                revoked = Some(revoked.map_or(time, |earliest| earliest.min(time)));
+            }
+            CertStatus::Unknown => {}
+        };
         if index == 0 {
             for response in responses.clone() {
                 if let Ok(answer) = match currency(()) {
@@ -967,30 +980,29 @@ pub(crate) fn offline_revocation<'a>(
                     Currency::AtProof { proof, now } => {
                         ocsp::check_embedded_at_proof(response, cert, issuer, &trusted, proof, now)
                     }
-                } && answer.status != CertStatus::Unknown
-                {
-                    status = Some(answer.status);
-                    break;
-                }
-            }
-        }
-        if status.is_none() {
-            for bytes in crls {
-                let serial = cert.tbs_certificate().serial_number().as_bytes();
-                if let Ok(found) = match currency(()) {
-                    Currency::Now(now) => crl::serial_status(bytes, issuer, serial, now),
-                    Currency::AtProof { proof, now } => {
-                        crl::serial_status_at_proof(bytes, issuer, serial, proof, now)
-                    }
                 } {
-                    status = Some(match found {
-                        CrlStatus::Good => CertStatus::Good,
-                        CrlStatus::Revoked { time, reason } => CertStatus::Revoked { time, reason },
-                    });
-                    break;
+                    note(answer.status);
                 }
             }
         }
+        for bytes in crls {
+            let serial = cert.tbs_certificate().serial_number().as_bytes();
+            if let Ok(found) = match currency(()) {
+                Currency::Now(now) => crl::serial_status(bytes, issuer, serial, now),
+                Currency::AtProof { proof, now } => {
+                    crl::serial_status_at_proof(bytes, issuer, serial, proof, now)
+                }
+            } {
+                note(match found {
+                    CrlStatus::Good => CertStatus::Good,
+                    CrlStatus::Revoked { time, reason } => CertStatus::Revoked { time, reason },
+                });
+            }
+        }
+        let status = match revoked {
+            Some(time) => Some(CertStatus::Revoked { time, reason: None }),
+            None => good.then_some(CertStatus::Good),
+        };
         match status {
             Some(CertStatus::Revoked { time, .. }) if time <= at => {
                 return (CheckStatus::Failed, Some(time));

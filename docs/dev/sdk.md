@@ -381,6 +381,18 @@ Unchanged: the signer and chain certificates are judged valid **at `P`** (they a
 `certificate_facts` and the anchored path use `P`); revoked at or before `P` is `Invalid`;
 revoked after `P` leaves the signature valid and reports `RevokedAfterProvenTime`.
 
+**All acceptable statuses count (selection).** For one certificate every embedded OCSP answer
+and CRL that passes the checks above is evaluated, in no particular order (the count is bounded
+by the evidence store limits). Any acceptable `revoked` revokes: the earliest revocation time
+among them is reported (at or before `P`: `Invalid`/`Revoked`; after `P`:
+`RevokedAfterProvenTime`). `Good` needs at least one acceptable `good` and no `revoked`;
+otherwise the status stays `Unavailable`. An unacceptable status (stale, wrong issuer or
+responder, other certificate, `unknown`) is ignored as before and never turns `Unavailable`
+into `Good`. A `good` answer listed first no longer hides a later `revoked` one.
+The status fetched online (`check_path_revocation`) never holds two statuses for one certificate
+(the CRL is fetched only when OCSP gave no `good`/`revoked`), so no `good` can hide a `revoked`
+there; it is unchanged.
+
 **Standard basis (ETSI EN 319 102-1 V1.3.1, read from the published text).** 5.2.5.4 (Revocation
 freshness checker): status is fresh when `issuance time > validation time - maximum accepted
 freshness`; 5.5.4 step 6 reruns the checker with the *best-signature-time* when the status

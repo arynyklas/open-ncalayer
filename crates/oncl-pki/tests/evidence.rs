@@ -4166,3 +4166,193 @@ fn limits_intersect_field_by_field() {
     assert_eq!(b.intersect(a), both);
     assert!(both.validate().is_ok());
 }
+
+// ETSI EN 319 102-1 5.2.5: every acceptable embedded status counts, whatever its order.
+fn doc_crl(
+    fixture: &Fixture,
+    signer: &KeyEntry,
+    revoked: Option<OffsetDateTime>,
+    this_update: OffsetDateTime,
+) -> Vec<u8> {
+    let mut crl = MockCrl::new(signer.clone())
+        .with_this_update(this_update)
+        .next_update(Some(this_update + time::Duration::HOUR));
+    if let Some(at) = revoked {
+        crl = crl.revoke(
+            fixture
+                .doc
+                .cert
+                .tbs_certificate()
+                .serial_number()
+                .as_bytes(),
+            at,
+        );
+    }
+    crl.der()
+}
+
+/// Validates with the document OCSP `ocsp` (if any) plus extra document CRLs.
+fn revocation_world(ocsp: Status, crls: &[Vec<u8>]) -> ValidationReport {
+    let fixture = Fixture::new();
+    let token = fixture.token(&fixture.signature, PROVEN);
+    let mut payloads = fixture.payloads(ocsp, Status::Good);
+    for crl in crls {
+        payloads.push((EvidenceKind::Crl, crl.clone()));
+    }
+    let parent = tempfile::tempdir().unwrap();
+    let mut resources = scope();
+    let mut case = prepare(&mut resources, parent.path(), &payloads, &token, None);
+    validate(
+        &fixture,
+        &mut case,
+        AdesLevel::T,
+        &resources,
+        &Offline::new(),
+    )
+}
+
+#[test]
+fn revoked_status_wins_over_good_in_any_order() {
+    let fixture = Fixture::new();
+    let issuer = fixture.intermediate.clone();
+    let early = PROVEN - time::Duration::HOUR;
+    let crl_now = NOW - time::Duration::MINUTE;
+    let good_crl = doc_crl(&fixture, &issuer, None, crl_now);
+    let revoked_crl = doc_crl(&fixture, &issuer, Some(early), crl_now);
+    let cases: [(&str, ValidationReport); 4] = [
+        (
+            "ocsp good then crl revoked",
+            revocation_world(Status::Good, std::slice::from_ref(&revoked_crl)),
+        ),
+        (
+            "crl good then ocsp revoked",
+            revocation_world(Status::Revoked(early), std::slice::from_ref(&good_crl)),
+        ),
+        (
+            "good crl then revoked crl",
+            revocation_world(Status::Missing, &[good_crl.clone(), revoked_crl.clone()]),
+        ),
+        (
+            "revoked crl then good crl",
+            revocation_world(Status::Missing, &[revoked_crl.clone(), good_crl.clone()]),
+        ),
+    ];
+    for (name, report) in cases {
+        assert_eq!(report.verdict, Verdict::Invalid, "{name}");
+        assert_eq!(report.signers[0].revocation, CheckStatus::Failed, "{name}");
+        assert!(
+            report.signers[0]
+                .reasons
+                .contains(&ValidationReason::Revoked { at: early }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn earliest_revocation_time_is_reported() {
+    let fixture = Fixture::new();
+    let early = PROVEN - time::Duration::HOUR;
+    let late = PROVEN - time::Duration::MINUTE;
+    let crl = doc_crl(
+        &fixture,
+        &fixture.intermediate,
+        Some(early),
+        NOW - time::Duration::MINUTE,
+    );
+    let report = revocation_world(Status::Revoked(late), &[crl]);
+    assert_eq!(report.verdict, Verdict::Invalid);
+    assert!(
+        report.signers[0]
+            .reasons
+            .contains(&ValidationReason::Revoked { at: early })
+    );
+}
+
+#[test]
+fn good_only_when_all_acceptable_statuses_agree() {
+    let fixture = Fixture::new();
+    let good = doc_crl(
+        &fixture,
+        &fixture.intermediate,
+        None,
+        NOW - time::Duration::MINUTE,
+    );
+    let report = revocation_world(Status::Good, &[good]);
+    assert_eq!(report.signers[0].revocation, CheckStatus::Passed);
+    assert_ne!(report.verdict, Verdict::Invalid);
+}
+
+#[test]
+fn unacceptable_revoked_statuses_are_ignored() {
+    let fixture = Fixture::new();
+    let early = PROVEN - time::Duration::HOUR;
+    // Signed by a key that is not the certificate's issuer.
+    let foreign = doc_crl(
+        &fixture,
+        &fixture.root,
+        Some(early),
+        NOW - time::Duration::MINUTE,
+    );
+    // Issued two hours before the proof time: stale.
+    let stale = doc_crl(
+        &fixture,
+        &fixture.intermediate,
+        Some(early),
+        PROVEN - time::Duration::hours(2),
+    );
+    for (name, bad) in [("foreign issuer", foreign), ("stale", stale)] {
+        let report = revocation_world(Status::Good, &[bad]);
+        assert_eq!(report.signers[0].revocation, CheckStatus::Passed, "{name}");
+        assert_ne!(report.verdict, Verdict::Invalid, "{name}");
+        let report = revocation_world(
+            Status::Missing,
+            &[
+                doc_crl(
+                    &fixture,
+                    &fixture.intermediate,
+                    None,
+                    NOW - time::Duration::MINUTE,
+                ),
+                report_bad(&fixture, name),
+            ],
+        );
+        assert_eq!(report.signers[0].revocation, CheckStatus::Passed, "{name}");
+    }
+}
+fn report_bad(fixture: &Fixture, name: &str) -> Vec<u8> {
+    let early = PROVEN - time::Duration::HOUR;
+    if name == "stale" {
+        doc_crl(
+            fixture,
+            &fixture.intermediate,
+            Some(early),
+            PROVEN - time::Duration::hours(2),
+        )
+    } else {
+        doc_crl(
+            fixture,
+            &fixture.root,
+            Some(early),
+            NOW - time::Duration::MINUTE,
+        )
+    }
+}
+
+#[test]
+fn revoked_after_proof_with_good_status_keeps_after_semantics() {
+    let fixture = Fixture::new();
+    let crl = doc_crl(
+        &fixture,
+        &fixture.intermediate,
+        Some(REVOKED),
+        NOW - time::Duration::MINUTE,
+    );
+    let report = revocation_world(Status::Good, &[crl]);
+    assert_ne!(report.verdict, Verdict::Invalid);
+    assert!(
+        report.signers[0]
+            .reasons
+            .contains(&ValidationReason::RevokedAfterProvenTime { at: REVOKED })
+    );
+}
