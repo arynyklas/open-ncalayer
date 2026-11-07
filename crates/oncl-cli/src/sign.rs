@@ -19,6 +19,12 @@ pub struct Authority {
 }
 impl KeyUseGuard for Authority {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
+        // A ticketed use is a declared plugin operation's key use; the CLI has no
+        // `--plugin-bytes` grant to check it against yet (stage MP9), so it is refused.
+        // Plugins without declarations carry no ticket and are authorized as before.
+        if event.plugin().is_some() {
+            return Err(OperationError::PermissionDenied);
+        }
         if event.operation_id.get() != self.operation.load(Ordering::SeqCst)
             || event.key_id != self.key
             || event.action != self.action

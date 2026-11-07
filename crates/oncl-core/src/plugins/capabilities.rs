@@ -116,12 +116,7 @@ impl Backend<'_, '_> {
             Import::KeysDescribe | Import::KeysChain => {
                 use der::Encode;
                 let args: abi::Handle = decode(args)?;
-                let binding = self
-                    .bindings
-                    .keys
-                    .iter()
-                    .find(|key| key.handle == args.handle)
-                    .ok_or(OperationError::PermissionDenied)?;
+                let binding = self.bound_key(args.handle)?;
                 self.authorize(import, Some(&binding.key.selector().key_id()))?;
                 if self.state.released.contains(&args.handle) {
                     return Err(OperationError::PermissionDenied);
@@ -187,15 +182,15 @@ impl Backend<'_, '_> {
             }
             Import::KeysRelease => {
                 let args: abi::Handle = decode(args)?;
-                let key = self
-                    .bindings
-                    .keys
-                    .iter()
-                    .find(|k| k.handle == args.handle)
-                    .ok_or(OperationError::PermissionDenied)?;
+                let key = self.bound_key(args.handle)?;
                 self.authorize(import, Some(&key.key.selector().key_id()))?;
                 if self.state.released.contains(&args.handle) {
-                    return Err(OperationError::PermissionDenied);
+                    // A declared operation's one key: releasing it again is a no-op.
+                    return if self.declared.is_some() {
+                        Ok(encoded(()))
+                    } else {
+                        Err(OperationError::PermissionDenied)
+                    };
                 }
                 self.state.released.push(args.handle);
                 Ok(encoded(()))

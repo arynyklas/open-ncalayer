@@ -81,5 +81,9 @@ name = "plugin_manual"
 required-features = ["plugins", "tokens"]
 
 [[test]]
+name = "plugin_ticket"
+required-features = ["plugins", "tokens"]
+
+[[test]]
 name = "key_sources"
 required-features = ["tokens"]

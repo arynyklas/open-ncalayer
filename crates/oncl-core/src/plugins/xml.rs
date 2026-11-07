@@ -79,18 +79,36 @@ impl<'a, 'b> Backend<'a, 'b> {
             Import::KeysSignXml => {
                 let args: abi::SignXmlArgs = decode(bytes)?;
                 let key = self.xml_key(import, args.handle)?;
+                self.arm_ticket(
+                    key,
+                    oncl_plugin::operations::KeyKind::Xml,
+                    ContentBinding::bytes(args.xml.as_ref()),
+                    Some(super::ticket::xml_profile(&args)),
+                )?;
                 let spec = oncl_plugin::headless::xml_spec(&args).map_err(argument)?;
                 self.xml_operation(import, key, &args.xml, crate::xml::LegacySpec::Xml(spec))
             }
             Import::KeysSignXmlEx => {
                 let args: abi::SignXmlExArgs = decode(bytes)?;
                 let key = self.xml_key(import, args.handle)?;
+                self.arm_ticket(
+                    key,
+                    oncl_plugin::operations::KeyKind::XmlEx,
+                    ContentBinding::bytes(args.xml.as_ref()),
+                    super::ticket::xml_ex_profile(&args),
+                )?;
                 let spec = oncl_plugin::headless::xml_spec_ex(&args);
                 self.xml_operation(import, key, &args.xml, crate::xml::LegacySpec::Xml(spec))
             }
             Import::KeysSignXades => {
                 let args: abi::XadesArgs = decode(bytes)?;
                 let key = self.xml_key(import, args.handle)?;
+                self.arm_ticket(
+                    key,
+                    oncl_plugin::operations::KeyKind::Xades,
+                    ContentBinding::bytes(args.xml.as_ref()),
+                    super::ticket::xades_profile(&args),
+                )?;
                 let tsa = if args.level == abi::XadesLevel::B {
                     None
                 } else {
@@ -132,11 +150,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         import: Import,
         handle: u32,
     ) -> Result<&'b PluginKeyBinding<'b>, OperationError> {
-        let keys: &'b [PluginKeyBinding<'b>] = self.bindings.keys;
-        let key = keys
-            .iter()
-            .find(|key| key.handle == handle)
-            .ok_or(OperationError::PermissionDenied)?;
+        let key = self.bound_key(handle)?;
         self.authorize(import, Some(&key.key.selector().key_id()))?;
         if self.state.released.contains(&handle) {
             return Err(OperationError::PermissionDenied);

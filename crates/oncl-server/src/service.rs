@@ -323,6 +323,21 @@ fn install_plugins(
             if !config.tokens.iter().any(|t| t.id == grant.token) {
                 return Err(invalid());
             }
+            // Design 4.7: a plugin that declares operations is granted only under a declared
+            // name. Fail this grant (and say so), not the server.
+            if !manifest.operations().is_empty()
+                && !manifest
+                    .operations()
+                    .iter()
+                    .any(|o| o.name() == grant.operation)
+            {
+                let declared: Vec<&str> = manifest.operations().iter().map(|o| o.name()).collect();
+                eprintln!(
+                    "oncl-server: error: plugin {} declares operations {declared:?}; the grant for the undeclared operation {:?} of token {:?} is skipped",
+                    plugin.id, grant.operation, grant.token
+                );
+                continue;
+            }
             let imports = grant
                 .imports
                 .iter()

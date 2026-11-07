@@ -946,7 +946,15 @@ pub enum Profile {
 }
 
 impl Profile {
-    fn encode(&self, kind: KeyKind, values: Option<ParamValues<'_>>) -> Option<Vec<u8>> {
+    /// The canonical options encoding of `self` as a `kind` use (the format of
+    /// [`KeyUse::options_canonical`]). The Core builds a `Profile` from the options of the
+    /// call a plugin actually makes and encodes it here, so the declared profile and the
+    /// actual call hash through this one encoder. `values` resolves `param:` sources;
+    /// `None` writes them by name (the declared form).
+    ///
+    /// `kind` MUST be the kind of the variant; a mismatch encodes a hash no declared
+    /// profile has.
+    pub fn encode(&self, kind: KeyKind, values: Option<ParamValues<'_>>) -> Option<Vec<u8>> {
         let mut w = Writer::new(b"ONCLOPT1\0");
         w.u8(kind.tag());
         let src = |w: &mut Writer, id: u8, s: &Option<Source>| -> Option<()> {

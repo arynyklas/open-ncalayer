@@ -243,6 +243,10 @@ impl Engine {
             plugin_pki: None,
             #[cfg(feature = "plugins")]
             plugin_xml_output_limit: None,
+            #[cfg(feature = "plugins")]
+            plugin_refusal: None,
+            #[cfg(feature = "plugins")]
+            plugin_ticket: std::sync::Mutex::new(None),
         }
     }
     pub fn hash(
