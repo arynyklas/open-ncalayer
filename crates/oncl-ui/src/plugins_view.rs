@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::LocalKey;
 
 use oncl_flows::Locale;
-use oncl_flows::capabilities::{CapabilityLine, capability_text};
+use oncl_flows::capabilities::{CapabilityLine, OperationConsent, capability_text};
 use slint::{ComponentHandle, ModelRc, PlatformError, SharedString, VecModel};
 use time::OffsetDateTime;
 
@@ -56,8 +56,9 @@ pub trait PluginsServices: Send + Sync {
     ///
     /// # Errors
     ///
-    /// None waits, or what failed.
-    fn confirm_update(&self, id: &str) -> Result<(), PluginActionError>;
+    /// None waits, another package waits than `expected_sha256`, the one the user was shown
+    /// ([`PendingUpdate::package_sha256`]), or what failed.
+    fn confirm_update(&self, id: &str, expected_sha256: &str) -> Result<(), PluginActionError>;
     /// Downloads the catalog again. Blocks for the download.
     fn refresh(&self);
 }
@@ -79,6 +80,9 @@ pub enum PluginActionError {
     NotInstalled,
     /// No update of the plugin waits for the user.
     NothingToConfirm,
+    /// A newer update took the place of the one the user was shown: it must be reviewed
+    /// again.
+    Superseded,
     /// Anything else: the technical detail, shown after a translated prefix.
     Failed(String),
 }
@@ -131,7 +135,14 @@ pub struct InstalledPlugin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingUpdate {
     pub version: String,
+    /// The new capabilities, then (if any) a summary of the operations new or wider by name.
     pub added: Vec<CapabilityLine>,
+    /// All its operations, said from checked fields with what is new or wider marked: shown
+    /// in the consent window; an update without any is allowed from the row at once.
+    pub operations: Vec<OperationConsent>,
+    /// The sha256 (hex) of the package shown: only this one is installed on the user's
+    /// answer.
+    pub package_sha256: String,
 }
 
 /// Whether an installed plugin serves its modules.
@@ -255,10 +266,9 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     ui.on_install_file(move || with(id, pick_file));
     ui.on_refresh(move || with(id, refresh));
     ui.on_dismiss(move || {
-        worker::close_requested::<Open>(id);
+        closing(id);
     });
-    ui.window()
-        .on_close_requested(move || worker::close_requested::<Open>(id));
+    ui.window().on_close_requested(move || closing(id));
     worker::set_open(Some(Rc::clone(&open)));
     if let Err(e) = ui.show() {
         worker::set_open::<Open>(None);
@@ -267,6 +277,16 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     foreground::take(&ui);
     load(&open);
     Ok(())
+}
+
+/// The window `id` is asked to close. When it does, the consent windows it opened go with it:
+/// an answer to a window that is not there to say what happened would be silent.
+fn closing(id: u64) -> slint::CloseRequestResponse {
+    let response = worker::close_requested::<Open>(id);
+    if response == slint::CloseRequestResponse::HideWindow {
+        crate::install_plugin::withdraw(id);
+    }
+    response
 }
 
 /// Reads the plugins on a worker thread, then shows them.
@@ -331,6 +351,7 @@ fn action_error_text(e: &PluginActionError, kind: Action, l: Locale) -> String {
         PluginActionError::NeedsCore(version) => t.needs_core.replace("{0}", version),
         PluginActionError::NotInstalled => t.not_installed.to_owned(),
         PluginActionError::NothingToConfirm => t.nothing_to_confirm.to_owned(),
+        PluginActionError::Superseded => t.superseded.to_owned(),
         PluginActionError::Failed(detail) => detail.clone(),
     };
     failed.replace("{0}", &why)
@@ -403,14 +424,86 @@ fn remove(open: &Open, row: i32) {
     );
 }
 
-/// «Разрешить обновление»: the update waiting is installed.
+/// «Разрешить обновление»: an update that brings operations is asked in the consent window
+/// ([`crate::install_plugin`]) and installed only when the user says «Обновить»; any other
+/// waiting update is installed at once, as before.
 fn confirm_update(open: &Open, row: i32) {
     let Some(plugin) = installed_at(open, row) else {
         return;
     };
+    let Some(update) = plugin.pending_update.as_ref() else {
+        return;
+    };
+    let sha = update.package_sha256.clone();
+    if update.operations.is_empty() {
+        install_update(open, plugin.id, sha);
+        return;
+    }
+    let id = open.id;
+    let plugin_id = plugin.id.clone();
+    let mut request = update_request(
+        &plugin,
+        update,
+        update_decision(move || {
+            let sent = slint::invoke_from_event_loop(move || decided_update(id, plugin_id, sha));
+            if let Err(e) = sent {
+                tracing::warn!(error = %e, "no windows: the update is not installed");
+            }
+        }),
+    );
+    request.window = Some(id);
+    crate::install_plugin::enqueue(request);
+}
+
+/// What the consent window does with the user's answer: «Обновить» (`true`) runs `install`
+/// (on the event loop); «Отмена», Escape and the close button run nothing.
+fn update_decision(install: impl FnOnce() + Send + 'static) -> crate::install_plugin::Decide {
+    Box::new(move |yes| {
+        if yes {
+            install();
+        }
+    })
+}
+
+/// The consent window for `update` of `plugin`: the new capabilities (not the summary line of
+/// the operations: each has its block) and the operations.
+fn update_request(
+    plugin: &InstalledPlugin,
+    update: &PendingUpdate,
+    decide: crate::install_plugin::Decide,
+) -> crate::install_plugin::InstallPluginRequest {
+    crate::install_plugin::InstallPluginRequest {
+        origin: None,
+        name: plugin.name.clone(),
+        version: update.version.clone(),
+        replaces: plugin.replaces.clone(),
+        replacing: Some(crate::install_plugin::InstalledVersion {
+            version: plugin.version.clone(),
+            local: plugin.local,
+        }),
+        capabilities: update
+            .added
+            .iter()
+            .filter(|c| !matches!(c, CapabilityLine::Operations(_)))
+            .cloned()
+            .collect(),
+        operations: update.operations.clone(),
+        update: true,
+        window: None,
+        local: false,
+        decide,
+    }
+}
+
+/// «Обновить» in the consent window: the update of `plugin_id` is installed. On the event loop.
+fn decided_update(id: u64, plugin_id: String, sha: String) {
+    with(id, |open: &Open| install_update(open, plugin_id, sha));
+}
+
+fn install_update(open: &Open, plugin_id: String, expected_sha256: String) {
     run_action(
         open,
-        move |services| services.confirm_update(&plugin.id),
+        move |services| services.confirm_update(&plugin_id, &expected_sha256),
         Action::Update,
         None,
     );
@@ -698,6 +791,7 @@ struct Texts {
     /// `{version}`, `{0}`: what it may do besides.
     pending_update: &'static str,
     nothing_to_confirm: &'static str,
+    superseded: &'static str,
     installed_already: &'static str,
     being_installed: &'static str,
     no_catalog: &'static str,
@@ -740,6 +834,7 @@ impl Texts {
                 plugin_update_failed: "Плагинді жаңарту мүмкін болмады: {0}",
                 pending_update: "{version} нұсқасына жаңарту сіздің рұқсатыңызды күтеді: плагин қосымша мыналарды істей алады: {0}",
                 nothing_to_confirm: "рұқсат күтетін жаңарту жоқ",
+                superseded: "жаңартудың жаңарақ нұсқасы келді: оны қайта қарап шығыңыз",
                 installed_already: "ол орнатылып қойған",
                 being_installed: "ол қазір орнатылуда",
                 no_catalog: "плагиндер каталогы қолжетімсіз",
@@ -777,6 +872,7 @@ impl Texts {
                 plugin_update_failed: "Не удалось обновить плагин: {0}",
                 pending_update: "Обновление до версии {version} ждёт вашего разрешения: плагин сможет ещё {0}",
                 nothing_to_confirm: "обновление не ждёт разрешения",
+                superseded: "пришла более новая версия обновления: просмотрите её снова",
                 installed_already: "он уже установлен",
                 being_installed: "он уже устанавливается",
                 no_catalog: "каталог плагинов недоступен",
@@ -814,6 +910,7 @@ impl Texts {
                 plugin_update_failed: "Cannot update the plugin: {0}",
                 pending_update: "The update to version {version} waits for your permission: the plugin will also be able to {0}",
                 nothing_to_confirm: "no update waits for permission",
+                superseded: "a newer version of the update arrived: review it again",
                 installed_already: "it is installed already",
                 being_installed: "it is being installed already",
                 no_catalog: "the plugin catalog is unavailable",
@@ -891,7 +988,7 @@ pub(crate) mod fakes {
             self.outcome()
         }
 
-        fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+        fn confirm_update(&self, id: &str, _expected: &str) -> Result<(), PluginActionError> {
             self.log(Call::ConfirmUpdate(id.to_owned()));
             self.outcome()
         }
@@ -947,6 +1044,8 @@ mod tests {
                             CapabilityLine::Dialogs,
                             CapabilityLine::Http(vec!["https://b.kz/".to_owned()]),
                         ],
+                        operations: Vec::new(),
+                        package_sha256: "ab".repeat(32),
                     }),
                 },
                 InstalledPlugin {
@@ -988,11 +1087,15 @@ mod tests {
     }
 
     fn opened(l: Locale) -> Opened {
+        opened_with(l, view())
+    }
+
+    fn opened_with(l: Locale, view: PluginsView) -> Opened {
         let dir = tempfile::tempdir().unwrap();
         offscreen::install();
         worker::manual::enable();
         let fake = FakePlugins::default();
-        *fake.view.lock().unwrap() = Some(view());
+        *fake.view.lock().unwrap() = Some(view);
         let calls = Arc::clone(&fake.calls);
         let fail = Arc::clone(&fake.fail);
         set_desktop_windows(DesktopWindows {
@@ -1017,6 +1120,126 @@ mod tests {
 
     fn taken(calls: &Mutex<Vec<Call>>) -> Vec<Call> {
         std::mem::take(&mut *calls.lock().unwrap())
+    }
+
+    #[test]
+    fn an_update_with_operations_is_asked_in_the_consent_window() {
+        use oncl_flows::capabilities::{AddedLine, KeyUseKind};
+        let mut shown = view();
+        let operation = OperationConsent {
+            name: "sign-file".to_owned(),
+            lines: vec![
+                CapabilityLine::Added(AddedLine::New),
+                CapabilityLine::KeyUse(KeyUseKind::Raw),
+            ],
+            label: ["а".to_owned(), "ә".to_owned(), "a".to_owned()],
+            xpaths: Vec::new(),
+        };
+        let update = shown.installed[0].pending_update.as_mut().unwrap();
+        update
+            .added
+            .push(CapabilityLine::Operations(vec!["sign-file".to_owned()]));
+        update.operations = vec![operation];
+        let o = opened_with(Locale::En, shown);
+        taken(&o.calls);
+        // «Allow the update» does not install: the consent window asks.
+        o.open.ui.invoke_confirm_update(0);
+        worker::manual::run_all();
+        assert!(crate::install_plugin::is_open());
+        assert_eq!(taken(&o.calls), []);
+        // The window is the update's: its button, its operations, no summary line twice.
+        let request = update_request(
+            &installed_at(&o.open, 0).unwrap(),
+            installed_at(&o.open, 0)
+                .unwrap()
+                .pending_update
+                .as_ref()
+                .unwrap(),
+            Box::new(|_| {}),
+        );
+        assert!(request.update && !request.local);
+        assert_eq!(request.version, "1.1.0");
+        assert_eq!(request.replacing.as_ref().unwrap().version, "1.0.0");
+        assert_eq!(request.operations.len(), 1);
+        assert!(
+            request
+                .capabilities
+                .iter()
+                .all(|c| !matches!(c, CapabilityLine::Operations(_)))
+        );
+        assert_eq!(request.capabilities.len(), 2);
+        // «Update» in the window installs.
+        decided_update(o.open.id, "kz.example.one".to_owned(), "ab".repeat(32));
+        worker::manual::run_all();
+        assert_eq!(
+            taken(&o.calls),
+            [Call::ConfirmUpdate("kz.example.one".to_owned()), Call::View]
+        );
+    }
+
+    #[test]
+    fn only_update_installs_cancel_and_close_do_not() {
+        let ran = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&ran);
+        let decide = update_decision(move || *counted.lock().unwrap() += 1);
+        decide(false);
+        assert_eq!(*ran.lock().unwrap(), 0, "Cancel does not install");
+        let counted = Arc::clone(&ran);
+        update_decision(move || *counted.lock().unwrap() += 1)(true);
+        assert_eq!(*ran.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn closing_the_plugin_window_takes_its_consent_window_with_it() {
+        let mut shown = view();
+        let update = shown.installed[0].pending_update.as_mut().unwrap();
+        update.operations = vec![OperationConsent {
+            name: "sign-file".to_owned(),
+            lines: Vec::new(),
+            label: ["а".to_owned(), "ә".to_owned(), "a".to_owned()],
+            xpaths: Vec::new(),
+        }];
+        let o = opened_with(Locale::En, shown);
+        o.open.ui.invoke_confirm_update(0);
+        assert!(crate::install_plugin::is_open());
+        o.open.ui.invoke_dismiss();
+        assert!(
+            !crate::install_plugin::is_open(),
+            "the consent window closed with it"
+        );
+    }
+
+    #[test]
+    fn a_superseded_update_says_so_and_the_list_is_read_again() {
+        let o = opened(Locale::En);
+        taken(&o.calls);
+        *o.fail.lock().unwrap() = Some(PluginActionError::Superseded);
+        o.open.ui.invoke_confirm_update(0);
+        worker::manual::run_all();
+        assert_eq!(
+            taken(&o.calls),
+            [Call::ConfirmUpdate("kz.example.one".to_owned()), Call::View]
+        );
+        assert!(
+            o.open
+                .ui
+                .get_message()
+                .contains("a newer version of the update arrived"),
+            "{}",
+            o.open.ui.get_message()
+        );
+    }
+
+    #[test]
+    fn an_update_without_operations_is_allowed_from_the_row_at_once() {
+        let o = opened(Locale::En);
+        taken(&o.calls);
+        o.open.ui.invoke_confirm_update(0);
+        worker::manual::run_all();
+        assert_eq!(
+            taken(&o.calls),
+            [Call::ConfirmUpdate("kz.example.one".to_owned()), Call::View]
+        );
     }
 
     #[test]

@@ -295,7 +295,7 @@ UI: консент-текст строится из объявления/про�
 | **MP4** | `PluginInteraction` (ключевой выбор по привязанному ключу, `terminals`, запрет диалогов) | `oncl-plugin/headless.rs` | MP2 (параллельно MP1–MP2 допустимо) |
 | **MP5a** | Страница «Плагины»: список операций (+unsupported с причиной), параметры, раннер, отчёт | `oncl-ui` | MP3a-2, MP4, MP7 |
 | **MP5b** | Страница согласия (доверенные поля, профиль, сеть) и доступность (фокус/Enter/DPI/screen reader) | `oncl-ui` + slint | MP5a |
-| **MP5c** | `install_plugin.rs`: показ операций; повторное согласие при смене `[[operations]]` | `oncl-ui` | MP1 |
+| **MP5c** (сделано) | `install_plugin.rs`: показ операций; повторное согласие при смене `[[operations]]` | `oncl-ui` | MP1 |
 | **MP6** | Объявления портов волнами ≤ 6, по MP0; тесты портов | по агенту на волну | MP0, MP1, MP2, MP3a-3, MP4 (+MP3b для derived-операций) |
 | **MP7** | Desktop: `openncalayer/src/plugins.rs` (реестр из `Store`, хеш, обновление), feature `oncl-core/plugins` для `oncl-ui/openncalayer`, размер бинаря | `openncalayer` | MP2 |
 | **MP8** | `oncl-api` DTO/OpenAPI/клиент: подкоды, `plugin_bytes`; сервер/CLI-валидация против объявления; `docs/user` | `oncl-api/server/cli` | MP3a-3 |
