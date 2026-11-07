@@ -184,7 +184,7 @@ origins = ["https://trusted.example"]
     plugins
         .install(
             manifest,
-            [7; 32],
+            PackageHash::Loose([7; 32]),
             wasm,
             module_limits,
             vec![host_permission],

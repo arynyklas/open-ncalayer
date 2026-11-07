@@ -24,7 +24,9 @@ mod capabilities;
 mod cms;
 mod manual;
 mod xml;
-pub use manual::{PluginIdentity, PluginParam, PluginRequestError, loose_package_sha256};
+pub use manual::{
+    PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
+};
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
 #[derive(Clone, Debug)]
@@ -164,7 +166,7 @@ struct Installed {
     capabilities: oncl_plugin::Capabilities,
     shared: Arc<oncl_plugin::SharedState>,
     identity: PluginIdentity,
-    operations: Vec<oncl_plugin::operations::Operation>,
+    manifest: Manifest,
 }
 /// Trusted installed code plus explicit host policy. Never discovers, downloads or updates code.
 #[derive(Default)]
@@ -182,13 +184,15 @@ impl PluginRegistry {
     pub fn new() -> Self {
         Self::default()
     }
-    /// `package_sha256` is the sum of the package file (`oncl_plugin::Package::sha256`); a
-    /// host that has no package file passes [`loose_package_sha256`]. The registered
-    /// identity is `{id, package_sha256, version}` and nothing else.
+    /// `package` is [`PackageHash::File`] of the package file as read by
+    /// `oncl_plugin::Package::read` (prefer [`PluginRegistry::install_package`]) or, for a
+    /// host that has no package file, [`loose_package_hash`]. The registry cannot check it
+    /// against `manifest` and `wasm`. The registered identity is `{id, package, version}`
+    /// and nothing else.
     pub fn install(
         &mut self,
         manifest: Manifest,
-        package_sha256: [u8; 32],
+        package: PackageHash,
         wasm: &[u8],
         limits: InstanceLimits,
         policy: Vec<PluginPermission>,
@@ -212,10 +216,10 @@ impl PluginRegistry {
             .with_limits(limits);
         let identity = PluginIdentity {
             id: manifest.id.clone(),
-            package_sha256,
+            package,
             version: manifest.version.to_string(),
         };
-        let operations = manifest.operations().to_vec();
+        let retained = manifest.clone();
         self.installed.insert(
             manifest.id,
             Installed {
@@ -224,7 +228,7 @@ impl PluginRegistry {
                 capabilities: manifest.capabilities,
                 shared: Arc::default(),
                 identity,
-                operations,
+                manifest: retained,
             },
         );
         Ok(())

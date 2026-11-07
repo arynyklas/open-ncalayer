@@ -176,23 +176,43 @@ field; no shipped host (CLI, server, desktop) derives it from
 
 ### Plugin registry and declared operations (`plugins`)
 
-`PluginRegistry::install(manifest, package_sha256, wasm, limits, policy)` records the
-package hash with the plugin (`oncl_plugin::Package::sha256`; a host that loads manifest and
-module separately passes `plugins::loose_package_sha256(manifest_toml, wasm)`). A registered
-plugin's identity for audit is `PluginIdentity { id, package_sha256, version }` and never its
-manifest name (`Engine::plugin_identity`).
+`PluginRegistry::install(manifest, package, wasm, limits, policy)` records a `PackageHash`
+with the plugin. `PackageHash::File` is the SHA-256 of the whole package file as read by
+`oncl_plugin::Package::read`; `PackageHash::Loose` (`plugins::loose_package_hash(manifest_toml,
+wasm)`, what the CLI and server use, which load manifest and module separately) is a
+domain-separated hash of those two inputs. The kinds never compare equal and encode with
+different tags (`PackageHash::canonical`); a loose hash is not a package-file hash and
+nothing verifies either against the module: the registry takes the value as given. A host
+that loads through `oncl_plugin::Store` (the `distribution` feature, not enabled by this
+crate) must take manifest, module and `File(package.sha256)` from one `Package` value.
+`BuiltinInfo::sha256` (the module alone) is neither kind. A registered plugin's identity for
+audit is `PluginIdentity { id, package, version }` and never its manifest name
+(`Engine::plugin_identity`).
 
 A plugin without `[[operations]]` is unchanged: its grants and `PluginPermission::with_keys`
 pin the key exactly. For a plugin that declares operations, `PluginRegistry::allow_declared`
 (and `allow_declared_with_pki`) adds a registry policy built from the manifest only: the
 declared imports for one `(plugin, operation, caller)` and **any** key. The chosen key is
 checked on the per-call grant side (`PluginPermission::with_keys` there), which never accepts
-the declared policy for a key. `Engine::plugin_operations` lists the manual, runnable
-(non-`derived`) operations; `Engine::plugin_request` builds the exact request text the module
-receives from the parsed JSON template and typed `PluginParam` values (documents as base64,
-never string-pasted). Undeclared, non-manual and `derived` operations and bad parameters are
-refused with `PluginRequestError`, always `NotApplied`, before any key is used. Consent and
-key-use approval are not part of this API.
+the declared policy for a key. The declared `network` is enforced: `none` takes no endpoint,
+`pki` takes only endpoints on the PKI hosts the host passes (normally
+`oncl_plugin::NCA_PKI_HOSTS`, subdomains included), and `network = [urls]` operations are not
+runnable in the manual window in this release (`PluginRequestError::NetworkUnsupported`, not
+listed). Whether a caller kind may use an operation's `manual` or `server` flavour is the
+wiring host's check.
+
+`Engine::plugin_operations` lists `Manifest::manual_operations` (without URL networks).
+`Engine::plugin_request` builds the exact request text the module receives from the parsed
+JSON template and typed `PluginParam` values, never by pasting text: the final length is
+computed first and refused above the plugin's `max_transfer` (`ErrorCode::InputLimit`)
+before anything is substituted, then written once into a buffer of that size. Documents are
+standard base64 and never empty; a text is counted in characters like its declared limit and,
+when a key profile reads it as an XPath, checked with `Source::check_value`. The text is not
+normalized. The output is compact JSON with object keys sorted (the template's key order is
+not kept), integers as written; a template number that is not an `i64`/`u64` is refused
+(`InvalidTemplate`) rather than re-printed. Undeclared, non-manual, `derived` and URL-network
+operations and bad parameters are refused with `PluginRequestError`, always `NotApplied`,
+before any key is used. Consent and key-use approval are not part of this API.
 
 ## 6. Semver, versions and migration
 

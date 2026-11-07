@@ -192,7 +192,8 @@ pub struct BuiltinInfo {
     pub id: String,
     pub version: Version,
     pub modules: Vec<String>,
-    /// The SHA-256 of its `plugin.wasm`.
+    /// The SHA-256 of its `plugin.wasm` alone. It is not a package hash
+    /// (`oncl_core::plugins::PackageHash`) and must not be used as one.
     pub sha256: [u8; 32],
     /// The SHA-256 of its `plugin.toml`.
     pub manifest_sha256: [u8; 32],

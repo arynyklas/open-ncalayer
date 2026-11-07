@@ -15,8 +15,45 @@ use oncl_pki::resource::ResourceLimits;
 use oncl_plugin::{InstanceLimits, Manifest};
 use std::sync::{Arc, atomic::Ordering};
 
+thread_local! { static ALLOCATED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+struct Counting;
+#[global_allocator]
+static COUNTING: Counting = Counting;
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: forwards the allocator contract unchanged.
+        let p = unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) };
+        let _ = ALLOCATED.try_with(|c| {
+            if let Some(n) = c.get() {
+                c.set(Some(n.saturating_add(layout.size())))
+            }
+        });
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the allocation and its layout are forwarded unchanged.
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, p, layout) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        // SAFETY: preserves System's ownership and layout requirements.
+        let r = unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, p, layout, size) };
+        let _ = ALLOCATED.try_with(|c| {
+            if let Some(n) = c.get() {
+                c.set(Some(n.saturating_add(size)))
+            }
+        });
+        r
+    }
+}
+/// Bytes allocated on this thread while `f` runs.
+fn allocated<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    ALLOCATED.with(|c| c.set(Some(0)));
+    let out = f();
+    (out, ALLOCATED.with(|c| c.take()).unwrap())
+}
+
 const MODULE: &str = "test.l01.module";
-const SHA: [u8; 32] = [9; 32];
+const SHA: PackageHash = PackageHash::File([9; 32]);
 
 fn manifest_text(name: &str, operations: &str) -> String {
     format!(
@@ -29,6 +66,7 @@ min_core = "0.1.0-alpha.7"
 modules = ["{MODULE}"]
 [capabilities]
 keys = true
+http = ["https://api.example.kz/"]
 {operations}"#
     )
 }
@@ -46,6 +84,7 @@ kind = "document"
 max_bytes = 64
 [operations.uses]
 imports = ["keys_sign_raw"]
+network = "pki"
 [[operations.uses.key]]
 kind = "raw"
 content = "param:file"
@@ -74,6 +113,7 @@ name = "lang"
 kind = "locale"
 [operations.uses]
 imports = ["hash"]
+network = "none"
 
 [[operations]]
 name = "derive-op"
@@ -83,6 +123,7 @@ request = '{"module":"test.l01.module","method":"derive","args":[]}'
 label = { ru = "в", kk = "ә", en = "c" }
 [operations.uses]
 imports = ["keys_sign_cms_ex"]
+network = "pki"
 [[operations.uses.key]]
 kind = "cms_ex"
 content = "derived"
@@ -106,8 +147,84 @@ imports = ["hash"]
 
 /// The whole set, for tests that never run the module.
 fn all_operations() -> String {
-    format!("{SIGN_RAW}{REST}")
+    let placeholders = vec![r#""{f:base64}""#; 400].join(",");
+    let big = format!(
+        r#"
+[[operations]]
+name = "big"
+module = "test.l01.module"
+manual = true
+request = '{{"module":"test.l01.module","method":"big","args":[{placeholders}]}}'
+label = {{ ru = "д", kk = "ә", en = "e" }}
+[[operations.params]]
+name = "f"
+kind = "document"
+max_bytes = 1048576
+[operations.uses]
+imports = ["hash"]
+"#
+    );
+    format!("{SIGN_RAW}{REST}{big}{EXTRA}")
 }
+
+const EXTRA: &str = r#"
+[[operations]]
+name = "pad"
+module = "test.l01.module"
+manual = true
+request = '{"module":"test.l01.module","method":"p","args":["{t}"]}'
+label = { ru = "е", kk = "ә", en = "f" }
+[[operations.params]]
+name = "t"
+kind = "text"
+max_chars = 4096
+[operations.uses]
+imports = ["hash"]
+
+[[operations]]
+name = "sign-xml"
+module = "test.l01.module"
+manual = true
+request = '{"module":"test.l01.module","method":"x","args":["{doc:base64}", "{path}"]}'
+label = { ru = "ж", kk = "ә", en = "g" }
+[[operations.params]]
+name = "doc"
+kind = "document"
+max_bytes = 64
+[[operations.params]]
+name = "path"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["keys_sign_xml"]
+[[operations.uses.key]]
+kind = "xml"
+content = "param:doc"
+[operations.uses.key.profile]
+element = "param:path"
+
+[[operations]]
+name = "num"
+module = "test.l01.module"
+manual = true
+request = '{"module":"test.l01.module","method":"n","args":["{on}", 12345678901234567890123]}'
+label = { ru = "з", kk = "ә", en = "h" }
+[[operations.params]]
+name = "on"
+kind = "flag"
+[operations.uses]
+imports = ["hash"]
+
+[[operations]]
+name = "urls"
+module = "test.l01.module"
+manual = true
+request = '{"module":"test.l01.module","method":"u","args":[]}'
+label = { ru = "и", kk = "ә", en = "i" }
+[operations.uses]
+imports = ["hash"]
+network = ["https://api.example.kz/"]
+"#;
 
 fn raw(handle: u32) -> (Import, Vec<u8>) {
     (
@@ -128,7 +245,7 @@ struct Rig {
 fn rig(
     name: &str,
     operations: &str,
-    sha: [u8; 32],
+    sha: PackageHash,
     handle: u32,
     prepare: impl FnOnce(&mut PluginRegistry),
 ) -> Rig {
@@ -161,7 +278,7 @@ fn rig(
 fn prepare_install(
     plugins: &mut PluginRegistry,
     manifest: Manifest,
-    sha: [u8; 32],
+    sha: PackageHash,
     handle: u32,
     extras: bool,
 ) {
@@ -173,7 +290,7 @@ fn prepare_install(
                 &[raw(handle)],
                 "",
                 if extras {
-                    &[Import::Hash, Import::KeysSignCmsEx]
+                    &[Import::Hash, Import::KeysSignCmsEx, Import::KeysSignXml]
                 } else {
                     &[]
                 },
@@ -231,13 +348,34 @@ fn install_records_package_hash_and_identity_ignores_name() {
     let b = rig("Totally Different Name", &all_operations(), SHA, 1, |_| {});
     let expect = PluginIdentity {
         id: ID.to_owned(),
-        package_sha256: SHA,
+        package: SHA,
         version: "1.2.3".to_owned(),
     };
     assert_eq!(a.engine.plugin_identity(ID), Some(&expect));
     assert_eq!(b.engine.plugin_identity(ID), Some(&expect));
-    let other = rig("Plugin A", &all_operations(), [1; 32], 1, |_| {});
+    let other = rig(
+        "Plugin A",
+        &all_operations(),
+        PackageHash::File([1; 32]),
+        1,
+        |_| {},
+    );
     assert_ne!(other.engine.plugin_identity(ID), Some(&expect));
+    // The same digest as a loose hash is another identity, with another encoding.
+    let loose = rig(
+        "Plugin A",
+        &all_operations(),
+        PackageHash::Loose([9; 32]),
+        1,
+        |_| {},
+    );
+    assert_ne!(loose.engine.plugin_identity(ID), Some(&expect));
+    assert_ne!(SHA.canonical(), PackageHash::Loose([9; 32]).canonical());
+    assert_eq!(SHA.digest(), PackageHash::Loose([9; 32]).digest());
+    assert_ne!(
+        loose_package_hash(b"m", b"w"),
+        PackageHash::File(*loose_package_hash(b"m", b"w").digest())
+    );
     assert_eq!(a.engine.plugin_identity("nobody"), None);
 }
 
@@ -250,7 +388,7 @@ fn declared_policy_with_per_call_key_scope() {
     let all = [key.clone(), other.clone()];
     let caller = caller();
     let declare = |p: &mut PluginRegistry| {
-        p.allow_declared_with_pki(ID, "sign-raw", fixture::caller(), PKI)
+        p.allow_declared_with_pki(ID, "sign-raw", fixture::caller(), PKI, &["synthetic.test"])
             .unwrap();
     };
     // No declared policy yet: the call grant alone is not enough.
@@ -325,7 +463,7 @@ fn plugin_operations_lists_only_runnable_declared() {
         .iter()
         .map(|o| o.name().to_owned())
         .collect();
-    assert_eq!(names, ["sign-raw", "note"]);
+    assert_eq!(names, ["sign-raw", "note", "big", "pad", "sign-xml", "num"]);
     assert_eq!(
         r.engine.plugin_operations("nobody").unwrap_err(),
         PluginRequestError::UnknownPlugin
@@ -580,4 +718,229 @@ fn legacy_plugin_without_operations_unchanged() {
     );
     assert_eq!(guard.applied.load(Ordering::SeqCst), 0);
     assert_eq!(provider.opens.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn request_over_max_transfer_is_refused_before_anything_is_built() {
+    // Break caught: placeholders are expanded (document cloned per occurrence) before the
+    // size is known; 400 x 1 MiB would be ~1.3 GB.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    let doc = vec![7u8; 1 << 20];
+    let (result, bytes) = allocated(|| {
+        r.engine
+            .plugin_request(ID, "big", &[("f", PluginParam::Document(&doc))])
+    });
+    assert_eq!(result.unwrap_err(), PluginRequestError::RequestTooLarge);
+    assert!(bytes < 256 << 10, "allocated {bytes} bytes");
+    assert_eq!(
+        PluginRequestError::RequestTooLarge.code(),
+        ErrorCode::InputLimit
+    );
+}
+
+#[test]
+fn request_length_boundary_is_exact() {
+    // Break caught: the size check is dropped or off by one (max_transfer = 4096).
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    let overhead = r
+        .engine
+        .plugin_request(ID, "pad", &[("t", PluginParam::Text(""))])
+        .unwrap()
+        .len();
+    let fit = "a".repeat(4096 - overhead);
+    let text = r
+        .engine
+        .plugin_request(ID, "pad", &[("t", PluginParam::Text(&fit))])
+        .unwrap();
+    assert_eq!(text.len(), 4096);
+    let over = "a".repeat(4096 - overhead + 1);
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "pad", &[("t", PluginParam::Text(&over))])
+            .unwrap_err(),
+        PluginRequestError::RequestTooLarge
+    );
+    // Escapes count at their written length: 'quote' is 2 bytes in the request.
+    let quotes = "\"".repeat((4096 - overhead) / 2);
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "pad", &[("t", PluginParam::Text(&quotes))])
+            .unwrap()
+            .len(),
+        overhead + 2 * quotes.len()
+    );
+    let quotes = "\"".repeat((4096 - overhead) / 2 + 1);
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "pad", &[("t", PluginParam::Text(&quotes))])
+            .unwrap_err(),
+        PluginRequestError::RequestTooLarge
+    );
+}
+
+#[test]
+fn text_limit_counts_characters_not_bytes() {
+    // Break caught: max_chars compared with the byte length (40 chars of 2 bytes).
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    let forty = "é".repeat(40);
+    assert!(r.engine.plugin_request(ID, "note", &NOTE(&forty)).is_ok());
+    let forty_one = "é".repeat(41);
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "note", &NOTE(&forty_one))
+            .unwrap_err(),
+        PluginRequestError::TooLarge("text".into())
+    );
+}
+
+#[test]
+fn base64_padding_and_empty_document() {
+    // Break caught: wrong padding, or an empty file accepted as a document.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    for (doc, expect) in [(&b"a"[..], "YQ=="), (b"ab", "YWI="), (b"abc", "YWJj")] {
+        let text = r
+            .engine
+            .plugin_request(ID, "sign-raw", &[("file", PluginParam::Document(doc))])
+            .unwrap();
+        assert!(text.contains(&format!("\"{expect}\"")), "{text}");
+    }
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "sign-raw", &[("file", PluginParam::Document(b""))])
+            .unwrap_err(),
+        PluginRequestError::InvalidValue("file".into())
+    );
+}
+
+#[test]
+fn xpath_text_is_checked_and_template_numbers_are_not_rewritten() {
+    // Break caught: a text that feeds an XPath source skips Source::check_value; a number
+    // JSON re-printing would change reaches the module.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    let sign = |path: &str| {
+        r.engine.plugin_request(
+            ID,
+            "sign-xml",
+            &[
+                ("doc", PluginParam::Document(b"<a/>")),
+                ("path", PluginParam::Text(path)),
+            ],
+        )
+    };
+    assert!(sign("/a/b").is_ok());
+    for bad in ["a/b", "/a\u{202e}b", "/a\nb"] {
+        assert_eq!(
+            sign(bad).unwrap_err(),
+            PluginRequestError::InvalidValue("path".into())
+        );
+    }
+    assert_eq!(
+        r.engine
+            .plugin_request(ID, "num", &[("on", PluginParam::Flag(true))])
+            .unwrap_err(),
+        PluginRequestError::InvalidTemplate
+    );
+}
+
+#[test]
+fn declared_network_is_enforced() {
+    // Break caught: endpoints given to an operation whose declared network forbids them.
+    let mut plugins = PluginRegistry::new();
+    prepare_install(
+        &mut plugins,
+        Manifest::from_toml(&manifest_text("p", &all_operations())).unwrap(),
+        SHA,
+        1,
+        true,
+    );
+    let get = oncl_pki::http::HttpMethod::Get;
+    let hosts = ["pki.gov.kz"];
+    // none: no endpoint at all
+    assert_eq!(
+        plugins
+            .allow_declared_with_pki(
+                ID,
+                "note",
+                caller(),
+                [(get, "http://ocsp.pki.gov.kz")],
+                &hosts
+            )
+            .unwrap_err(),
+        PluginRequestError::NetworkNotDeclared
+    );
+    // pki: only PKI hosts, exact URLs
+    for bad in [
+        "http://evil.example/ocsp",
+        "http://evilpki.gov.kz",
+        "not a url",
+    ] {
+        assert_eq!(
+            plugins
+                .allow_declared_with_pki(ID, "sign-raw", caller(), [(get, bad)], &hosts)
+                .unwrap_err(),
+            PluginRequestError::InvalidEndpoint,
+            "{bad}"
+        );
+    }
+    plugins
+        .allow_declared_with_pki(
+            ID,
+            "sign-raw",
+            caller(),
+            [
+                (get, "http://ocsp.pki.gov.kz"),
+                (get, "http://pki.gov.kz/x"),
+            ],
+            &hosts,
+        )
+        .unwrap();
+    // urls: not runnable in the manual window
+    assert_eq!(
+        plugins.allow_declared(ID, "urls", caller()).unwrap_err(),
+        PluginRequestError::NetworkUnsupported
+    );
+}
+
+#[test]
+fn urls_operation_is_not_offered_or_built_and_other_refusals() {
+    // Break caught: a URL-network operation is offered; unknown plugin / server-only gaps.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    let names: Vec<_> = r
+        .engine
+        .plugin_operations(ID)
+        .unwrap()
+        .iter()
+        .map(|o| o.name().to_owned())
+        .collect();
+    assert!(!names.contains(&"urls".to_owned()));
+    let error = r.engine.plugin_request(ID, "urls", &[]).unwrap_err();
+    assert_eq!(error, PluginRequestError::NetworkUnsupported);
+    assert_eq!(
+        error.applied_state(),
+        oncl_pki::key::AppliedState::NotApplied
+    );
+    assert_eq!(
+        r.engine.plugin_request("nobody", "note", &[]).unwrap_err(),
+        PluginRequestError::UnknownPlugin
+    );
+    let mut plugins = PluginRegistry::new();
+    prepare_install(
+        &mut plugins,
+        Manifest::from_toml(&manifest_text("p", &all_operations())).unwrap(),
+        SHA,
+        1,
+        true,
+    );
+    assert_eq!(
+        plugins
+            .allow_declared(ID, "server-only", caller())
+            .unwrap_err(),
+        PluginRequestError::NotManual
+    );
+    assert_eq!(
+        plugins
+            .allow_declared("nobody", "note", caller())
+            .unwrap_err(),
+        PluginRequestError::UnknownPlugin
+    );
 }
