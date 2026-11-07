@@ -1,341 +1,327 @@
 # Плагины в окне ручных инструментов: модель разрешений
 
-**Статус:** проект для решения пользователя (вариант A выбран: плагины остаются в ручном окне, модель разрешений переделывается). Кода нет. База: ветка платформы, tip `08891678`.
+**Статус:** проект, ревизия 2 (после ревью `review1.md`; решения пользователя и родителя учтены, открытых вопросов нет). Кода нет. База: ветка платформы, tip `08891678`.
 **Связано:** [плагины](plugins.md), [платформа §8.3](platform.md), план `docs/superpowers/plans/2026-11-02-platform.md` (Task 21, Task 30), отчёты U03 `platform-ui-task-30/{report,rereview2}.md`.
-**Решение за один абзац:** гибрид. (1) Манифест плагина получает `[[operations]]`: имя операции, типизированные параметры, явный список импортов, виды применения ключа и откуда берутся подписываемые байты. (2) Хост (не плагин) строит запрос из шаблона и выдаёт `PluginPermission` на вызов только в пределах объявления. (3) Каждое применение ключа плагином привязано к дайджесту, который пользователь увидел в окне согласия: байты равны замороженному документу (`bound`) либо воспроизведены детерминированным прогоном-планом и показаны в Core-построенном превью (`derived`). (4) `KeysSignRaw` над байтами, которые плагин выдумал сам, в ручном окне не предлагается. (5) ABI WASM не меняется (`ABI_VERSION = 1`), 34 порта не пересобираются, меняются их `plugin.toml`.
+
+**Решение.** Вариант A пользователя (плагины остаются в ручном окне) реализуется гибридом C:
+1. Манифест получает `[[operations]]`: шаблон запроса, типизированные параметры, явный список импортов и **профиль применения ключа** (виды, фиксированные опции, откуда содержимое).
+2. Запрос плагину строит **хост** по шаблону; плагин сам операцию не выбирает.
+3. Каждое применение ключа плагином проходит единственную авторитетную проверку в `KeyUseGuard::before_use` по «билету» (`PluginUse`), который Core выписывает из тех же декодированных `args`, что идут в движок. Билет сверяется с одобрением: вид, SHA-256 содержимого, дайджест опций.
+4. Опции подписи в одобрение входят **всегда**: Core принуждает их к профилю из манифеста (плагин отклониться от профиля не может), а согласие рисуется из профиля.
+5. `max_uses = 1` везде в ручном окне; `Digest`/`raw` — только `bound`; диалоги плагина запрещены; Origin не подставляется.
+6. Этапы: сначала путь `bound`; путь `derived` (план-прогон, MP3b) — отдельный более поздний выпуск по итогам MP0.
+7. ABI (`ABI_VERSION = 1`) и wasm 34 портов не меняются; меняются их `plugin.toml`.
+
+**Что изменилось против ревизии 1:** §1 исправлены C5/C11 и добавлены факты (C12–C14); §3.5 диалоги запрещены, `keys::terminals`; §4.1 новый пример и профиль опций; §4.2 билет вместо `Action::PluginSign`, ключ вызова в статической политике; §4.3 план: allow-list, `now`, TTL; §4.4 полное превью или отказ; §4.5 сервер/CLI: модель доверия оператора и судьба существующих грантов; §4.7 отказы; §6 таблица атак +9 строк; §7 решения R1–R14; §8 вопросов нет; §9 стадии MP0–MP13 и поправка Task 30P.
 
 ---
 
 ## 1. Конфликт (что именно сломано и где)
 
-Задача U03 «плагины в ручном окне» остановлена владельцем и ревьюером (`report.md:176-181`, `rereview2.md` §4). Проверено по исходникам tip-а; номера строк — этого worktree.
+Задача U03 «плагины в ручном окне» остановлена (`report.md:176-181`, `rereview2.md` §4). Номера строк — этого worktree.
 
 | # | Факт | Где |
 |---|---|---|
 | C1 | Разрешение — точный host-issued кортеж `(plugin_id, operation, CallerContext, imports, keys, files, endpoints, pki_endpoints)`; нет `Deserialize`, нет wildcard | `crates/oncl-core/src/plugins.rs:27-38`, `matches` `:87-91`, `permits` `:92-94` |
-| C2 | Авторизация двойная: нужно совпадение и в grant операции, и в политике реестра; ключ дополнительно через `grant.allows_key` | `plugins.rs:329-342` (`Backend::authorize`), `:513-533` (`plugin_call`), `:559-576` (фильтр импортов) |
-| C3 | Манифест не знает операций: только `modules` (имена WSS-модулей) и булевы `Capabilities` (`keys, dialogs, files, key_files, page_files, settings, shared, builtin` + префиксы http/origins) | `crates/oncl-plugin/src/manifest.rs:52-54`, `:114-143` |
-| C4 | `call_headless` принимает только `request: &str`; **строки операции в нём нет**. `operation` — метка хоста в `PluginCall`, плагину не передаётся; `request` — собственный WSS-JSON плагина | `crates/oncl-plugin/src/headless.rs:134-145`; `plugins.rs:179-182`, `:599-606` |
-| C5 | Таблицы «capability → Import» нет. Импорты назначает оператор: CLI — `--allow-import/--key/--plugin-pki-endpoint/--caller` (`crates/oncl-cli/src/plugin.rs:140-150`, вызов `:253`), сервер — `PluginGrant{token,operation,imports[],keys[],pki_endpoints[]}` (`crates/oncl-server/src/config.rs:175-185`, сборка `crates/oncl-server/src/service.rs:322-360`). Единственная связь манифест↔импорт — пересечение при компиляции (`Compiled::imports()`) |
-| C6 | Headless жёстко отвергает все интерактивные импорты (`Dialog*`, `KeysChoose/Select/FlowOpen/FlowPick`, `File{Open,Save,Choose,ChooseKind,OpenEx}`, `CoreOpenWindow`, `Keystore*`) как `InteractionRequired` | `headless.rs:105-130` |
-| C7 | Подписывающих импортов не один, а шесть: `KeysSignRaw` (`plugins.rs:368-410`), `KeysSignCms/CmsEx` (`plugins/cms.rs:61-98`), `KeysSignXml/XmlEx/Xades` (`plugins/xml.rs:73-140`). **Во всех подписываемое содержимое выбирает плагин** (`args.data`, `args.content`, `xml`). Уточнение к U03 («только `KeysSignRaw`»): структуру CMS/XML строит Core, но содержимое — плагин |
-| C8 | Гард применения ключа не отличает плагин от документа: `KeyUseEvent{operation_id, key_id, action, batch_item}` (`crates/oncl-core/src/keys.rs:434-439`), плагин применяет ключ как `Action::Sign` (`policy.rs:8-12`). Десктопный `ConsentGuard` разрешает «N применений ключа K для operation O и Action::Sign» (`crates/oncl-ui/src/signing/runner.rs:60-125`), т.е. выданное для плагина согласие покрыло бы любые байты, а согласие вида `UserConsent` привязано к `items` (`crates/oncl-ui/src/signing/controller.rs:69-110`), которых у плагина нет |
-| C9 | У ручного вызова нет Origin: `encode_input(request, caller.browser_origin(), ..)` (`headless.rs:144-145`); `CallerContext::LocalOperator(String)` даёт `None`. Порты, проверяющие сайт (`qoltanba` и др.), ответят `INVALID_ORIGIN`. Подставлять Origin нельзя (Task 21, `plan:396`) |
-| C10 | Окна интерактивного (WSS) пути показывают текст плагина (`detail`) в доверенной области (`plugins.md`, «keys_choose … в окнах видны сайт, название плагина и detail»). Для ручного окна это недопустимо (`plan:508`: «тексты плагина не переписывают trusted область») |
-| C11 | В `oncl-ui` исполнения плагинов нет; зависимость от `oncl-core/plugins` уже в замыкании бинаря (отчёт U03 §5) |
+| C2 | Авторизация двойная: и grant операции, и политика реестра, зафиксированная при `install`; ключ дополнительно через `grant.allows_key` | `plugins.rs:329-342`, `:513-533`, `:559-576`; `install` `:142-176` |
+| C3 | Манифест не знает операций: `modules` и булевы `Capabilities` (`keys, dialogs, files, key_files, page_files, settings, shared, builtin` + префиксы). Разбор строгий (`deny_unknown_fields` у `RawManifest`, `RawCapabilities`) | `crates/oncl-plugin/src/manifest.rs:52-54`, `:114-143`, `:605`, `:621` |
+| C4 | `call_headless` принимает только `request: &str`; строки операции в нём нет. `operation` — метка хоста в `PluginCall`; плагину уходит только `Input{request, origin, locale="ru"}` | `crates/oncl-plugin/src/headless.rs:134-145`; `plugins.rs:179-182`, `:599-606`; `crates/oncl-pdk/src/abi.rs:116` |
+| C5 | Связь манифест↔импорт есть: каждый импорт требует булев флаг (`Import::capability()`, `declares()`), проверяется при `compile`. Нет только **per-operation** таблицы. Импорты операции назначает оператор: CLI `--allow-import/--key/--plugin-pki-endpoint/--caller` (`crates/oncl-cli/src/plugin.rs:140-150`, вызов `:253`), сервер `PluginGrant{token,operation,imports[],keys[],pki_endpoints[]}` (`crates/oncl-server/src/config.rs:175-185`, `service.rs:322-360`) | `crates/oncl-plugin/src/runtime.rs:249-265` |
+| C6 | Headless жёстко отвергает интерактивные импорты (`Dialog*`, `KeysChoose/Select/FlowOpen/FlowPick`, `File*`, `CoreOpenWindow`, `Keystore*`) как `InteractionRequired` | `headless.rs:105-130` |
+| C7 | Подписывающих импортов шесть: `KeysSignRaw` (`plugins.rs:368-410`), `KeysSignCms/CmsEx` (`plugins/cms.rs:61-98`), `KeysSignXml/XmlEx/Xades` (`plugins/xml.rs:73-140`). Во всех содержимое выбирает плагин. Помимо содержимого плагин задаёт **опции**: у CMS `content = Data \| Digest` (`abi.rs:1505-1510`; `Digest` → `Action::SignDigest`, нужен `allow_prehashed`, `cms.rs:102-117`), `cosign` (`Auto` — CMS в содержимом подписывается вторым подписантом), `attrs.extra` (произвольные подписанные атрибуты), `econtent_type`, `timestamp = Custom(TsaSpec)` (`abi.rs:1600-1628`, `:1748-1755`); у XML — `element/parent/placement/signature_method` (`abi.rs:2229-2326`); у XAdES — `level/tsa/chain`. Простой `KeysSignCms` жёстко ставит `CoSign::Auto` (`cms.rs:66-72`) |
+| C8 | Единственная точка применения ключа — `AuthorizedSigner::sign_digest` (`crates/oncl-core/src/keys.rs:585-640`); событие `KeyUseEvent{operation_id,key_id,action,batch_item}` (`keys.rs:433-439`) не знает ни плагина, ни содержимого; плагин применяет ключ как `Action::Sign`/`SignDigest` (`policy.rs:5-25`, `cms.rs:102-111`). Дайджест, который подписывает ключ, — дайджест подписываемых атрибутов/`SignedInfo` (содержит время подписи), а не содержимого. Десктопный `ConsentGuard` разрешает «N применений ключа K для операции O и действия A» (`crates/oncl-ui/src/signing/runner.rs:60-125`), согласие `UserConsent` привязано к `items` документов (`controller.rs:69-110`), которых у плагина нет |
+| C9 | У ручного вызова нет Origin: `encode_input(request, caller.browser_origin(), ..)` (`headless.rs:144-145`); `CallerContext::LocalOperator(String)` даёт `None`. Подставлять Origin нельзя (`plan:396`). Порты с проверкой сайта отвечают `INVALID_ORIGIN` на пустой Origin (например `qoltanba`: `plugins/qoltanba/src/lib.rs:171-177`) |
+| C10 | Окна интерактивного (WSS) пути показывают текст плагина (`detail`) в доверенной области (`plugins.md`, раздел `keys`); для ручного окна недопустимо |
+| C11 | Desktop WSS работает через `oncl_plugin::PluginModules` (`crates/openncalayer/src/plugins.rs`), а не через `oncl_core::plugins::PluginRegistry` (последний — только `oncl-cli`, `oncl-server`, `oncl-core`). `oncl-ui` включает у `oncl-core` лишь `xml, pdf, jose` (`crates/oncl-ui/Cargo.toml:17`): `plugins` для ручного окна нужно добавить явно |
+| C12 | Хеш пакета есть в `store.rs` (`Installed.sha256`, `Package.sha256`, `store.rs:50,156-175`; `package.rs:35,73`), но `PluginRegistry::install(manifest, wasm, limits, policy)` его не принимает и не хранит (`plugins.rs:142-176`): сверять `package_sha256` из одобрения не с чем |
+| C13 | Сервер: `Operation::Plugin{plugin, operation, args, keys}` — `args` целиком клиентский JSON (`crates/oncl-api/src/dto.rs:142-149`, OpenAPI `openapi.rs:214`, `dispatch.rs:1500-1540`); ключ плагина авторизуется токеном как `Action::Sign` (`dispatch.rs:221`, `:239`) |
+| C14 | Каталожное обновление плагина идёт без запроса, если `capabilities.added_over(old)` пусто (`manifest.rs:196`, `crates/openncalayer/src/plugins.rs:1015`); `[[operations]]` в `Capabilities` не входит |
 
-**Итог конфликта.** Ручному окну нужно, чтобы *пользователь* одобрил применение ключа, видя *что* подписывается. Сегодня (C1–C5) разрешение хост выдаёт вслепую относительно содержимого, манифест ничего не объявляет, подписываемые байты выбирает плагин (C7), гард их не видит (C8), а большинство портов не работают без диалогов и Origin (C6, C9). Операции нет ни в ABI, ни в манифесте, поэтому окну нечего показать и не к чему привязать согласие.
+**Итог.** Ручному окну нужно, чтобы пользователь одобрил применение ключа, видя *что* и *как* подписывается. Сегодня разрешение хост выдаёт слепо относительно содержимого и опций (C7), манифест операций не знает (C3), гард событие не различает (C8), клиент/плагин сам формирует запрос (C4, C13), а большинство портов не работают без диалогов и Origin (C6, C9).
 
-Инвентаризация портов (грубо, `grep` исходников `plugins/*/`; в MP0 заменяется точным `Compiled::imports()`): `plugin.toml` — 34, у всех `keys = true`, 35 имён `modules`; `sign_cms_ex` — 26, `sign_xml` — 18, `sign_xml_ex` — 9, `sign_cms` — 4, `sign_xades` — 1; **`sign_raw` — 7** (`acbank, arta, devart, esf-osdkz, rating1c, taxtech, uchet-esf`); выбор ключа диалогом `keys::select` — 18, `keys::choose` — 4.
+**Операция — это не имя.** Операция = (шаблон запроса, строящийся хостом) + (набор импортов) + (профиль применения ключа). Строку `operation` в `PluginCall` плагин не видит; защиту дают (а) host-built `request`, (б) импорты ⊆ объявление, (в) проверка применения ключа в `before_use`. Тест `forged_operation_name` проверяет именно это, а не «имя».
 
-## 2. Инварианты (что решение обязано держать)
+Инвентаризация портов (грубо, grep по `plugins/*/`; в MP0 заменяется точным `Compiled::imports()`): `plugin.toml` — 34, у всех `keys = true`, 35 имён `modules`; `sign_cms_ex` — 25, `sign_xml` — 18, `sign_xml_ex` — 9, `sign_cms` — 4, `sign_xades` — 1; `sign_raw` — 7 (`acbank, arta, devart, esf-osdkz, rating1c, taxtech, uchet-esf`); выбор ключа `keys::select` — 18, `keys::choose` — 4. Упоминание `origin` в `src` есть почти у каждого порта; доля пригодных к ручному окну без Origin неизвестна до MP0 и, по грубой оценке, заметно меньше половины.
 
-1. **Пользователь, а не манифест и не плагин, одобряет применение ключа.** Манифест — верхняя граница (что плагин *может* запросить), одобрение — отдельный акт для каждого вызова.
-2. **Текст доверенной области строит хост**: id и локализованное `name` плагина, перечисление импортов/ключа/файлов/адресов из объявления, SHA-256 и имена документов, превью байтов, построенное Core. Ни `label`, ни `args`, ни `detail` плагина не попадают в доверенную область; `label` показывается только в рамке «от плагина».
-3. **Согласие привязано к байтам**: каждое применение ключа плагином сверяется с дайджестом из согласия *до* `Engine::sign` (порядок как в `plugins.rs:380-384`). Расхождение — `PermissionDenied`, `AppliedState::NotApplied`.
-4. **Согласие не переживает вызов**: ни постоянных ручных grant, ни переноса между операциями/ключами/версиями пакета.
-5. **Серверу/CLI не нужен человек, но и не нужен автоответ**: grant оператора — точный и валидируется против объявления; интерактивные импорты по-прежнему `InteractionRequired`.
-6. **Нет нового доверия к плагину**: рабочий WASM по-прежнему ограничен `InstanceLimits`, fuel, бюджетом ресурсов Core.
+## 2. Инварианты
+
+1. Применение ключа одобряет **пользователь**; манифест — верхняя граница, одобрение — акт каждого вызова.
+2. Доверенная область (страница согласия) состоит только из полей, которые плагин не контролирует: `id`, `package_sha256`, `version`, данные ключа/сертификата, имена и SHA-256 документов, профиль подписи из Core, объявленные адреса. **`name`, `description`, `label` манифеста — поля автора плагина**; они показываются лишь в рамке «от плагина» (plain text, ≤ 80 символов, bidi/управляющие экранируются).
+3. Согласие привязано к вид + содержимое + **опции**; проверка до применения ключа (билет в `before_use`, §4.2).
+4. Согласие не переживает вызов (разовое, TTL, привязано к `OperationId`).
+5. Серверу/CLI человек не нужен, но автоответа нет; grant точный.
+6. Нет нового доверия к WASM: `InstanceLimits`, fuel, бюджет Core.
+7. Никакого произвольного UI плагина: `Dialog*` в ручном окне запрещены (`plan:499`, `platform.md:252`).
 
 ## 3. Модели
 
-Общая терминология: **объявление** — `[[operations]]` манифеста; **план** — прогон WASM без применения ключа, фиксирующий, что плагин собирается подписать; **одобрение** — `PluginApproval`, результат согласия.
+### Модель A — операционные гранты + согласие по дайджесту
+Объявление в манифесте; хост строит запрос; применение ключа сверяется с одобрением (содержимое + опции); для `derived` содержимого — план-прогон и превью. Пользователь видит документ/ключ/профиль подписи/сеть. Плагин может только объявленные импорты и один вид применения с одобренными байтами. `raw` — только `bound`. Сервер: grant ⊆ объявление. ABI не меняется. Минус: сложная реализация `derived`.
 
-### Модель A — операционные гранты + согласие по дайджесту (объявление + план)
+### Модель B — хост-подписание (плагин возвращает типизированный запрос)
+Плагины не зовут `keys_sign_*`; хост подписывает через фасады Core и обычную страницу согласия. Лучшая безопасность, но требует ABI v2 (`oncl_prepare/oncl_finish`) и переписывания всех 34 портов: 25 портов зовут `sign_cms_ex` посреди логики. Неприемлема сейчас; целевой ABI v2 (MP13).
 
-Суть: манифест объявляет операции; хост строит запрос; для `derived`-содержимого запускается план; пользователь одобряет список «ключ × вид × дайджест»; реальный вызов проверяет каждое применение.
+### Модель C (выбрана) — гибрид
+A как основа; ближе к B там, где это дёшево: (1) для CMS/XML/XAdES структуру и профиль подписи строит Core, описание согласия — из профиля, как у встроенных инструментов; (2) `raw` и `Digest` — только `bound`; (3) `derived` — отдельный поздний этап (MP3b) с жёсткими условиями (§4.4); (4) операция в манифесте проектируется так, чтобы позднее переехать на `sign_request` (B) без смены интерфейса окна.
 
-- **Что видит и подтверждает пользователь.** Страница согласия (хост): `<name плагина>` v`<version>` (`id`, SHA-256 пакета); операция `<name>` и рамка «от плагина: <label>»; файлы: имя + размер + SHA-256 каждого параметра `document`; ключ: alias + серийный/отпечаток сертификата + субъект; **каждое применение ключа** одной строкой: `<вид: CMS|CMS+TSA|XML|XAdES-T|raw>`, `документ <имя> (SHA-256 …)` для `bound` либо `данные, составленные плагином: N байт, SHA-256 …`, Core-превью (до 8 КиБ экранированного текста/hex: начало и конец); сеть: перечень объявленных адресов; фраза «плагин получит подпись». Кнопки «Подписать»/«Отмена»; подпись — только после ввода пароля ключа в уже существующем потоке окна.
-- **Что может плагин.** Только импорты, перечисленные в объявлении ∩ `Compiled::imports()` ∩ интерактив, который Core отвечает сам (§3.5); применять ключ — только видом из объявления, только на байты из одобрения, не чаще указанного числа раз.
-- **Чего не может.** Выбрать другой ключ, подписать другие байты, вызвать импорт вне объявления, сменить операцию, увидеть секрет/путь, показать текст в доверенной области.
-- **`KeysSignRaw`.** `bound` (байты равны замороженному параметру) — допускается; `derived` — в ручном окне **не предлагается** (см. решение R4, вопрос Q1). Привязка raw к виду «документ» делает raw честным: пользователь видит файл, который подписывается как есть.
-- **Headless/сервер.** Grant оператора ⊆ объявление; для `derived` требуется явный флаг `plugin_bytes = true` в `PluginGrant` (оператор сознательно разрешает «плагин выбирает байты»); `bound` проверяется на самом вызове по входным частям запроса. Плана и человека нет, автоответа нет.
-- **Аудит.** BEGIN/FINAL применения ключа несут plugin id, SHA-256 пакета, имя операции, вид, SHA-256 и длину содержимого, caller.
-- **Совместимость.** Меняются только `plugin.toml` (+`min_core`), ABI и wasm не меняются.
-- **Минусы.** Самая сложная реализация (план, детерминизация времени/random, превью); пользователь всё же оценивает `derived`-байты по превью — предел честности.
-
-### Модель B — только хост-подписание: плагин возвращает типизированный запрос
-
-Суть: плагины не вызывают `keys_sign_*`; они возвращают `SignRequest{documents|refs, profile}`, хост подписывает через фасады Core и обычную страницу согласия — тот же путь, что у встроенных инструментов (`UserConsent.items/profile`, `controller.rs:69-110`).
-
-- **Что видит пользователь.** Ровно то же, что для встроенного Sign: документы, формат и опции, ключ. Согласие строится по `profile`, а не по тексту плагина.
-- **Что может плагин.** Готовить входы (разбор, XML-шаблон, PDF-отчёт) и потреблять выходы (ответ).
-- **Raw.** Невозможен по построению: нет импорта; байты для подписи — это документы/refs, которые видит пользователь.
-- **Headless/сервер.** Аналогично: плагин возвращает запрос, сервер подписывает по grant (action/ключ), без автоответа.
-- **Аудит.** Максимально чистый: единственный источник применения ключа — хост, plugin id в BEGIN/FINAL как контекст.
-- **Совместимость.** **Ломает ABI и все 34 порта.** Порты — порты NCALayer-модулей: `keys_select` → `sign_cms_ex` → дальнейшая логика с результатом подписи (CAdES-T → `tsp_stamp`, добавление отчёта и т.п.; 26 портов зовут `sign_cms_ex` посреди логики). Нужен ABI v2 с двухфазным протоколом (`oncl_prepare` → хост подписывает → `oncl_finish(signatures)`), переписывание каждого порта и всех `oncl-port-tests` (паритет с оригиналом). Порты, где подписанное нужно плагину для следующего шага (многошаговые), не укладываются в «вернуть запрос».
-- **Вердикт.** Лучшая модель безопасности, неприемлемая цена для существующих портов сейчас; годится как целевой ABI v2.
-
-### Модель C (рекомендуемая) — гибрид A + B там, где B дёшево
-
-То же, что A, плюс правило «чем меньше доверия — тем ближе к B»:
-
-1. Для видов `cms, cms_ex, xml, xml_ex, xades` Core уже строит контейнер: согласие описывает его **так же, как B** (профиль/формат/опции от Core, а не от плагина). Плагин поставляет только содержимое, и оно привязано (`bound`) или показано (`derived`).
-2. `raw` — **только `bound`**. Операции портов, где raw строится из вычисленных байт (JWS-подобные `acbank`, `esf-osdkz` и др.), в ручном окне недоступны, пока для них нет B-входа (ABI v2, MP8, не блокирует эту работу). Серверу/CLI они остаются доступными через явный `plugin_bytes = true`.
-3. ABI v2 (B) — отдельное будущее изменение; манифест A (`kind=…`, `content=…`) спроектирован так, чтобы операция позже переехала на `sign_request` без изменения интерфейса окна.
-
-**Рекомендация: C.** Причины: ABI/wasm не трогаются (34 порта сохраняют паритет и тесты); согласие строится хостом из объявления и из Core-превью; raw над придуманными байтами в ручном окне невозможен; деградация — отказ до применения ключа, а не молчаливый allow.
-
-### Сводная таблица
-
-| | A | B | C (рек.) |
+| | A | B | C |
 |---|---|---|---|
-| ABI/wasm 34 портов | без изменений | ABI v2, переписать все | без изменений |
-| Манифест | `[[operations]]` | `[[operations]]` + typed sign | как A |
-| Привязка к байтам | дайджест (bound/derived) | по построению | дайджест, raw только bound |
-| Plugin-chosen raw в ручном окне | отказ/запрет | невозможен | отказ |
-| Сложность | высокая (план) | очень высокая | высокая |
-| Порты в ручном окне | кроме derived-raw и origin-only | после переписывания | кроме derived-raw и origin-only |
+| ABI/wasm | без изменений | v2, переписать 34 | без изменений |
+| Привязка | содержимое + опции | по построению | содержимое + опции, raw/Digest только bound |
+| Порты в окне | кроме unsupported (MP0) | после переписывания | кроме unsupported (MP0) |
 
-## 3.5 Интерактивные импорты в ручном окне (общая часть A/C)
+### 3.5 Ключевой выбор и интерактив в ручном окне
+Порты зовут `keys::select` (18) и `keys::choose` (4). Это не «UI плагина», а выбор ключа, который в ручном окне уже сделал пользователь:
+- `KeysSelect/KeysChoose/KeysFlowOpen/KeysFlowPick` → Core оценивает фильтр плагина (`Filter/FilterMore`, те же функции `oncl-flows`) против сертификата выбранного пользователем ключа; подходит — `Chosen{handle, alias, certificate}` для единственного привязанного ключа (секрет и путь хранилища плагину не передаются); не подходит — `None`.
+- `KeysTerminals` → `[]`; `TokensScan` → «токены выключены»; `KeysOpen` и прочее, что в Core headless даёт `PermissionDenied` (`plugins/capabilities.rs:203`, трап), — порт с такими вызовами **unsupported** (причина — в таблице MP0, не молчаливо).
+- **`Dialog*`, `File*`, `CoreOpenWindow`, `Keystore*` — запрещены** (`InteractionRequired`, как в C6). Порт, которому они нужны, unsupported с причиной.
+- `PluginInteraction` (UI-трейт) нужен только для выбора ключа; никакого рендера текста плагина в нём нет.
+- Сервер/CLI: `PluginInteraction` не передаётся, поведение C6 без изменений.
 
-Порты зовут `keys::select` (18) и `keys::choose` (4) — без них не работают (C6). Решение: в ручном режиме Core отвечает на ключевой выбор **ключом, который пользователь уже выбрал в окне хоста**; никакого автосогласия на применение:
-
-- `Mode::Manual` задаётся хостом при `PluginBindings::with_interaction(&dyn PluginInteraction)`; без него поведение прежнее (`InteractionRequired`, C6).
-- `KeysSelect/KeysChoose/KeysFlowOpen/KeysFlowPick` → Core оценивает фильтр плагина (`Filter/FilterMore`, те же функции, что в `oncl-flows`) против сертификата выбранного ключа: подходит — возвращает `Chosen{handle, alias, certificate}` для единственного привязанного ключа; не подходит — `None` («отмена окна», плагин сам выдаёт свою ошибку). Секрет и путь хранилища плагину не передаются (как в интерактивном пути).
-- `DialogMessage/DialogConfirm/DialogChoice` → через `PluginInteraction` рисуются в рамке «текст плагина» (обычный текст, не разметка, длина ограничена); ответ пользователя **не является согласием на подпись**.
-- `DialogPassword/DialogReader/DialogCsr/DialogImport`, `File*`, `CoreOpenWindow`, `Keystore*` — по-прежнему `InteractionRequired` (документы приходят параметрами, пароли — через поток ключа хоста).
-- Сервер/CLI: `PluginInteraction` не передаётся — C6 без изменений.
-
-## 4. Рекомендуемая модель в деталях (C)
+## 4. Рекомендуемая модель в деталях
 
 ### 4.1 Манифест
 
-Новая таблица, `deny_unknown_fields` как у остального манифеста; формат версионируется `min_core` пакета (старое ядро отвергает неизвестное поле, `manifest.rs:66,103`). Пример (порт `qoltanba`):
+Новая таблица в `RawManifest` (`deny_unknown_fields` отвергает её в старом ядре; `min_core` пакета поднимается). Пример ниже **иллюстративный** (вымышленный плагин `example.sign`, не порт; реальные операции портов определит MP0 — `qoltanba` в ручном окне недоступен из-за Origin, его метод `signFileBytes` имеет арность 2 и читает хранилище, `plugins/qoltanba/src/lib.rs:103-106, 270`):
 
 ```toml
-min_core = "0.1.0-alpha.7"            # поднимается там, где есть [[operations]]
+min_core = "0.1.0-alpha.7"
 
 [[operations]]
-name    = "sign-file"                  # ^[a-z][a-z0-9-]{0,31}$, уникально в плагине
-module  = "kz.btsdigital.qoltanba.CMSSignUtil"   # одно из `modules`
-manual  = true                         # показывать в ручном окне
-server  = false                        # разрешить grant сервера/CLI
-request = '{"module":"kz.btsdigital.qoltanba.CMSSignUtil","method":"signFileBytes","args":["{file:base64}"]}'
-label   = { ru = "Подписать файл", kk = "Файлға қол қою", en = "Sign a file" }   # только рамка «от плагина», ≤ 80 симв.
+name    = "sign-file"                       # ^[a-z][a-z0-9-]{0,31}$, уникально
+module  = "example.sign"                    # из `modules`
+manual  = true                              # показывать в ручном окне
+server  = false                             # допускать grant сервера/CLI
+request = '{"module":"example.sign","method":"signFile","args":["{file:base64}"]}'   # арность — как у метода плагина
+label   = { ru = "Подписать файл", kk = "Файлға қол қою", en = "Sign a file" }      # только рамка «от плагина»
 
 [[operations.params]]
 name = "file"
-kind = "document"                      # document | text | choice | flag | locale
-max_bytes = 16777216                   # ≤ InstanceLimits.max_transfer / 4 (base64)
+kind = "document"                           # document | text | choice | flag | locale
+max_bytes = 16777216
 
 [operations.uses]
-imports  = ["keys_select", "keys_describe", "keys_sign_cms_ex", "ocsp_fetch", "hash"]   # ⊆ Compiled::imports()
-network  = "pki"                       # none | pki | [exact endpoints]
-interactive = ["keys_select"]          # ⊆ imports; только отвечаемые Core (§3.5)
+imports = ["keys_select", "keys_describe", "keys_sign_cms_ex", "hash"]   # ⊆ Compiled::imports()
+network = "pki"                             # none | pki | [точные URL]
+interactive = ["keys_select"]               # ⊆ {keys_select, keys_choose, keys_flow_open, keys_flow_pick}
 
 [[operations.uses.key]]
-kind    = "cms_ex"                     # raw | cms | cms_ex | xml | xml_ex | xades
-content = "param:file"                 # param:<имя> -> bound | "derived"
-max_uses = 1
+kind     = "cms_ex"                         # raw | cms | cms_ex | xml | xml_ex | xades
+content  = "param:file"                     # param:<имя> => bound; "derived" => только после MP3b
+max_uses = 1                                # единственно допустимое значение в ручном окне
+[operations.uses.key.profile]               # профиль опций; Core принуждает (см. ниже)
+encapsulate = false
+cosign      = "never"
+timestamp   = "basics"                      # none | basics | kalkan   (Custom запрещён)
+certificates = "signer"
+output      = "der"
 ```
 
-Правила проверки при разборе (в `Manifest::from_toml`, ошибка → пакет не устанавливается):
+**Профиль опций — решение по условию (1).** Выбран вариант «объявленный профиль, который Core принуждает», а не «план для каждой операции»: план остаётся только для `derived`-содержимого. Правила:
+- Профиль — типизированная структура соответствующего вида. Поля вне белого списка (`attrs.extra`, произвольный `econtent_type`, `timestamp = Custom`, `Digest` с чужим алгоритмом, `signature_method` вне известных) в профиль не входят вовсе, а значения опций в реальном `args` плагина обязаны **совпасть** с профилем (канонический байтовый вид опций → `options_sha256`), иначе отказ до ключа (`OptionsMismatch`). Незаданное в профиле поле означает значение по умолчанию Core, и отклонение от него — тоже отказ.
+- Допустимые варианты поля: `fixed` (константа) либо `param:<имя>` (для XPath `element/parent` у XML — текст, введённый пользователем и показанный в согласии).
+- `cosign` в профиле только `never`; для простого `KeysSignCms` в одобренном режиме Core подставляет `CoSign::Never` вместо `Auto` (документируемое отличие от унаследованной семантики: ручное окно подписывает байты выбранного файла как есть, даже если это CMS). Это закрывает расхождение «подписано не то, что показано» при `cosign: Auto` (внутреннее содержимое ≠ `args.content`).
+- `max_uses = 1`; многоподписные операции в ручном окне не поддерживаются (unsupported с причиной «несколько подписей»).
+- **`CmsContent::Digest`:** запрещён для `derived`; для `bound` Core сам считает дайджест замороженного документа алгоритмом ключа (ГОСТ 34.311/Стрибог/SHA-2 по сертификату, как `cms_spec` и проверка `digest.algorithm() == alg.hash_alg()`, `keys.rs:~615`) и требует побайтового равенства с `args` — показывается имя документа и этот дайджест (не SHA-256). Это возможно только при `allow_prehashed` политики контекста; ручное окно включает его для плагинного контекста.
 
-- `request` — валидный JSON после подстановки пробных значений; плейсхолдеры `{<param>[:base64|:text]}` — только объявленные параметры, ровно один раз на документ; запрос после подстановки максимума ≤ `max_transfer` (иначе операция недоступна, честный лимит, а не усечение).
-- `uses.imports ⊆ Compiled::imports()` проверяет установка (WASM известен), `interactive ⊆ {keys_select, keys_choose, keys_flow_open, keys_flow_pick, dialog_message, dialog_confirm, dialog_choice}`.
-- Любой `key`-импорт в `imports` требует соответствующей строки `[[uses.key]]`: `keys_sign_raw`→`raw`, `keys_sign_cms`→`cms`, `keys_sign_cms_ex`→`cms_ex` и т.д.; `Capabilities.keys = true` обязателен.
-- `content = "param:x"` — `x` имеет `kind=document` (для `xml/xml_ex/xades` допустим `text`); `raw` с `derived` в манифесте **синтаксически допустим**, но помечает операцию `manual`-недоступной (линтер `xtask` требует `manual = false`).
-- `network = "pki"` — только PKI-хосты ядра (список `plugins.md`); произвольные адреса — перечень точных URL, перекрываемых `capabilities.http`.
+Проверки при разборе: `request` — валидный JSON после подстановки пробных значений, плейсхолдеры только объявленных параметров, максимум ≤ `max_transfer` (иначе операция недоступна, честный `InputLimit`); `uses.imports ⊆ Compiled::imports()` проверяет установка (WASM известен); любой ключевой импорт требует строки `[[uses.key]]` соответствующего вида и `Capabilities.keys = true`; `content = "param:x"` — `x` типа `document` (для `xml*/xades` допустим `text`); `raw` с `derived` запрещён линтером; число `[[uses.key]]` ≤ 8; `network = "pki"` — только PKI-хосты ядра.
 
-### 4.2 Типы и функции Core (`oncl-core`, feature `plugins`)
+### 4.2 Типы и точки проверки (Core)
 
 ```text
-PluginOperation        { name, module, params, uses: Uses }        // из manifest, неизменяемо
-Uses                   { imports, interactive, network, keys: Vec<KeyUseDecl> }
-KeyUseDecl             { kind: KeyUseKind, content: Content, max_uses }
-Content                { Param(String) | Derived }
-PluginApproval         { package_sha256, operation, caller, key: KeyId,
-                         uses: Vec<ApprovedUse>, clock_ms, random_seed: [u8;32],
-                         inputs: Vec<(String, [u8;32])> }             // не Deserialize; строится только Core из PluginPlan + UserConsent
-ApprovedUse            { kind, content_sha256: [u8;32], content_len: u64, options_sha256: [u8;32] }
-PluginPlan             { uses: Vec<PlannedUse>, complete: bool, preview: Vec<PreviewLine> }
-Engine::plugin_operations(plugin_id) -> &[PluginOperation]
-Engine::plugin_request(plugin_id, op, &[ParamValue]) -> Result<String, ..>  // host-built request
-Engine::plugin_plan(call, bindings, ctx) -> Result<PluginPlan, OperationError> // без ключа, без побочных эффектов
-Engine::plugin_call_approved(call, bindings, &PluginApproval, ctx) -> Result<PluginResult, OperationError>
-Action::PluginSign                                                         // новый вид, отличный от Action::Sign (C8)
-KeyUseEvent::plugin() -> Option<&PluginUse{ plugin_id, package_sha256, operation, kind, content_sha256, content_len }>
+PluginOperation, Uses, KeyUseDecl{kind, content: Param|Derived, max_uses:1, profile}
+PluginApproval  { package_sha256, version, operation, caller, operation_id, key: KeyId, ttl_deadline,
+                  uses: [ApprovedUse], inputs: [(param, sha256)], clock_ms?, random_seed? }  // не Clone, не Deserialize
+ApprovedUse     { kind, content_sha256|prehashed_digest, content_len, options_sha256 }
+PluginUse       { plugin_id, package_sha256, operation, kind, content_sha256, options_sha256 }   // «билет»
+OperationContext.plugin_ticket: Option<PluginUse>          // только Core-бэкенд плагина кладёт его
+KeyUseEvent.plugin: Option<PluginUse>                      // берётся из ctx.plugin_ticket.take() в sign_digest
+PluginPermission::declared(plugin_id, operation, caller)   // KeyScope::Declared, только из реестра
+Engine::plugin_operations / plugin_request / plugin_call_approved / (MP3b) plugin_plan
 ```
 
-`PluginPermission` сохраняется как есть (C1) и остаётся единственным способом авторизации импортов; новые типы лишь **строят** разрешение:
+**Единственная авторитетная проверка — `KeyUseGuard::before_use`** (`keys.rs:634`) — на билете, а не на дайджесте движка (дайджест движка — дайджест подписываемых атрибутов с временем подписи, C8; восстановить из него содержимое нельзя). Построение билета:
+1. Бэкенд плагина (`cms.rs`, `xml.rs`, `plugins.rs`) один раз декодирует `args` в типизированную структуру; из **этой же структуры** считает вид, SHA-256 эффективного содержимого (после принудительного `cosign=Never`; для `Digest` — сам дайджест) и `options_sha256` по каноническому кодированию, сверяет опции с профилем.
+2. Кладёт билет в `ctx.plugin_ticket` и передаёт ту же структуру в движок (`engine.sign(...)`); `AuthorizedSigner::sign_digest` создаёт `KeyUseEvent`, забирая билет (`take()` — одноразовый).
+3. `PluginConsentGuard::before_use` (десктоп) / серверный гард разрешает применение только если `event.plugin == Some(t)`, `t` совпадает с неисчерпанным `ApprovedUse`, `max_uses` не исчерпан, TTL не истёк, `operation_id` совпадает, `package_sha256` совпадает с установленным. События без билета в плагинном движке — отказ; события **с** билетом в документном `ConsentGuard` — отказ (у плагина отдельный экземпляр движка/гарда, так что согласие на документ не покрывает плагин и наоборот).
+4. Предварительная сверка в бэкенде (`Backend::authorize`) — только быстрый отказ без побочных эффектов; решает гард. Отказ приходит до `Engine::sign`, ключ не применён, `NotApplied`.
 
-- `PluginPermission::from_operation(&PluginOperation, caller, keys, files, endpoints)` — импорты берутся из `uses.imports`, не вводятся оператором; оператор/хост может **сузить**, не расширить (`debug_assert`/ошибка при попытке).
-- `PluginRegistry::install` требует `permissions ⊆ declared` для плагинов с `[[operations]]`; плагин без объявлений принимает старые permissions (WSS/интерактив), но в ручное окно и серверные grant, требующие `operation`, не попадает (R3).
-- `Backend::authorize` для ключевых импортов дополнительно требует, чтобы в `PluginApproval` нашёлся неисчерпанный `ApprovedUse` с совпадающими `kind` и `content_sha256` (пересчитывается Core по фактическим `args`, не по заявлению плагина), и `Action::PluginSign` в `ExecutionGrant` (`ConsentGuard.allow(op, key, PluginSign, n)`; `Sign`-гранты на плагин не распространяются).
-- Для `bound`-применений дайджест сравнивается с дайджестом замороженного параметра `inputs`; для `derived` — с `ApprovedUse` из плана.
+**Без `Action::PluginSign` (ревизия 1 отозвана).** Новое действие ломало бы токены (`dispatch.rs:221`, токены хранят `Action::Sign`). Вместо него: флаг-билет в контексте и отдельный гард. Токены не меняются; миграции токенов нет.
 
-### 4.3 План (derived) и детерминизм
+**Ключ вызова и статическая политика реестра (условие 9).** `install(policy)` фиксирует `PluginPermission` раз и навсегда, а `permits(import, Some(key))` требует ключ в `p.keys` (`plugins.rs:92-94`). Для плагинов с операциями политика реестра строится из объявления как `KeyScope::Declared` (конструктор доступен только `PluginRegistry`): хост-сторона проверяет `(plugin_id, operation, caller)`, импорт ∈ объявленные, вид применения ∈ объявленные и **не проверяет конкретный ключ**. Конкретный ключ проверяется второй, пер-вызовной стороной, которую строит UI: `ExecutionGrant::with_keys([выбранный])` + `plugin_permissions([PluginPermission::from_operation(..).with_keys([выбранный])])` (`policy.rs:93-110`). Обе стороны по-прежнему обязательны (C2). `KeyScope::Exact` — прежнее поведение для плагинов без объявлений.
 
-`plugin_plan` — прогон того же WASM тем же `call_headless`, но с `PlanBackend`:
+**Хеш пакета (C12).** `PluginRegistry::install` получает `package_sha256` (из `store.rs`) и хранит в `Installed`; `plugin_call_approved` сверяет с `PluginApproval.package_sha256`. Подмена wasm/манифеста между согласием и вызовом → `PackageChanged`.
 
-- ключевые импорты: записывают `PlannedUse{kind, sha256(content), len, options}` (Core считает по декодированным `args`) и возвращают **правдоподобную заглушку** (нулевая подпись нужной длины), без вызова `Engine::sign`;
-- запрещены с ошибкой `PlanDenied` (план → `complete=false`): сеть (`http*`, `ocsp/crl/tsp*`), запись файлов, `settings_put`, `shared_put`, интерактив;
-- разрешены чистые: `hash`, `cert_info/details`, `cms_verify` над входами, `xml_verify`, `log` (без вывода), `now`, `random`, `local_time`;
-- `now/local_time` возвращают `clock_ms` из одобрения, `random` — поток HKDF из `random_seed` (свежие 32 байта на согласие, CSPRNG; в реальном прогоне те же значения): прогон воспроизводим, поэтому дайджесты плана и реального вызова совпадают, если плагин не использует скрытые зависимости;
-- лимиты: те же `InstanceLimits`, fuel и бюджет `ctx`; один план на согласие;
-- плагин, чьё содержимое подписи зависит от результата предыдущей подписи или сети (`complete=false` или реальный дайджест отличается), **не одобряется**: ручное окно показывает «операция не может быть показана для подтверждения» (`ErrorCode::PermissionDenied`, подкод `PlanUnavailable`), ключ не применялся.
+### 4.3 Реальный вызов и заморозка
+Документы замораживает UI-раннер **до** построения `request` (чтение один раз в память/spool с подсчётом SHA-256, как у документного Sign; сравнение по дайджесту замороженных байт, не по пути). `FrozenInput` (`plugins.rs:260`, для `page_file_*`) не участвует. Параметр подставляется в шаблон из замороженных байт; `request` после подстановки ≤ `max_transfer`. Сертификат ключа сверяется по отпечатку (как `StoreChanged`, `runner.rs:505`). Для `bound` `inputs[param]` — SHA-256 замороженного документа, а `ApprovedUse.content_sha256` берётся из него (для `Digest` — дайджест алгоритмом ключа).
 
-Реальный вызов: `now/random` подменяются теми же значениями; сеть разрешена по объявлению; первое же применение ключа с неодобренным `(kind, sha256, options)` или сверх `max_uses` → отказ `KeyUseNotApproved`, `NotApplied`.
+### 4.4 `derived` (MP3b, отдельный поздний выпуск; решается после MP0)
+Условия (ограничения от решения родителя):
+- `max_uses = 1`; `raw` и `CmsContent::Digest` для `derived` запрещены; допустимы только виды `cms/cms_ex/xml/xml_ex/xades`, содержимое — валидный UTF-8 текст.
+- **Превью полное или отказ**: Core показывает **всё** содержимое экранированным текстом, если оно ≤ `PREVIEW_MAX = 64 КиБ`; больше — отказ `PreviewTooLarge` (ключ не применён). Никакого «начала и конца». В превью: управляющие и bidi-символы заменены видимыми метками, длинные строки переносятся, прокрутка полная; показывается также SHA-256 и размер.
+- **План-прогон** (`plugin_plan`): тот же WASM, тот же `call_headless`, но `PlanBackend` с **allow-list по умолчанию «запретить»**. Разрешено: `hash`, `cert_info`, `cert_details`, `keys_describe`, `keys_chain`, `keys_release`, `xml_verify`, `platform`, `call_locale`, `now`, `local_time`, `random`, `log` (вывод отбрасывается). Запрещено (трап → `PlanUnavailable`): всё остальное, в том числе `cms_verify` (сеть и часы), `settings_get/put`, `shared_get/put`, `ca_list/ca_issuer/pkix_path` и PKI-запросы, `http*`, `page_file_*`, `core_modules`, интерактив. Трап в headless необратим для плагина (`headless.rs:88-103`), перехватить отказ он не может.
+- Ключевые импорты в плане записывают билет и возвращают нулевую заглушку подписи нужной длины, не вызывая `Engine::sign`; плагин, который проверяет заглушку или строит дальнейшее по ней, получает расхождение и **отказ при реальном применении** (билет не совпал, ключ не применён: `max_uses = 1`, второго применения нет, поэтому «отказ после частичного применения» невозможен).
+- **Детерминизм и часы.** План и реальный вызов получают одинаковые `now/local_time` (`clock_ms`, берётся при согласии) и один и тот же `random` (HKDF от свежих 32 байт на согласие). `clock_ms` в реальном вызове заморожен; `now()` не двигается, поэтому плагин, который «ждёт» по `now()`, упирается в fuel/deadline и падает трапом (границы — существующие `InstanceLimits.fuel` и дедлайн контекста). Возраст одобрения ограничен TTL = 120 с (`ApprovalExpired`), чтобы замороженное время не расходилось с реальным дольше TTL.
+- Бюджет: план и реальный вызов выполняются последовательно и не удерживают резерв одновременно (`plugins.rs:552-556`: до `max_transfer·8 + max_memory` на вызов); «двойной запуск» — это 2× fuel, ограниченный дедлайном; повторный план на то же согласие запрещён.
 
-### 4.4 Что видит пользователь (текст строит хост; ru/kk/en)
+### 4.5 Что видит пользователь (текст строит хост; ru/kk/en)
 
 ```text
-Плагин «Qoltanba (порт OpenNCALayer)» 1.0.0-beta.4   io.github…qoltanba   пакет 9f3c…a1
-Операция: sign-file   [от плагина: «Подписать файл»]
-Будет использован ключ: Иванов И. · серийный 5c…  · отпечаток 8e…  (КНЦ, до 2027-02-01)
-Файл: акт.pdf · 1 482 311 байт · SHA-256 3a7d…
-Применений ключа: 1
-  1. CMS (CAdES) с меткой времени НУЦ — документ «акт.pdf» (SHA-256 3a7d… совпадает с выбранным файлом)
-Сеть: ocsp.pki.gov.kz, tsp.pki.gov.kz
-Плагин получит подписанные данные и вернёт ответ.
+Плагин id: example.sign   версия 1.0.0   пакет SHA-256 9f3c…a1          ← доверенные поля
+Операция: sign-file       [от плагина: «Подписать файл»]                ← рамка «от плагина»
+Ключ: Иванов И. · серийный 5c… · отпечаток 8e… (до 2027-02-01)
+Файл «акт.pdf» · 1 482 311 байт · SHA-256 3a7d…
+Применение ключа: 1 раз
+  CMS (CAdES): отсоединённая; метка времени НУЦ; сопись нет; доп. атрибутов нет      ← из профиля Core
+  Подписывается файл «акт.pdf» как есть (SHA-256 совпадает)
+Сеть: ocsp.pki.gov.kz, tsp.pki.gov.kz. Плагин может передать данные только по этим адресам; документ может быть отправлен на разрешённые хосты.
 [Отмена]  [Подписать]
 ```
+Страница доступна с клавиатуры (порядок фокуса, Enter не подтверждает подпись до фокуса на «Подписать», масштаб/DPI, экранные читатели), как документное согласие. Результат (`response` плагина) показывается как plain text в рамке «от плагина»; место и имя сохранения выбирает хост (`PluginOutputBinding`), не плагин.
 
-Для `derived`: `2. XML (XMLDSig) — данные, составленные плагином: 8 412 байт, SHA-256 b1…; превью: ⟨начало 4 КиБ⟩ … ⟨конец 4 КиБ⟩` (красная рамка, строка «это не файл, который вы выбрали»). Превью — Core-функция `preview_bytes(kind, bytes)` (экранирует управляющие/bidi-символы, для XML — по тексту; для бинарных — hex). Рамка «от плагина» — обычный текст ≤ 80 симв.
+### 4.6 Совместимость с 34 портами и миграция
+- ABI и wasm не меняются. Меняются `plugins/*/plugin.toml` (+`min_core`), хеши в `plugins/workspace/registry.toml`, и **выпуск 34 новых версий пакетов через подписанный индекс обновлений** (MP11), а не «правка файла».
+- **Охват: все порты, которые могут работать** (решение родителя). MP0 строит таблицу «порт × метод → supported | unsupported(причина)». Причины unsupported перечисляются явно: требует Origin (`INVALID_ORIGIN`); использует `Dialog*`/`File*`; `keys::open/terminals`-ветка без ответа; несколько подписей за вызов; `raw` над вычисляемыми байтами (derived-raw); зависимость от состояния между вызовами (`shared/settings`). Unsupported порты показываются в окне с причиной (не скрываются, Origin не подставляется).
+- **Старые установленные версии** (без `[[operations]]`) работают по WSS как раньше; в ручном окне операций у них нет.
+- **Каталожные обновления (C14).** `added_over` расширяется: появление/изменение `[[operations]]` с `uses.key`, расширение `imports/network`, смена профиля — считается добавленной возможностью и **требует явного согласия установки** (`install_plugin.rs`); автообновление с пустым `added_over` не может молча добавить операцию с применением ключа.
 
-### 4.5 Совместимость с 34 портами и миграция
+### 4.7 Сервер, CLI, существующие гранты (условие 7)
+Решено: **модель доверия оператора для свободного `args` остаётся** (typed params + document parts в `dto.rs`/OpenAPI — отдельный будущий этап MP8b, не блокирует). Что значит «grant ⊆ объявление» при свободном `args`:
+- Для плагинов **с** `[[operations]]`: `PluginGrant.operation` обязана быть объявленной с `server = true`; `imports ⊆ uses.imports` (пустой список = все объявленные); `keys` разрешены лишь если операция объявляет применение ключа; **профиль опций принуждается Core так же, как в ручном окне** (клиент не может добавить `attrs.extra`, `Custom` TSA и т. п.); `cosign=never` и `Digest`-запрет те же. Привязать содержимое к документу сервер не может (нет типизированных параметров), поэтому для любого применения ключа обязателен явный флаг `plugin_bytes = true` в `PluginGrant` (оператор принимает «содержимое выбирает клиент/плагин», как сегодня), и билет `PluginUse` пишется в аудит. `args` по-прежнему свободный JSON клиента; хост не строит `request`, поэтому сервер защищён **импортами, профилем и ключами**, а не шаблоном.
+- Для плагинов **без** объявлений (все 34 до MP6, сторонние): поведение сервера/CLI **не меняется** — grant по меткам оператора, как сейчас; в аудит пишется `declared=false`, на старте — предупреждение «grant без объявления: профиль опций не принуждается». Это ответ на «что станет с существующими грантами портов до MP6»: они продолжают работать как раньше (deny-by-default уже обеспечен точным grant).
+- После обновления плагина до версии с объявлениями грант на неопределённую в ней `operation` **пропускается** с ошибкой в журнале (имена объявленных операций указаны), остальные работают.
+- Токены не меняются (`Action::Sign` как сегодня, `dispatch.rs:221`). Серверный `KeyUseGuard` получает те же правила билета (п. 4.2.3).
+- CLI: `--operation`/`--allow-import` валидируются против объявления; `--plugin-bytes`; `--profile` не принимается (профиль берётся из манифеста).
 
-- **ABI/wasm**: не меняются (`ABI_VERSION = 1`, `oncl-pdk/src/abi.rs:50`).
-- **`plugin.toml` (34 шт.)**: добавляются `[[operations]]` и поднимается `min_core`; изменение `registry.toml`/хешей пакетов (`plugins/workspace/registry.toml`). Операции объявляются **по факту прогона** (MP0): сначала те, что `bound`/structured и не требуют Origin; остальные остаются WSS-only без записи в манифест.
-- **Origin-порты** (C9): операции не объявляются `manual`, пока порт не работает без Origin (проверка в MP0 по каждому методу под `LocalOperator`). Origin не подставляется.
-- **Установленные ранее плагины** (устаревший манифест без `operations`): продолжают работать по WSS/интерактивному пути; в ручном окне и серверных grant, которые требуют `operation`, их операций нет (**deny by default** до установки версии с объявлением). Установка/обновление показывает пользователю список объявленных операций и видов применения ключа (расширение `install_plugin.rs`); смена `package_sha256` делает старые объявления неприменимыми.
-- **Серверные grants (`config.rs:175`)**: grant на `operation`, которой нет в объявлении, пропускается с ошибкой в журнале на старте (сервис продолжает работу, grant не создаётся); `PluginGrant` получает `plugin_bytes: bool` (по умолчанию `false`) для `derived`; `imports` в конфиге становится сужением объявленных (пустой список = все объявленные).
-- **CLI**: `oncl plugin --operation` и `--allow-import` валидируются против объявления; `--plugin-bytes` для derived.
-
-### 4.6 Отказы (типизированно, `NotApplied` до применения ключа)
+### 4.8 Отказы (типизированно)
+Подкод — поле рядом с кодом (контракт `oncl-api::ErrorCode` стабилен; MP8 добавляет структуру «код+подкод» в DTO/OpenAPI/клиент).
 
 | Причина | `ErrorCode` | Подкод | Ключ |
 |---|---|---|---|
-| Операции нет в объявлении / `manual=false` | `PermissionDenied` | `NotDeclared` | не применялся |
-| Пакет изменился после согласия | `PermissionDenied` | `PackageChanged` | не применялся |
+| Операция не объявлена / `manual=false` | `PermissionDenied` | `NotDeclared` | не применялся |
+| Пакет изменился | `PermissionDenied` | `PackageChanged` | не применялся |
 | Импорт вне объявления | `PermissionDenied` | `ImportNotDeclared` | не применялся |
-| Вид/дайджест вне одобрения, сверх `max_uses` | `PermissionDenied` | `KeyUseNotApproved` | не применялся (проверка до `Engine::sign`) |
-| План невозможен (сеть/зависимость от подписи) | `PermissionDenied` | `PlanUnavailable` | не применялся |
-| Интерактив вне §3.5 / без `PluginInteraction` | `InteractionRequired` | имя импорта | не применялся |
-| Origin требуется, а его нет | ответ плагина (`INVALID_ORIGIN`) | — | не применялся |
-| Ошибка после применения (TSA, сеть) | как сейчас (`AfterKeyUse`) | — | `Applied`/`Unknown` честно |
+| Опции не по профилю | `PermissionDenied` | `OptionsMismatch` | не применялся |
+| Билет вне одобрения / TTL / уже использован | `PermissionDenied` | `KeyUseNotApproved` / `ApprovalExpired` | не применялся (до `Engine::sign`) |
+| План невозможен / превью > 64 КиБ / не текст | `PermissionDenied` | `PlanUnavailable` / `PreviewTooLarge` | не применялся |
+| Интерактив вне §3.5 | `InteractionRequired` | имя импорта | не применялся |
+| Origin нужен | ответ плагина | — | не применялся |
+| Ошибка **после** применения (TSA, сеть) | как сейчас (`AfterKeyUse`) | — | `Applied`/`Unknown` честно |
+
+Утверждение «отказ всегда до ключа» верно потому, что применений ровно одно (`max_uses = 1`): все проверки предшествуют первому и единственному применению; поэтому не бывает состояния «первая подпись применена, вторая отклонена».
 
 ## 5. Аудит
+BEGIN на применение ключа: `plugin_id`, `package_sha256`, `version`, `operation`, `caller`, `kind`, `content_sha256` (или дайджест `Digest`), `options_sha256`, `bound|derived`, `consent_id` (ручное) / `grant_id` + `declared` (сервер), `key_id`. FINAL: `applied`, `succeeded`, код. Нет FINAL → `Unknown`. Источник — `KeyUseEvent.plugin` и `KeyUseGuard::before_use/finish` (`runner.rs:107-130`, `crates/oncl-server/src/audit.rs`). Байты и превью в аудит не пишутся.
 
-- BEGIN: на каждое применение ключа плагином — `plugin_id`, `package_sha256`, `operation`, `caller` (`LocalOperator("desktop-manual")` | `ServiceClient(token id)` | `Browser{origin}`), `kind`, `content_sha256`, `content_len`, `bound|derived`, `consent_id` (ручное) или `grant_id` (сервер), `key_id`. Источник — расширенное `KeyUseEvent` (§4.2) и существующий `KeyUseGuard::before_use/finish` (`runner.rs:107-130`) и аудит сервера (`crates/oncl-server/src/audit.rs`).
-- FINAL: `applied`, `succeeded`, код ошибки. Нет FINAL после падения процесса — `Unknown` (как уже сделано в `audit.rs`).
-- В аудит не пишутся байты содержимого и превью, только дайджесты.
-
-## 6. Таблица атак (вредоносный плагин)
+## 6. Таблица атак (вредоносный плагин / клиент)
 
 | Атака | Защита | Остаточный риск |
 |---|---|---|
-| Подписать выбранные плагином байты | `ApprovedUse(sha256)` сверяется Core по фактическим `args` до `Engine::sign` (§4.2); `raw` только `bound` | `derived` — пользователь видит превью: оценка человека, не доказательство |
-| Подмена операции (плагин заявляет «check», подписывает) | Операцию и шаблон запроса выбирает хост из манифеста; импорт/вид вне объявления → `ImportNotDeclared`/`KeyUseNotApproved`. Объявление, показывающее «подпись», — часть согласия; заявленный `label` только в рамке | Плагин может объявить честный `sign`, но лживый `label` — пользователь видит рамку «от плагина», доверенные строки генерирует хост |
-| Confused deputy между операциями | `PluginPermission` на `(plugin_id, operation, caller)` (C1) и `ApprovedUse.operation`; одобрение A не покрывает B (тест) | — |
-| TOCTOU согласие→вызов (файл, пакет, сертификат) | Параметры замораживаются один раз (`FrozenInput`, `plugins.rs:260`), дайджест считается по замороженным байтам, не по пути; `package_sha256` сверяется; `now/random` детерминированы | Аппаратный токен/хранилище подменены между согласием и вызовом: сверяется отпечаток сертификата (как `StoreChanged` в `runner.rs:~500`) |
-| Расхождение план↔реальный вызов (плагин ведёт себя иначе второй раз) | Реальное применение сверяется с одобрением, любое отличие — отказ до ключа | Плагин может «подписать меньше, чем одобрено» — безопасно; может не подписать вовсе — отказ/ошибка плагина |
-| Инъекция текста в UI (`label`, `detail`, диалоги, `response`) | Доверенные строки — из объявления и Core; `label`/диалоги плагина — plain text, ≤ длин, bidi/управляющие экранируются, рамка «от плагина», `response` не рендерится в доверенной области | Социальная инженерия внутри рамки «от плагина» |
-| Исчерпание ресурсов (план, цикл, память, подписи) | Тот же `InstanceLimits`/fuel/бюджет Core; один план; `max_uses`; лимит `request ≤ max_transfer`; потолок размера превью и числа `[[uses.key]]` (≤ 8) | План удваивает CPU на вызов; ограничен лимитом fuel |
-| Подмена ключа/handle | Ключ выбирает пользователь; `PluginKeyBinding` один; `KeysSelect` отвечает только им (§3.5) | — |
-| Скрытая сеть в плане (утечка до согласия) | В плане сеть/файлы/shared запрещены (`PlanDenied`) | — |
-| Повтор одобрения | `PluginApproval` не `Clone`, потребляется вызовом; `consent_id` разовый | — |
-| Серверный grant шире объявления | Валидация при старте; без `plugin_bytes` `derived` недоступен | Оператор сознательно разрешил — его ответственность |
+| Подписать выбранные плагином байты | билет сверяется в `before_use` с `ApprovedUse` (SHA-256 содержимого); `raw`/`Digest` только `bound` | `derived` — оценка человека по полному превью (этап MP3b) |
+| Опции подписи вне показанного (`attrs.extra`, `econtent_type`, `cosign`, custom TSA, XML `placement/signature_method`, XAdES `level`) | профиль принуждается Core; `options_sha256` входит в билет; `cosign=never` | — |
+| `CmsContent::Digest` (содержимое неизвестно хосту) | для `bound` Core считает дайджест документа алгоритмом ключа; для `derived` запрещён | — |
+| Сопись/вложенный CMS: `args.content` ≠ реально подписанное | `cosign` принудительно `never`; билет по эффективному содержимому | — |
+| Спуфинг операции (плагин «check» подписывает) | `request` строит хост; импорты/вид ⊆ объявление; билет | Лживый `label` виден лишь в рамке «от плагина» |
+| Спуфинг доверенной области именем плагина (`Manifest.name` у автора) | доверенны только `id`, `package_sha256`, `version`; `name/label/description` — в рамке «от плагина» | Социальная инженерия внутри рамки |
+| Confused deputy между операциями | `PluginPermission(plugin_id, operation, caller)` + `ApprovedUse.operation` | — |
+| TOCTOU согласие→вызов (файл, пакет, сертификат, часы) | заморозка документа до сборки `request`; сверка по дайджесту замороженных байт; `package_sha256`; отпечаток сертификата; TTL 120 с; `clock_ms` | A→B→A закрыт сверкой байт, а не пути |
+| Тихое каталожное обновление добавляет операцию с ключом | `added_over` расширен (C14): `[[operations]]` с `uses.key` требует явного согласия установки | — |
+| Повтор/подмена одобрения | не `Clone`, одноразовое, привязано к `OperationId`, TTL | — |
+| Подмена ключа/handle; `keys::terminals`/`keys_open` | единственный привязанный ключ; `terminals` → `[]`; `keys_open` → порт unsupported (трап до ключа) | — |
+| Диалоги/UI плагина как согласие | `Dialog*` запрещены; ключевой выбор отвечает Core | — |
+| Отправка документа плагином по сети | в согласии: сеть и адреса, явная фраза «документ может быть отправлен на разрешённые хосты»; адреса — точный список или PKI-хосты; в плане сеть запрещена | Разрешённый хост (`*.gov.kz`) получает данные — решает пользователь, читая согласие |
+| UI-инъекция (`label`, `response`, превью) | plain text, длины ограничены, bidi/управляющие экранированы; `response` в рамке | — |
+| Исчерпание ресурсов (двойной запуск, превью огромное) | один план; 2× fuel под дедлайном; план и вызов не держат резерв одновременно; превью ≤ 64 КиБ или отказ; `request ≤ max_transfer` | Ограниченный CPU |
+| Результат: плагин навязывает путь сохранения | место и имя выбирает хост (`PluginOutputBinding`) | — |
+| Серверный клиент подсовывает опции/метод в свободный `args` | профиль принуждается Core; импорты/ключи по гранту; для ключа нужен `plugin_bytes`; метод в `args` оператор доверяет | Оператор принял «содержимое выбирает клиент» |
+| Серверный grant шире объявления | валидация при загрузке; недоговорный grant пропускается | — |
 
-## 7. Ruled decisions (приняты, не требуют ответа)
+## 7. Решения (ruled)
+- **R1.** ABI не меняется; B/ABI v2 — MP13, отдельно.
+- **R2.** Согласие не хранится; каждый вызов подтверждается заново.
+- **R3.** Deny-by-default для ручного окна: плагин без `[[operations]]` в нём не виден. Серверные/CLI-гранты плагинов без объявлений не меняются (§4.7).
+- **R4.** `raw` и `Digest` — только `bound`. `derived` — только MP3b, при `max_uses=1`, виды текста, полное превью ≤ 64 КиБ.
+- **R5.** Origin не подставляется; Origin-порты — unsupported с причиной.
+- **R6.** `Dialog*` запрещены (пересмотрено, ревизия 1 разрешала).
+- **R7.** Охват: все порты, которые могут работать, по MP0; unsupported перечислены с причиной.
+- **R8.** `Action::PluginSign` не вводится: билет + отдельный гард; токены не меняются.
+- **R9.** `max_uses = 1` во всех операциях ручного окна.
+- **R10.** Опции — профиль из манифеста, принуждаемый Core; `cosign=never`; `Custom` TSA и `attrs.extra` запрещены.
+- **R11.** Единственная авторитетная проверка — `before_use` по билету; проверка в бэкенде лишь предварительная.
+- **R12.** Хеш пакета передаётся в `PluginRegistry::install`; политика реестра — `KeyScope::Declared`, ключ — в пер-вызовном grant.
+- **R13.** Каталожное обновление с изменёнными `[[operations]]` — повторное согласие (`added_over` расширен).
+- **R14.** Сервер: свободный `args`, профиль принуждается, `plugin_bytes=true` обязателен; типизированные параметры сервера — MP8b, позже.
 
-- **R1.** ABI не меняется; изменения — манифест + Core + UI. B/ABI v2 — отдельный будущий план (MP8).
-- **R2.** Согласие не сохраняется; запрос подтверждения — на каждый вызов. Причина: инвариант 4.
-- **R3.** Плагин без `[[operations]]` не виден ручному окну и серверным grant, которые требуют `operation`; WSS/интерактивный путь не меняется. Причина: deny-by-default, нет миграции вслепую.
-- **R4.** Plugin-derived `raw` в ручном окне запрещён; derived `cms/xml/xades` — разрешён с превью (вопрос Q1 — только про его допустимость в принципе).
-- **R5.** Ручной Origin не подставляется; Origin-порты — WSS-only до проверки в MP0.
-- **R6.** Диалоги плагина в ручном окне допустимы (`DialogMessage/Confirm/Choice`) в рамке «от плагина», но никогда не равны согласию на подпись.
-- **R7.** Серверный grant без пригодного объявления пропускается (не валит сервер), с ошибкой в журнале.
-- **R8.** `Action::PluginSign` вводится отдельно от `Sign` (иначе гард C8 не различает).
-- **R9.** Размер документа параметра ограничен `max_transfer/4` (base64); большие документы плагинами в ручном окне не обрабатываются — честный `InputLimit`.
-- **R10.** Заглушка подписи в плане нулевая нужной длины; если плагин её проверяет, `PlanUnavailable`.
-
-## 8. Вопросы, требующие решения пользователя
-
-**Q1. Разрешать ли `derived`-содержимое (CMS/XML/XAdES, составленное самим плагином) в ручном окне, с превью и дайджестом, или только `bound` (подписывается ровно выбранный файл)?**
-Рекомендация: разрешать с превью (иначе ~половина портов недоступна в ручном окне: XML-порты `esf-osdkz`, `taxtech` и др. строят XML сами). Альтернатива «только bound» проще (нет плана и детерминизма, MP3b выпадает) и безопаснее, но урезает функциональность.
-
-**Q2. Охват портов первой поставки: все 34 сразу (MP6, ~6 PR по 6 портов) или «витрина» из 5–6 портов (`qoltanba` и ещё по одному на каждый вид: CMS, XML, XAdES, bound-raw, derived-XML), остальные — позже?**
-Рекомендация: витрина, затем волны. Причина: каждый порт требует прогона под `LocalOperator` (Origin, интерактив) и паритет-теста; ошибка в объявлении безопасна (отказ), но стоит времени ревью.
-
-Остальное решено в §7.
+## 8. Вопросы пользователю
+Нет. Q1/Q2 решены (derived со строгими условиями, поэтапно; охват — все пригодные порты по MP0).
 
 ## 9. План реализации
 
 ### 9.1 Файлы и модули
-
 | Область | Файлы |
 |---|---|
-| Манифест | `crates/oncl-plugin/src/manifest.rs` (+ `Operation, Param, Uses, KeyUseDecl`, разбор/проверка), `package.rs`, `store.rs` (хранить `package_sha256`), `plugins/workspace/registry.toml`, `docs/design/plugins.md` |
-| Хост-типы Core | `crates/oncl-core/src/plugins.rs` (`from_operation`, `plugin_request`, `plugin_plan`, `plugin_call_approved`, `PluginApproval`), `plugins/plan.rs` (новый), `plugins/{cms,xml}.rs` (вычисление дайджеста применения), `keys.rs` (`KeyUseEvent::plugin`), `policy.rs` (`Action::PluginSign`), `error.rs` (подкоды) |
-| Runtime | `crates/oncl-plugin/src/headless.rs` (`PluginInteraction`, детерминированные `now/random`, режим плана), `host.rs` без изменений ABI |
-| UI | `crates/oncl-ui/src/workspace/{operations.rs,tools.rs}` (страница «Плагины»), `workspace/plugins.rs` (новый: список операций, параметры, консент, раннер), `signing/runner.rs` (`ConsentGuard` для `PluginSign`), `signing/controller.rs` (`PluginConsent`), `ui/workspace.slint`/`plugins.slint`, `install_plugin.rs` (показ операций) |
-| Сервер/CLI | `crates/oncl-server/src/{config.rs,service.rs,audit.rs}`, `service/operations/dispatch.rs:1500-1540`, `crates/oncl-cli/src/plugin.rs` |
-| Порты | `plugins/*/plugin.toml` (34), `plugins/workspace/registry.toml`, `crates/oncl-port-tests/tests/` |
-| Инструмент | `xtask` (`plugin-ops-check`: линтер объявлений) |
-| Документы | `docs/design/plugins.md`, `docs/design/platform.md §8.3`, план (поправка §9.4), `docs/user/…` |
+| Манифест | `crates/oncl-plugin/src/manifest.rs` (`RawManifest` + `Operation/Param/Uses/KeyUseDecl/Profile`, `added_over`), `package.rs`, `store.rs`, `plugins/workspace/registry.toml`, `docs/design/plugins.md` |
+| Core | `crates/oncl-core/src/plugins.rs` (`install` с хешем, `KeyScope`, `from_operation`, `plugin_request`, `plugin_call_approved`), `plugins/{approval,plan}.rs` (новые), `plugins/{cms,xml}.rs`, `keys.rs` (`KeyUseEvent.plugin`, билет в `sign_digest`), `context.rs` (`plugin_ticket`), `error.rs` (подкоды) |
+| Runtime | `crates/oncl-plugin/src/headless.rs` (`PluginInteraction`, `now/random`, режим плана) |
+| Desktop wiring | `crates/openncalayer/src/plugins.rs` (построение `PluginRegistry` из `Store`, хеш пакета, обновление при смене версии, `added_over`), `crates/openncalayer/Cargo.toml`, `crates/oncl-ui/Cargo.toml` (`oncl-core/plugins`; размер бинаря) |
+| UI | `crates/oncl-ui/src/workspace/{operations.rs,tools.rs,plugins.rs}`, `signing/{runner.rs,controller.rs}` (`PluginConsentGuard`, `PluginConsent`), `ui/{workspace,plugins}.slint`, `install_plugin.rs` |
+| API/сервер/CLI | `crates/oncl-api/src/{dto.rs,openapi.rs,client.rs}` (подкоды, `plugin_bytes`), `crates/oncl-server/src/{config.rs,service.rs,audit.rs}`, `service/operations/dispatch.rs`, `crates/oncl-cli/src/plugin.rs`, `docs/user/{http-api,cli,server}.md` |
+| Порты/выпуск | `plugins/*/plugin.toml` (34), `registry.toml`, `crates/oncl-port-tests/tests/`, подписанный индекс обновлений (`update-index.md`) |
+| Инструмент | `xtask` (`plugin-ops-check`) |
 
 ### 9.2 Тесты (поведенческие)
-
-Core (`crates/oncl-core/tests/plugin_manual.rs`, на реальном synthetic WASM как `plugin_access.rs`):
-
-- `undeclared_operation_is_denied` / `import_outside_declaration_is_denied`
-- `forged_operation_name`: guest подставляет другую `operation` в запросе — Core игнорирует; согласие операции A не позволяет вызвать B
-- `a_b_a_swap`: согласие на документ A; между планом и вызовом путь заменён на B и возвращён на A — применён ключ к замороженным байтам A или отказ; мутация «дайджест по пути» убивается
-- `key_use_with_other_bytes_is_not_applied`: плагин подписывает не то, что одобрено → `KeyUseNotApproved`, `NotApplied`, счётчик `applications() == 0`
-- `raw_over_plugin_bytes_is_refused_in_manual`
-- `plan_has_no_side_effects`: сеть/файл/settings/shared в плане → `PlanDenied`, счётчики хоста нулевые
-- `plan_equals_call_bytes_with_deterministic_clock_and_random`
-- `package_changed_after_consent`
-- `approval_is_single_use`, `max_uses_enforced`
-- `selection_answers_only_bound_key`: `keys_select` возвращает только привязанный ключ; несовпавший фильтр → `None`
-- `dialog_answer_is_not_consent`
-- `manual_call_has_no_origin`: порт с проверкой Origin отвечает `INVALID_ORIGIN`, ключ не применён
-
-Сервер/CLI: `grant_outside_declaration_is_skipped_with_error`, `derived_needs_plugin_bytes_flag`, `unattended_interaction_required_unchanged`, аудит BEGIN/FINAL содержит plugin id/operation/digest.
-
-UI: консент-текст строится только из объявления/Core (мутация: подстановка `label` в доверенную строку убивается), `preview` экранирует bidi, окно закрывается в состоянии `Running` по тем же правилам, что подпись, и тест `confirm → swap → run` (как C3 U03).
-
-Порты: для каждого `manual` порта один тест под `LocalOperator` через `plugin_call_approved` (реальная операция, не эхо) + сверка независимым верификатором (OpenSSL/lxml как в `plan` Task 30 smoke).
+Core (`crates/oncl-core/tests/plugin_manual.rs`, реальный synthetic WASM):
+`undeclared_operation_is_denied`, `import_outside_declaration_is_denied`, `forged_operation_name` (операцию задаёт хост-`request`, плагин её не видит и не выбирает), `a_b_a_swap` (A→B→A: подписывается замороженный A или отказ; мутация «дайджест по пути» убивается), `key_use_with_other_bytes_is_not_applied` (`applications()==0`), `options_outside_profile_are_refused` (`attrs.extra`, `econtent_type`, `Custom` TSA, `placement`, XAdES level — по отдельному кейсу; мутация «опции не в билете» убивается), `cosign_auto_is_forced_never_and_cannot_mislead`, `prehashed_bound_uses_key_algorithm_digest`, `prehashed_derived_refused`, `raw_over_plugin_bytes_refused`, `ticket_without_event_is_refused` и `document_guard_refuses_plugin_ticket`, `approval_is_single_use`, `approval_expired`, `package_changed_after_consent` (хеш в `install`), `declared_policy_with_per_call_key` (ключ только из grant вызова), `selection_answers_only_bound_key`, `terminals_answers_empty_and_keys_open_traps`, `dialogs_are_interaction_required`, `manual_call_has_no_origin`. MP3b: `plan_has_no_side_effects`, `plan_allowlist_denies_by_default` (cms_verify, settings_get, shared_get, ca_list), `plan_equals_call_bytes_with_frozen_clock`, `now_loop_hits_fuel`, `preview_over_limit_refused`, `derived_multi_use_refused`.
+Сервер/CLI: `declared_plugin_grant_enforces_profile`, `server_key_use_needs_plugin_bytes`, `undeclared_plugin_grants_unchanged`, `grant_for_unknown_operation_is_skipped`, `tokens_unchanged`, аудит BEGIN/FINAL содержит билет.
+UI: консент-текст строится из объявления/профиля Core (мутация «`name` или `label` в доверенной строке» убивается), превью экранирует bidi, `confirm → swap → run`, фокус/Enter/DPI страницы согласия, закрытие окна в `Running`.
+Установка/каталог: `catalog_update_adding_key_operation_requires_consent`.
+Порты: на каждый supported порт один тест через `plugin_call_approved` (реальная операция) + независимый верификатор; для unsupported — тест, что причина отображается.
 
 ### 9.3 Стадии (независимо ревьюируемые)
-
 | Задача | Содержание | Владелец (outline брифа) | Зависит |
 |---|---|---|---|
-| **MP0** | Инвентаризация: `Compiled::imports()` каждого из 34 wasm; для каждого метода — интерактив, ключевые виды, Origin под `LocalOperator`; таблица `docs/design/manual-plugins-inventory.md`. Без кода продукта. | один агент, read-only + тестовый прогон | — |
-| **MP1** | Схема `[[operations]]`, парсинг и проверки (§4.1), `package_sha256`, `min_core`; тесты отказов (дубликаты, плейсхолдеры, imports ⊄ compiled) | `oncl-plugin`: manifest/package/store | — |
-| **MP2** | `PluginPermission::from_operation`, `install` с `⊆ declared`, `plugin_request`, сервер/CLI-валидация grant, `plugin_bytes`; deny-by-default миграция | `oncl-core` + `oncl-server` + `oncl-cli` | MP1 |
-| **MP3a** | `Action::PluginSign`, расширение `KeyUseEvent`, `PluginApproval`, bound-проверка до `Engine::sign`, подкоды, аудит | `oncl-core` | MP2 |
-| **MP3b** | `plugin_plan`, `PlanBackend`, детерминизм `now/random`, превью `preview_bytes` (derived); пропуск при Q1=bound-only | `oncl-core` + `oncl-plugin/headless.rs` | MP3a |
-| **MP4** | `PluginInteraction`, Core-ответ `KeysSelect/Choose/Flow*`, диалоги в рамке; без интерфейса — прежнее поведение | `oncl-plugin/headless.rs` + `oncl-core` | MP2 |
-| **MP5** | Страница «Плагины» в ручном окне: список операций, параметры, консент-страница, раннер, отчёт; `install_plugin.rs` показывает операции | `oncl-ui` (+ slint) | MP3a, MP4 (и MP3b) |
-| **MP6** | Объявления портов (по волнам по ≤ 6; витрина первой, Q2), паритет-тесты, регистрация | один агент на волну | MP0, MP1, MP3a |
-| **MP7** | Документация: `plugins.md`, `platform.md §8.3`, user-доки; правка плана (§9.4); smoke нативного окна | один агент | MP5 |
-| **MP8** (отдельно, не блокирует) | ABI v2 `oncl_prepare/oncl_finish` (модель B) для derived-raw портов | отдельный план | — |
+| **MP0** | Инвентаризация: `Compiled::imports()` 34 wasm; по каждому методу — интерактив, ключевые виды, опции, число подписей, Origin под `LocalOperator`, состояние; таблица supported/unsupported с причинами в `docs/design/manual-plugins-inventory.md`; решение о запуске MP3b | read-only + прогон | — |
+| **MP1** | Схема `[[operations]]`, профиль, проверки разбора, `added_over`, `min_core` | `oncl-plugin` manifest/package | — |
+| **MP2** | `install` с `package_sha256`, `KeyScope::Declared`, `from_operation`, `plugin_request`, deny-by-default | `oncl-core` plugins | MP1 |
+| **MP3a-1** | `ctx.plugin_ticket`, `KeyUseEvent.plugin`, `PluginConsentGuard`, серверный гард; отказ документного гарда на билет | `oncl-core` keys/context | MP2 |
+| **MP3a-2** | `PluginApproval`, принуждение профиля, `cosign=never`, `bound` и `Digest`-bound, TTL, `max_uses=1` | `oncl-core` approval | MP3a-1 |
+| **MP3a-3** | Подкоды (`oncl-core` ошибки + контракт DTO), аудит BEGIN/FINAL | `oncl-core` + `oncl-server` audit | MP3a-2 |
+| **MP3b** | `plugin_plan`, allow-list, детерминизм, полное превью ≤ 64 КиБ; **отдельный выпуск**, старт после MP0 | `oncl-core` + `oncl-plugin` | MP3a-3, MP0 |
+| **MP4** | `PluginInteraction` (ключевой выбор по привязанному ключу, `terminals`, запрет диалогов) | `oncl-plugin/headless.rs` | MP2 (параллельно MP1–MP2 допустимо) |
+| **MP5a** | Страница «Плагины»: список операций (+unsupported с причиной), параметры, раннер, отчёт | `oncl-ui` | MP3a-2, MP4, MP7 |
+| **MP5b** | Страница согласия (доверенные поля, профиль, сеть) и доступность (фокус/Enter/DPI/screen reader) | `oncl-ui` + slint | MP5a |
+| **MP5c** | `install_plugin.rs`: показ операций; повторное согласие при смене `[[operations]]` | `oncl-ui` | MP1 |
+| **MP6** | Объявления портов волнами ≤ 6, по MP0; тесты портов | по агенту на волну | MP0, MP1, MP2, MP3a-3, MP4 (+MP3b для derived-операций) |
+| **MP7** | Desktop: `openncalayer/src/plugins.rs` (реестр из `Store`, хеш, обновление), feature `oncl-core/plugins` для `oncl-ui/openncalayer`, размер бинаря | `openncalayer` | MP2 |
+| **MP8** | `oncl-api` DTO/OpenAPI/клиент: подкоды, `plugin_bytes`; сервер/CLI-валидация против объявления; `docs/user` | `oncl-api/server/cli` | MP3a-3 |
+| **MP8b** (позже, не блокирует) | Типизированные параметры и document parts для серверной операции плагина | отдельный план | MP8 |
+| **MP9** | CLI `oncl plugin`: валидация, `--plugin-bytes`, тесты | `oncl-cli` | MP8 |
+| **MP10** | `cargo xtask plugin-ops-check` (линтер объявлений: imports ⊆ compiled, `max_uses=1`, raw/derived, плейсхолдеры) | `xtask` | MP1 |
+| **MP11** | Выпуск 34 новых версий пакетов: `registry.toml`, хеши, подписанный индекс (`update-index.md`) | релизный агент | MP6 |
+| **MP12** | Документация (`plugins.md`, `platform.md §8.3`, user-доки), нативный smoke | один агент | MP5b, MP11 |
+| **MP13** (отдельно) | ABI v2 `oncl_prepare/oncl_finish` (модель B) для derived-raw | отдельный план | — |
 
-Каждая задача: RED-тест → GREEN → фокусные `cargo test -p …`; общий CI-прогон один раз в конце, как в плане.
+Каждая задача: RED-тест → GREEN → фокусные `cargo test -p …`; общий CI один раз в конце, как в плане.
 
 ### 9.4 Точная поправка плана
+В `docs/superpowers/plans/2026-11-02-platform.md`, Task 30, **второй** пункт чек-листа (строка `plan:495`): блок `**[ОТКРЫТО, 2026-11-05: …]**` заменить (от маркера `**[ОТКРЫТО, 2026-11-05:` до закрывающего `]**` пункта) на:
 
-В `docs/superpowers/plans/2026-11-02-platform.md`, Task 30, второй пункт: заменить блок **`[ОТКРЫТО, 2026-11-05: … manual-plugins остановлены на дизайн-решении … рекомендация ревью — (C) не предлагать plugins в окне инструментов и …]`** на:
+> **[ПЕРЕНАЗНАЧЕНО, 2026-11-07: «поддерживаемые plugins» в ручном окне исполняются по `docs/design/manual-plugins.md` (вариант A, гибрид C): операции и профиль подписи в манифесте, билет применения ключа в `KeyUseGuard::before_use`, `bound` первым, `derived` отдельным этапом; диалоги плагина запрещены; Origin не подставляется; непригодные порты перечисляются с причиной. Задачи MP0–MP12 (Task 30P). Encrypt/decrypt/recipients по-прежнему исключены до G01/G02.]**
 
-> **[ПЕРЕНАЗНАЧЕНО, 2026-11-07: «поддерживаемые plugins» в ручном окне исполняются по `docs/design/manual-plugins.md` (вариант A, гибрид): операции в манифесте, согласие по дайджесту, raw над байтами плагина не предлагается; задачи MP0–MP7. Task 30 в части plugins закрывается после MP5/MP7; остальные пункты Task 30 от этого не зависят.]**
+Добавить после Task 30:
 
-и добавить после Task 30 раздел:
+> ### Task 30P — MP0–MP12: плагины в ручном окне
+> **Files:** `crates/oncl-plugin/src/{manifest,package,store,headless}.rs`, `crates/oncl-core/src/{plugins.rs,plugins/{approval,plan}.rs,keys.rs,context.rs,error.rs}`, `crates/oncl-ui/src/workspace/plugins.rs`, `crates/oncl-ui/ui/plugins.slint`, `crates/openncalayer/src/plugins.rs`, `crates/oncl-api/src/{dto,openapi,client}.rs`, `crates/oncl-server/src/{config,service,audit}.rs`, `crates/oncl-cli/src/plugin.rs`, `plugins/*/plugin.toml`, `xtask`, `docs/design/{plugins,platform}.md`, `docs/user/*`.
+> **Interfaces:** `[[operations]]` манифеста с профилем подписи; `PluginApproval`, `PluginUse` (билет), `Engine::plugin_request/plugin_call_approved/plugin_plan`; ABI `ABI_VERSION = 1` и токены не меняются.
+> - [ ] MP0 инвентаризация (supported/unsupported с причинами) → MP1 схема → MP2 реестр/хеш/`KeyScope::Declared` → MP3a-1/2/3 билет, одобрение, профиль, подкоды, аудит → MP4 ключевой выбор → MP7 desktop wiring → MP5a/b/c UI и доступность → MP8/MP9 API/сервер/CLI → MP10 линтер → MP6 порты волнами → MP11 выпуск пакетов → MP12 документация и smoke. MP3b (`derived`) — отдельный поздний выпуск по итогам MP0.
+> - [ ] RED/GREEN: тесты §9.2 документа дизайна (`a_b_a_swap`, `key_use_with_other_bytes_is_not_applied`, `options_outside_profile_are_refused`, `forged_operation_name`, `catalog_update_adding_key_operation_requires_consent`); мутации «дайджест по пути», «опции не в билете», «`name`/`label` в доверенной строке» убиваются.
+> - [ ] Не подставлять Origin; не сохранять согласие; `Dialog*` запрещены; `raw`/`Digest` только `bound`; не менять ABI и токены.
 
-> ### Task 30P — MP0–MP7: плагины в ручном окне
-> **Files:** `crates/oncl-plugin/src/{manifest,package,store,headless}.rs`, `crates/oncl-core/src/{plugins.rs,plugins/plan.rs,keys.rs,policy.rs,error.rs}`, `crates/oncl-ui/src/workspace/plugins.rs`, `crates/oncl-server/src/{config,service,audit}.rs`, `crates/oncl-cli/src/plugin.rs`, `plugins/*/plugin.toml`, `docs/design/{plugins,platform}.md`.
-> **Interfaces:** `[[operations]]` манифеста; `PluginOperation`, `Engine::plugin_request/plugin_plan/plugin_call_approved`, `PluginApproval`, `Action::PluginSign`; ABI `ABI_VERSION = 1` не меняется.
-> - [ ] MP0 инвентаризация портов; MP1 схема манифеста; MP2 grants ⊆ объявление, deny-by-default; MP3a/b привязка применения ключа к дайджесту и план; MP4 Core-ответ ключевого выбора; MP5 страница; MP6 порты волнами; MP7 документация и smoke.
-> - [ ] RED/GREEN: тесты §9.2 документа дизайна, включая `a_b_a_swap`, `key_use_with_other_bytes_is_not_applied`, `forged_operation_name`; мутации «дайджест по пути», «`label` в доверенной строке» убиваются.
-> - [ ] Не подставлять Origin; не сохранять согласие; plugin-chosen `raw` в ручном окне не предлагать; не менять ABI.
-
-В строке «Не выбранные функции … plugin-form schema …» (`plan:630`) добавить пояснение: `[[operations.params]]` — типизированные параметры одной операции (документ, текст, выбор, флаг), а не конструктор форм настроек плагина; невыбранная «plugin-form schema» остаётся невыбранной.
+В строке «Не выбранные функции … plugin-form schema …» (`plan:630`) добавить пояснение: `[[operations.params]]` — типизированные параметры одной операции, а не конструктор форм настроек плагина.
 
 ## 10. Риски и оговорки
-
-- Оценка `derived` превью — человеческая. Если пользователь ответит на Q1 «только bound», MP3b и детерминизм не делаются.
-- Доля портов, годных к ручному окну без Origin и без недетерминированных зависимостей, неизвестна до MP0 ([ПРЕДПОЛОЖЕНИЕ]: часть XML-портов проверяет сайт).
-- Подкоды ошибок требуют согласования с публичным контрактом `oncl-api` (`ErrorCode` стабилен): подкод — поле, а не новый код.
-- Номера строк в таблице C1–C11 привязаны к tip `08891678`; при исполнении сверять.
+- Доля портов, годных к ручному окну, мала или неизвестна до MP0 (Origin/диалоги/`keys::open`); возможна ситуация, когда в первом выпуске supported — единицы портов. Решение «все пригодные» не сужается.
+- `derived` (MP3b) — оценка человека по полному превью; выпуск откладывается до MP0 и может не состояться, если пригодных derived-портов нет.
+- Подкоды ошибок меняют публичный контракт `oncl-api` (поле, а не новый код) и требуют обновления OpenAPI/клиента (MP8).
+- `cosign=never` для простого `KeysSignCms` — осознанное отличие от унаследованной семантики `Auto` в ручном окне.
+- Номера строк привязаны к tip `08891678`; при исполнении сверять.
