@@ -84,6 +84,32 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path plugins/Cargo.toml
+      # The oracles of the tests that compare the workspace with tools that do not share its
+      # code. Those tests FAIL without them (nothing is skipped): pyHanko, lxml, cryptography
+      # and asn1crypto from xtask/assets/oracle/requirements.txt in a virtualenv, and an OpenSSL
+      # 3 that has `cms` and `pkcs12 -legacy` (the Linux and Git for Windows ones; macOS ships
+      # LibreSSL, so Homebrew's).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Oracle environment (pyHanko 0.38.0, OpenSSL)
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/oracle"
+          if [ "$RUNNER_OS" = Windows ]; then
+            py="$RUNNER_TEMP/oracle/Scripts/python.exe"
+          else
+            py="$RUNNER_TEMP/oracle/bin/python"
+          fi
+          "$py" -m pip install --require-virtualenv -r xtask/assets/oracle/requirements.txt
+          "$py" -c "import pyhanko, lxml, cryptography, asn1crypto, gostcrypto"
+          echo "ONCL_PYHANKO_PYTHON=$py" >> "$GITHUB_ENV"
+          # Linux: openssl from apt (on PATH). Windows: the tests find Git for Windows'
+          # openssl.exe under ProgramFiles themselves (docs/user/cli.md), nothing to export.
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+            echo "ONCL_OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+          fi
       - name: Test
         shell: bash
         run: |
@@ -93,7 +119,15 @@ jobs:
           fi
           cargo xtask fetch-fixtures
           # The built-in modules' benchmarks (`bench_*`) run in release, in the `bench` job.
-          cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ --skip bench_ "${skip[@]}"
+          # Ignored tests this job does not run: the two that write more than 4 GiB of real
+          # bytes (run by hand, release probes), and two developer tools that need their own
+          # input (`ONCL_DENSE_PDF`, `LOOPBACK_PKI_DIR`). Every other ignored test runs here,
+          # fixtures and oracles included: the parity tests of oncl-ui run the `oncl` binary
+          # that this very `cargo test` builds (target/debug/oncl). A missing oracle fails them.
+          cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ --skip bench_ \
+            --skip offset_over_4gib --skip common_region_replay_crosses_four_gib \
+            --skip external_dense_pdf_signs_and_verifies --skip serve_a_synthetic_authority_until_stdin_closes \
+            "${skip[@]}"
       # The built-in modules' tests again with no markers for the long strings of a request
       # (the modules read them as the tests sent them): the same tests pass both ways.
       - name: Built-in modules without markers
@@ -116,6 +150,12 @@ jobs:
       - name: CMS interop with OpenSSL
         if: runner.os == 'Linux'
         run: cargo xtask interop-openssl
+      # Offline and read-only (about 3 s): the SDK's dependency closure against the forbidden
+      # crates. `cargo xtask sdk smoke` (packs and builds the chain, about 75 s warm) stays a
+      # manual gate: its offline consumer resolve was not tried against a cold CI cache.
+      - name: SDK dependency closure
+        if: runner.os == 'Linux'
+        run: cargo xtask sdk closure
 
   # The built-in modules' limits in a 32-bit process, where their memory is smallest.
   builtins-x86:

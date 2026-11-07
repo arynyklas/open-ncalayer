@@ -70,7 +70,9 @@ impl From<der::Error> for AdesError {
 fn fatal(error: &AdesError) -> bool {
     match error {
         AdesError::Processing(_)
-        | AdesError::Evidence(EvidenceError::Processing(_) | EvidenceError::Limit) => true,
+        | AdesError::Evidence(
+            EvidenceError::Processing(_) | EvidenceError::Limit | EvidenceError::InvalidLimits(_),
+        ) => true,
         AdesError::Stream(StreamError::Processing(_) | StreamError::MissingTemporaryStore) => true,
         AdesError::AfterKeyUse { source, .. } => fatal(source),
         AdesError::Cms(crate::cms::CmsError::Key(_)) => true,

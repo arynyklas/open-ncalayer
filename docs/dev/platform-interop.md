@@ -13,7 +13,7 @@
 | `pyhanko` 0.38.0 | PAdES: целостность, доверие, DSS, метки документа | RSA PDF |
 | `lxml`, `cryptography`, `asn1crypto` | каноническая форма XML, RSA над SignedInfo / signedAttrs, разбор BER/DER, токены RFC 3161, разбор ByteRange | RSA и структура |
 
-Окружение Python: `ONCL_PYHANKO_PYTHON` (venv с `pyHanko==0.38.0 pyhanko-certvalidator==0.33.0 lxml gostcrypto`). `ONCL_OPENSSL` — путь к OpenSSL. Контейнер и том NCANode: `ONCL_NCANODE_CONTAINER`, `ONCL_NCANODE_CACHE_VOLUME` (по умолчанию как у `interop-ncanode`; общий том не меняется, если задать свой). `cargo xtask fetch-fixtures` берёт `openapi.yml`, CAdES/PAdES/XAdES-образцы NCANode; ничего из этого не коммитится.
+Окружение Python: `ONCL_PYHANKO_PYTHON` (venv с `pyHanko==0.38.0 pyhanko-certvalidator==0.33.0 lxml gostcrypto`; точные закреплённые версии прямых зависимостей — `xtask/assets/oracle/requirements.txt`, `pip install --require-virtualenv -r` в venv; их же ставит job `test` в CI). `ONCL_OPENSSL` — путь к OpenSSL. Контейнер и том NCANode: `ONCL_NCANODE_CONTAINER`, `ONCL_NCANODE_CACHE_VOLUME` (по умолчанию как у `interop-ncanode`; общий том не меняется, если задать свой). `cargo xtask fetch-fixtures` берёт `openapi.yml`, CAdES/PAdES/XAdES-образцы NCANode; ничего из этого не коммитится.
 
 Отсутствующий инструмент или другая версия, чем в дескрипторе, даёт строку `BLOCKED` с точной причиной, а не подмену.
 

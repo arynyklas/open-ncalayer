@@ -281,6 +281,13 @@ struct literals; every in-tree literal was migrated):
 | `max_crl_item_bytes` | per CRL, never above `crl::MAX_CRL_LEN` (64 MiB) |
 | `max_total_bytes` | aggregate over every evidence category, CRLs included |
 
+`EvidenceLimits::validate` rejects a zero `max_crl_bytes`, `max_crl_item_bytes` or
+`max_total_bytes` with `EvidenceError::InvalidLimits` (as it rejects a zero `max_bytes`). It
+does not order the three: intake takes the minimum of the item cap, the CRL aggregate and the
+total, and clamps the item cap to `MAX_CRL_LEN`, so a cap above another is just not the binding
+one. `EvidenceLimits::intersect` is the one field-by-field minimum of two sets, used by
+`oncl-core` and `oncl-xml`.
+
 `max_bytes`/`max_item_bytes` now apply to non-CRL evidence only. To keep the old
 admission of a literal, set `max_crl_bytes = max_total_bytes = max_bytes` and
 `max_crl_item_bytes = max_item_bytes`. Decoded certificates, OCSP answers and tokens keep

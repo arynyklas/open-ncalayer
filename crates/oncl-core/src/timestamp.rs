@@ -94,6 +94,7 @@ fn error(error: EvidenceError) -> OperationError {
     match error {
         EvidenceError::Processing(error) => error.into(),
         EvidenceError::Limit => ProcessingError::MetadataLimit.into(),
+        EvidenceError::InvalidLimits(_) => ProcessingError::InvalidLimits.into(),
         EvidenceError::InvalidBinding => {
             ProcessingError::InvalidInput("invalid standalone timestamp request").into()
         }

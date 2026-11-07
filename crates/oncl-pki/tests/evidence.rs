@@ -4083,3 +4083,86 @@ fn a_scanned_crl_over_one_mib_is_charged_as_memory_not_as_metadata() {
     );
     assert_eq!(report.signers[0].chain, CheckStatus::Passed);
 }
+
+fn invalid_limits(limits: EvidenceLimits) -> bool {
+    matches!(limits.validate(), Err(EvidenceError::InvalidLimits(_)))
+}
+
+#[test]
+fn crl_and_total_quotas_are_validated() {
+    assert!(evidence_limits().validate().is_ok());
+    // A zero quota admits nothing: as for `max_bytes`, a configuration error, not "no CRLs".
+    for broken in [
+        EvidenceLimits {
+            max_crl_bytes: 0,
+            ..evidence_limits()
+        },
+        EvidenceLimits {
+            max_crl_item_bytes: 0,
+            ..evidence_limits()
+        },
+        EvidenceLimits {
+            max_total_bytes: 0,
+            ..evidence_limits()
+        },
+    ] {
+        assert!(invalid_limits(broken), "{broken:?}");
+    }
+    // No ordering is imposed: intake takes the minimum, so an item cap above the aggregate (or
+    // an aggregate above the total) is merely not the binding one.
+    assert!(
+        EvidenceLimits {
+            max_crl_item_bytes: (4 << 20) + 1,
+            max_crl_bytes: 1 << 20,
+            max_total_bytes: 512 << 10,
+            ..evidence_limits()
+        }
+        .validate()
+        .is_ok()
+    );
+    // A CRL item cap above the library maximum (clamped at intake) stays valid.
+    assert!(
+        EvidenceLimits {
+            max_crl_bytes: u64::MAX / 2,
+            max_crl_item_bytes: u64::MAX / 2,
+            max_total_bytes: u64::MAX / 2,
+            ..evidence_limits()
+        }
+        .validate()
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_store_refuses_invalid_crl_quotas_before_staging() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut resources = scope();
+    let broken = EvidenceLimits {
+        max_crl_item_bytes: 0,
+        ..evidence_limits()
+    };
+    assert!(matches!(
+        EvidenceStore::new(
+            TemporaryStore::new(parent.path()).unwrap(),
+            broken,
+            &mut resources
+        ),
+        Err(EvidenceError::InvalidLimits(_))
+    ));
+}
+
+#[test]
+fn limits_intersect_field_by_field() {
+    let a = evidence_limits();
+    let b = EvidenceLimits {
+        max_items: 8,
+        max_crl_bytes: 1 << 20,
+        max_crl_item_bytes: 1 << 19,
+        max_total_bytes: 2 << 20,
+        ..evidence_limits()
+    };
+    let both = a.intersect(b);
+    assert_eq!(both, b);
+    assert_eq!(b.intersect(a), both);
+    assert!(both.validate().is_ok());
+}

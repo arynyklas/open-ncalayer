@@ -711,40 +711,30 @@ pub fn extend_transaction(
     crate::references::ades::extend_transaction(input, level, profile, services, output, scope)
 }
 
-pub(crate) fn intersect_limits(a: EvidenceLimits, b: EvidenceLimits) -> EvidenceLimits {
-    EvidenceLimits {
-        max_items: a.max_items.min(b.max_items),
-        max_bytes: a.max_bytes.min(b.max_bytes),
-        max_item_bytes: a.max_item_bytes.min(b.max_item_bytes),
-        max_crl_bytes: a.max_crl_bytes.min(b.max_crl_bytes),
-        max_crl_item_bytes: a.max_crl_item_bytes.min(b.max_crl_item_bytes),
-        max_total_bytes: a.max_total_bytes.min(b.max_total_bytes),
-        max_chain_len: a.max_chain_len.min(b.max_chain_len),
-        max_proofs: a.max_proofs.min(b.max_proofs),
-        max_coverage_parts: a.max_coverage_parts.min(b.max_coverage_parts),
-        max_coverage_bytes: a.max_coverage_bytes.min(b.max_coverage_bytes),
-    }
-}
 pub(crate) fn effective_limits(
     metadata: usize,
     work: u64,
     configured: Option<EvidenceLimits>,
 ) -> Result<EvidenceLimits> {
-    let defaults = EvidenceLimits {
-        max_items: 24,
-        max_bytes: 24 * metadata as u64,
-        max_item_bytes: metadata as u64,
-        max_crl_bytes: 24 * metadata as u64,
-        max_crl_item_bytes: metadata as u64,
-        max_total_bytes: 24 * metadata as u64,
-        max_chain_len: 16,
-        max_proofs: 8,
-        max_coverage_parts: 256,
-        max_coverage_bytes: work,
-    };
     // The metadata cap bounds markup only: it scales the defaults of a host that
-    // configured nothing, and never clips the evidence quotas a host chose itself.
-    let limits = configured.unwrap_or(defaults);
+    // configured nothing, and never clips the evidence quotas a host chose itself (so a
+    // huge cap is not even multiplied then, and saturates otherwise).
+    let limits = configured.unwrap_or_else(|| {
+        let metadata = metadata as u64;
+        let aggregate = metadata.saturating_mul(24);
+        EvidenceLimits {
+            max_items: 24,
+            max_bytes: aggregate,
+            max_item_bytes: metadata,
+            max_crl_bytes: aggregate,
+            max_crl_item_bytes: metadata,
+            max_total_bytes: aggregate,
+            max_chain_len: 16,
+            max_proofs: 8,
+            max_coverage_parts: 256,
+            max_coverage_bytes: work,
+        }
+    });
     limits.validate()?;
     Ok(limits)
 }
@@ -816,9 +806,7 @@ impl XadesServices<'_> {
     }
     pub fn bounded_limits(&self, profile: &XmlSignProfile<'_>) -> Result<EvidenceLimits> {
         let limits = limits(profile)?;
-        let limits = self
-            .evidence_limits
-            .map_or(limits, |c| intersect_limits(limits, c));
+        let limits = self.evidence_limits.map_or(limits, |c| limits.intersect(c));
         limits.validate()?;
         Ok(limits)
     }
@@ -914,4 +902,51 @@ fn copy_reference(
         offset += n as u64;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host_limits() -> EvidenceLimits {
+        EvidenceLimits {
+            max_items: 4,
+            max_bytes: 1 << 20,
+            max_item_bytes: 1 << 19,
+            max_crl_bytes: 1 << 20,
+            max_crl_item_bytes: 1 << 19,
+            max_total_bytes: 2 << 20,
+            max_chain_len: 4,
+            max_proofs: 2,
+            max_coverage_parts: 16,
+            max_coverage_bytes: 1 << 30,
+        }
+    }
+
+    #[test]
+    fn a_huge_metadata_cap_with_explicit_limits_keeps_them_untouched() {
+        let host = host_limits();
+        for metadata in [usize::MAX, usize::MAX / 24 + 1] {
+            assert_eq!(effective_limits(metadata, 1, Some(host)).unwrap(), host);
+        }
+    }
+
+    #[test]
+    fn a_huge_metadata_cap_saturates_the_defaults() {
+        let limits = effective_limits(usize::MAX, 7, None).unwrap();
+        assert_eq!(limits.max_item_bytes, usize::MAX as u64);
+        assert_eq!(limits.max_crl_item_bytes, usize::MAX as u64);
+        assert_eq!(limits.max_bytes, u64::MAX);
+        assert_eq!(limits.max_crl_bytes, u64::MAX);
+        assert_eq!(limits.max_total_bytes, u64::MAX);
+        assert_eq!(limits.max_coverage_bytes, 7);
+    }
+
+    #[test]
+    fn the_defaults_scale_with_the_metadata_cap() {
+        let limits = effective_limits(1000, 5, None).unwrap();
+        assert_eq!(limits.max_bytes, 24_000);
+        assert_eq!(limits.max_crl_item_bytes, 1000);
+        assert_eq!(limits.max_total_bytes, 24_000);
+    }
 }

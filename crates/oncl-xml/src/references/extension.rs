@@ -111,7 +111,7 @@ pub(crate) fn extend_transaction(
     profile.evidence_limits = Some(
         services
             .evidence_limits
-            .map_or(caller, |host| source::intersect_limits(caller, host)),
+            .map_or(caller, |host| caller.intersect(host)),
     );
     let profile = &profile;
     if level > AdesLevel::B

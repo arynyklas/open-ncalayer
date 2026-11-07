@@ -19,6 +19,9 @@ pub(crate) fn error(error: XmlSourceError) -> OperationError {
         XmlSourceError::Processing(error)
         | XmlSourceError::Evidence(EvidenceError::Processing(error)) => error.into(),
         XmlSourceError::Evidence(EvidenceError::Limit) => ProcessingError::MetadataLimit.into(),
+        XmlSourceError::Evidence(EvidenceError::InvalidLimits(_)) => {
+            ProcessingError::InvalidLimits.into()
+        }
         XmlSourceError::Xml(oncl_xml::XmlError::Key(error)) => OperationError::Key(error),
         XmlSourceError::AlgorithmDenied => OperationError::Key(KeyError::UnsupportedAlgorithm),
         XmlSourceError::Acquisition(_) | XmlSourceError::Evidence(EvidenceError::Timestamp(_)) => {
@@ -767,18 +770,7 @@ pub(crate) fn intersect_evidence_limits(
     b: Option<oncl_pki::evidence::EvidenceLimits>,
 ) -> Option<oncl_pki::evidence::EvidenceLimits> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(oncl_pki::evidence::EvidenceLimits {
-            max_items: a.max_items.min(b.max_items),
-            max_bytes: a.max_bytes.min(b.max_bytes),
-            max_item_bytes: a.max_item_bytes.min(b.max_item_bytes),
-            max_crl_bytes: a.max_crl_bytes.min(b.max_crl_bytes),
-            max_crl_item_bytes: a.max_crl_item_bytes.min(b.max_crl_item_bytes),
-            max_total_bytes: a.max_total_bytes.min(b.max_total_bytes),
-            max_chain_len: a.max_chain_len.min(b.max_chain_len),
-            max_proofs: a.max_proofs.min(b.max_proofs),
-            max_coverage_parts: a.max_coverage_parts.min(b.max_coverage_parts),
-            max_coverage_bytes: a.max_coverage_bytes.min(b.max_coverage_bytes),
-        }),
+        (Some(a), Some(b)) => Some(a.intersect(b)),
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
     }
