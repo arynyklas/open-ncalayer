@@ -313,10 +313,20 @@ kind = "document"
 max_bytes = 4096
 [operations.uses]
 imports = ["keys_sign_raw", "hash"]
-network = "none"
+network = "pki"
 [[operations.uses.key]]
 kind = "raw"
 content = "param:file"
+
+[[operations]]
+name = "plain"
+module = "test.declared.module"
+server = true
+request = '{"module":"test.declared.module","method":"m","args":[]}'
+label = { ru = "а", kk = "ә", en = "a" }
+[operations.uses]
+imports = ["hash"]
+network = "none"
 
 [[operations]]
 name = "manual-only"
@@ -499,7 +509,7 @@ modules = ["test.plain.module"]
 
     #[test]
     fn pki_endpoints_need_a_declared_pki_network() {
-        let mut g = grant("run", &["hash"], &[], false);
+        let mut g = grant("plain", &["hash"], &[], false);
         g.pki_endpoints = vec!["https://ocsp.pki.gov.kz/".into()];
         let error = skipped(judge("test.declared", &declared(), &g));
         assert!(error.contains("network"), "{error}");

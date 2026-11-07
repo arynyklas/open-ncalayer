@@ -540,6 +540,10 @@ fn bound_bytes<'p>(
 ) -> Result<&'p [u8], PluginPrepareError> {
     match params.iter().find(|(n, _)| *n == name) {
         Some((_, PluginParam::Document(bytes))) => Ok(bytes),
+        // Text signs as its UTF-8 bytes; nothing typed is nothing to sign.
+        Some((_, PluginParam::Text(""))) => {
+            Err(PluginRequestError::InvalidValue(name.to_owned()).into())
+        }
         Some((_, PluginParam::Text(text))) => Ok(text.as_bytes()),
         Some(_) => Err(PluginRequestError::WrongKind(name.to_owned()).into()),
         None => Err(PluginRequestError::MissingParam(name.to_owned()).into()),

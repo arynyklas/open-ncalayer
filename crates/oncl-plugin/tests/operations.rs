@@ -448,11 +448,6 @@ fn the_refusal_matrix() {
             |e| matches!(e, E::Request { .. }),
         ),
         (
-            "extra request member",
-            edit(r#""args":["#, r#""x":1,"args":["#),
-            |e| matches!(e, E::Request { .. }),
-        ),
-        (
             "undeclared placeholder",
             edit("{file:base64}", "{nope:base64}"),
             |e| matches!(e, E::Request { .. }),
@@ -502,13 +497,6 @@ fn the_refusal_matrix() {
             "choice without choices",
             edit(r#"kind = "document""#, r#"kind = "choice""#).replace("max_bytes = 16777216", ""),
             |e| matches!(e, E::Param { .. }),
-        ),
-        (
-            "text as the content of cms_ex",
-            edit(r#"kind = "document""#, r#"kind = "text""#)
-                .replace("max_bytes = 16777216", "")
-                .replace("{file:base64}", "{file}"),
-            |e| matches!(e, E::KeyContent { .. }),
         ),
     ];
     for (what, text, check) in cases {
@@ -595,6 +583,7 @@ name = "path"
 kind = "text"
 [operations.uses]
 imports = ["{import}"]
+network = "pki"
 [[operations.uses.key]]
 kind = "{kind}"
 content = "param:doc"
@@ -831,6 +820,7 @@ name = "doc"
 kind = "document"
 [operations.uses]
 imports = ["keys_sign_xml_ex"]
+network = "pki"
 [[operations.uses.key]]
 kind = "xml_ex"
 content = "param:doc"
@@ -864,6 +854,7 @@ name = "path"
 kind = "text"
 [operations.uses]
 imports = ["keys_sign_xml"]
+network = "pki"
 [[operations.uses.key]]
 kind = "xml"
 content = "param:doc"
@@ -892,11 +883,7 @@ fn the_declaration_canonical_ignores_the_label_only() {
     let a = parse(&with(OP)).unwrap().operations()[0].canonical();
     let relabelled = parse(&edit(r#"en = "Sign a file""#, r#"en = "Do it""#)).unwrap();
     assert_eq!(relabelled.operations()[0].canonical(), a);
-    let other = parse(&edit(
-        r#"network = "pki""#,
-        r#"network = ["https://api.example.kz/"]"#,
-    ))
-    .unwrap();
+    let other = parse(&edit("server  = false", "server  = true")).unwrap();
     assert_ne!(other.operations()[0].canonical(), a);
     // The order of imports is not significant; their set is.
     let reordered = parse(&edit(
@@ -944,13 +931,6 @@ fn an_update_changing_an_operation_asks_only_when_it_widens() {
             "output",
             ("output       = \"der\"", "output       = \"pem\""),
         ),
-        (
-            "network",
-            (
-                r#"network = "pki""#,
-                r#"network = ["https://api.example.kz/v1/"]"#,
-            ),
-        ),
         ("imports", (r#""hash"]"#, r#""hash", "tsp_request"]"#)),
         ("server", ("server  = false", "server  = true")),
         (
@@ -966,16 +946,10 @@ fn an_update_changing_an_operation_asks_only_when_it_widens() {
     assert!(added(&edit(r#"en = "Sign a file""#, r#"en = "Other""#), &old).is_empty());
     // Narrowing asks for nothing: a narrower network, a smaller document, a request
     // spaced differently, `manual` switched off.
-    let wide = edit(
-        r#"network = "pki""#,
-        r#"network = ["https://api.example.kz/"]"#,
-    );
-    let narrower = edit(
-        r#"network = "pki""#,
-        r#"network = ["https://api.example.kz/v1/"]"#,
-    )
-    .replace("max_bytes = 16777216", "max_bytes = 1048576")
-    .replace(r#""method":"signFile","#, r#""method" : "signFile","#);
+    let wide = with(OP);
+    let narrower = edit("max_bytes = 16777216", "max_bytes = 16777216")
+        .replace("max_bytes = 16777216", "max_bytes = 1048576")
+        .replace(r#""method":"signFile","#, r#""method" : "signFile","#);
     assert!(
         added(&narrower, &wide).is_empty(),
         "{:?}",
@@ -992,6 +966,29 @@ fn an_update_changing_an_operation_asks_only_when_it_widens() {
     );
     let fewer = edit(r#"interactive = ["keys_select"]"#, "interactive = []");
     assert!(added(&fewer, &old).is_empty());
+    // The network of an operation without a key: wider asks, narrower does not.
+    let urls = |u: &str| info_op(&format!("[\"{u}\"]"), "\"http_request\"");
+    assert!(
+        !added(
+            &urls("https://api.example.kz/"),
+            &info_op("\"none\"", "\"hash\"")
+        )
+        .is_empty()
+    );
+    assert!(
+        !added(
+            &urls("https://api.example.kz/"),
+            &urls("https://api.example.kz/v1/")
+        )
+        .is_empty()
+    );
+    assert!(
+        added(
+            &urls("https://api.example.kz/v1/"),
+            &urls("https://api.example.kz/")
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -1161,7 +1158,7 @@ fn xades_levels_are_b_and_t_for_now() {
             &format!("level = \"{level}\""),
         )
     };
-    parse(&xades("b", "\"none\"")).unwrap();
+    parse(&xades("b", "\"pki\"")).unwrap();
     parse(&xades("t", "\"pki\"")).unwrap();
     for level in ["lt", "lta"] {
         let e = match parse(&xades(level, "\"pki\"")) {
@@ -1180,38 +1177,64 @@ fn xades_levels_are_b_and_t_for_now() {
     ));
 }
 
+/// A plain operation: no key, `imports` and `network` as given.
+fn info_op(network: &str, imports: &str) -> String {
+    with(&format!(
+        r#"
+[[operations]]
+name = "info"
+module = "example.sign"
+manual = true
+request = '{{"module":"example.sign","method":"info","args":[]}}'
+label = {{ ru = "а", kk = "ә", en = "a" }}
+[operations.uses]
+imports = [{imports}]
+network = {network}
+"#
+    ))
+}
+
 #[test]
 fn network_none_excludes_what_needs_the_network() {
     // An import that sends requests.
     for import in ["http_request", "tsp_request", "ocsp_fetch", "cms_verify"] {
-        let text = edit(r#"network = "pki""#, r#"network = "none""#)
-            .replace("timestamp    = \"basics\"", "timestamp    = \"none\"")
-            .replace(r#""hash"]"#, &format!(r#""hash", "{import}"]"#));
         assert!(
-            matches!(refused(&text), OperationError::NetworkNeeded { .. }),
+            matches!(
+                refused(&info_op("\"none\"", &format!("\"{import}\""))),
+                OperationError::NetworkNeeded { .. }
+            ),
             "{import}"
         );
     }
-    // A profile that time-stamps.
-    let text = edit(r#"network = "pki""#, r#"network = "none""#);
+    parse(&info_op("\"none\"", "\"hash\"")).unwrap();
+    parse(&info_op("\"pki\"", "\"tsp_request\"")).unwrap();
+}
+
+#[test]
+fn a_key_operation_declares_network_pki() {
+    // Neither `none` nor URLs: the manual window signs with the PKI hosts only.
+    for network in [
+        r#"network = "none""#,
+        r#"network = ["https://api.example.kz/"]"#,
+    ] {
+        let text = edit(r#"network = "pki""#, network)
+            .replace("timestamp    = \"basics\"", "timestamp    = \"none\"");
+        assert!(
+            matches!(refused(&text), OperationError::NetworkNeeded { why, .. } if why.contains("key operation")),
+            "{network}"
+        );
+    }
+    // Not declared at all is `none`.
+    let text = edit("network = \"pki\"\n", "");
     assert!(matches!(
         refused(&text),
-        OperationError::NetworkNeeded { why, .. } if why.contains("time-stamps")
-    ));
-    assert!(matches!(
-        refused(&op_of(
-            "xades",
-            "keys_sign_xades",
-            "\"none\"",
-            "level = \"t\""
-        )),
         OperationError::NetworkNeeded { .. }
     ));
-    // Neither: fine.
-    parse(
-        &edit(r#"network = "pki""#, r#"network = "none""#)
-            .replace("timestamp    = \"basics\"", "timestamp    = \"none\""),
-    )
+    // An operation without a key may declare anything its imports allow.
+    parse(&info_op(
+        "[\"https://api.example.kz/\"]",
+        "\"http_request\"",
+    ))
     .unwrap();
 }
 
@@ -1247,7 +1270,7 @@ fn xpath_text_is_checked_where_it_is_written_and_where_it_is_typed() {
         let text = op_of(
             "xml",
             "keys_sign_xml",
-            "\"none\"",
+            "\"pki\"",
             &format!("element = \"{}\"", bad.replace('\t', "\\t")),
         );
         assert!(parse(&text).is_err(), "{bad:?}");
@@ -1255,7 +1278,7 @@ fn xpath_text_is_checked_where_it_is_written_and_where_it_is_typed() {
     parse(&op_of(
         "xml",
         "keys_sign_xml",
-        "\"none\"",
+        "\"pki\"",
         "element = \"/a/b[1]\"",
     ))
     .unwrap();
@@ -1263,7 +1286,7 @@ fn xpath_text_is_checked_where_it_is_written_and_where_it_is_typed() {
     let long = op_of(
         "xml",
         "keys_sign_xml",
-        "\"none\"",
+        "\"pki\"",
         "element = \"param:path\"",
     )
     .replace(
@@ -1278,7 +1301,7 @@ fn xpath_text_is_checked_where_it_is_written_and_where_it_is_typed() {
         &op_of(
             "xml",
             "keys_sign_xml",
-            "\"none\"",
+            "\"pki\"",
             "element = \"param:path\"",
         )
         .replace(
@@ -1303,7 +1326,7 @@ fn xpath_text_is_checked_where_it_is_written_and_where_it_is_typed() {
     let m = parse(&op_of(
         "xml",
         "keys_sign_xml",
-        "\"none\"",
+        "\"pki\"",
         "element = \"param:path\"",
     ))
     .unwrap();
@@ -1328,7 +1351,7 @@ fn namespaces_are_distinct_and_documents_can_run() {
         op_of(
             "xml_ex",
             "keys_sign_xml_ex",
-            "\"none\"",
+            "\"pki\"",
             &format!("namespaces = [{{ prefix = \"p\", uri = \"urn:p\" }}{extra}]"),
         )
     };
@@ -1524,7 +1547,7 @@ fn xml_ex_base() -> String {
     op_of(
         "xml_ex",
         "keys_sign_xml_ex",
-        "\"none\"",
+        "\"pki\"",
         &format!(
             "element = \"/a/b\"\nparent = \"/a\"\nplacement = \"parent\"\n\
              namespaces = [{{ prefix = \"p\", uri = \"urn:p\" }}]\nother_prefix_uri = \"urn:o\"\n\
@@ -1666,10 +1689,6 @@ fn every_profile_field_of_every_kind_changes_the_canonical_bytes() {
             (r#"name    = "sign-file""#, r#"name    = "sign-other""#),
             ("server  = false", "server  = true"),
             ("max_bytes = 16777216", "max_bytes = 1024"),
-            (
-                r#"network = "pki""#,
-                r#"network = ["https://api.example.kz/"]"#,
-            ),
             (r#""hash"]"#, r#""hash", "now"]"#),
             (r#"interactive = ["keys_select"]"#, "interactive = []"),
             (r#""method":"signFile""#, r#""method":"signOther""#),
@@ -1694,7 +1713,7 @@ fn every_profile_field_of_every_kind_changes_the_canonical_bytes() {
         &op_of(
             "xml",
             "keys_sign_xml",
-            "\"none\"",
+            "\"pki\"",
             "element = \"/a\"\nparent = \"/b\"",
         ),
         &[
@@ -1729,7 +1748,7 @@ fn golden_vectors_for_every_kind() {
     // A change of any of these is a change of every `options_sha256` ever approved: it must
     // be deliberate and come with a new magic.
     let cases: [(&str, String); 6] = [
-        ("raw", op_of("raw", "keys_sign_raw", "\"none\"", "")),
+        ("raw", op_of("raw", "keys_sign_raw", "\"pki\"", "")),
         (
             "cms",
             op_of(
@@ -1745,7 +1764,7 @@ fn golden_vectors_for_every_kind() {
             op_of(
                 "xml",
                 "keys_sign_xml",
-                "\"none\"",
+                "\"pki\"",
                 "element = \"/a\"\nparent = \"/b\"",
             ),
         ),
@@ -1783,22 +1802,22 @@ fn golden_vectors_for_every_kind() {
 const GOLDEN: &str = "\
 raw 4f4e434c4f5054310001
 raw sha 22c485d3367481df1d3ec61f5589d897d2fafbf2242f1ada9d3d8b60c7611e6e
-raw op 0acad06450aa0f87ae9defa0eb9a8466ce2afaa7d7f71ed8c337080e5663558d
+raw op ab7d7669e84c841e74923e66ed956865613138b2a911c4194dec92631e8da209
 cms 4f4e434c4f505431000201010201
 cms sha 527ff4b9a6d5d237c9b4c6a5e90617b06debe506c60697578870b8fb21034626
-cms op 5c72c7ebded809a23dc7f241918f659e1810bd8d621899b5993216774aad4d1c
+cms op e5a6fdb14886e9a37456762ddc6a4652e552f7192a1b8b6cf25d1a07b974685c
 cms_ex 4f4e434c4f50543100030100020003000401050006000701080109010a00
 cms_ex sha 721f6636938156c8cfd5d965ce1107c6f84f7e3bf0b10b25ad314bc02333ef0d
-cms_ex op 9ab0986d9d630b668cb0dd5db45ae6d22a7747568f5cec03863ce675f6c23200
+cms_ex op 5e26ad089b44e87519d68265163deb09082013881df2a494f8d0ccc0933123a0
 xml 4f4e434c4f50543100040101000000022f610201000000022f62
 xml sha 743503a863ea3b394800d7329886445929e3551c672ef9206ba50db6a0f796f7
-xml op f7a1ee66ecb31af38acb75d30aec1f0fa30f71cf798c5a2c25be651643a40d1b
+xml op fa9550181823dce9561e6420395cc8f55fb1d283757e8742abcd6fc36db062f7
 xml_ex 4f4e434c4f50543100050101000000042f612f620201000000022f610302040000000100000001700000000575726e3a7005010000000575726e3a6f060100000031687474703a2f2f7777772e77332e6f72672f323030312f30342f786d6c647369672d6d6f7265237273612d736861323536070100000027687474703a2f2f7777772e77332e6f72672f323030312f30342f786d6c656e6323736861323536080309010a020b01010001
 xml_ex sha 2015620adf9df64bb903382387db5ab9fced884c0a88dd0f238365d895eda042
-xml_ex op d67282b29fc6bcfbff209c52bc38c52bb0325faa498369ea53ce64a2fa4f15b3
+xml_ex op db26ae1aaf9848eb8ec047c3f88b74b2c45c6d90a0390bf617ff6832bcd07001
 xades 4f4e434c4f505431000601010201030100000031687474703a2f2f7777772e77332e6f72672f323030312f30342f786d6c647369672d6d6f7265237273612d736861323536040100000027687474703a2f2f7777772e77332e6f72672f323030312f30342f786d6c656e6323736861323536
 xades sha 1e1238b33c67e75559889d5ec48bfd7de9d97d0317b5e1ab6960b268be3eea7e
-xades op 6319f5131dc4c399150b6f8375837a1309567a3e864bc16f550f62adc2a2ab1b
+xades op ed9a0f6604609f479da5f6dc8837987b1e4d10eed1b185127b99915288f833dd
 ";
 
 #[test]
@@ -1990,7 +2009,7 @@ mod consent {
     fn every_cms_ex_field_is_shown_or_default() {
         // The default profile: only the essentials (and the fixed cosign).
         assert_eq!(
-            facts_of(&op_of("cms_ex", "keys_sign_cms_ex", "\"none\"", "")),
+            facts_of(&op_of("cms_ex", "keys_sign_cms_ex", "\"pki\"", "")),
             [
                 ProfileFact::Detached,
                 ProfileFact::ContentAsIs,
@@ -2024,7 +2043,7 @@ mod consent {
         let facts = facts_of(&op_of(
             "cms_ex",
             "keys_sign_cms_ex",
-            "\"none\"",
+            "\"pki\"",
             "encapsulate = true\noutput = \"base64\"",
         ));
         assert_eq!(facts[0], ProfileFact::Attached);
@@ -2034,7 +2053,7 @@ mod consent {
     #[test]
     fn every_xml_ex_field_is_shown_or_default() {
         assert_eq!(
-            facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"none\"", "")),
+            facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"pki\"", "")),
             [ProfileFact::XmlWholeDocument]
         );
         let profile = format!(
@@ -2045,7 +2064,7 @@ mod consent {
              output = {{ serialize = {{ declaration = true, standalone_no = false, trim = true }} }}",
             SIGNATURE_METHODS[0], DIGEST_METHODS[0]
         );
-        let facts = facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"none\"", &profile));
+        let facts = facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"pki\"", &profile));
         assert_eq!(
             facts,
             [
@@ -2065,7 +2084,7 @@ mod consent {
         let facts = facts_of(&op_of(
             "xml_ex",
             "keys_sign_xml_ex",
-            "\"none\"",
+            "\"pki\"",
             "element = \"param:path\"\nparent = \"/p\"\nplacement = \"parent\"\nbase64_line_breaks = true",
         ));
         assert_eq!(facts[0], ProfileFact::XmlElementParam);
@@ -2074,7 +2093,7 @@ mod consent {
         let facts = facts_of(&op_of(
             "xml_ex",
             "keys_sign_xml_ex",
-            "\"none\"",
+            "\"pki\"",
             "placement = \"first_child_of_document\"",
         ));
         assert!(facts.contains(&ProfileFact::XmlPlacement(
@@ -2087,7 +2106,7 @@ mod consent {
         let facts = facts_of(&op_of(
             "xades",
             "keys_sign_xades",
-            "\"none\"",
+            "\"pki\"",
             &format!(
                 "signature_method = \"{}\"\ndigest_method = \"{}\"",
                 SIGNATURE_METHODS[1], DIGEST_METHODS[1]
@@ -2105,7 +2124,7 @@ mod consent {
         let text = op_of(
             "xml",
             "keys_sign_xml",
-            "\"none\"",
+            "\"pki\"",
             &format!("element = \"{crafted}\"\nparent = \"/p/Core verified\""),
         );
         let consent = parse(&text).unwrap().operations()[0].consent(None);
@@ -2210,9 +2229,9 @@ mod consent {
     fn server_network_and_profile_changes_show() {
         let lines = lines_of(&edit("server  = false", "server  = true"));
         assert!(lines.contains(&CapabilityLine::OperationServer(true)));
-        let lines = lines_of(&edit(
-            r#"network = "pki""#,
-            r#"network = ["https://api.example.kz/v1/"]"#,
+        let lines = lines_of(&info_op(
+            "[\"https://api.example.kz/v1/\"]",
+            "\"http_request\"",
         ));
         assert!(lines.iter().any(|l| matches!(
             l,
@@ -2262,10 +2281,7 @@ mod consent {
     #[test]
     fn an_update_names_what_is_new_or_wider() {
         let old = with(OP);
-        let new = edit("server  = false", "server  = true").replace(
-            r#"network = "pki""#,
-            r#"network = ["https://api.example.kz/v1/"]"#,
-        );
+        let new = edit("server  = false", "server  = true");
         let new = parse(&new).unwrap();
         let added = new.added_over(&parse(&old).unwrap());
         let consent = new.operations()[0].consent(added.operations.first());
@@ -2274,7 +2290,15 @@ mod consent {
                 .lines
                 .contains(&CapabilityLine::Added(AddedLine::Server))
         );
-        // Pki → URLs: a wider network by the core's own ruling.
+        // Pki → URLs (an operation without a key): a wider network by the core's ruling.
+        let wide = parse(&info_op(
+            "[\"https://api.example.kz/v1/\"]",
+            "\"http_request\"",
+        ))
+        .unwrap();
+        let was = parse(&info_op("\"pki\"", "\"http_request\"")).unwrap();
+        let added = wide.added_over(&was);
+        let consent = wide.operations()[0].consent(added.operations.first());
         assert!(
             consent
                 .lines
@@ -2312,7 +2336,7 @@ mod consent {
         let lines = lines_of(&op_of(
             "xades",
             "keys_sign_xades",
-            "\"none\"",
+            "\"pki\"",
             "level = \"b\"",
         ));
         assert!(lines.iter().any(|l| matches!(
@@ -2323,17 +2347,244 @@ mod consent {
         let lines = lines_of(&op_of(
             "xml_ex",
             "keys_sign_xml_ex",
-            "\"none\"",
+            "\"pki\"",
             "element = \"/a/b\"",
         ));
         assert!(lines.iter().any(|l| matches!(
             l,
             CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::XmlElementFixed)
         )));
-        let lines = lines_of(&op_of("xml", "keys_sign_xml", "\"none\"", ""));
+        let lines = lines_of(&op_of("xml", "keys_sign_xml", "\"pki\"", ""));
         assert!(lines.iter().any(|l| matches!(
             l,
             CapabilityLine::KeyProfile(f) if f == &[ProfileFact::XmlWholeDocument]
         )));
     }
+}
+
+// ---- MP1b: any JSON object as the request template; text as content ---------------------
+
+/// An operation with the request template `request` (a TOML literal string, so it holds no
+/// single quote), the params `params` (`name:kind` pairs) and a raw key use over `content`.
+fn shaped(request: &str, params: &[(&str, &str)], content: &str) -> String {
+    let mut text = String::new();
+    for (name, kind) in params {
+        text.push_str(&format!(
+            "[[operations.params]]\nname = \"{name}\"\nkind = \"{kind}\"\n"
+        ));
+    }
+    with(&format!(
+        r#"
+[[operations]]
+name = "x"
+module = "example.sign"
+manual = true
+request = '{request}'
+label = {{ ru = "а", kk = "ә", en = "a" }}
+{text}
+[operations.uses]
+imports = ["keys_sign_raw"]
+network = "pki"
+[[operations.uses.key]]
+kind = "raw"
+content = "{content}"
+"#
+    ))
+}
+
+#[test]
+fn the_three_real_request_shapes_parse() {
+    // ARRAY args (rating1c, dogovor24, qiwi).
+    parse(&shaped(
+        r#"{"module":"example.sign","method":"sign","args":["{doc:base64}","fixed",1,true]}"#,
+        &[("doc", "document")],
+        "param:doc",
+    ))
+    .unwrap();
+    // OBJECT args (fhs, energy).
+    parse(&shaped(
+        r#"{"module":"example.sign","method":"sign","args":{"data":"{doc:base64}","who":{"name":"{who}"}}}"#,
+        &[("doc", "document"), ("who", "text")],
+        "param:doc",
+    ))
+    .unwrap();
+    // ROOT-KEYED, no module, no args (esf-osdkz, eproc, efactoring, market).
+    parse(&shaped(
+        r#"{"method":"signPlainData","storageName":"PKCS12","data":"{text}"}"#,
+        &[("text", "text")],
+        "param:text",
+    ))
+    .unwrap();
+    parse(&shaped(
+        r#"{"type":"text","data":"{text}"}"#,
+        &[("text", "text")],
+        "param:text",
+    ))
+    .unwrap();
+    // Not even a method: an empty object, for an operation with no params.
+    parse(&info_op("\"pki\"", "\"hash\"").replace(
+        r#"{"module":"example.sign","method":"info","args":[]}"#,
+        "{}",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn request_template_injections_and_bombs_are_refused() {
+    let doc = [("doc", "document")];
+    let ok = |request: &str| parse(&shaped(request, &doc, "param:doc")).map(|_| ());
+    let bad = |what: &str, request: &str| match ok(request) {
+        Err(PackageError::Operation(OperationError::Request { .. })) => {}
+        other => panic!("{what}: {other:?}"),
+    };
+    bad("placeholder in a key", r#"{"{doc}":1,"d":"{doc:base64}"}"#);
+    bad(
+        "placeholder in a nested key",
+        r#"{"a":{"{doc}":1},"d":"{doc:base64}"}"#,
+    );
+    bad("partial placeholder", r#"{"d":"x{doc:base64}"}"#);
+    bad(
+        "two placeholders in one string",
+        r#"{"d":"{doc:base64}{doc:base64}"}"#,
+    );
+    bad(
+        "module placeholder",
+        r#"{"module":"{doc}","d":"{doc:base64}"}"#,
+    );
+    bad(
+        "method placeholder",
+        r#"{"method":"{doc}","d":"{doc:base64}"}"#,
+    );
+    bad(
+        "other module",
+        r#"{"module":"example.other","d":"{doc:base64}"}"#,
+    );
+    bad("module not text", r#"{"module":1,"d":"{doc:base64}"}"#);
+    bad("method not text", r#"{"method":["a"],"d":"{doc:base64}"}"#);
+    bad(
+        "undeclared placeholder",
+        r#"{"d":"{doc:base64}","e":"{nope}"}"#,
+    );
+    assert!(matches!(
+        ok(r#"{"d":1}"#),
+        Err(PackageError::Operation(OperationError::Param { .. }))
+    ));
+    bad("duplicate key", r#"{"d":"{doc:base64}","d":1}"#);
+    bad(
+        "duplicate nested key",
+        r#"{"a":{"b":1,"b":2},"d":"{doc:base64}"}"#,
+    );
+    bad("float", r#"{"d":"{doc:base64}","n":1.5}"#);
+    bad("root array", r#"["{doc:base64}"]"#);
+    bad("root string", r#""{doc:base64}""#);
+    bad("document without base64", r#"{"d":"{doc}"}"#);
+    bad("not JSON", r#"{"d":"{doc:base64}""#);
+    // A key with a control character or too long.
+    bad(
+        "long key",
+        &format!(r#"{{"{}":1,"d":"{{doc:base64}}"}}"#, "k".repeat(129)),
+    );
+    // Depth: 16 deep is fine, 17 is not.
+    let nest = |depth: usize| {
+        format!(
+            r#"{{"d":"{{doc:base64}}","n":{}{}}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        )
+    };
+    ok(&nest(14)).unwrap();
+    bad("depth bomb", &nest(40));
+    bad("deep brackets", &nest(200));
+    // Count of values and of keys of one object.
+    bad(
+        "value bomb",
+        &format!(r#"{{"d":"{{doc:base64}}","n":[{}0]}}"#, "0,".repeat(2100)),
+    );
+    let keys: String = (0..70).map(|i| format!(r#""k{i}":0,"#)).collect();
+    bad("key bomb", &format!(r#"{{{keys}"d":"{{doc:base64}}"}}"#));
+    // Size.
+    bad(
+        "size bomb",
+        &format!(r#"{{"d":"{{doc:base64}}","s":"{}"}}"#, "a".repeat(17_000)),
+    );
+}
+
+#[test]
+fn text_is_content_for_every_key_kind() {
+    // raw and cms_ex over a text param: the UTF-8 bytes of the typed value are signed.
+    let text_op = |kind: &str, import: &str, profile: &str| op_of_text(kind, import, profile);
+    for (kind, import) in [
+        ("raw", "keys_sign_raw"),
+        ("cms", "keys_sign_cms"),
+        ("cms_ex", "keys_sign_cms_ex"),
+        ("xml", "keys_sign_xml"),
+        ("xml_ex", "keys_sign_xml_ex"),
+        ("xades", "keys_sign_xades"),
+    ] {
+        let m = parse(&text_op(kind, import, "")).unwrap_or_else(|e| panic!("{kind}: {e}"));
+        let key = &m.operations()[0].uses().keys()[0];
+        assert_eq!(key.content(), &Content::Bound("text".to_owned()), "{kind}");
+    }
+    // A digest form of a text is fine (the core hashes the bytes); derived text is not.
+    parse(&text_op(
+        "cms_ex",
+        "keys_sign_cms_ex",
+        "content_form = \"digest\"",
+    ))
+    .unwrap();
+    assert!(parse(&text_op("raw", "keys_sign_raw", "").replace("param:text", "derived")).is_err());
+    // The limits: 1..=65536 characters.
+    let limit = |n: u32| {
+        text_op("raw", "keys_sign_raw", "").replace(
+            "kind = \"text\"",
+            &format!("kind = \"text\"\nmax_chars = {n}"),
+        )
+    };
+    parse(&limit(1)).unwrap();
+    parse(&limit(65_536)).unwrap();
+    assert!(matches!(
+        refused(&limit(65_537)),
+        OperationError::Param { .. }
+    ));
+    assert!(matches!(refused(&limit(0)), OperationError::Param { .. }));
+    // A flag or a choice is never content.
+    let flag = text_op("raw", "keys_sign_raw", "").replace("kind = \"text\"", "kind = \"flag\"");
+    assert!(matches!(refused(&flag), OperationError::KeyContent { .. }));
+}
+
+fn op_of_text(kind: &str, import: &str, profile: &str) -> String {
+    with(&format!(
+        r#"
+[[operations]]
+name = "x"
+module = "example.sign"
+manual = true
+request = '{{"method":"sign","data":"{{text}}"}}'
+label = {{ ru = "а", kk = "ә", en = "a" }}
+[[operations.params]]
+name = "text"
+kind = "text"
+[operations.uses]
+imports = ["{import}"]
+network = "pki"
+[[operations.uses.key]]
+kind = "{kind}"
+content = "param:text"
+[operations.uses.key.profile]
+{profile}
+"#
+    ))
+}
+
+#[test]
+fn the_declaration_encoding_is_versioned() {
+    let m = parse(&with(OP)).unwrap();
+    let bytes = m.operations()[0].canonical();
+    assert!(bytes.starts_with(b"ONCLOP2\0"));
+    assert!(!bytes.starts_with(b"ONCLOP1"));
+    // The same declaration under the old magic is another byte string, so a hash taken of
+    // it is never mistaken for a current one.
+    let mut old = bytes.clone();
+    old[6] = b'1';
+    assert_ne!(Sha256::digest(&old), Sha256::digest(&bytes));
 }
