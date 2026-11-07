@@ -529,6 +529,42 @@ fn derived_operation_refused() {
     );
 }
 
+#[test]
+fn server_request_is_built_for_server_operations_only() {
+    // Break caught: a server or CLI request is built for an operation that is not for them, or
+    // an operation that is for them is refused because the manual window does not offer it.
+    let r = rig("p", &all_operations(), SHA, 1, |_| {});
+    assert_eq!(
+        r.engine
+            .plugin_server_request(ID, "server-only", &[])
+            .unwrap(),
+        r#"{"args":[],"method":"srv","module":"test.l01.module"}"#
+    );
+    assert_eq!(
+        r.engine.plugin_request(ID, "server-only", &[]).unwrap_err(),
+        PluginRequestError::NotManual
+    );
+    for name in ["sign-raw", "note", "derive-op", "nope"] {
+        assert_eq!(
+            r.engine.plugin_server_request(ID, name, &[]).unwrap_err(),
+            PluginRequestError::UndeclaredOperation,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        r.engine
+            .plugin_server_request(ID, "server-only", &[("x", PluginParam::Text("a"))])
+            .unwrap_err(),
+        PluginRequestError::UnknownParam("x".to_owned())
+    );
+    assert_eq!(
+        r.engine
+            .plugin_server_request("nobody", "server-only", &[])
+            .unwrap_err(),
+        PluginRequestError::UnknownPlugin
+    );
+}
+
 const NOTE: fn(&str) -> Vec<(&'static str, PluginParam<'_>)> = |text| {
     vec![
         ("text", PluginParam::Text(text)),

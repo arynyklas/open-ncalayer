@@ -40,6 +40,17 @@ impl KeyUseGuard for Authority {
         if let Some(ticket) = event.plugin() {
             let verdict = match &self.plugin {
                 None => Err(oncl_core::plugins::TicketRefusal::NotGranted),
+                Some(grant) if grant.content_unavailable(ticket) => {
+                    let id = oncl_core::plugins::PluginRefusalCode::ContentBindingUnavailable.id();
+                    crate::plugin::record_subcode(id);
+                    crate::diagnostic(format_args!(
+                        "oncl: plugin_refused operation_id={} subcode={id} plugin={} operation={}",
+                        event.operation_id,
+                        ticket.identity().id,
+                        ticket.operation()
+                    ));
+                    return Err(OperationError::PermissionDenied);
+                }
                 Some(grant) => grant.check(ticket).and_then(|()| {
                     if self.plugin_used.swap(true, Ordering::SeqCst) {
                         Err(oncl_core::plugins::TicketRefusal::AlreadyUsed)
@@ -66,6 +77,9 @@ impl KeyUseGuard for Authority {
             || event.action != self.action
         {
             return Err(OperationError::PermissionDenied);
+        }
+        if let Some(ticket) = event.plugin() {
+            crate::plugin::audit_line(event.operation_id.get(), ticket);
         }
         Ok(KeyUseReceipt::new(event.clone()))
     }
