@@ -12,6 +12,7 @@ mod local;
 mod output;
 mod pem;
 mod plugin;
+mod plugin_list;
 mod public;
 mod remote;
 mod reports;
@@ -19,7 +20,7 @@ mod secrets;
 mod sign;
 mod terminal;
 mod wsse;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 fn diagnostic(arguments: std::fmt::Arguments<'_>) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "{arguments}");
@@ -32,8 +33,9 @@ fn entry() -> i32 {
         Ok(cli) => cli,
         Err(error) => {
             return match error.kind() {
+                // The help of the command asked for (`oncl plugin call --help` lists its flags).
                 clap::error::ErrorKind::DisplayHelp => {
-                    let _ = args::Cli::command().print_help();
+                    let _ = error.print();
                     0
                 }
                 clap::error::ErrorKind::DisplayVersion => {

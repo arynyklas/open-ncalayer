@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.rating1c"
-version = "1.0.0-beta.3"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.4"
+min_core = "0.1.0-alpha.7"
 modules = ["kz.rating1c.edo.signUtils"]
 
 [name]
@@ -19,3 +19,172 @@ version = "1.9.5"
 
 [capabilities]
 keys = true
+
+[[operations]]
+name = "sign-xml"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"signXml","args":["PKCS12","SIGNATURE","{xml}","","",""]}'
+label = { ru = "Подписать XML-документ целиком", kk = "XML құжатына тұтас қол қою", en = "Sign a whole XML document" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_xml_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml_ex"
+content = "param:xml"
+
+[operations.uses.key.profile]
+placement = "document_element"
+strip_whitespace = true
+base64_line_breaks = false
+output = { serialize = { declaration = false, standalone_no = false, trim = true } }
+
+[[operations]]
+name = "sign-xml-element"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"signXml","args":["PKCS12","SIGNATURE","{xml}","{tbs}","{parent}",""]}'
+label = { ru = "Подписать элемент XML (XPath)", kk = "XML элементіне қол қою (XPath)", en = "Sign an XML element (XPath)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[[operations.params]]
+name = "tbs"
+kind = "text"
+max_chars = 256
+
+[[operations.params]]
+name = "parent"
+kind = "text"
+max_chars = 256
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_xml_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml_ex"
+content = "param:xml"
+
+[operations.uses.key.profile]
+element = "param:tbs"
+parent = "param:parent"
+placement = "parent"
+strip_whitespace = true
+base64_line_breaks = false
+output = { serialize = { declaration = false, standalone_no = false, trim = true } }
+
+[[operations]]
+name = "create-cms"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"createCmsFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",false,false,""]}'
+label = { ru = "Создать CMS (отсоединённая подпись)", kk = "CMS жасау (бөлек қолтаңба)", en = "Create a CMS (detached)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[[operations]]
+name = "create-cms-attached"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"createCmsFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",true,false,""]}'
+label = { ru = "Создать CMS (данные внутри)", kk = "CMS жасау (деректер ішінде)", en = "Create a CMS (attached)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[operations.uses.key.profile]
+encapsulate = true
+
+[[operations]]
+name = "create-cms-timestamp"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"createCmsFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",false,true,""]}'
+label = { ru = "Создать CMS с меткой времени (отсоединённая)", kk = "Уақыт белгісі бар CMS жасау (бөлек)", en = "Create a time-stamped CMS (detached)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[operations.uses.key.profile]
+timestamp = "kalkan"
+
+[[operations]]
+name = "create-cms-attached-timestamp"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"createCmsFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",true,true,""]}'
+label = { ru = "Создать CMS с меткой времени (данные внутри)", kk = "Уақыт белгісі бар CMS жасау (деректер ішінде)", en = "Create a time-stamped CMS (attached)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[operations.uses.key.profile]
+encapsulate = true
+timestamp = "kalkan"
+
+[[operations]]
+name = "create-raw-sign"
+module = "kz.rating1c.edo.signUtils"
+manual = true
+request = '{"module":"kz.rating1c.edo.signUtils","method":"createRawSignFromBase64","args":["PKCS12","SIGNATURE","{file:base64}",""]}'
+label = { ru = "Создать сырую подпись", kk = "Шикі қолтаңба жасау", en = "Create a raw signature" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_raw", "cert_details"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "raw"
+content = "param:file"

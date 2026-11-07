@@ -17,6 +17,7 @@ pub mod platform;
 pub mod platform_interop;
 pub mod plugin;
 pub mod plugin_ops;
+pub mod plugin_ports;
 pub mod privacy;
 pub mod registry;
 pub mod sdk_delivery;

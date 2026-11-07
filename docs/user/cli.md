@@ -28,7 +28,8 @@ On Windows unpack the `.zip` (Explorer or `tar -xf oncl-<version>-win-x64.zip`) 
 | `extend --profile cms\|xml\|pdf --level b\|t\|lt\|lta` | Keyless evidence extension |
 | `timestamp acquire\|verify` | Standalone RFC 3161 token |
 | `jws sign\|verify`, `jwt encode\|verify\|decode` | RS256 / ECGOST3410-2015-512 JOSE |
-| `plugin call` | Runtime-only WASM invocation with operator grants |
+| `plugin call` | Runtime-only WASM invocation with operator grants ([Plugins](#plugins-oncl-plugin)) |
+| `plugin operations` | The operations a plugin manifest declares, for writing grants; optional module check |
 | `batch run` | Ordered mixed batch from a JSON manifest |
 
 Sign profiles: `cms`, `raw`, `digest-sha256|gost2004|gost2015-512`, `xml`, `wsse`, `pdf`, and `cades-`/`xades-`/`pades-` with `b`, `t`, `lt`, `lta`. Verify profiles: `cms`, `xml`, `xml-kalkan`, `wsse`, `pdf`, and the same level families. Profiles and algorithms are never inferred from file names or untrusted tokens.
@@ -82,10 +83,172 @@ A deadline (`--timeout-seconds`) is exit **1** `DeadlineExceeded` for every sing
 
 * `jws sign|verify --serialization compact|flattened|general [--detached]`; `jwt encode|verify|decode`. `jwt verify` takes `--issuer`, `--audience`, `--leeway-seconds` and the host clock; `jwt decode` is explicitly unverified. JWS payload ≤ 256 KiB, claims ≤ 64 KiB.
 * `sign|verify --profile wsse` with `--soap-version soap11|soap12`, `--wsse-role`, `--wsse-required-header`, `--wsse-timestamp-required`, `--wsse-timestamp-max-lifetime` (verification), and for signing `--wsse-token-reference ncanode-x509-key-identifier|binary-security-token`, `--wsse-token-id`, `--wsse-body-id`, `--wsse-timestamp-id|created|expires`. Misplaced options are rejected before I/O.
-* `plugin call --manifest plugin.toml --module plugin.wasm --operation OP --caller LABEL --allow-import NAME … --args-file args.json --output -`: installation is not authority. The operator names the caller (`LocalOperator`), operation, exact imports, an optional bound key (`--key … --key-handle N --authorize`) and exact PKI bases (`--plugin-pki-endpoint GET=url`). Guest data cannot add imports, keys or origins; mandatory prompts return the typed `InteractionRequired`; there is no GUI. **Declared operations** (a manifest with `[[operations]]`) are validated against the declaration before any file other than the manifest and module is opened: the operation must be declared with `server = true` and `--allow-import` must be among its declared imports (none given means all of them; otherwise `oncl: PermissionDenied; subcode=not-declared; applied=NotApplied`), `--key` needs a declared key use (`subcode=no-key-use`) and `--plugin-pki-endpoint` needs `network = "pki"` (`subcode=network-not-declared`). Because the CLI cannot bind the signed bytes to a document, a key use of a declared operation needs the explicit `--plugin-bytes` (requires `--key`; without it the use is refused before the key is applied: `subcode=not-granted`); Core forces the declared signature options, and an attempt to deviate is `subcode=options-mismatch`; one invocation uses the key once. There is no `--profile`: the profile is the manifest's (`--profile` is refused with `oncl: ProfileFromManifest`). A plugin without declarations is unchanged (`--plugin-bytes` is then ignored with a warning). The failure line is `oncl: <code>; subcode=<id>; applied=<state>` only when a reason exists; the id is the same stable one the HTTP API answers ([error subcodes](http-api.md)). The `oncl plugin` command surface beyond this call (listing declared operations, a manual-window equivalent) is a later stage.
+* `plugin call` / `plugin operations`: runtime-only plugin invocation and the listing of a manifest's declared operations; installation is not authority. Flags, typed parameters, consent, audit, refusals and exit codes are in [Plugins](#plugins-oncl-plugin).
 * `batch run --manifest batch.json [--key … --secret-file …] --authorize`: items `hash`, `sign` (`cms|cms-detached|raw`), `verify` (optional `detached`), `extract`, each with unique `id`. The whole manifest is admitted before any source or key I/O; destinations must not exist and an output may not feed another item. Each completed output is published when its item completes, so a later failure or cancellation keeps earlier files. A bad source fails only that item. Exit 0/2/3 by worst verification, 4 for any failed/not-run item, 130 for cancellation.
 
 Real Ctrl-Break delivery to an owned child process group (Windows) exits 130; reads remain cooperative.
+
+## Plugins (`oncl plugin`)
+
+```text
+oncl plugin operations --manifest plugin.toml [--wasm plugin.wasm] [--json]
+oncl plugin call       --manifest plugin.toml --module plugin.wasm --operation OP --caller LABEL
+                       --output - [--allow-import NAME …] [request] [key and grants]
+```
+
+Installation is not authority. The operator, who runs the command, names the caller (a `LocalOperator` label), the operation, the exact imports, the key and the PKI bases; the plugin cannot widen any of them. There is no GUI, no browser origin and **no prompt**: a mandatory dialog of the plugin returns the typed `InteractionRequired`, and nothing asks for consent. Both commands are local only; with `--endpoint` they are refused with `RemoteUnsupported` before any I/O.
+
+### `plugin operations`: what is declared
+
+Lists the `[[operations]]` of a manifest (`Manifest::operations()` of `oncl-plugin`, the parser that `plugin call` and `cargo xtask plugin-ops-check` use), so that grants can be written without reading the TOML. It opens no key and runs nothing.
+
+| Flag | Meaning |
+|---|---|
+| `--manifest PATH` | The plugin's `plugin.toml` (at most 64 KiB) |
+| `--wasm PATH` | Also compile this module (at most 16 MiB) against the manifest: every import an operation declares must be an import of the module, every import of the module must be declared by a capability (the library check of `plugin-ops-check`). Exit 1 when it does not fit |
+| `--json`, `--report PATH` | The report as JSON (global flags; `--report` creates a new file and prints nothing) |
+
+```text
+$ oncl plugin operations --manifest plugins/example/plugin.toml
+plugin test.cli 1.0.0: 2 declared operation(s)
+operation sign
+  label: "a"
+  server: yes  manual: no
+  cli: yes
+  imports: keys_sign_raw
+  network: pki
+  param file: document (at most 4096 bytes)
+  key: raw, content param:file
+    signs with your key: a raw signature of the content
+operation manual-only
+  label: "a"
+  server: no  manual: yes
+  cli: no (not for the CLI: server = false)
+  imports: none
+  network: none
+  param file: document (at most 4096 bytes)
+  key: none
+```
+
+`cli:` says whether `plugin call` can run the operation: it needs `server = true` and content that the host can run. An operation with `derived` content is shown as `cli: no (not runnable: derived content)`: no host runs it yet and `plugin call` refuses it (`subcode=not-declared`). The key-use and profile words are the host's English texts of the install window (what the core forces on the signature); the `label` and any `plugin's xpath` are the plugin's own untrusted text and are printed quoted and escaped. A plugin without `[[operations]]` prints `declares no operations`.
+
+JSON (`code` is `Completed`, or `InvalidInput` when `--wasm` does not fit; `applied` is always `NotApplied`; optional fields are omitted when absent):
+
+| Field | Meaning |
+|---|---|
+| `code`, `applied` | as above |
+| `plugin` | `{id, version}` |
+| `operations[]` | one object per declared operation, in manifest order |
+| `operations[].name`, `.label` | the operation name; the plugin's English label (untrusted) |
+| `.server`, `.manual` | the declared flags |
+| `.runnable`, `.derived` | `runnable` is `false` exactly when `derived` is `true` (derived content) |
+| `.cli` | `server` and `runnable`: the operation `plugin call` accepts |
+| `.imports` | the declared host imports (the most `--allow-import` may name) |
+| `.network` | `{"kind":"none"}`, `{"kind":"pki"}` or `{"kind":"urls","urls":[…]}` |
+| `.params[]` | `{name, kind}` with `kind` `document` (`max_bytes`), `text` (`max_chars`), `choice` (`choices`), `flag` or `locale` |
+| `.keys[]` | one per key use: `kind` (`raw`, `cms`, `cms_ex`, `xml`, `xml_ex`, `xades`), `content` (`param:<name>` or `derived`), `words`, and `profile` (the forced options in words, when there are any to say) |
+| `.xpaths` | the plugin's own XPaths of the profile (untrusted), when there are any |
+| `module` | with `--wasm`: `{ok}` and, when `false`, `error` (the library's reason) |
+
+### `plugin call`: flags
+
+| Flag | Meaning |
+|---|---|
+| `--manifest`, `--module` | The manifest (≤ 64 KiB) and module (≤ 16 MiB) of the one plugin installed for this process |
+| `--operation OP` | The operation: a declared one with `server = true`, or, for a plugin without declarations, the label the operator grants |
+| `--caller LABEL` | The operator label recorded as the caller (never an origin, never taken from the plugin) |
+| `--allow-import NAME` | Exact host imports granted (repeatable, known names only). For a declared operation they must be among its declared imports; none given means all declared. For a plugin without declarations none given means none |
+| `--output PATH\|-` | Where the response is written (never overwrites; `-` is stdout, which cannot be combined with `--json` on stdout) |
+| `--args-file PATH\|-` | A **free** JSON request (≤ 256 KiB): what a plugin without declarations takes, and what a declared operation still accepts (the operator trusts the request, as before) |
+| `--param NAME=VALUE` | A typed `text`, `choice` or `locale` parameter of a declared operation (repeatable) |
+| `--param-file NAME=PATH\|-` | A `document` parameter read from a file (`-` is stdin; at most one stdin source per command) |
+| `--param-flag NAME` | A `flag` parameter set to true; a declared flag that is not named is false |
+| `--key PATH [--alias A]` or `--key-name N --key-config FILE` | The key bound as handle `--key-handle` (default 1); see [Named key sources](#named-key-sources) |
+| `--secret-file PATH` \| `--secret-interactive` | The key password, as for `sign` |
+| `--authorize` | Required with a key: confirms this exact key use |
+| `--plugin-bytes` | The operator's consent to a key use of a declared operation (below); needs a key |
+| `--plugin-pki-endpoint GET=URL` / `POST=URL` | Exact PKI bases the plugin's key validation may reach (≤ 16; needs a declared `network = "pki"`) |
+| `--profile` | **Not accepted** (`oncl: ProfileFromManifest`): the signature profile of a declared operation is the manifest's, forced by Core |
+
+Global flags (`--json`, `--report`, trust and `--timeout-seconds`) behave as for the other commands. `--args-file` and any `--param*` flag cannot be combined (`InvalidCombination`); a malformed `NAME=VALUE`, a name that is not `^[a-z][a-z0-9_]{0,31}$`, more than 16 parameters of a kind, two stdin sources (`StdinConflict`) or a stdin source with `--secret-interactive` are usage errors that withhold the values and open nothing.
+
+### Typed parameters
+
+For a declared operation without `--args-file`, Core builds the request from the manifest's template exactly as the manual window does (`Engine::plugin_server_request`; `module` and `method` come from the manifest alone, each whole-string placeholder is replaced by the typed value, a document as standard base64, keys sorted, compact). Everything is checked before any secret is read or key opened, and an operation with no parameters needs no flag at all:
+
+* every declared parameter must be given once (a flag may be left out: false); an undeclared name is `unknown-param`, a repeated one `duplicate-param`, a missing one `missing-param`;
+* a document comes only from `--param-file` and a text, choice or locale only from `--param` (`param-wrong-kind` otherwise); a choice must be one of the declared `choices`, a locale `ru`, `kk` or `en`, a text at most `max_chars` characters (and a valid absolute XPath when a profile reads it) (`param-invalid-value` / `param-too-large`);
+* a document file is read only for a declared document and never past its declared `max_bytes` (nor the 256 KiB request limit): a larger file is `InputLimit`, `subcode=param-too-large`, and an empty one `param-invalid-value`;
+* the whole request must fit 256 KiB (`request-too-large`).
+
+A text parameter that a key profile reads (`element = "param:xpath"`) is also what the `--plugin-bytes` grant is matched with: the grant covers exactly the profile with that value, so a plugin that signs with another element is `options-mismatch`.
+
+A plugin **without** `[[operations]]` is unchanged: it takes only `--args-file`, and `--param*` or a missing `--args-file` is refused (`PermissionDenied`, `subcode=not-declared`) because there is nothing to check them against. `--plugin-bytes` has no effect on it (a warning says so).
+
+### Consent and audit
+
+The CLI never prompts. For a declared operation Core issues a ticket for every key use and checks it against the declaration (one use, the declared kind and options), and because the CLI cannot bind the bytes the plugin signs to a document, a key use needs `--plugin-bytes`: **the operator who runs the command is the consenting party**, and the flag says that they accept that the plugin chooses the bytes the key signs (with a free `--args-file` the grant binds the operation, kind and options only, and the plugin decides what it signs; with typed parameters it also binds the content: the ticket's content must equal the exact bytes passed for the parameter the key use is bound to, a text as UTF-8 and a document as the file bytes, otherwise the use is refused before the key with `subcode=content-mismatch`. A digest-form bound use cannot be computed before the key is opened and is refused with `subcode=content-binding-unavailable`). Without it the use is refused before the key is applied (`subcode=not-granted`). `--plugin-bytes` covers one use of the declared kind with exactly the declared options (the options a profile reads from a `--param` are those values); a deviation is `options-mismatch`, a second use in one call `key-use-spent`.
+
+The CLI keeps no journal; stderr is the operator's record. Before the key is used, an authorised key use of a declared operation writes one line (the trusted facts of Core's ticket; never the document, a parameter value, a secret or a nonce), then the usual `private_use` line after it:
+
+```text
+oncl: plugin_use operation_id=7 plugin=test.cli version=1.0.0 package=2:<sha256 of manifest+module> operation=sign caller=local-operator declared=true grant=cli-plugin-bytes content_sha256=<sha256 of the bytes signed> content_len=14 prehashed=false options_sha256=<sha256 of the forced options> ticket=<sha256 digest of the ticket>
+oncl: private_use operation_id=7 applied=Applied succeeded=true
+```
+
+`grant=cli-plugin-bytes` is the consent (an interactive approval would have a nonce hash instead); `package=2:…` is the loose package hash (kind 2) of the two files you named. A refused key use writes `oncl: plugin_refused operation_id=… subcode=… plugin=… operation=…` instead, with no key use.
+
+### Exit codes, refusals and the failure line
+
+| Exit | Meaning |
+|---:|---|
+| 0 | Completed (`plugin operations`: listed, and the module fits when `--wasm` is given) |
+| 1 | Any refusal or failure, including every usage error and `--wasm` that does not fit |
+| 130 | Cancelled (Ctrl-C/Ctrl-Break) |
+
+A failure prints `oncl: <code>; subcode=<id>; applied=<NotApplied|Applied|Unknown>` on stderr (`subcode=` only when the refusal has one) and nothing on stdout. A refused plugin command never prints a JSON report: the `subcode` JSON field belongs to the items of `batch run` and to the HTTP error of `oncl-server`; here the failure line is the contract, and the exit code and `applied` are those of every command. Stable subcodes of `plugin call`:
+
+| Code | `subcode` | Cause |
+|---|---|---|
+| `PermissionDenied` | `not-declared` | The operation is not declared, not `server = true` or derived; an import beyond the declaration; typed parameters (or no `--args-file`) for a plugin without declarations; a name the plugin calls that is not declared |
+| `PermissionDenied` | `no-key-use` | `--key` for an operation that declares no key use |
+| `PermissionDenied` | `network-not-declared` | `--plugin-pki-endpoint` without `network = "pki"` |
+| `PermissionDenied` | `not-granted` | A key use without `--plugin-bytes` (or not the granted plugin, operation or key) |
+| `PermissionDenied` | `content-mismatch`, `content-binding-unavailable` | Typed parameters: the plugin signs other bytes than the ones passed, or the bound use is digest-form |
+| `PermissionDenied` | `options-mismatch`, `kind-mismatch`, `key-use-spent`, … | The key use differs from the declaration (see [the design](../design/manual-plugins.md) §4.8 for the whole list); the key was not applied except for `key-use-spent` (the first use stays `Applied`) |
+| `InvalidInput` | `unknown-param`, `duplicate-param`, `missing-param`, `param-wrong-kind`, `param-invalid-value`, `invalid-template` | A typed parameter is wrong (above) |
+| `InputLimit` | `param-too-large`, `request-too-large` | A parameter over its declared size, or a request over 256 KiB |
+
+### Examples
+
+A declared operation with a document parameter and a key (Git Bash; the manifest declares `sign` with `server = true`, `param file` a document, `keys_sign_raw` and `network = "pki"`):
+
+```sh
+oncl plugin operations --manifest plugin.toml                    # what may I grant?
+oncl plugin call --manifest plugin.toml --module plugin.wasm \
+  --operation sign --caller ops-laptop --output signature.b64 \
+  --param-file file=statement.pdf \
+  --key signer.p12 --secret-file secrets/signer.secret --authorize --plugin-bytes \
+  --root nca-root.der --pki-endpoint https://pki.example.test \
+  --plugin-pki-endpoint GET=https://pki.example.test/ocsp --plugin-pki-endpoint POST=https://pki.example.test/ocsp
+```
+
+A keyless declared operation with typed text, choice and flag parameters:
+
+```sh
+oncl plugin call --manifest plugin.toml --module plugin.wasm --operation note \
+  --caller ops-laptop --output - \
+  --param text='hello' --param pick=two --param lang=kk --param-flag on
+```
+
+A plugin without declarations (unchanged: the operator names the label and the imports, the request is free):
+
+```sh
+oncl plugin call --manifest plugin.toml --module plugin.wasm --operation hash \
+  --caller ops-laptop --allow-import hash --args-file request.json --output -
+```
+
+`plugin call --json` prints `{operation_id, code: "Completed", applied, response_bytes}` after the response artifact is written (the response itself goes to `--output`).
 
 ## Legacy XML (`XmlSignSpec` / `XadesSpec`) options
 
@@ -139,7 +302,7 @@ A batch stopped by Ctrl-C/Ctrl-Break or `--timeout-seconds` still emits its term
 | `batch run` | `operation_id`, `code` (`Completed`/`Partial`/`Cancelled`/`DeadlineExceeded`), `attempted`, `completed`, `total`, `stop` (text or `null`), `items[]` |
 | `items[]` | `id`, `status` (`Completed`/`Failed`/`NotRun`), `code`, `subcode` (remote failed items with a precise reason), `applied`, `verdict` (verify items), `published` (items with an output), `digest` `{algorithm, hex}` (hash items) |
 
-Optional fields are omitted, not `null`, when absent. `timestamp`, `jws`, `jwt` and `plugin call` print their own smaller reports (`operation_id`, `code`, `applied` plus byte counters, `profile`, `verdict`, `policy` or `facts` as relevant). The table is derived from the report structures in `crates/oncl-cli/src/reports.rs`, `local.rs`, `public.rs` and `batch.rs`.
+Optional fields are omitted, not `null`, when absent. `timestamp`, `jws`, `jwt` and `plugin call` print their own smaller reports (`operation_id`, `code`, `applied` plus byte counters, `profile`, `verdict`, `policy` or `facts` as relevant); `plugin operations` prints the report described under [Plugins](#plugins-oncl-plugin). The table is derived from the report structures in `crates/oncl-cli/src/reports.rs`, `local.rs`, `public.rs` and `batch.rs`.
 
 ## Remote mode (`--endpoint`)
 

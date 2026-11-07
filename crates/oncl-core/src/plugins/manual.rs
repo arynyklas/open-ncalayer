@@ -142,6 +142,13 @@ impl From<PluginRequestError> for OperationError {
     }
 }
 
+/// Which caller's view of the declared operations a request is built for.
+#[derive(Clone, Copy)]
+enum Flavour {
+    Manual,
+    Server,
+}
+
 /// A [`PackageHash::Loose`]: SHA-256 over a length-prefixed manifest text and module, for
 /// hosts that load them separately instead of from a package file. It can never equal a
 /// file hash and is not verified against anything.
@@ -175,6 +182,15 @@ impl Installed {
             return Err(PluginRequestError::NetworkUnsupported);
         }
         Ok(op)
+    }
+
+    /// The operation, if a server or CLI grant may name it: declared, runnable and `server`.
+    /// One that is not for servers is reported as not declared.
+    pub(super) fn server_operation(&self, name: &str) -> Result<&Operation, PluginRequestError> {
+        self.manifest
+            .server_operations()
+            .find(|o| o.name() == name)
+            .ok_or(PluginRequestError::UndeclaredOperation)
     }
 }
 
@@ -290,12 +306,39 @@ impl Engine {
         operation: &str,
         params: &[(&str, PluginParam<'_>)],
     ) -> Result<String, PluginRequestError> {
+        self.declared_request(plugin_id, operation, params, Flavour::Manual)
+    }
+
+    /// [`plugin_request`](Self::plugin_request) for a server or CLI grant: the operation must
+    /// be declared with `server = true` and runnable (it need not be `manual`); a plugin
+    /// without `[[operations]]` or an operation that is not for servers is
+    /// [`PluginRequestError::UndeclaredOperation`]. The request is built exactly as the
+    /// manual window builds it.
+    pub fn plugin_server_request(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        params: &[(&str, PluginParam<'_>)],
+    ) -> Result<String, PluginRequestError> {
+        self.declared_request(plugin_id, operation, params, Flavour::Server)
+    }
+
+    fn declared_request(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        params: &[(&str, PluginParam<'_>)],
+        flavour: Flavour,
+    ) -> Result<String, PluginRequestError> {
         let installed = self
             .plugins
             .as_ref()
             .and_then(|r| r.installed.get(plugin_id))
             .ok_or(PluginRequestError::UnknownPlugin)?;
-        let op = installed.manual_operation(operation)?;
+        let op = match flavour {
+            Flavour::Manual => installed.manual_operation(operation)?,
+            Flavour::Server => installed.server_operation(operation)?,
+        };
         for (i, (name, _)) in params.iter().enumerate() {
             if !op.params().iter().any(|p| p.name == *name) {
                 return Err(PluginRequestError::UnknownParam((*name).to_owned()));

@@ -115,6 +115,15 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::batch::BatchCommand,
     },
+    /// Run a WASM plugin operation under the operator's grants, or list what a manifest declares
+    ///
+    /// `plugin call` runs one operation: the operator names the caller, the operation, the
+    /// imports and the key, and `--plugin-bytes` is the operator's own consent to a key use of
+    /// a declared operation (nothing ever prompts). A declared operation takes typed
+    /// `--param`, `--param-file` and `--param-flag` values; a plugin without declarations takes
+    /// a free `--args-file`. `plugin operations --manifest plugin.toml` lists the declared
+    /// operations (name, imports, network, key use and profile) so grants can be written
+    /// without reading the TOML. See docs/cli.md, "Plugins".
     Plugin {
         #[command(subcommand)]
         command: crate::plugin::PluginCommand,
@@ -460,7 +469,7 @@ impl Cli {
             Command::Timestamp {
                 command: crate::families::TimestampCommand::Acquire { output, .. },
             } => Some(output.as_str()),
-            Command::Plugin { command } => Some(command.args().output.as_str()),
+            Command::Plugin { command } => command.output(),
             Command::Jws { command } => command.output(),
             Command::Jwt { command } => command.output(),
             _ => None,
