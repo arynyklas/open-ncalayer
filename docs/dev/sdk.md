@@ -268,8 +268,11 @@ Three Core steps, in this order (`docs/design/manual-plugins.md` 4.2, 4.3, 4.8).
 `plugin_prepare` and `plugin_call_approved` take the same `ManualCall { plugin_id, operation,
 params, key: &PluginKeyBinding, caller: &CallerContext }`:
 
-1. `Engine::plugin_prepare(&ManualCall, &OperationContext)` returns a `PluginPrepared` or a
-   `PluginPrepareError` (always `NotApplied`; it takes `&mut OperationContext` to open the key once).
+1. `Engine::plugin_prepare(&ManualCall, &mut OperationContext)` returns a `PluginPrepared` or a
+   `PluginPrepareError` (always `NotApplied`). It opens the key once (a token login or key-store
+   decryption happens at this point, and again in the call), so the host collects the secret
+   BEFORE showing the consent and puts it in the binding's key request; a failed open is
+   `KeyUnavailable` without its cause.
    It validates the parameters like `plugin_request`, freezes what is signed (the bytes of the
    bound parameter, SHA-256 and length; for a `cms_ex` profile whose `content_form` is `digest`
    the digest Core itself computes with the hash algorithm of the bound key's signature
@@ -280,8 +283,8 @@ params, key: &PluginKeyBinding, caller: &CallerContext }`:
    `CallerContext::LocalOperator` (the manual window has no origin) and the key binding must
    carry its public metadata (`with_public_metadata`: alias and certificate). The metadata
    is the host's statement about the key it signs with: Core shows it and gives it to the plugin
-   (`BoundKey`, `keys_describe`) but does not re-read it from the key store, so the host builds
-   the binding from the one key source it signs with.
+   (`BoundKey`, `keys_describe`) and `plugin_prepare` compares its certificate with the one the
+   key store holds for the key (`CertificateMismatch`).
    `PluginPrepared::summary()` is a `ConsentSummary`: the **trusted** description to render
    (identity `{id, PackageHash, version}`, operation name, kind, number of uses, the declared
    profile with the user's text resolved, the options hash, the content parameter name, length,

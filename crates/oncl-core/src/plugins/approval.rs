@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 /// for less ([`PluginPrepared::approve`]), never more.
 pub const APPROVAL_TTL: Duration = Duration::from_secs(120);
 
-/// Why a manual-window key use could not be prepared. Raised before any key is opened.
+/// Why a manual-window key use could not be prepared. Raised before any key is applied (preparing opens the key once, see [`Engine::plugin_prepare`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PluginPrepareError {
@@ -51,14 +51,16 @@ pub enum PluginPrepareError {
     UnsupportedKey,
     /// A `param:` source of the profile has no valid text.
     Options,
-    /// The key could not be opened to compare its certificate with the binding's.
+    /// The key could not be opened to compare its certificate with the binding's. The cause
+    /// (wrong secret, cancellation, deadline, permission) is not kept: collect the secret before
+    /// preparing and treat this as "could not open".
     KeyUnavailable,
     /// The certificate in the binding's metadata is not the one the key store holds for the
     /// key: what the user would be shown is not what would sign.
     CertificateMismatch,
 }
 impl PluginPrepareError {
-    /// Always `NotApplied`: nothing here opens a key.
+    /// Always `NotApplied`: nothing here applies a key.
     pub fn applied_state(&self) -> AppliedState {
         AppliedState::NotApplied
     }
@@ -689,7 +691,9 @@ impl Engine {
     /// local operator the operation is registered for; `key` must carry its public
     /// metadata (alias, certificate).
     ///
-    /// The key is opened (and released) once to compare its certificate with the binding's
+    /// The key is opened (and released) once, at preparation, with the secret in `call.key.key`
+    /// (a token login or a key-store decryption happens now, and again in the call): the host
+    /// collects the secret BEFORE showing the consent. The key is opened to compare its certificate with the binding's
     /// metadata ([`PluginPrepareError::CertificateMismatch`]); nothing is granted or applied.
     /// The approval binds that certificate's SHA-256: the guard refuses the key use
     /// ([`TicketRefusal::CertificateChanged`], not applied) if the key about to sign holds
@@ -705,6 +709,8 @@ impl Engine {
         ctx: &mut OperationContext,
     ) -> Result<PluginPrepared, PluginPrepareError> {
         let plan = self.plugin_plan(call, ctx)?;
+        // A request that cannot be built is no operation to ask the user about.
+        self.plugin_request(call.plugin_id, call.operation, call.params)?;
         // What the user is shown is what will sign: the key store's own certificate for this
         // key must be the one the binding's metadata carries. Opening a key applies none.
         let services = self
@@ -719,8 +725,6 @@ impl Engine {
             return Err(PluginPrepareError::CertificateMismatch);
         }
         drop(lease);
-        // A request that cannot be built is no operation to ask the user about.
-        self.plugin_request(call.plugin_id, call.operation, call.params)?;
         Ok(PluginPrepared {
             plan,
             operation_id: ctx.id(),
@@ -848,5 +852,93 @@ mod tests {
             ApprovedCall::of(Err(OperationError::PermissionDenied), Vec::new()).applied(),
             AppliedState::NotApplied
         );
+    }
+
+    /// Changing any one field of a summary changes its digest.
+    #[test]
+    fn every_field_of_the_summary_changes_the_digest() {
+        let base = ConsentSummary {
+            plugin: PluginIdentity {
+                id: "p".into(),
+                package: PackageHash::File([1; 32]),
+                version: "1".into(),
+            },
+            operation: "op".into(),
+            kind: KeyKind::Raw,
+            uses: 1,
+            profile: Profile::Raw,
+            options_sha256: [2; 32],
+            content: ConsentContent {
+                param: "file".into(),
+                len: 3,
+                sha256: [3; 32],
+                prehashed: None,
+            },
+            key: ConsentKey {
+                alias: "a".into(),
+                serial_hex: "01".into(),
+                subject_cn: Some("cn".into()),
+                fingerprint_sha256: [4; 32],
+                not_after: time::OffsetDateTime::UNIX_EPOCH,
+            },
+            network: ConsentNetwork::None,
+        };
+        let d = base.digest();
+        let variants: Vec<(&str, Box<dyn Fn(&mut ConsentSummary)>)> = vec![
+            ("id", Box::new(|s| s.plugin.id = "q".into())),
+            (
+                "package",
+                Box::new(|s| s.plugin.package = PackageHash::File([9; 32])),
+            ),
+            ("version", Box::new(|s| s.plugin.version = "2".into())),
+            ("operation", Box::new(|s| s.operation = "o2".into())),
+            ("kind", Box::new(|s| s.kind = KeyKind::Cms)),
+            ("uses", Box::new(|s| s.uses = 2)),
+            (
+                "profile",
+                Box::new(|s| s.profile = Profile::Cms(Default::default())),
+            ),
+            ("options", Box::new(|s| s.options_sha256 = [9; 32])),
+            ("param", Box::new(|s| s.content.param = "x".into())),
+            ("len", Box::new(|s| s.content.len = 4)),
+            ("sha256", Box::new(|s| s.content.sha256 = [9; 32])),
+            (
+                "prehashed",
+                Box::new(|s| {
+                    s.content.prehashed = Some(PrehashedDigest {
+                        alg: HashAlg::Sha256,
+                        digest: vec![1],
+                    })
+                }),
+            ),
+            ("alias", Box::new(|s| s.key.alias = "b".into())),
+            ("serial", Box::new(|s| s.key.serial_hex = "02".into())),
+            ("cn", Box::new(|s| s.key.subject_cn = None)),
+            (
+                "cn text",
+                Box::new(|s| s.key.subject_cn = Some("other".into())),
+            ),
+            (
+                "fingerprint",
+                Box::new(|s| s.key.fingerprint_sha256 = [9; 32]),
+            ),
+            (
+                "not_after",
+                Box::new(|s| s.key.not_after += time::Duration::DAY),
+            ),
+            (
+                "network",
+                Box::new(|s| {
+                    s.network = ConsentNetwork::Pki {
+                        endpoints: vec!["http://a/".into()],
+                    }
+                }),
+            ),
+        ];
+        for (name, change) in variants {
+            let mut s = base.clone();
+            change(&mut s);
+            assert_ne!(s.digest(), d, "{name} is not in the digest");
+        }
     }
 }

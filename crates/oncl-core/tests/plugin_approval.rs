@@ -1401,10 +1401,11 @@ fn the_certificate_that_signs_is_the_one_the_user_approved() {
     );
     drop(c);
     // The guard decides on the certificate of the key that actually signs: an approval for
-    // certificate B whose metadata also says B (so the fast check passes) is refused at the
-    // key use, because the key lease holds A.
+    // certificate B with the honest binding (metadata says A) is refused by the fast check
+    // before the module runs; the guard-only case is the next test.
     let mut c = ctx(&rig, "sign-raw");
     let p = prepare(&rig, "sign-raw", &params, &mut c);
+    assert_eq!(rig.guard.applications(), 1, "preparing applies no key");
     let s = p.summary();
     let fingerprint: [u8; 32] = {
         use sha2::Digest;
@@ -1508,4 +1509,42 @@ fn prehash_algorithm_agrees_with_the_signer_under_ncalayer_compatibility() {
     let p = prepared.summary().content.prehashed.clone().unwrap();
     assert_eq!(p.alg, oncl_pki::key::HashAlg::Sha256);
     assert_eq!(p.digest, SigAlg::RsaSha256.digest(DOC));
+}
+
+#[test]
+fn guard_decides_on_lease_certificate_not_on_metadata() {
+    let params = doc(DOC);
+    let other = crypto::issued("user-gost2015-sign").cert;
+    let rig = rigged(&[raw_call(DOC)], "");
+    let mut c = ctx(&rig, "sign-raw");
+    let lying = binding(&rig.key, 1).with_public_metadata(&rig.alias, &other, &[]);
+    let p = prepare(&rig, "sign-raw", &params, &mut c);
+    assert_eq!(rig.guard.applications(), 0, "preparing applies no key");
+    let s = p.summary();
+    let fingerprint: [u8; 32] = {
+        use sha2::Digest;
+        Sha256::digest(der::Encode::to_der(&other).unwrap()).into()
+    };
+    // Lease A, metadata B, approval B: the fast check passes; only the guard can stop it.
+    let forged = PluginApproval::for_tests(
+        s.plugin.clone(),
+        "sign-raw",
+        manual(),
+        c.id(),
+        rig.key.key_id(),
+        1,
+        vec![ApprovedUse::for_tests(
+            s.kind,
+            ContentBinding::bytes(DOC),
+            s.options_sha256,
+            fingerprint,
+        )],
+        Instant::now() + APPROVAL_TTL,
+        [9; 16],
+    );
+    let result = call_with(&rig, "sign-raw", &params, &lying, forged, &mut c);
+    assert!(denied(&result), "{result:?}");
+    assert_eq!(result.refusals(), [TicketRefusal::CertificateChanged]);
+    assert_eq!(rig.guard.applications(), 0);
+    assert_eq!(result.applied(), AppliedState::NotApplied);
 }
