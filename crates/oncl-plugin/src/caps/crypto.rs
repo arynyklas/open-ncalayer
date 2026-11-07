@@ -170,9 +170,9 @@ pub fn nca_pki_hosts() -> Arc<[String]> {
 }
 
 /// The TSA of `PkiUrl::Default`.
-const DEFAULT_TSA: &str = "http://tsp.pki.gov.kz";
+pub const DEFAULT_TSA: &str = "http://tsp.pki.gov.kz";
 /// The OCSP responder of `PkiUrl::Default`.
-const DEFAULT_OCSP: &str = "http://ocsp.pki.gov.kz";
+pub const DEFAULT_OCSP: &str = "http://ocsp.pki.gov.kz";
 
 /// A URL of a PKI service, if the core may ask it: `http(s)://` to one of the PKI hosts
 /// or a subdomain of one; any for a built-in module.

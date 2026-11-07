@@ -39,8 +39,8 @@ pub use builtins::{
     BUILTIN_MAX_TRANSFER, BuiltinInfo, BuiltinLimits, BuiltinSource, BuiltinStats, Builtins,
 };
 pub use caps::{
-    HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS,
-    SharedState, nca_pki_hosts,
+    DEFAULT_OCSP, DEFAULT_TSA, HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES,
+    MAX_SECRETS, NCA_PKI_HOSTS, SharedState, nca_pki_hosts,
 };
 pub use host::HostServices;
 pub use manifest::{

@@ -31,11 +31,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use oncl_desktop::UpdateSettings;
+use oncl_flows::capabilities::CapabilityLine;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::core::Bundles;
+use oncl_plugin::operations::{AddedOperation, AddedReason};
 use oncl_plugin::{
-    BUILT_IN, Capabilities, Installed, LoadError, Localized, MAX_PACKAGE, Package, PluginModules,
-    Replaces, Source, Store,
+    Added, BUILT_IN, Capabilities, Installed, LoadError, Localized, MAX_PACKAGE, Manifest, Package,
+    PluginModules, Replaces, Source, Store,
 };
 use oncl_protocol::{AddInfo, DynamicModules};
 use oncl_ui::PluginActionError;
@@ -182,8 +184,27 @@ pub struct InstalledView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingView {
     pub version: Version,
-    /// What it may do that the installed version may not.
-    pub added: Capabilities,
+    /// What it may do that the installed version may not: capabilities and operations.
+    pub added: Added,
+}
+
+impl PendingView {
+    /// What the user is asked to agree to, a line each: the capabilities, then (if any) the
+    /// operations that are new or wider, by name (their labels are the plugin's own text and
+    /// are not shown as a promise).
+    pub fn lines(&self) -> Vec<CapabilityLine> {
+        let mut lines = self.added.capabilities.lines();
+        if !self.added.operations.is_empty() {
+            lines.push(CapabilityLine::Operations(
+                self.added
+                    .operations
+                    .iter()
+                    .map(|o| o.name.clone())
+                    .collect(),
+            ));
+        }
+        lines
+    }
 }
 
 /// Whether an installed plugin serves its modules.
@@ -269,7 +290,7 @@ enum Asker {
 struct Known {
     name: Localized,
     replaces: Option<Replaces>,
-    capabilities: Capabilities,
+    manifest: Manifest,
 }
 
 /// An update downloaded and checked, waiting for the user: it may do more (`added`) than
@@ -279,7 +300,7 @@ struct PendingUpdate {
     package: Package,
     bytes: Vec<u8>,
     snapshot: Installed,
-    added: Capabilities,
+    added: Added,
 }
 
 /// Why a catalog download did not bring a catalog.
@@ -1009,10 +1030,7 @@ impl PluginService {
             }
             Err(Download::Bad(e)) => return self.bad(release, e),
         };
-        let added = package
-            .manifest
-            .capabilities
-            .added_over(&self.capabilities_of(&release.id));
+        let added = self.added_over_installed(&package.manifest);
         if added.is_empty() {
             let _ = self.install_update(release, package, &bytes, snapshot);
             return;
@@ -1060,20 +1078,43 @@ impl PluginService {
         .map_err(PluginActionError::Failed)
     }
 
-    /// What the installed `id` may do: its package's capabilities (none known: nothing).
-    fn capabilities_of(&self, id: &str) -> Capabilities {
-        if let Some(known) = lock(&self.known).get(id) {
-            return known.capabilities.clone();
-        }
-        match self.store.load_package(id) {
+    /// What the manual-tools window may offer of the plugins installed now: the registry
+    /// and the list ([`manual::ManualPlugins`]). Built from the store under the lock that
+    /// installs and updates, so it never sees a plugin half-replaced.
+    pub fn manual_plugins(&self) -> manual::ManualPlugins {
+        let _change = lock(&self.changing);
+        manual::ManualPlugins::build(&self.store)
+    }
+
+    /// What `new` asks for over the installed plugin of its id: capabilities and
+    /// `[[operations]]` ([`Manifest::added_over`]). An installed package that cannot be read
+    /// counts as one that may do nothing: everything `new` asks for waits for the user.
+    fn added_over_installed(&self, new: &Manifest) -> Added {
+        let id = &new.id;
+        let known = lock(&self.known).get(id).map(|k| k.manifest.clone());
+        let old = known.or_else(|| match self.store.load_package(id) {
             Ok(package) => {
                 self.remember(&package);
-                package.manifest.capabilities
+                Some(package.manifest)
             }
             Err(e) => {
-                warn!(plugin = id, error = %e, "cannot read the installed plugin");
-                Capabilities::default()
+                warn!(plugin = %id, error = %e, "cannot read the installed plugin");
+                None
             }
+        });
+        match old {
+            Some(old) => new.added_over(&old),
+            None => Added {
+                capabilities: new.capabilities.added_over(&Capabilities::default()),
+                operations: new
+                    .operations()
+                    .iter()
+                    .map(|o| AddedOperation {
+                        name: o.name().to_owned(),
+                        reasons: vec![AddedReason::New],
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -1278,7 +1319,7 @@ impl PluginService {
             Known {
                 name: package.manifest.name.clone(),
                 replaces: package.manifest.replaces.clone(),
-                capabilities: package.manifest.capabilities.clone(),
+                manifest: package.manifest.clone(),
             },
         );
     }
@@ -1508,6 +1549,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub mod manual;
 pub mod window;
 
 #[cfg(test)]

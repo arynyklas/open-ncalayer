@@ -133,7 +133,7 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                 },
                 pending_update: p.pending_update.map(|update| PendingUpdate {
                     version: update.version.to_string(),
-                    added: update.added.lines(),
+                    added: update.lines(),
                 }),
                 id: p.id,
             })
@@ -278,9 +278,12 @@ mod tests {
                     state: PluginState::Withdrawn,
                     pending_update: Some(PendingView {
                         version: Version::new(2, 1, 0),
-                        added: Capabilities {
-                            files: true,
-                            ..Capabilities::default()
+                        added: oncl_plugin::Added {
+                            capabilities: Capabilities {
+                                files: true,
+                                ..Capabilities::default()
+                            },
+                            operations: Vec::new(),
                         },
                     }),
                 },
