@@ -357,13 +357,13 @@ mod tests {
 
     #[test]
     fn typed_values_follow_their_kinds_and_limits() {
-        let (fields, mut values) = filled("\"drive_C:\\docs\\a.txt\"");
+        let (fields, mut values) = filled("\"docs/a.txt\"");
         let typed = read(&fields, &values).unwrap();
         assert_eq!(
             typed[0],
             (
                 "file".to_owned(),
-                Typed::Document(PathBuf::from("drive_C:\\docs\\a.txt"))
+                Typed::Document(PathBuf::from("docs/a.txt"))
             ),
             "the quotes of «Copy as path» are not part of the path"
         );

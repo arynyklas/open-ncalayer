@@ -1542,3 +1542,20 @@ fn the_runs_deadline_is_the_sdks_default_operation_timeout() {
         oncl_pki::resource::ResourceLimits::default().operation_timeout
     );
 }
+
+#[test]
+fn while_the_confirmation_is_prepared_the_buttons_keep_their_real_names() {
+    let rig = rig();
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_key_raw(&doc);
+    rig.unlocked();
+    rig.ui().invoke_cert_chosen(0);
+    // Right after the choice the summary may not be there yet; either way the names are set.
+    let t = Texts::of(Locale::En);
+    assert_eq!(rig.ui().get_cancel_label(), t.consent_cancel);
+    assert_eq!(
+        rig.ui().get_confirm_label(),
+        t.confirm_label.replace("{0}", "sign-raw")
+    );
+    assert!(!rig.ui().get_confirm_enabled());
+}

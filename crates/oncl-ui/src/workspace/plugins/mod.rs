@@ -1463,9 +1463,17 @@ fn render_consent(st: &State, ui: &PluginsState<'_>, t: &Texts) {
     ui.set_c_frame_name(v.frame.name.as_str().into());
     ui.set_c_frame_label(v.frame.label.as_str().into());
     ui.set_c_frame_lines(text_model(v.frame.lines.iter().cloned()));
-    ui.set_confirm_label(v.confirm_label.as_str().into());
+    // Before the summary is ready the buttons still have their real, localized names.
+    let operation = current_operation(st)
+        .map(|o| o.operation)
+        .unwrap_or_default();
+    if st.controller.step() == Step::Consent && view.is_none() {
+        ui.set_confirm_label(t.confirm_label.replace("{0}", &operation).as_str().into());
+    } else {
+        ui.set_confirm_label(v.confirm_label.as_str().into());
+    }
     if st.controller.step() == Step::Consent {
-        ui.set_cancel_label(v.cancel_label.as_str().into());
+        ui.set_cancel_label(t.consent_cancel.into());
     }
     // From the step and the controller, never from a running job: the job that prepared the
     // confirmation waits for the very button this enables.
