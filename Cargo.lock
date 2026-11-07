@@ -4503,6 +4503,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tracing",
  "ureq",
  "windows-sys 0.61.2",
  "zeroize",

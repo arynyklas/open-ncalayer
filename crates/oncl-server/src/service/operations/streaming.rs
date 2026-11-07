@@ -157,6 +157,7 @@ pub(super) async fn response(
                     staging: runtime.source_store.as_ref(),
                     host: &host,
                     caller: &caller,
+                    subcode: None,
                 };
                 match mode {
                     Mode::Operations => {
@@ -276,7 +277,7 @@ fn execute(
         let (result, reservation, artifact) = match outcome {
             Ok(done) => done,
             Err(error) => {
-                let failure = match dispatch::classify(error, applied_any) {
+                let failure = match dispatch::classify(error, applied_any, env.subcode.take()) {
                     dispatch::Failure::Abort(error) => return Err(error),
                     dispatch::Failure::Typed(failure) => failure,
                 };

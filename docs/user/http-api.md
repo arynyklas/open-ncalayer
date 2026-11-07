@@ -168,7 +168,8 @@ Before a completed response, execution failures use the stable `code` and
 `applied` envelope from the raw service: 403 PermissionDenied, 400 InvalidRequest,
 413 byte/resource limit, 503 CapacityExceeded/AuditUnavailable, or 504
 DeadlineExceeded (also for an upload that stalls or falls below the minimum upload rate,
-see [the server guide](server.md)). Hashing never applies a private key. Authentication occurs
+see [the server guide](server.md)). An error answer may add an optional `subcode` string next
+to `code` (see "Error subcodes" below). Hashing never applies a private key. Authentication occurs
 before body intake; the original admission root starts before bounded metadata
 intake, then the host consumes that same root into an authorized operation
 context. Queueing, SDK work, response ownership and actual network writes retain
@@ -217,11 +218,62 @@ before any key, secret or document is touched. `xades_legacy_t` signs with a hos
 with the original admitted context. Installation is not authority: each
 (token, plugin, operation) needs an operator `[[plugins.permissions]]` entry listing
 the allowed host imports, named keys and exact GET PKI status URLs; the caller identity
-is the token, never a request or payload `origin`. Mandatory dialogs fail with
+is the token, never a request or payload `origin`. A plugin that **declares** its operations
+(`[[operations]]` in its manifest) is held to the declaration: Core forces the declared
+signature options (a request cannot add attributes, a custom TSA and the like), `cosign`
+is never, and a key use needs the grant's explicit `plugin_bytes = true` (below); the
+unrefused use is audited with its ticket. A plugin **without** declarations is unchanged. Mandatory dialogs fail with
 `InteractionRequired` (403), a denied nested import is `PermissionDenied`, key use is
 audited and reported `Applied`/`Unknown`. Token (PC/SC) keys are operator named keys;
 they fail closed (NotApplied, no BEGIN) without a reader/card and card transactions
 on one device never overlap.
+
+## Error subcodes
+
+An error answer (an HTTP error before the headers, `error` of a failed `final` record,
+`error` of a failed batch item) is `{"code": ..., "applied": ...}` and, **only when the
+refusal has a precise reason**, `"subcode": "<id>"`:
+
+```json
+{"code":"PermissionDenied","applied":"NotApplied","subcode":"not-granted"}
+```
+
+* The field is **additive**: `ErrorCode` (the 19 stable codes) and the statuses are unchanged,
+  an error without a reason is byte-for-byte what it was, and `subcode` is never required.
+  The OpenAPI schema lists it and keeps `additionalProperties: false` for what a server may
+  send. The Rust client (`oncl_api`) ignores unknown fields and drops a non-string subcode, so
+  older and newer peers interoperate; a client built before this change that still rejects
+  unknown fields fails to parse a plugin refusal that carries one (code and `applied` are lost
+  with it), so upgrade clients with the server.
+* The id matches `^[A-Za-z][A-Za-z0-9_-]{0,63}$` (the ids the server emits are lowercase
+  kebab-case; the pattern is the wire bound). `InteractionRequired` carries no subcode. It is **opaque and
+  open**: new ids may appear, treat unknown ones as the plain `code`. It is a reason, never a
+  message, and never contains document, key or parameter bytes. A value outside the pattern
+  is dropped by the client (the typed `code` survives).
+* Today only plugin refusals carry one. A refusal is **always `NotApplied`** except
+  `key-use-spent` (a second key use in one request (one `OperationId`; two plugin items of one request count together): the first use is real and stays
+  reported `Applied`). The ids a server answer can carry for a plugin operation:
+
+| `subcode` | `code` | Meaning |
+|---|---|---|
+| `not-granted` | `PermissionDenied` | The operation declares a key use and the grant has no `plugin_bytes = true`; or no grant covers the ticketed use |
+| `options-mismatch` | `PermissionDenied` | The plugin asked for signature options other than the declared profile (or a profile that names a parameter, which a server cannot match) |
+| `package-changed` | `PermissionDenied` | The plugin package is not the installed one |
+| `key-mismatch` | `PermissionDenied` | The key is not one the grant names |
+| `kind-mismatch` | `PermissionDenied` | The signature kind is not a declared key use |
+| `caller-mismatch` | `PermissionDenied` | The ticket's caller is not the granted token |
+| `ticket-uses` | `PermissionDenied` | The ticket allows other than exactly one use |
+| `key-use-spent` | `PermissionDenied` | One request tried to use a key twice (`applied` is `Applied`) |
+| `not-declared` | `PermissionDenied` | The operation is not declared by the plugin (a server grant for it is skipped at start-up, so a request normally gets a plain 403 without a subcode; the `oncl plugin` CLI reports this id) |
+
+Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`) belong to the
+desktop manual window and are listed in the SDK guide.
+
+The Rust client (`oncl_api::client::ClientError`) exposes it as `server_subcode`
+(`Option<String>`, already validated, safe to print); its `describe()` becomes
+`PermissionDenied; subcode=not-granted`. The `oncl` CLI prints
+`oncl: PermissionDenied; subcode=not-granted; applied=NotApplied` and adds `subcode` to the
+failed row of a `batch --json` report; without a reason the line is exactly as before.
 
 ## Keys and secret roles
 
@@ -344,7 +396,31 @@ operation = "run"
 imports = ["hash", "keys_sign_raw"]   # exact host imports (Import::name())
 keys = ["ops-key"]                    # operator-named keys, also in the token's keys
 pki_endpoints = ["http://pki.example/ocsp"]   # exact GET URLs for nested validation
+plugin_bytes = false                  # default; see below
 ```
+
+`plugin_bytes = true` is the operator's explicit acceptance that **the plugin (or its
+client) chooses the bytes the granted key signs**. The server cannot bind the content to a
+document (`args` is free JSON; typed parameters and document parts are a later stage), so
+a key use of a *declared* operation is refused (`PermissionDenied`, subcode `not-granted`,
+`NotApplied`, before any `BEGIN` and before the key; a refusal record may be written) unless the grant carries it. It needs at
+least one `keys` entry (validation refuses `plugin_bytes = true` without a key) and has no
+effect for a plugin without declarations (the server logs a warning). Even then the use
+must match the declaration exactly: the ticket's plugin, package hash, operation, the
+token as caller, a named key of the grant, the declared kind and the declared options
+(`options-mismatch` otherwise) and it must be the request's only key use (a second plugin item or a second signature in the same request is `key-use-spent`).
+
+**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. No shipped manifest declares operations yet.
+
+At start-up a grant of a declared plugin is checked against the manifest and **skipped with
+an error in the log** (the other grants and the server keep running) when it is wider than the
+declaration: an operation the plugin does not declare (the error lists the declared ones) or
+declares without `server = true`; an import outside `uses.imports` (an empty `imports` list
+means all declared imports); `keys` or `plugin_bytes` for an operation with no key use;
+`pki_endpoints` without `network = "pki"`. A grant naming an import that does not exist, an
+unknown token or a duplicate (token, operation) still fails the configuration. A grant of a
+plugin without declarations is kept as before with a start-up warning that its signature
+options are not enforced.
 
 Plugin outputs (`take_output` staged files) and bound input files are **not exposed** by
 HTTP: the SDK supports them through the original context, but no request-to-file

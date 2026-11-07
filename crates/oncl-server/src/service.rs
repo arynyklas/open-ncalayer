@@ -137,11 +137,13 @@ impl ServiceHost {
             32,
             config.max_in_flight as usize,
         )?;
+        let (registry, plugin_grants, plugin_policy) = install_plugins(&config)?;
         let audit = if config.audit_directory.exists() {
             DurableAuditGuard::open(audit_config)?
         } else {
             DurableAuditGuard::create(audit_config)?
-        };
+        }
+        .with_plugin_policy(plugin_policy.clone())?;
         if audit.health() != AuditHealth::Healthy {
             if !config.recover_audit {
                 return Err(io::Error::other("audit recovery required"));
@@ -165,7 +167,6 @@ impl ServiceHost {
                     .map_err(|_| invalid())?,
             )
         };
-        let (registry, plugin_grants) = install_plugins(&config)?;
         let mut services = EngineServices::hash_only(config.limits())
             .with_shared_budget(budget)
             .with_keys(keys.clone(), Arc::new(audit.clone()))
@@ -200,6 +201,7 @@ impl ServiceHost {
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
             jwt_audience: config.pki.jwt.expected_audience.clone(),
             plugin_grants,
+            plugin_policy,
             trust_bytes: config.pki.trust_bytes()?,
         });
         Ok(Arc::new(Self {
@@ -283,16 +285,21 @@ impl ServiceHost {
 }
 /// Operator-only plugin installation: code availability, never authority. The
 /// per-(token, operation) permission lists exact host imports and key names and
-/// binds the caller identity to the token, not to any request field.
+/// binds the caller identity to the token, not to any request field. A grant of a plugin
+/// that declares operations is judged against the declaration
+/// ([`crate::plugin_grants::judge`]); the ticket policy of its key uses is built here too.
 fn install_plugins(
     config: &ServerConfig,
 ) -> io::Result<(
     oncl_core::plugins::PluginRegistry,
     Vec<operations::PluginGrantRuntime>,
+    Arc<crate::plugin_grants::ServerPluginPolicy>,
 )> {
+    use crate::plugin_grants::{ServerPluginPolicy, Verdict, judge};
     use oncl_core::plugins::{CallerContext, PluginPermission, PluginRegistry};
     let mut registry = PluginRegistry::new();
     let mut grants = Vec::new();
+    let mut policy = ServerPluginPolicy::default();
     let mut ids = std::collections::HashSet::new();
     for plugin in &config.plugins {
         if !ids.insert(plugin.id.as_str()) {
@@ -318,37 +325,39 @@ fn install_plugins(
             return Err(invalid());
         }
         let wasm = read(&plugin.wasm, 16 << 20)?;
+        let package = oncl_core::plugins::loose_package_hash(manifest_text.as_bytes(), &wasm);
         let mut permissions = Vec::new();
         for grant in &plugin.permissions {
             if !config.tokens.iter().any(|t| t.id == grant.token) {
                 return Err(invalid());
             }
-            // Design 4.7: a plugin that declares operations is granted only under a declared
-            // name. Fail this grant (and say so), not the server.
-            if !manifest.operations().is_empty()
-                && !manifest
+            // Design 4.7: a grant wider than the declaration is skipped (and said so), not
+            // the server; an import that does not exist is a configuration error.
+            let (imports, declared) = match judge(&plugin.id, &manifest, grant)? {
+                Verdict::Skip(error) => {
+                    eprintln!("oncl-server: error: {error}");
+                    continue;
+                }
+                Verdict::Keep {
+                    imports,
+                    declared,
+                    warnings,
+                } => {
+                    for warning in warnings {
+                        eprintln!("oncl-server: warning: {warning}");
+                    }
+                    (imports, declared)
+                }
+            };
+            if declared
+                && let Some(operation) = manifest
                     .operations()
                     .iter()
-                    .any(|o| o.name() == grant.operation)
+                    .find(|o| o.name() == grant.operation)
+                && !operation.uses().keys().is_empty()
             {
-                let declared: Vec<&str> = manifest.operations().iter().map(|o| o.name()).collect();
-                eprintln!(
-                    "oncl-server: error: plugin {} declares operations {declared:?}; the grant for the undeclared operation {:?} of token {:?} is skipped",
-                    plugin.id, grant.operation, grant.token
-                );
-                continue;
+                policy.add(&plugin.id, grant, package, operation)?;
             }
-            let imports = grant
-                .imports
-                .iter()
-                .map(|name| {
-                    oncl_pdk::abi::Import::ALL
-                        .iter()
-                        .copied()
-                        .find(|i| i.name() == name)
-                        .ok_or_else(invalid)
-                })
-                .collect::<io::Result<Vec<_>>>()?;
             let keys = grant
                 .keys
                 .iter()
@@ -380,7 +389,7 @@ fn install_plugins(
         registry
             .install(
                 manifest,
-                oncl_core::plugins::loose_package_hash(manifest_text.as_bytes(), &wasm),
+                package,
                 &wasm,
                 oncl_plugin::InstanceLimits {
                     max_memory: plugin.max_memory,
@@ -391,7 +400,7 @@ fn install_plugins(
             )
             .map_err(|_| invalid())?;
     }
-    Ok((registry, grants))
+    Ok((registry, grants, Arc::new(policy)))
 }
 /// Stable wire code of a processing failure (never its message).
 pub(crate) fn processing_code(error: &ProcessingError) -> ErrorCode {
@@ -423,10 +432,7 @@ pub(crate) fn api_applied(value: oncl_pki::key::AppliedState) -> oncl_api::error
 /// Stable terminal error + honest key-application state from the typed SDK
 /// error, never reconstructed from a message.
 pub(crate) fn operation_failure(error: &OperationError) -> ApiError {
-    ApiError {
-        code: api_code(error.code()),
-        applied: api_applied(error.applied_state()),
-    }
+    ApiError::new(api_code(error.code()), api_applied(error.applied_state()))
 }
 /// Stable wire code of a typed SDK error code.
 pub(crate) fn api_code(code: oncl_core::ErrorCode) -> ErrorCode {

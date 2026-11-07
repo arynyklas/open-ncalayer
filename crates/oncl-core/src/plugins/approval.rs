@@ -431,13 +431,25 @@ pub struct ApprovedCall {
     outcome: Result<PluginResult, OperationError>,
     applied: AppliedState,
     refusals: Vec<TicketRefusal>,
+    subcode: Option<PluginRefusalCode>,
+}
+/// The one place a refusal that never reached the guard is told to the operator's logs, so
+/// that every refusal is recorded with its stable subcode.
+fn log_refusal(code: PluginRefusalCode) {
+    tracing::warn!(
+        target: "oncl::plugin_audit",
+        subcode = code.id(),
+        "a plugin operation was refused before any key was applied"
+    );
 }
 impl ApprovedCall {
     fn refused(reason: TicketRefusal) -> Self {
+        log_refusal(reason.into());
         Self {
             outcome: Err(OperationError::PermissionDenied),
             applied: AppliedState::NotApplied,
             refusals: vec![reason],
+            subcode: Some(reason.into()),
         }
     }
     fn failed(error: PluginPrepareError) -> Self {
@@ -448,10 +460,13 @@ impl ApprovedCall {
             PluginPrepareError::CallerNotManual => vec![TicketRefusal::Caller],
             _ => Vec::new(),
         };
+        let subcode = PluginRefusalCode::from(&error);
+        log_refusal(subcode);
         Self {
             outcome: Err(error.into()),
             applied: AppliedState::NotApplied,
             refusals,
+            subcode: Some(subcode),
         }
     }
     fn of(outcome: Result<PluginResult, OperationError>, refusals: Vec<TicketRefusal>) -> Self {
@@ -459,10 +474,12 @@ impl ApprovedCall {
             Ok(result) => result.applied_state(),
             Err(error) => error.applied_state(),
         };
+        let subcode = refusals.first().copied().map(PluginRefusalCode::from);
         Self {
             outcome,
             applied,
             refusals,
+            subcode,
         }
     }
     /// Whether the key was applied.
@@ -472,6 +489,13 @@ impl ApprovedCall {
     /// The refusals recorded for this invocation, oldest first.
     pub fn refusals(&self) -> &[TicketRefusal] {
         &self.refusals
+    }
+    /// The stable subcode of why the call was refused: the first refusal the guard recorded,
+    /// or the reason the call could not be prepared. `None` when nothing was refused (also
+    /// after an error that came after the key was applied). The plugin never sees it: its
+    /// own error is `PermissionDenied`.
+    pub fn subcode(&self) -> Option<PluginRefusalCode> {
+        self.subcode
     }
     /// The plugin's reply, or why there is none.
     pub fn result(&self) -> Result<&PluginResult, &OperationError> {
@@ -787,6 +811,7 @@ impl Engine {
                 outcome: Err(OperationError::MissingValidationServices),
                 applied: AppliedState::NotApplied,
                 refusals: Vec::new(),
+                subcode: None,
             };
         };
         let Some(metadata) = key.metadata.as_ref() else {

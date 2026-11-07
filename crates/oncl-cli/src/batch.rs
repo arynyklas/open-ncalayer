@@ -201,6 +201,9 @@ pub(crate) struct Row {
     pub(crate) id: String,
     pub(crate) status: &'static str,
     pub(crate) code: String,
+    /// The service's stable subcode of a refused item (remote batches only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subcode: Option<String>,
     pub(crate) applied: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verdict: Option<&'static str>,
@@ -409,6 +412,7 @@ pub fn run(
             id: result.id().to_owned(),
             status,
             code,
+            subcode: None,
             applied: format!("{:?}", result.applied_state()),
             verdict,
             published: destinations[index].as_ref().map(|_| published[index]),
@@ -485,7 +489,10 @@ pub(crate) fn human(report: &Report) -> String {
     for row in &report.items {
         human.push_str(&format!("\n{}: {}", row.id, row.status));
         if row.status == "Failed" {
-            human.push_str(&format!(" ({})", row.code));
+            match &row.subcode {
+                Some(subcode) => human.push_str(&format!(" ({}; subcode={subcode})", row.code)),
+                None => human.push_str(&format!(" ({})", row.code)),
+            }
         }
         if let Some(verdict) = row.verdict {
             human.push_str(&format!(" {verdict}"));
@@ -524,4 +531,47 @@ fn batch_error(error: oncl_core::batch::BatchError) -> OperationError {
 
 fn key_request<'a>(selector: &'a KeySelector, secret: Option<&'a str>) -> KeyRequest<'a> {
     KeyRequest::new(selector, secret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(subcode: Option<&str>) -> Report {
+        Report {
+            operation_id: 1,
+            code: "Failed",
+            attempted: 1,
+            completed: 0,
+            total: 1,
+            stop: None,
+            items: vec![Row {
+                id: "a".into(),
+                status: "Failed",
+                code: "PermissionDenied".into(),
+                subcode: subcode.map(str::to_owned),
+                applied: "NotApplied".into(),
+                verdict: None,
+                published: None,
+                digest: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_failed_row_with_a_subcode_shows_it_in_json_and_text() {
+        let report = failed(Some("not-granted"));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["items"][0]["subcode"], "not-granted");
+        assert!(human(&report).contains("(PermissionDenied; subcode=not-granted)"));
+    }
+
+    #[test]
+    fn a_row_without_a_subcode_is_exactly_as_before() {
+        let report = failed(None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json["items"][0].get("subcode").is_none());
+        assert!(human(&report).contains("(PermissionDenied)"));
+        assert!(!human(&report).contains("subcode"));
+    }
 }

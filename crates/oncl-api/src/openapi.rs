@@ -176,7 +176,8 @@ fn schemas() -> Value {
         object(&required, props)
     };
     json!({
-        "ApiError": object(&["code","applied"], json!({"code": ref_("ErrorCode"), "applied": ref_("AppliedState")})),
+        "ApiError": object(&["code","applied"], json!({"code": ref_("ErrorCode"), "applied": ref_("AppliedState"),
+            "subcode": {"type":"string","pattern":crate::error::SUBCODE_PATTERN,"maxLength":crate::error::SUBCODE_MAX,"description":"Optional precise reason next to `code` (additive: the code set is unchanged and the field is absent when the refusal has none). A stable kebab-case identifier of a plugin refusal, for example `not-granted` (the operator did not grant `plugin_bytes` for this plugin operation), `options-mismatch`, `package-changed`, `key-use-spent`; `InteractionRequired` carries none. Never a message and never document or key material; clients must treat unknown values as opaque."}})),
         "ErrorCode": enumeration(&["PermissionDenied","InteractionRequired","InvalidRequest","CapacityExceeded","DeadlineExceeded","Cancelled","InputLimit","FramingLimit","MissingTemporaryStore","MemoryLimit","TempLimit","MetadataLimit","OutputLimit","AuditUnavailable","MissingConfiguration","KeyNotFound","ValidationFailed","OperationFailed","Internal"]),
         "AppliedState": {"enum":["NotApplied","Applied","Unknown"],"description":"Whether a private key was used. `Unknown` after a post-use failure; no rollback or exactly-once is promised."},
         "OperationMetadata": object(&["items","parts"], json!({
@@ -347,10 +348,7 @@ fn batch_responses() -> Value {
                 1,
                 BatchItemOutcome::Failed,
                 AppliedState::NotApplied,
-                Some(ApiError {
-                    code: ErrorCode::TempLimit,
-                    applied: AppliedState::NotApplied,
-                }),
+                Some(ApiError::not_applied(ErrorCode::TempLimit)),
                 None,
             ),
             batch_item(
@@ -369,7 +367,7 @@ fn batch_responses() -> Value {
             applied: AppliedState::NotApplied,
         }),
     );
-    let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError{code:example,applied:AppliedState::NotApplied}}}});
+    let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError::not_applied(example)}}});
     json!({
         "200":{"description":"Always `multipart/mixed`: coalesced `progress` parts (with per-item position), one `artifact` part per FINISHED output (opaque Content-ID named by that item's result), and a mandatory `batch_final` part last (multipart name `final`). A stream without a terminal record is an unknown outcome, never a success. If the original deadline expires or the client disconnects mid-batch the response is aborted without a terminal record (no byte may leave after the deadline); the durable audit journal holds the per-item facts.",
             "content":{"multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last).","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("BatchFinalEvent")}},"examples":{"mixed":{"summary":"Sign, verify (Invalid is a completed item) and hash","value":mixed},"quota_stop":{"summary":"Item 2 hit a terminal quota: item 1's artifact stands, item 3 not run","value":stopped}}}}},
@@ -461,22 +459,24 @@ fn responses() -> Value {
             cms: None::<InspectedCms>,
         },
     )]);
-    let failure = failed(ApiError {
-        code: ErrorCode::AuditUnavailable,
-        applied: AppliedState::NotApplied,
-    });
-    let after_use = failed(ApiError {
-        code: ErrorCode::OperationFailed,
-        applied: AppliedState::Unknown,
-    });
-    let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError{code:example,applied:AppliedState::NotApplied}}}});
+    let failure = failed(ApiError::not_applied(ErrorCode::AuditUnavailable));
+    let after_use = failed(ApiError::new(
+        ErrorCode::OperationFailed,
+        AppliedState::Unknown,
+    ));
+    let plugin_refusal =
+        failed(ApiError::not_applied(ErrorCode::PermissionDenied).with_subcode("not-granted"));
+    let error = |description: &str, example: ErrorCode| json!({"description":description,"content":{"application/json":{"schema":ref_("ApiError"),"example":ApiError::not_applied(example)}}});
     json!({
         "200":{"description":"Operations without a binary artifact return one JSON `final` record. Operations that produce a binary artifact (extract, sign, extend, stamp, jws/jwt creation) return `multipart/mixed`: coalesced `progress` JSON parts, one `artifact` part per output (opaque `Content-ID` named by the result's `artifact`, exact `Content-Length`), and a mandatory `final` part last. A stream without a terminal `final` of status `completed` is not a success. Before headers, failures are typed JSON errors with a status code; after headers the status cannot change, so failures are reported in `final` (status `failed`, honest Applied state, artifacts withheld) or by transport abort.",
             "content":{
                 "application/json":{"schema":ref_("FinalEvent"),"examples":{"hash":{"value":hash},"verification_invalid_is_200":{"summary":"A bad signature is a completed Invalid report, never HTTP 500","value":verification},"jws_verification":{"value":jws_verify},"inspection":{"value":inspect}}},
-                "multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last). `progress` and `final` parts are application/json; `artifact` parts are application/octet-stream with a Content-ID.","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("FinalEvent")}},"examples":{"signed":{"summary":"Terminal record of a signing stream","value":signing},"stamp":{"value":stamp},"failed_before_use":{"value":failure},"failed_after_use":{"summary":"Key use is unknown after a post-use failure","value":after_use}}}}},
+                "multipart/mixed":{"schema":{"type":"object","description":"Wire order: progress*, artifact*, final (last). `progress` and `final` parts are application/json; `artifact` parts are application/octet-stream with a Content-ID.","required":["final"],"properties":{"progress":{"type":"array","items":ref_("ProgressEvent")},"artifact":{"type":"array","items":{"type":"string","format":"binary"}},"final":ref_("FinalEvent")}},"examples":{"signed":{"summary":"Terminal record of a signing stream","value":signing},"stamp":{"value":stamp},"failed_before_use":{"value":failure},"failed_after_use":{"summary":"Key use is unknown after a post-use failure","value":after_use},"failed_plugin_refusal":{"summary":"A plugin key use was refused before the key was applied; `error.subcode` names the reason","value":plugin_refusal}}}}},
         "400":error("Malformed or confused metadata, unknown/duplicate/late/unused part, secret in JSON",ErrorCode::InvalidRequest),
-        "403":error("Token, operation, key or inline right not granted",ErrorCode::PermissionDenied),
+        "403":{"description":"Token, operation, key or inline right not granted; or a plugin key use refused before the key was applied (`subcode` names the reason, see `ApiError`)",
+            "content":{"application/json":{"schema":ref_("ApiError"),"examples":{
+                "plain":{"summary":"A right is not granted","value":ApiError::not_applied(ErrorCode::PermissionDenied)},
+                "plugin_refusal":{"summary":"A declared plugin operation may not use a key for plugin-chosen bytes: the grant has no `plugin_bytes = true`","value":ApiError::not_applied(ErrorCode::PermissionDenied).with_subcode("not-granted")}}}}},
         "404":error("Unknown path or operation route (no NCANode aliases, no plugin/encryption routes)",ErrorCode::InvalidRequest),
         "408":error("The request was cancelled before completion",ErrorCode::Cancelled),
         "413":error("Document, framing, memory, temp, metadata or output limit",ErrorCode::InputLimit),

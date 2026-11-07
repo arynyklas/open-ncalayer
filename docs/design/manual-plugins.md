@@ -208,6 +208,8 @@ Engine::plugin_operations / plugin_request / plugin_call_approved / (MP3b) plugi
 | Origin нужен | ответ плагина | — | не применялся |
 | Ошибка **после** применения (TSA, сеть) | как сейчас (`AfterKeyUse`) | — | `Applied`/`Unknown` честно |
 
+Реализованные id подкодов (MP3a-3, `PluginRefusalCode`) — kebab-case и мельче таблицы: `NotDeclared`→`not-declared`, `PackageChanged`→`package-changed`, `OptionsMismatch`→`options-mismatch`, `ApprovalExpired`→`approval-expired`; `KeyUseNotApproved` разбит на `approval-missing`, `ticket-missing`, `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`, `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`, `certificate-changed`, `approval-replayed`, `busy`; `manual=false` — `not-manual`; добавлены `not-granted`, `no-consent-guard`, `audit-fact-too-long`; `ImportNotDeclared`, `PlanUnavailable`, `PreviewTooLarge` не реализованы (нет путей кода; MP3b/MP8).
+
 Утверждение «отказ всегда до ключа» верно потому, что применений ровно одно (`max_uses = 1`): все проверки предшествуют первому и единственному применению; поэтому не бывает состояния «первая подпись применена, вторая отклонена».
 
 ## 5. Аудит

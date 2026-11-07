@@ -1753,6 +1753,51 @@ fn jose_inspect_timestamp_and_extend_families_run_remotely() {
     assert!(std::fs::metadata(&ext).unwrap().len() > std::fs::metadata(&base).unwrap().len());
 }
 
+/// A typed refusal that carries a `subcode` is printed with it; one without is exactly the
+/// old line; a hostile subcode (control bytes, forged line) is never printed.
+#[test]
+fn a_service_refusal_subcode_is_printed_and_a_hostile_one_is_not() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let s = Session::new(&remote);
+    let doc = s.file("doc.bin", b"abc");
+    let cases: [(&str, &str); 3] = [
+        (
+            r#"{"code":"PermissionDenied","applied":"NotApplied","subcode":"not-granted"}"#,
+            "oncl: PermissionDenied; subcode=not-granted; applied=NotApplied",
+        ),
+        (
+            r#"{"code":"PermissionDenied","applied":"NotApplied"}"#,
+            "oncl: PermissionDenied; applied=NotApplied",
+        ),
+        (
+            r#"{"code":"PermissionDenied","applied":"NotApplied","subcode":"x\r\noncl: forged"}"#,
+            "oncl: PermissionDenied; applied=NotApplied",
+        ),
+    ];
+    for (body, expected) in cases {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let serve = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let via = Session::via(&remote, format!("http://{address}"));
+        let out = via.run(&["hash", "--algorithm", "sha256", "--input", path(&doc)]);
+        serve.join().unwrap();
+        let stderr = text(&out.stderr);
+        assert_eq!(exit(&out), 1, "{stderr}");
+        assert_eq!(stderr.trim_end(), expected, "{body}");
+    }
+}
+
 #[test]
 fn overload_is_a_typed_not_applied_failure_with_the_local_exit_contract() {
     let pki = Pki::start();

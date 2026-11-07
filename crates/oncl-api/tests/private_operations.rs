@@ -3191,6 +3191,7 @@ async fn plugin_route_uses_operator_grants_the_original_context_and_typed_refusa
                 operation: "run".into(),
                 imports: imports.iter().map(|s| s.to_string()).collect(),
                 keys: keys.iter().map(|s| s.to_string()).collect(),
+                plugin_bytes: false,
                 pki_endpoints: vec![
                     format!("{}/ocsp", pki.origin),
                     format!("{}/root.crl", pki.origin),
@@ -3320,10 +3321,11 @@ async fn plugin_route_uses_operator_grants_the_original_context_and_typed_refusa
     service.stop().await;
 }
 
-/// A plugin operation that declares its key uses (`[[operations]]`) is ticketed by Core; the
-/// server has no `plugin_bytes` grant to match a ticket against yet, so its key use is
-/// refused before the audit journal and the key (stage MP3a-1). The same grant for a plugin
-/// without declarations (the test above) is unchanged.
+/// A plugin operation that declares its key uses (`[[operations]]`) is ticketed by Core; a
+/// grant without `plugin_bytes = true` cannot use the key, so the use is refused (subcode
+/// `not-granted`) before the audit journal and the key. The same grant for a plugin without
+/// declarations (the test above) is unchanged; the matrix with `plugin_bytes` is in
+/// `plugin_grants.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn declared_plugin_operation_key_use_is_refused_before_audit_and_key() {
     use oncl_pdk::abi::{self, Import};
@@ -3385,6 +3387,7 @@ content = "param:file"
                 operation: operation.into(),
                 imports: vec!["keys_sign_raw".into()],
                 keys: vec!["ops-key".into()],
+                plugin_bytes: false,
                 pki_endpoints: vec![
                     format!("{}/ocsp", pki.origin),
                     format!("{}/root.crl", pki.origin),
@@ -3407,7 +3410,19 @@ content = "param:file"
     let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(error["code"], "PermissionDenied");
     assert_eq!(error["applied"], "NotApplied");
-    assert_eq!(begins(&service), 0, "the journal is never touched");
+    assert_eq!(
+        error["subcode"], "not-granted",
+        "the grant has no plugin_bytes: the client is told why"
+    );
+    assert_eq!(begins(&service), 0, "the key is never authorised: no BEGIN");
+    // The refusal itself is a durable record of its own (MP3a-3) with its stable subcode.
+    let refusals = service.host.audit.plugin_records().unwrap();
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert_eq!(refusals[0].refusal.as_deref(), Some("not-granted"));
+    assert_eq!(refusals[0].facts.plugin_id, "test.declared");
+    assert_eq!(refusals[0].facts.operation, "run");
+    assert!(refusals[0].facts.declared);
+    assert_eq!(refusals[0].finished, None);
     // The grant under an operation the plugin does not declare was skipped at startup (a
     // plugin with declarations is granted only under declared names): refused, no journal.
     let body = body.replace(r#""operation":"run""#, r#""operation":"legacy""#);
@@ -3417,6 +3432,8 @@ content = "param:file"
     assert_eq!(error["code"], "PermissionDenied");
     assert_eq!(error["applied"], "NotApplied");
     assert_eq!(begins(&service), 0);
+    // Refused before the module ran: the guard was never asked, so no further record.
+    assert_eq!(service.host.audit.plugin_records().unwrap().len(), 1);
     service.stop().await;
 }
 fn sha256(bytes: &[u8]) -> Vec<u8> {
@@ -3693,6 +3710,7 @@ async fn authority_revoked_during_the_upload_never_runs_the_key_or_the_plugin() 
             operation: "run".into(),
             imports: vec!["keys_sign_raw".into()],
             keys: vec!["ops-key".into()],
+            plugin_bytes: false,
             pki_endpoints: vec![
                 format!("{}/ocsp", pki.origin),
                 format!("{}/root.crl", pki.origin),
@@ -3769,6 +3787,7 @@ async fn non_streaming_multi_item_failure_after_an_applied_plugin_item_keeps_its
             operation: "run".into(),
             imports: vec!["keys_sign_raw".into()],
             keys: vec!["ops-key".into()],
+            plugin_bytes: false,
             pki_endpoints: vec![
                 format!("{}/ocsp", pki.origin),
                 format!("{}/root.crl", pki.origin),
@@ -4459,6 +4478,7 @@ async fn plugin_grant_key_must_also_be_a_token_key_and_plugin_config_is_bounded(
         operation: operation.into(),
         imports: vec!["keys_sign_raw".into()],
         keys: vec!["ops-key".into()],
+        plugin_bytes: false,
         pki_endpoints: vec![],
     };
     let plugin = |permissions: Vec<PluginGrant>| PluginConfig {
@@ -4657,6 +4677,7 @@ async fn plugin_permission_matrix_is_per_token_and_per_operation_and_payload_ori
         operation: operation.into(),
         imports: vec![],
         keys: vec![],
+        plugin_bytes: false,
         pki_endpoints: vec![],
     };
     let service = Running::start_with(|config, _| {

@@ -73,6 +73,7 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
         // Raw signing is not a profile of the HTTP contract.
         return Err(Failure {
             code: "RemoteUnsupported".into(),
+            subcode: None,
             applied: AppliedState::NotApplied,
             cancelled: false,
         });
@@ -277,6 +278,7 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
     let mut rows = Vec::new();
     for (index, item) in manifest.items.iter().enumerate() {
         let mut digest = None;
+        let mut subcode = None;
         let (status, code, applied, verdict) = match submitted.iter().position(|i| *i == index) {
             None => ("Failed", "Io".to_owned(), AppliedState::NotApplied, None),
             Some(position) => {
@@ -310,16 +312,23 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
                             verdict,
                         )
                     }
-                    BatchItemOutcome::Failed => (
-                        "Failed",
-                        record
+                    BatchItemOutcome::Failed => {
+                        subcode = record
                             .error
                             .as_ref()
-                            .map(|error| format!("{:?}", error.code))
-                            .unwrap_or_else(|| "Failed".into()),
-                        core_applied(record.applied),
-                        None,
-                    ),
+                            .and_then(|error| error.subcode())
+                            .map(str::to_owned);
+                        (
+                            "Failed",
+                            record
+                                .error
+                                .as_ref()
+                                .map(|error| format!("{:?}", error.code))
+                                .unwrap_or_else(|| "Failed".into()),
+                            core_applied(record.applied),
+                            None,
+                        )
+                    }
                     BatchItemOutcome::NotRun => (
                         "NotRun",
                         "NotRun".to_owned(),
@@ -333,6 +342,7 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
             id: item.id().to_owned(),
             status,
             code,
+            subcode,
             applied: format!("{applied:?}"),
             verdict,
             published: item.output().map(|_| published[index]),
@@ -405,6 +415,7 @@ pub fn run(s: &mut Session<'_>, command: &BatchCommand) -> Result<i32, Failure> 
 fn probe_links(staging: &Path, destinations: &HashSet<&Path>) -> Result<(), Failure> {
     let refuse = || Failure {
         code: "DestinationNotLinkable".into(),
+        subcode: None,
         applied: AppliedState::NotApplied,
         cancelled: false,
     };

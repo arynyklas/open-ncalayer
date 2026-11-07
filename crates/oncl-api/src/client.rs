@@ -105,6 +105,9 @@ pub struct ClientError {
     pub status: Option<u16>,
     /// The typed service code of a [`FailureKind::Rejected`] refusal.
     pub server_code: Option<ErrorCode>,
+    /// The service's `subcode` of that refusal, if it named one: a well-formed identifier
+    /// ([`crate::error::is_subcode`]), so it is safe to print.
+    pub server_subcode: Option<String>,
     /// A fixed explanation of a protocol violation (never response bytes).
     pub detail: Option<&'static str>,
 }
@@ -116,6 +119,7 @@ impl ClientError {
             applied,
             status: None,
             server_code: None,
+            server_subcode: None,
             detail: None,
         }
     }
@@ -133,6 +137,9 @@ impl ClientError {
     /// Never a header, token or body byte.
     pub fn describe(&self) -> String {
         let mut text = self.code();
+        if let Some(subcode) = &self.server_subcode {
+            text.push_str(&format!("; subcode={subcode}"));
+        }
         if self.server_code.is_none() {
             if let Some(status) = self.status {
                 text.push_str(&format!(" (HTTP {status})"));
@@ -647,6 +654,7 @@ impl ApiClient {
                 // The service's own statement: it knows whether anything was applied.
                 error.applied = typed.applied;
                 error.server_code = Some(typed.code);
+                error.server_subcode = typed.subcode().map(str::to_owned);
             }
             return Err(error);
         }

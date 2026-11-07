@@ -196,6 +196,70 @@ foreign/old journal formats and live ownership. It does not silently migrate or
 repair another journal. Audit identity/lock/rotation/quota and opaque actor/key
 labels retain the audit library's existing semantics.
 
+### Plugin records in the audit journal
+
+The journal format stays `ONCLAU02`, 160-byte checksummed frames, and a journal that contains no
+plugin ticket is **byte-identical** to what earlier versions wrote. The same version reads every
+journal an earlier version wrote (tested with a journal produced by the previous code). Plugin
+operations that declare their key uses (`[[operations]]` in the manifest, "declared") add two
+frame kinds, which **an earlier version cannot read** (it reports the journal as damaged and asks
+for operator inspection): do not run an older server over a journal that holds them.
+
+* **Use (authorised).** Before the `BEGIN` of the key use, one to a few `PluginDetail` frames
+  carry: plugin id, package hash (kind `1` file / `2` loose, and SHA-256), version, operation
+  name, the ticket digest, the SHA-256 of the approval nonce when a user approved (never the nonce),
+  the content SHA-256 and length, whether the content was a prehashed digest, the options SHA-256,
+  the caller kind (`browser` / `local-operator` / `service-client`), `declared`, and the operator
+  grant that covered it. They are written in the same single write and sync as the `BEGIN`, so a
+  crash between them leaves details with no `BEGIN`: the use never began, the key was not applied.
+  Key id and principal are the journal's existing opaque labels on the `BEGIN`. The `FINAL` is the
+  existing one: `Applied`, `NotApplied` or `Unknown` honestly; no `FINAL` is `Unknown`.
+* **Refusal.** A ticketed key use that is refused writes the same `PluginDetail` frames and a
+  `PluginRefusal` frame, carrying the stable subcode id (for example `content-mismatch`,
+  `not-granted`, `no-consent-guard`). It writes **no `BEGIN`**: the key was not applied. At most
+  four refusals per operation are journaled (a plugin that keeps asking cannot push earlier
+  records out); all are also logged as `warn` events (target `oncl::plugin_audit`). The caller
+  receives `PermissionDenied`; the subcode is for the operator and, where the HTTP contract
+  exposes it, the API client, never the plugin.
+
+Plugins without declarations are unchanged: no ticket, no plugin record (the absence of one is
+`declared=false`). No document bytes, parameters, secrets or nonces are ever journaled.
+`DurableAuditGuard::plugin_records()` reads these records back for tools.
+
+Things an operator should know:
+
+* **Refusal journaling is best-effort.** It is skipped (the refusal is only logged) when the
+  journal is not healthy, when a key use is pending and the segment is full, at the quota, when
+  the operation is not bound (unauthenticated or unauthorised requests never write), after the
+  fourth refusal of one operation, or when the facts cannot be encoded. It never blocks or
+  changes the answer. A use whose facts cannot be journaled (a plugin version or grant id over
+  255 bytes) is refused as `audit-fact-too-long` with the key not applied, before the journal is
+  touched, and does not affect audit health. Manifest versions are limited to 64 characters and
+  grant names (token, plugin id, operation) to 64 characters each.
+* **The content digest is new in the journal.** Earlier journals held only opaque labels; a
+  plugin record holds the SHA-256 of the signed content and its length (the design requires it).
+  It identifies a document to anyone who can read the journal and guess it; protect the audit
+  directory like the keys' secrets directory. It is logged only at `debug` level.
+* **Torn multi-frame writes.** A use is several frames written at once; on power loss the
+  filesystem may persist later frames without earlier ones. That leaves a hole in the journal,
+  which is damage (fail closed, `recover_audit` refuses it), never a misread `BEGIN`.
+* **Rolling back.** An older server over a journal that holds plugin frames ends in
+  `fatal_corruption` and will not start. Before rolling back, archive or rotate the journal (move
+  the whole audit directory away; keep it for inspection) so the older server begins a new one.
+* **Format rule for future readers.** Frame kinds `0x80` and above are reserved for records a
+  reader that does not know them may skip (the sequence number still counts). Kinds `0x00..0x7f`
+  must be understood or the journal is damaged, as today. Nothing uses `0x80` yet, and
+  `ONCLAU02` is not bumped; this does not help binaries that are already shipped.
+* **Subcode ids differ from design 4.8** by design: `NotDeclared`, `PackageChanged`,
+  `OptionsMismatch`, `ApprovalExpired` are `not-declared`, `package-changed`, `options-mismatch`,
+  `approval-expired`; `KeyUseNotApproved` is split into `approval-missing`, `ticket-missing`,
+  `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`,
+  `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`,
+  `certificate-changed`, `approval-replayed`, `busy`; `manual=false` is `not-manual`; new are
+  `not-granted`, `no-consent-guard`, `audit-fact-too-long`, `unknown-plugin`, `derived-unsupported`
+  and the request/prepare ids. `PlanUnavailable`, `PreviewTooLarge` and `ImportNotDeclared` are not
+  implemented (no code path yet).
+
 Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global
 `inline_pkcs12 = true` and the token's own `inline_pkcs12 = true` right (both off
 by default; see [the HTTP contract](http-api.md), "Keys and secret roles"). The host
@@ -204,6 +268,48 @@ container and alias (`AccessPolicy::authorize_inline`), which cannot authorize a
 selector; no wildcard/source identity from a client becomes a grant. The Core
 provider accounts secret containers in bounded memory, never document scratch.
 `KeySelector::is_inline` exposes classification only, not secret bytes or paths.
+
+## Plugins
+
+A WASM plugin is installed by the operator (`[[plugins]]`: code availability only) and is
+reached through one exact `[[plugins.permissions]]` grant per (token, operation); the caller
+identity is the token. The full reference is in [the HTTP contract](http-api.md), "Plugin
+configuration reference"; the sample is in `deploy/server/server.example.toml`.
+
+```toml
+[[plugins]]
+id = "vendor.sign"
+manifest = "/private/plugins/sign.toml"
+wasm = "/private/plugins/sign.wasm"
+
+[[plugins.permissions]]
+token = "accounting-service"
+operation = "sign-file"            # a declared operation with `server = true`
+imports = ["keys_sign_cms_ex"]     # ⊆ the declared imports; empty = all declared
+keys = ["corporate-signing"]       # operator-named keys, also in the token's keys
+plugin_bytes = true                # the plugin / its client chooses what the key signs
+```
+
+* **Plugins that declare their operations** (`[[operations]]` in `plugin.toml`): the grant
+  must stay within the declaration (an operation with `server = true`, imports among the declared
+  ones, keys only for a declared key use, `pki_endpoints` only for `network = "pki"`); a wider
+  grant is **skipped with an `oncl-server: error:` line** and the rest of the server runs. Core
+  forces the declared signature options on every call. Because the server cannot tie the signed
+  bytes to a document, **any key use needs `plugin_bytes = true`** in the grant; without it the
+  use is refused before any `BEGIN` and before the key; a refusal record may be written (`PermissionDenied`, subcode
+  `not-granted`, `NotApplied`). A grant with keys but without `plugin_bytes` starts with a
+  warning that every key use will be refused. One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
+* **Plugins without declarations** (all packages before their manifests carry declarations, and
+  third-party ones): nothing changes. The grant is the operator's labels, the options are **not**
+  enforced, the audit says `declared=false`, and each such grant logs
+  `oncl-server: warning: grant without declaration ...` at start-up. `plugin_bytes` is
+  accepted there and has no effect (warned).
+* `plugin_bytes = true` without `keys` is refused by configuration validation.
+* The audit record of a declared key use (plugin id, package hash, version, operation, ticket
+  digest, content and options hashes, `declared`, the grant) and of a refused one is described
+  above under "Plugin records in the audit journal"; the `grant` is
+  `<token>:<plugin>:<operation>`. Refusals reach the client as the `subcode` of the error
+  answer ([error subcodes](http-api.md)).
 
 ## Revocation and bounds
 
