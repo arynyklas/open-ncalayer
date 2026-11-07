@@ -298,6 +298,12 @@ content = "param:file"
         "{text}"
     );
     assert!(denied.stdout.is_empty());
+    // The refusal is told to the operator with its stable subcode; the error itself is the
+    // plain PermissionDenied the plugin saw.
+    assert!(
+        text.contains("plugin_refused") && text.contains("subcode=not-granted"),
+        "{text}"
+    );
     // A label the plugin does not declare is refused too: no key use at all.
     let mut other = base(&declared, &extra);
     let at = other.iter().position(|a| *a == "sign").unwrap();

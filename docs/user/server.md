@@ -196,6 +196,70 @@ foreign/old journal formats and live ownership. It does not silently migrate or
 repair another journal. Audit identity/lock/rotation/quota and opaque actor/key
 labels retain the audit library's existing semantics.
 
+### Plugin records in the audit journal
+
+The journal format stays `ONCLAU02`, 160-byte checksummed frames, and a journal that contains no
+plugin ticket is **byte-identical** to what earlier versions wrote. The same version reads every
+journal an earlier version wrote (tested with a journal produced by the previous code). Plugin
+operations that declare their key uses (`[[operations]]` in the manifest, "declared") add two
+frame kinds, which **an earlier version cannot read** (it reports the journal as damaged and asks
+for operator inspection): do not run an older server over a journal that holds them.
+
+* **Use (authorised).** Before the `BEGIN` of the key use, one to a few `PluginDetail` frames
+  carry: plugin id, package hash (kind `1` file / `2` loose, and SHA-256), version, operation
+  name, the ticket digest, the SHA-256 of the approval nonce when a user approved (never the nonce),
+  the content SHA-256 and length, whether the content was a prehashed digest, the options SHA-256,
+  the caller kind (`browser` / `local-operator` / `service-client`), `declared`, and the operator
+  grant that covered it. They are written in the same single write and sync as the `BEGIN`, so a
+  crash between them leaves details with no `BEGIN`: the use never began, the key was not applied.
+  Key id and principal are the journal's existing opaque labels on the `BEGIN`. The `FINAL` is the
+  existing one: `Applied`, `NotApplied` or `Unknown` honestly; no `FINAL` is `Unknown`.
+* **Refusal.** A ticketed key use that is refused writes the same `PluginDetail` frames and a
+  `PluginRefusal` frame, carrying the stable subcode id (for example `content-mismatch`,
+  `not-granted`, `no-consent-guard`). It writes **no `BEGIN`**: the key was not applied. At most
+  four refusals per operation are journaled (a plugin that keeps asking cannot push earlier
+  records out); all are also logged as `warn` events (target `oncl::plugin_audit`). The caller
+  receives `PermissionDenied`; the subcode is for the operator and, where the HTTP contract
+  exposes it, the API client, never the plugin.
+
+Plugins without declarations are unchanged: no ticket, no plugin record (the absence of one is
+`declared=false`). No document bytes, parameters, secrets or nonces are ever journaled.
+`DurableAuditGuard::plugin_records()` reads these records back for tools.
+
+Things an operator should know:
+
+* **Refusal journaling is best-effort.** It is skipped (the refusal is only logged) when the
+  journal is not healthy, when a key use is pending and the segment is full, at the quota, when
+  the operation is not bound (unauthenticated or unauthorised requests never write), after the
+  fourth refusal of one operation, or when the facts cannot be encoded. It never blocks or
+  changes the answer. A use whose facts cannot be journaled (a plugin version or grant id over
+  255 bytes) is refused as `audit-fact-too-long` with the key not applied, before the journal is
+  touched, and does not affect audit health. Manifest versions are limited to 64 characters and
+  grant names (token, plugin id, operation) to 64 characters each.
+* **The content digest is new in the journal.** Earlier journals held only opaque labels; a
+  plugin record holds the SHA-256 of the signed content and its length (the design requires it).
+  It identifies a document to anyone who can read the journal and guess it; protect the audit
+  directory like the keys' secrets directory. It is logged only at `debug` level.
+* **Torn multi-frame writes.** A use is several frames written at once; on power loss the
+  filesystem may persist later frames without earlier ones. That leaves a hole in the journal,
+  which is damage (fail closed, `recover_audit` refuses it), never a misread `BEGIN`.
+* **Rolling back.** An older server over a journal that holds plugin frames ends in
+  `fatal_corruption` and will not start. Before rolling back, archive or rotate the journal (move
+  the whole audit directory away; keep it for inspection) so the older server begins a new one.
+* **Format rule for future readers.** Frame kinds `0x80` and above are reserved for records a
+  reader that does not know them may skip (the sequence number still counts). Kinds `0x00..0x7f`
+  must be understood or the journal is damaged, as today. Nothing uses `0x80` yet, and
+  `ONCLAU02` is not bumped; this does not help binaries that are already shipped.
+* **Subcode ids differ from design 4.8** by design: `NotDeclared`, `PackageChanged`,
+  `OptionsMismatch`, `ApprovalExpired` are `not-declared`, `package-changed`, `options-mismatch`,
+  `approval-expired`; `KeyUseNotApproved` is split into `approval-missing`, `ticket-missing`,
+  `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`,
+  `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`,
+  `certificate-changed`, `approval-replayed`, `busy`; `manual=false` is `not-manual`; new are
+  `not-granted`, `no-consent-guard`, `audit-fact-too-long`, `unknown-plugin`, `derived-unsupported`
+  and the request/prepare ids. `PlanUnavailable`, `PreviewTooLarge` and `ImportNotDeclared` are not
+  implemented (no code path yet).
+
 Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global
 `inline_pkcs12 = true` and the token's own `inline_pkcs12 = true` right (both off
 by default; see [the HTTP contract](http-api.md), "Keys and secret roles"). The host

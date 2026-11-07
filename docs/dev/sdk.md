@@ -338,6 +338,40 @@ application itself did not report, `NotApplied` for every refusal) and `refusals
 typed `TicketRefusal`s of this invocation: from the guard, or from the checks before the
 module ran, plus `NoGuard`, `Busy`, `Replayed`, `UndeclaredOperation`, `Caller`).
 
+#### Refusal subcodes and audit facts (`plugins`)
+
+`ErrorCode` is unchanged. Next to it every plugin refusal has a `PluginRefusalCode` (stable,
+`#[non_exhaustive]`): `id()` is a kebab-case string (`content-mismatch`, `package-changed`,
+`approval-expired`, `not-declared`, `not-granted`, ...) that is **never reused or renumbered**;
+`ALL` lists every subcode in append-only order and a test pins the full list of ids, so a change
+is deliberate. `error_code()` is the `ErrorCode` the refusal is reported with (always the one
+`OperationError::code` gives: `PermissionDenied` for ticket, caller and declaration refusals,
+`InputLimit`/`InvalidInput` for parameters, `UnsupportedAlgorithm`, `MissingKeyProvider`, `Io`).
+Every reason has one: `From<TicketRefusal>`, `From<&PluginRequestError>`,
+`From<&PluginPrepareError>`, `From<ApprovalIssueError>`, `From<ApprovalRejected>` and the
+`subcode()` method of each. `TicketRefusal::NotGranted` is for a server or CLI key use that no
+operator grant covers; `TicketRefusal::AuditFactTooLong` for a use whose version or grant id
+cannot be audited (over 255 bytes), refused before the journal is touched.
+`DurableAuditGuard::with_plugin_policy` returns `io::Result<Self>` (an error if the guard was
+already shared).
+
+Where a host reads it: `ApprovedCall::subcode()` (the first guard refusal, else the reason the
+call could not be prepared; `None` when nothing was refused, also after an error that came after
+the key was applied), `OperationContext::plugin_refusal_code()` (an undeclared label refused in
+`plugin_call`), and for a server whose guard is `DurableAuditGuard`
+`take_plugin_refusals(operation_id)` mapped with `PluginRefusalCode::from`. **The plugin never
+sees a subcode**: its own error is the bare `PermissionDenied`, with no text that names the reason.
+
+`PluginAuditRecord::from_ticket(&PluginUse, nonce, grant_id)` is what the audit of a use names:
+plugin `{id, package kind + sha256, version}`, operation, `PluginUse::digest()` (the ticket
+digest), the SHA-256 of the approval nonce (domain-separated; never the nonce), content SHA-256
+and length, whether the content is a prehashed digest, options SHA-256, the caller kind (not its
+name), `declared` and the operator `grant_id`. No document bytes, parameters or secrets.
+`PluginConsentGuard` emits it as a `tracing` event (`target = "oncl::plugin_audit"`) when a use is
+authorised, and a refusal with its `subcode` and ticket digest as a `warn` event; refusals that
+never reach a guard (a request or prepare error, an approval the call refuses) are `warn` events of
+the same target with the `subcode`. The durable form is in `docs/user/server.md` (audit).
+
 `PluginApproval::new`, `ApprovedUse::new` and the other constructors are not public. With the
 `testing` feature of `oncl-core` (never part of a release) `PluginApproval::for_tests`,
 `ApprovedUse::for_tests`, `PluginUse::for_tests` and `KeyUseEvent::with_plugin_ticket_for_tests`

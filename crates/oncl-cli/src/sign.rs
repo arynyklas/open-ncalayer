@@ -20,9 +20,19 @@ pub struct Authority {
 impl KeyUseGuard for Authority {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
         // A ticketed use is a declared plugin operation's key use; the CLI has no
-        // `--plugin-bytes` grant to check it against yet (stage MP9), so it is refused.
+        // `--plugin-bytes` grant to check it against yet (stage MP9), so it is refused, and
+        // the refusal is told with its stable subcode (the plugin sees PermissionDenied only).
         // Plugins without declarations carry no ticket and are authorized as before.
-        if event.plugin().is_some() {
+        if let Some(ticket) = event.plugin() {
+            crate::diagnostic(format_args!(
+                "oncl: plugin_refused operation_id={} subcode={} plugin={} operation={}",
+                event.operation_id,
+                oncl_core::plugins::PluginRefusalCode::from(
+                    oncl_core::plugins::TicketRefusal::NotGranted
+                ),
+                ticket.identity().id,
+                ticket.operation()
+            ));
             return Err(OperationError::PermissionDenied);
         }
         if event.operation_id.get() != self.operation.load(Ordering::SeqCst)

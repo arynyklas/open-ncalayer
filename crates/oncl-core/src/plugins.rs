@@ -21,9 +21,11 @@ use oncl_plugin::{Compiled, InstanceLimits, Manifest};
 use std::cell::RefCell;
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 mod approval;
+mod audit_record;
 mod capabilities;
 mod cms;
 mod manual;
+mod refusal;
 mod ticket;
 mod xml;
 pub use approval::{
@@ -31,9 +33,11 @@ pub use approval::{
     ConsentSummary, ManualCall, ManualHost, PluginPrepareError, PluginPrepared, PrehashedDigest,
     UserConfirmation,
 };
+pub use audit_record::{PluginAuditRecord, PluginCallerKind};
 pub use manual::{
     PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
 };
+pub use refusal::PluginRefusalCode;
 pub use ticket::{
     ApprovalRejected, ApprovedUse, ContentBinding, PluginApproval, PluginConsentGuard, PluginUse,
     REFUSAL_LOG, TicketRefusal,

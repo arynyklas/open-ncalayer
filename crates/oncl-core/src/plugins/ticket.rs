@@ -305,6 +305,10 @@ impl PluginApproval {
             nonce,
         )
     }
+    /// The facts of the use `ticket` makes under this approval, for audit.
+    pub fn audit_record(&self, ticket: &PluginUse) -> PluginAuditRecord {
+        PluginAuditRecord::from_ticket(ticket, Some(&self.nonce), None)
+    }
     /// The monotonic deadline after which the guard refuses every use of this approval
     /// ([`TicketRefusal::Expired`]).
     pub fn expires_at(&self) -> Instant {
@@ -411,6 +415,12 @@ pub enum TicketRefusal {
     Busy,
     /// The approval's nonce was granted to the guard before.
     Replayed,
+    /// No operator grant covers the ticket (the server or CLI has no `plugin_bytes` grant for
+    /// the plugin, operation and key).
+    NotGranted,
+    /// A fact of the use (a version or grant id) is too long to be audited: an unauditable
+    /// use does not run.
+    AuditFactTooLong,
 }
 
 /// Why [`PluginConsentGuard::grant`] did not take an approval.
@@ -517,7 +527,10 @@ impl PluginConsentGuard {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.refusals.iter().copied().collect()
     }
-    fn check(state: &mut GuardState, event: &KeyUseEvent) -> Result<(), TicketRefusal> {
+    fn check(
+        state: &mut GuardState,
+        event: &KeyUseEvent,
+    ) -> Result<PluginAuditRecord, TicketRefusal> {
         let ticket = event.plugin().ok_or(TicketRefusal::NoTicket)?;
         let armed = state.armed.as_mut().ok_or(TicketRefusal::NoApproval)?;
         let approval = &armed.approval;
@@ -576,7 +589,7 @@ impl PluginConsentGuard {
         match position {
             Some(i) => {
                 armed.spent[i] = true;
-                Ok(())
+                Ok(armed.approval.audit_record(ticket))
             }
             None => {
                 if armed
@@ -602,14 +615,18 @@ impl KeyUseGuard for PluginConsentGuard {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match Self::check(&mut state, event) {
-            Ok(()) => {
+            Ok(record) => {
                 self.applications.fetch_add(1, Ordering::SeqCst);
+                trace_authorised(event, &record);
                 Ok(KeyUseReceipt::new(event.clone()))
             }
             Err(reason) => {
                 tracing::warn!(
+                    target: "oncl::plugin_audit",
                     operation = event.operation_id.get(),
                     reason = ?reason,
+                    subcode = PluginRefusalCode::from(reason).id(),
+                    ticket_digest = event.plugin().map(|t| hex(&t.digest())).as_deref(),
                     "a plugin key use was refused before the key"
                 );
                 if state.refusals.len() == REFUSAL_LOG {
@@ -629,6 +646,42 @@ impl KeyUseGuard for PluginConsentGuard {
         );
         Ok(())
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The trace record of an authorised plugin key use: the same facts the durable journal
+/// keeps, none of them secret (the nonce only as a hash).
+pub(crate) fn trace_authorised(event: &KeyUseEvent, record: &PluginAuditRecord) {
+    tracing::info!(
+        target: "oncl::plugin_audit",
+        operation = event.operation_id.get(),
+        plugin = %record.plugin_id,
+        package_kind = record.package_kind,
+        package_sha256 = %hex(&record.package_sha256),
+        version = %record.version,
+        plugin_operation = %record.operation,
+        ticket_digest = %hex(&record.ticket_digest),
+        approval_nonce_sha256 = record.approval_nonce_sha256.map(|h| hex(&h)).as_deref(),
+        options_sha256 = %hex(&record.options_sha256),
+        caller = record.caller.as_str(),
+        declared = record.declared,
+        "a plugin key use was authorised"
+    );
+    // The content digest identifies a document: debug level only.
+    tracing::debug!(
+        target: "oncl::plugin_audit",
+        operation = event.operation_id.get(),
+        content_sha256 = %hex(&record.content_sha256),
+        content_len = record.content_len,
+        "content of an authorised plugin key use"
+    );
 }
 
 /// The declared operation a call runs, when its manifest declares one of that name.
