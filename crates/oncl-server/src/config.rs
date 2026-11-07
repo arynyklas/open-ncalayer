@@ -170,6 +170,11 @@ fn default_plugin_transfer() -> usize {
 }
 /// One exact (token, operation) grant: the allowed host imports and operator
 /// key names. The caller identity is the token, never a request field/Origin.
+///
+/// For a plugin operation that declares its key use (`[[operations]]`), the server cannot
+/// bind the signed content to a document (the arguments are free JSON of the client), so a
+/// key may be used only if the operator accepted that explicitly with `plugin_bytes = true`
+/// (docs/design/manual-plugins.md 4.7). Plugins without declarations are unchanged.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginGrant {
@@ -178,6 +183,10 @@ pub struct PluginGrant {
     pub imports: Vec<String>,
     #[serde(default)]
     pub keys: Vec<String>,
+    /// The operator accepts that the plugin (or its client) chooses the bytes the granted
+    /// key signs. Required for any key use of a declared operation; off unless written.
+    #[serde(default)]
+    pub plugin_bytes: bool,
     /// Exact GET PKI status URLs the plugin's nested validation may reach.
     #[serde(default)]
     pub pki_endpoints: Vec<String>,
@@ -470,6 +479,7 @@ impl ServerConfig {
                             || g.operation.len() > 64
                             || g.imports.len() > 72
                             || g.keys.len() > 8
+                            || (g.plugin_bytes && g.keys.is_empty())
                             || g.pki_endpoints.len() > 16
                             || g.pki_endpoints.iter().any(|u| u.len() > 2048)
                     })

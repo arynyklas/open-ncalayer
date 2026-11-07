@@ -6,5 +6,6 @@ pub mod executor;
 pub mod install;
 pub mod keys;
 mod pace;
+pub mod plugin_grants;
 pub mod service;
 pub mod telemetry;

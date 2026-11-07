@@ -30,6 +30,8 @@ pub(crate) struct HostPolicy {
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<String>,
     pub plugin_grants: Vec<PluginGrantRuntime>,
+    /// Checks ticketed key uses of declared plugin operations against the grants.
+    pub plugin_policy: Arc<crate::plugin_grants::ServerPluginPolicy>,
     /// DER bytes of the operator anchors + intermediates (sizes the PAdES plan).
     pub trust_bytes: u64,
 }
@@ -414,39 +416,45 @@ impl ServiceHost {
                         staging: None,
                         host: &host_policy,
                         caller: &caller,
+                        subcode: None,
                     };
                     let mut applied_any = false;
                     for item in request.items {
                         let (result, reservation, _) =
                             match dispatch::run(item.operation, &item.id, &mut env, ctx, None) {
                                 Ok(done) => done,
-                                Err(error) => match dispatch::classify(error, applied_any) {
-                                    dispatch::Failure::Abort(error) => return Err(error),
-                                    // Nothing applied earlier: a typed HTTP error.
-                                    dispatch::Failure::Typed(api) if !applied_any => {
-                                        return Ok(Err(api));
-                                    }
-                                    // Earlier items applied a key: a terminal failed
-                                    // record keeps their honest per-item state.
-                                    dispatch::Failure::Typed(api) => {
-                                        let reservation =
-                                            ctx.resources().reserve_metadata(JSON_BYTES)?;
-                                        let bytes = serde_json::to_vec(&ResponseEvent::Final {
-                                            operation_id: ctx.id().get(),
-                                            status: FinalStatus::Failed,
-                                            results,
-                                            error: Some(api),
-                                        })
-                                        .map_err(|_| {
-                                            ProcessingError::InvalidInput("response serialization")
-                                        })?;
-                                        if bytes.len() as u64 > JSON_BYTES {
-                                            return Err(ProcessingError::MetadataLimit);
+                                Err(error) => {
+                                    match dispatch::classify(error, applied_any, env.subcode.take())
+                                    {
+                                        dispatch::Failure::Abort(error) => return Err(error),
+                                        // Nothing applied earlier: a typed HTTP error.
+                                        dispatch::Failure::Typed(api) if !applied_any => {
+                                            return Ok(Err(api));
                                         }
-                                        ctx.resources().account_output(bytes.len() as u64)?;
-                                        return Ok(Ok((bytes, reservation)));
+                                        // Earlier items applied a key: a terminal failed
+                                        // record keeps their honest per-item state.
+                                        dispatch::Failure::Typed(api) => {
+                                            let reservation =
+                                                ctx.resources().reserve_metadata(JSON_BYTES)?;
+                                            let bytes = serde_json::to_vec(&ResponseEvent::Final {
+                                                operation_id: ctx.id().get(),
+                                                status: FinalStatus::Failed,
+                                                results,
+                                                error: Some(api),
+                                            })
+                                            .map_err(|_| {
+                                                ProcessingError::InvalidInput(
+                                                    "response serialization",
+                                                )
+                                            })?;
+                                            if bytes.len() as u64 > JSON_BYTES {
+                                                return Err(ProcessingError::MetadataLimit);
+                                            }
+                                            ctx.resources().account_output(bytes.len() as u64)?;
+                                            return Ok(Ok((bytes, reservation)));
+                                        }
                                     }
-                                },
+                                }
                             };
                         applied_any |= dispatch::applied_of(&result)
                             != oncl_api::error::AppliedState::NotApplied;

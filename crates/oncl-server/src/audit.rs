@@ -236,6 +236,9 @@ pub trait PluginTicketPolicy: Send + Sync {
         operation_id: OperationId,
         ticket: &PluginUse,
     ) -> Result<PluginGrantFacts, TicketRefusal>;
+    /// The operation ended (its binding was dropped): the policy forgets whatever it kept
+    /// for it. Called with the journal lock held: quick, no call back into the guard.
+    fn operation_ended(&self, _operation: OperationId) {}
 }
 /// Lifetime token for the host's immutable original-invocation identity binding.
 /// Dropping it never invents a FINAL for a private operation still in progress.
@@ -245,6 +248,9 @@ pub struct AuditBinding {
 }
 impl Drop for AuditBinding {
     fn drop(&mut self) {
+        if let Some(policy) = &self.shared.policy {
+            policy.operation_ended(self.operation);
+        }
         if let Ok(mut state) = self.shared.state.lock()
             && let Some(binding) = state.bindings.get_mut(&self.operation)
         {

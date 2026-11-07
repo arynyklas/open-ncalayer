@@ -218,13 +218,10 @@ impl Status {
     pub(crate) fn of(error: &ApiError) -> Self {
         use axum::response::IntoResponse;
         Self(
-            ApiError {
-                code: error.code,
-                applied: error.applied,
-            }
-            .into_response()
-            .status()
-            .as_u16(),
+            ApiError::new(error.code, error.applied)
+                .into_response()
+                .status()
+                .as_u16(),
         )
     }
 }

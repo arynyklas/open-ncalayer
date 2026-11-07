@@ -77,10 +77,16 @@ fn entry() -> i32 {
     match outcome {
         Ok(exit) => exit,
         Err(failure) => {
-            crate::diagnostic(format_args!(
-                "oncl: {}; applied={:?}",
-                failure.code, failure.applied
-            ));
+            match &failure.subcode {
+                Some(subcode) => crate::diagnostic(format_args!(
+                    "oncl: {}; subcode={subcode}; applied={:?}",
+                    failure.code, failure.applied
+                )),
+                None => crate::diagnostic(format_args!(
+                    "oncl: {}; applied={:?}",
+                    failure.code, failure.applied
+                )),
+            }
             if failure.cancelled { 130 } else { 1 }
         }
     }

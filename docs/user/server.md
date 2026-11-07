@@ -269,6 +269,48 @@ selector; no wildcard/source identity from a client becomes a grant. The Core
 provider accounts secret containers in bounded memory, never document scratch.
 `KeySelector::is_inline` exposes classification only, not secret bytes or paths.
 
+## Plugins
+
+A WASM plugin is installed by the operator (`[[plugins]]`: code availability only) and is
+reached through one exact `[[plugins.permissions]]` grant per (token, operation); the caller
+identity is the token. The full reference is in [the HTTP contract](http-api.md), "Plugin
+configuration reference"; the sample is in `deploy/server/server.example.toml`.
+
+```toml
+[[plugins]]
+id = "vendor.sign"
+manifest = "/private/plugins/sign.toml"
+wasm = "/private/plugins/sign.wasm"
+
+[[plugins.permissions]]
+token = "accounting-service"
+operation = "sign-file"            # a declared operation with `server = true`
+imports = ["keys_sign_cms_ex"]     # ⊆ the declared imports; empty = all declared
+keys = ["corporate-signing"]       # operator-named keys, also in the token's keys
+plugin_bytes = true                # the plugin / its client chooses what the key signs
+```
+
+* **Plugins that declare their operations** (`[[operations]]` in `plugin.toml`): the grant
+  must stay within the declaration (an operation with `server = true`, imports among the declared
+  ones, keys only for a declared key use, `pki_endpoints` only for `network = "pki"`); a wider
+  grant is **skipped with an `oncl-server: error:` line** and the rest of the server runs. Core
+  forces the declared signature options on every call. Because the server cannot tie the signed
+  bytes to a document, **any key use needs `plugin_bytes = true`** in the grant; without it the
+  use is refused before any `BEGIN` and before the key; a refusal record may be written (`PermissionDenied`, subcode
+  `not-granted`, `NotApplied`). A grant with keys but without `plugin_bytes` starts with a
+  warning that every key use will be refused. One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
+* **Plugins without declarations** (all packages before their manifests carry declarations, and
+  third-party ones): nothing changes. The grant is the operator's labels, the options are **not**
+  enforced, the audit says `declared=false`, and each such grant logs
+  `oncl-server: warning: grant without declaration ...` at start-up. `plugin_bytes` is
+  accepted there and has no effect (warned).
+* `plugin_bytes = true` without `keys` is refused by configuration validation.
+* The audit record of a declared key use (plugin id, package hash, version, operation, ticket
+  digest, content and options hashes, `declared`, the grant) and of a refused one is described
+  above under "Plugin records in the audit journal"; the `grant` is
+  `<token>:<plugin>:<operation>`. Refusals reach the client as the `subcode` of the error
+  answer ([error subcodes](http-api.md)).
+
 ## Revocation and bounds
 
 A standalone config/ACL change takes effect by graceful restart. Embedding trusted

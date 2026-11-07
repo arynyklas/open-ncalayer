@@ -17,10 +17,7 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
 };
 
 fn io_error(error: io::Error) -> OperationError {
@@ -259,21 +256,21 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         None
     };
     let selector = plan.as_ref().map(|plan| plan.selector.clone());
-    let (plugin_registry, _plugin_configuration, plugin_id) =
+    let (plugin_registry, _plugin_configuration, plugin_id, mut plugin_checked) =
         if let Command::Plugin { command } = &cli.command {
-            let (registry, reservation, id) =
+            let (registry, reservation, id, checked) =
                 crate::plugin::registry(command, selector.as_ref(), &budget)?;
-            (Some(registry), Some(reservation), id)
+            (Some(registry), Some(reservation), id, Some(checked))
         } else {
-            (None, None, String::new())
+            (None, None, String::new(), None)
         };
     let private = !matches!(cli.command, Command::Inspect(..));
     let authority = selector.as_ref().filter(|_| private).map(|key| {
-        Arc::new(crate::sign::Authority {
-            key: key.key_id(),
+        Arc::new(crate::sign::Authority::new(
+            key.key_id(),
             action,
-            operation: AtomicU64::new(0),
-        })
+            plugin_checked.as_mut().and_then(|c| c.bytes.take()),
+        ))
     });
     let store = if matches!(
         cli.command,
@@ -333,10 +330,14 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     let mut grant = ExecutionGrant::new(grant_actions)
         .with_keys(selector.iter().map(oncl_core::keys::KeySelector::key_id));
     if let Command::Plugin { command } = &cli.command {
+        let checked = plugin_checked
+            .as_ref()
+            .ok_or(OperationError::InvalidContext)?;
         grant = grant.with_plugins([crate::plugin::permission(
             command.args(),
             &plugin_id,
             selector.as_ref(),
+            checked,
         )?]);
     }
     if let Command::Inspect(args) = &cli.command {
