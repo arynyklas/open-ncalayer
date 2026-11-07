@@ -73,6 +73,11 @@ impl OperationContext {
     pub fn plugin_refusal(&self) -> Option<crate::plugins::TicketRefusal> {
         self.plugin_refusal
     }
+    /// [`Self::plugin_refusal`] as its stable subcode.
+    #[cfg(feature = "plugins")]
+    pub fn plugin_refusal_code(&self) -> Option<crate::plugins::PluginRefusalCode> {
+        self.plugin_refusal.map(Into::into)
+    }
     pub fn id(&self) -> OperationId {
         self.id
     }
