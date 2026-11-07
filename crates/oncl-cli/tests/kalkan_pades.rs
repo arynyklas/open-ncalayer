@@ -152,3 +152,92 @@ fn tampered_kalkan_pades_fails_with_the_cryptographic_reason_under_every_profile
         );
     }
 }
+
+/// The pinned NCANode PAdES-LTA file: signature, a later `DocTimeStamp` (an invisible
+/// widget added to the page's `/Annots`, with an empty appearance) and DSS updates that
+/// restate the DSS (new DSS/VRI dictionaries, refreshed OCSP). Both are legitimate
+/// signature-append/validation-only revisions, so the file gets a report, never a
+/// bare `InvalidInput`.
+#[test]
+#[ignore = "needs cargo xtask fetch-fixtures"]
+fn kalkan_pades_lta_gets_a_report_not_a_refusal() {
+    let file = oncl_testkit::ncanode("sample-signed-lta.pdf");
+    let (_, generic) = verify("pdf", &file);
+    let (code, report) = verify("pades-lta", &file);
+    let signer = &report["signers"][0];
+    assert_eq!(signer["signature"], "Passed", "{report}");
+    assert_eq!(signer["signature"], generic["signers"][0]["signature"]);
+    assert!(
+        reasons(&report).contains("Profile(SigningTimeForbidden)"),
+        "{report}"
+    );
+    assert_eq!(signer["ades_level"], Value::Null, "{report}");
+    assert_eq!(report["verdict"], "Invalid", "{report}");
+    assert_eq!(code, Some(2));
+}
+
+/// The grammar that lets the LTA file through stays narrow: every one of these
+/// same-length edits to the appended revision is still refused (exit 1, `InvalidInput`),
+/// while the unedited file is reported.
+#[test]
+#[ignore = "needs cargo xtask fetch-fixtures"]
+fn kalkan_pades_lta_widget_and_trailer_grammar_stays_strict() {
+    let original = std::fs::read(oncl_testkit::ncanode("sample-signed-lta.pdf")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let find = |needle: &[u8], last: bool| {
+        let mut hits = original
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, w)| *w == needle)
+            .map(|(at, _)| at);
+        if last { hits.next_back() } else { hits.next() }.expect("fixture structure")
+    };
+    let id0 = b"<4E949515AAF132498F650E7BDE6CDC2F>";
+    for (name, at, from, to) in [
+        // The rewritten page changes beyond /Annots.
+        (
+            "page",
+            find(b"/MediaBox [0 0 612 792]", false) + 21,
+            b"2".as_slice(),
+            b"3".as_slice(),
+        ),
+        // The widget is no longer invisible.
+        (
+            "visible",
+            find(b"/Rect [0.0 0.0 0.0 0.0]", false) + 15,
+            b"0.0".as_slice(),
+            b"9.0".as_slice(),
+        ),
+        // The page names a different widget than the field added.
+        (
+            "annots",
+            find(b"/Annots [62 0 R]", false) + 9,
+            b"62".as_slice(),
+            b"63".as_slice(),
+        ),
+        // ID[0], the permanent identifier, is substituted in the last revision.
+        ("id0", find(id0, true) + 1, b"4".as_slice(), b"5".as_slice()),
+    ] {
+        let mut edited = original.clone();
+        assert_eq!(&edited[at..at + from.len()], from, "{name}");
+        edited[at..at + to.len()].copy_from_slice(to);
+        let file = dir.path().join(format!("{name}.pdf"));
+        std::fs::write(&file, edited).unwrap();
+        let out = run(
+            &[
+                "--json",
+                "verify",
+                "--profile",
+                "pades-lta",
+                "--input",
+                path(&file),
+            ],
+            b"",
+        );
+        assert_eq!(out.status.code(), Some(1), "{name}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("InvalidInput"),
+            "{name}: {out:?}"
+        );
+    }
+}

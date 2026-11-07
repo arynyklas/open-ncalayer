@@ -154,7 +154,7 @@ impl PdfDocument<'_, '_> {
         let mut found = false;
         let mut known = BTreeSet::new();
         for revision in 0..self.revisions.len() {
-            for candidate in self.signature_candidates(revision, &known, pades)? {
+            for candidate in self.signature_candidates(revision, &known, pades, false)? {
                 if candidate.permission_transform {
                     return Err(PdfError::Unsupported(
                         "signature field lock or permission transform",
@@ -174,6 +174,7 @@ impl PdfDocument<'_, '_> {
         revision: usize,
         known: &BTreeSet<[u64; 4]>,
         pades: bool,
+        skip_timestamps: bool,
     ) -> Result<Vec<Candidate>> {
         let root = self.revisions[revision].root.clone();
         let catalog = self.resolve(revision, &root)?;
@@ -248,6 +249,14 @@ impl PdfDocument<'_, '_> {
                 {
                     return Err(PdfError::Malformed("document timestamp dictionary"));
                 }
+            } else if skip_timestamps
+                && document_timestamp
+                && get(dict, b"Type")?.name(b"DocTimeStamp")
+            {
+                // The generic profile reports signers. A document timestamp (ISO 32000-2
+                // 12.8.5) is evidence, not a signer: it is neither judged here nor refused;
+                // the PAdES profiles verify it.
+                continue;
             } else {
                 if dict
                     .get(b"Type".as_slice())
@@ -444,7 +453,7 @@ pub(crate) fn verify_snapshot(
         let mut candidates = Vec::new();
         let mut seen = BTreeSet::new();
         for revision in 0..doc.revisions.len() {
-            for candidate in doc.signature_candidates(revision, &seen, false)? {
+            for candidate in doc.signature_candidates(revision, &seen, false, true)? {
                 if !seen.insert(candidate.range.values()) {
                     continue;
                 }
