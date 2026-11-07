@@ -23,6 +23,10 @@ pub enum ErrorCode {
     OperationFailed,
     Internal,
 }
+/// Parsing is tolerant so older and newer peers interoperate: unknown fields are ignored and a
+/// `subcode` that is not a well-formed string is dropped (the published OpenAPI schema stays
+/// strict about what a server may send).
+///
 /// A typed error answer: the stable [`ErrorCode`], the honest key-application state and, for
 /// a refusal that has one, a `subcode`: a short stable identifier of the precise reason
 /// (for example a plugin key use the operator did not grant: `not-granted`).
@@ -32,7 +36,6 @@ pub enum ErrorCode {
 /// the code. It matches [`SUBCODE_PATTERN`]; anything else a peer sends is dropped on
 /// parsing (the typed code survives), so a subcode is always safe to print.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ApiError {
     pub code: ErrorCode,
     pub applied: AppliedState,
@@ -57,8 +60,16 @@ pub fn is_subcode(text: &str) -> bool {
 fn lenient_subcode<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
-    let text = Option::<String>::deserialize(deserializer)?;
-    Ok(text.filter(|t| is_subcode(t)))
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Loose {
+        Text(String),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Loose>::deserialize(deserializer)? {
+        Some(Loose::Text(text)) if is_subcode(&text) => Some(text),
+        _ => None,
+    })
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AppliedState {

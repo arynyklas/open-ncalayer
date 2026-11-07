@@ -143,7 +143,7 @@ impl ServiceHost {
         } else {
             DurableAuditGuard::create(audit_config)?
         }
-        .with_plugin_policy(plugin_policy.clone());
+        .with_plugin_policy(plugin_policy.clone())?;
         if audit.health() != AuditHealth::Healthy {
             if !config.recover_audit {
                 return Err(io::Error::other("audit recovery required"));

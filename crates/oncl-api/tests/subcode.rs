@@ -92,13 +92,13 @@ fn a_hostile_subcode_never_costs_the_typed_code_and_is_never_surfaced() {
 }
 
 #[test]
-fn other_unknown_fields_are_still_refused() {
-    assert!(
-        serde_json::from_str::<ApiError>(
-            r#"{"code":"PermissionDenied","applied":"NotApplied","extra":1}"#
-        )
-        .is_err()
-    );
+fn unknown_fields_and_a_non_string_subcode_are_ignored_not_fatal() {
+    let error: ApiError = serde_json::from_str(
+        r#"{"code":"PermissionDenied","applied":"NotApplied","extra":1,"subcode":7}"#,
+    )
+    .unwrap();
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert_eq!(error.subcode(), None);
 }
 
 #[test]

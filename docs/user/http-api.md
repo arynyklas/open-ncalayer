@@ -240,15 +240,18 @@ refusal has a precise reason**, `"subcode": "<id>"`:
 
 * The field is **additive**: `ErrorCode` (the 19 stable codes) and the statuses are unchanged,
   an error without a reason is byte-for-byte what it was, and `subcode` is never required.
-  A client written before it must tolerate the extra field on plugin refusals (the OpenAPI
-  schema lists it; `additionalProperties` stays false).
-* The id matches `^[A-Za-z][A-Za-z0-9_-]{0,63}$` (a lowercase kebab-case identifier; for
-  `InteractionRequired` the name of the host import the plugin needed). It is **opaque and
+  The OpenAPI schema lists it and keeps `additionalProperties: false` for what a server may
+  send. The Rust client (`oncl_api`) ignores unknown fields and drops a non-string subcode, so
+  older and newer peers interoperate; a client built before this change that still rejects
+  unknown fields fails to parse a plugin refusal that carries one (code and `applied` are lost
+  with it), so upgrade clients with the server.
+* The id matches `^[A-Za-z][A-Za-z0-9_-]{0,63}$` (the ids the server emits are lowercase
+  kebab-case; the pattern is the wire bound). `InteractionRequired` carries no subcode. It is **opaque and
   open**: new ids may appear, treat unknown ones as the plain `code`. It is a reason, never a
   message, and never contains document, key or parameter bytes. A value outside the pattern
   is dropped by the client (the typed `code` survives).
 * Today only plugin refusals carry one. A refusal is **always `NotApplied`** except
-  `key-use-spent` (a second key use in one invocation: the first use is real and stays
+  `key-use-spent` (a second key use in one request (one `OperationId`; two plugin items of one request count together): the first use is real and stays
   reported `Applied`). The ids a server answer can carry for a plugin operation:
 
 | `subcode` | `code` | Meaning |
@@ -260,7 +263,7 @@ refusal has a precise reason**, `"subcode": "<id>"`:
 | `kind-mismatch` | `PermissionDenied` | The signature kind is not a declared key use |
 | `caller-mismatch` | `PermissionDenied` | The ticket's caller is not the granted token |
 | `ticket-uses` | `PermissionDenied` | The ticket allows other than exactly one use |
-| `key-use-spent` | `PermissionDenied` | One invocation tried to use the key twice (`applied` is `Applied`) |
+| `key-use-spent` | `PermissionDenied` | One request tried to use a key twice (`applied` is `Applied`) |
 | `not-declared` | `PermissionDenied` | The operation is not declared by the plugin (a server grant for it is skipped at start-up, so a request normally gets a plain 403 without a subcode; the `oncl plugin` CLI reports this id) |
 
 Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`) belong to the
@@ -400,12 +403,14 @@ plugin_bytes = false                  # default; see below
 client) chooses the bytes the granted key signs**. The server cannot bind the content to a
 document (`args` is free JSON; typed parameters and document parts are a later stage), so
 a key use of a *declared* operation is refused (`PermissionDenied`, subcode `not-granted`,
-`NotApplied`, before the audit journal and the key) unless the grant carries it. It needs at
+`NotApplied`, before any `BEGIN` and before the key; a refusal record may be written) unless the grant carries it. It needs at
 least one `keys` entry (validation refuses `plugin_bytes = true` without a key) and has no
 effect for a plugin without declarations (the server logs a warning). Even then the use
 must match the declaration exactly: the ticket's plugin, package hash, operation, the
 token as caller, a named key of the grant, the declared kind and the declared options
-(`options-mismatch` otherwise) and it must be the invocation's only key use.
+(`options-mismatch` otherwise) and it must be the request's only key use (a second plugin item or a second signature in the same request is `key-use-spent`).
+
+**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. No shipped manifest declares operations yet.
 
 At start-up a grant of a declared plugin is checked against the manifest and **skipped with
 an error in the log** (the other grants and the server keep running) when it is wider than the

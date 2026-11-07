@@ -296,9 +296,9 @@ plugin_bytes = true                # the plugin / its client chooses what the ke
   grant is **skipped with an `oncl-server: error:` line** and the rest of the server runs. Core
   forces the declared signature options on every call. Because the server cannot tie the signed
   bytes to a document, **any key use needs `plugin_bytes = true`** in the grant; without it the
-  use is refused before the audit journal and the key (`PermissionDenied`, subcode
+  use is refused before any `BEGIN` and before the key; a refusal record may be written (`PermissionDenied`, subcode
   `not-granted`, `NotApplied`). A grant with keys but without `plugin_bytes` starts with a
-  warning that every key use will be refused. One invocation can use the key once.
+  warning that every key use will be refused. One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
 * **Plugins without declarations** (all packages before their manifests carry declarations, and
   third-party ones): nothing changes. The grant is the operator's labels, the options are **not**
   enforced, the audit says `declared=false`, and each such grant logs

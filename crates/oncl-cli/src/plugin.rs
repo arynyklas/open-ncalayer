@@ -174,7 +174,6 @@ pub struct BytesGrant {
     plugin: String,
     operation: String,
     caller: String,
-    package: oncl_core::plugins::PackageHash,
     uses: Vec<(oncl_plugin::operations::KeyKind, Option<[u8; 32]>)>,
 }
 impl BytesGrant {
@@ -190,9 +189,6 @@ impl BytesGrant {
         }
         if ticket.identity().id != self.plugin || ticket.operation() != self.operation {
             return Err(R::NotGranted);
-        }
-        if ticket.identity().package != self.package {
-            return Err(R::Identity);
         }
         if ticket.max_uses() != oncl_plugin::operations::MAX_USES {
             return Err(R::Uses);
@@ -214,7 +210,6 @@ fn check_declaration(
     manifest: &oncl_plugin::Manifest,
     args: &PluginCallArgs,
     has_key: bool,
-    package: &oncl_core::plugins::PackageHash,
 ) -> Result<Checked, &'static str> {
     use oncl_plugin::operations::Network;
     let named: Vec<Import> = args
@@ -258,7 +253,6 @@ fn check_declaration(
         plugin: manifest.id.clone(),
         operation: operation.name().to_owned(),
         caller: args.caller.clone(),
-        package: *package,
         uses: operation
             .uses()
             .keys()
@@ -346,12 +340,10 @@ pub fn registry(
         .map_err(|_| ProcessingError::InvalidInput("manifest is not UTF-8"))?;
     let manifest = oncl_plugin::Manifest::from_toml(text)
         .map_err(|_| ProcessingError::InvalidInput("invalid plugin manifest"))?;
-    let checked = check_declaration(&manifest, args, selector.is_some(), &package_hash).map_err(
-        |subcode| {
-            record_subcode(subcode);
-            OperationError::PermissionDenied
-        },
-    )?;
+    let checked = check_declaration(&manifest, args, selector.is_some()).map_err(|subcode| {
+        record_subcode(subcode);
+        OperationError::PermissionDenied
+    })?;
     let id = manifest.id.clone();
     let mut registry = PluginRegistry::new();
     registry.install(
@@ -442,4 +434,68 @@ pub fn call(
     );
     output::finish_artifact(stage, &args.output, prepared, applied)?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oncl_core::plugins::{ContentBinding, PluginIdentity, PluginUse, TicketRefusal as R};
+    use oncl_plugin::operations::KeyKind;
+
+    const DECLARED_HASH: [u8; 32] = [3; 32];
+
+    fn grant() -> BytesGrant {
+        BytesGrant {
+            plugin: "test.cli".into(),
+            operation: "sign".into(),
+            caller: "op".into(),
+            uses: vec![(KeyKind::Raw, Some(DECLARED_HASH))],
+        }
+    }
+    fn ticket(operation: &str, caller: &str, kind: KeyKind, options: [u8; 32]) -> PluginUse {
+        PluginUse::for_tests(
+            PluginIdentity {
+                id: "test.cli".into(),
+                package: oncl_core::plugins::loose_package_hash(b"m", b"w"),
+                version: "1".into(),
+            },
+            operation,
+            CallerContext::LocalOperator(caller.into()),
+            kind,
+            1,
+            oncl_core::keys::KeyId::new("k").unwrap(),
+            ContentBinding::bytes(b"x"),
+            options,
+            [0; 32],
+        )
+    }
+
+    #[test]
+    fn only_the_declared_use_of_the_named_operator_is_allowed() {
+        let g = grant();
+        g.check(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH))
+            .unwrap();
+        assert_eq!(
+            g.check(&ticket("sign", "other", KeyKind::Raw, DECLARED_HASH)),
+            Err(R::Caller)
+        );
+        assert_eq!(
+            g.check(&ticket("legacy", "op", KeyKind::Raw, DECLARED_HASH)),
+            Err(R::NotGranted)
+        );
+        assert_eq!(
+            g.check(&ticket("sign", "op", KeyKind::Cms, DECLARED_HASH)),
+            Err(R::Kind)
+        );
+        assert_eq!(
+            g.check(&ticket("sign", "op", KeyKind::Raw, [9; 32])),
+            Err(R::Options)
+        );
+        let mut param = grant();
+        param.uses = vec![(KeyKind::Raw, None)];
+        assert_eq!(
+            param.check(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH)),
+            Err(R::Options)
+        );
+    }
 }

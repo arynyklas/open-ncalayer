@@ -228,7 +228,7 @@ async fn options_outside_the_declared_profile_are_refused_even_with_plugin_bytes
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn one_invocation_cannot_use_the_key_twice() {
+async fn one_request_cannot_use_the_key_twice() {
     let pki = Pki::start();
     let manifest = format!(
         "{HEADER}{}",

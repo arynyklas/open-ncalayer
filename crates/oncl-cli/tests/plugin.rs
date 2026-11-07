@@ -626,3 +626,26 @@ fn a_plugin_without_declarations_ignores_plugin_bytes_with_a_warning() {
         stderr(&result)
     );
 }
+
+#[test]
+fn a_second_key_use_in_one_call_is_refused_and_the_first_stays_reported() {
+    let w = world();
+    let mut calls = sign_raw_call();
+    calls.extend(sign_raw_call());
+    let declared = install_with(DECLARED, &calls);
+    let (get, post) = (
+        format!("GET={}/ocsp", w.origin),
+        format!("POST={}/ocsp", w.origin),
+    );
+    let mut extra = key_args(&w, &get, &post);
+    extra.push("--plugin-bytes");
+    let result = run(&base(&declared, &extra), b"");
+    let text = stderr(&result);
+    assert_eq!(result.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("oncl: PermissionDenied; subcode=key-use-spent; applied=Applied"),
+        "{text}"
+    );
+    assert_eq!(text.matches("private_use").count(), 1, "{text}");
+    assert!(result.stdout.is_empty());
+}

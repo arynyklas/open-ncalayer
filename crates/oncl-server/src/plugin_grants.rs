@@ -12,9 +12,9 @@
 //! * Core ticketes every key use of a declared operation from the very arguments it runs and
 //!   forces the declared options. The server cannot bind the signed bytes to a document (the
 //!   arguments are free JSON of the client), so [`ServerPluginPolicy`], consulted by the audit
-//!   guard before the journal is touched, lets a ticketed key use through only when the grant
+//!   guard before any BEGIN is written, lets a ticketed key use through only when the grant
 //!   carries `plugin_bytes = true`, names the key, matches the installed package and the
-//!   declared options, and is the first use of that invocation.
+//!   declared options, and is the first use of that request (operation id).
 use crate::{
     audit::{PluginGrantFacts, PluginTicketPolicy},
     config::PluginGrant,
@@ -30,16 +30,12 @@ use oncl_plugin::{
     operations::{KeyKind, Network, Operation},
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io,
     sync::{Mutex, PoisonError},
 };
 
-/// How many finished invocations the policy remembers as having used their one key use. An
-/// invocation lives only while its operation runs, so this exceeds any number of operations
-/// in flight (`max_in_flight` is at most 256) by a wide margin.
-const SPENT_MEMORY: usize = 4096;
-/// Refusals kept for the HTTP layer to drain (one per refused invocation).
+/// Refusals kept for the HTTP layer to drain (one per refused operation).
 const REFUSAL_MEMORY: usize = 256;
 
 /// The verdict on one configured grant.
@@ -165,7 +161,9 @@ struct Rule {
 #[derive(Default)]
 pub struct ServerPluginPolicy {
     rules: Vec<Rule>,
-    spent: Mutex<VecDeque<OperationId>>,
+    /// Operations that used their one key use and have not ended yet (forgotten by
+    /// [`PluginTicketPolicy::operation_ended`]; never evicted by anything else).
+    spent: Mutex<HashSet<OperationId>>,
     refusals: Mutex<VecDeque<(OperationId, TicketRefusal)>>,
 }
 
@@ -213,6 +211,15 @@ impl ServerPluginPolicy {
         log.remove(at).map(|(_, refusal)| refusal)
     }
 
+    /// How many operations hold a spent use (tests).
+    #[cfg(test)]
+    fn spent_operations(&self) -> usize {
+        self.spent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
     fn decide(&self, operation: OperationId, ticket: &PluginUse) -> Result<&Rule, TicketRefusal> {
         let CallerContext::ServiceClient(token) = ticket.caller() else {
             return Err(TicketRefusal::Caller);
@@ -245,18 +252,20 @@ impl ServerPluginPolicy {
             return Err(TicketRefusal::Options);
         }
         let mut spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
-        if spent.contains(&operation) {
+        if !spent.insert(operation) {
             return Err(TicketRefusal::AlreadyUsed);
         }
-        if spent.len() == SPENT_MEMORY {
-            spent.pop_front();
-        }
-        spent.push_back(operation);
         Ok(rule)
     }
 }
 
 impl PluginTicketPolicy for ServerPluginPolicy {
+    fn operation_ended(&self, operation: OperationId) {
+        self.spent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&operation);
+    }
     fn check(
         &self,
         operation_id: OperationId,
@@ -620,7 +629,7 @@ modules = ["test.plain.module"]
     }
 
     #[test]
-    fn a_matching_ticket_under_plugin_bytes_is_allowed_once_per_invocation() {
+    fn a_matching_ticket_under_plugin_bytes_is_allowed_once_per_operation() {
         let policy = policy(true);
         let id = operation_id(0);
         let facts = policy.check(id, &Ticket::default().build()).unwrap();
@@ -630,7 +639,7 @@ modules = ["test.plain.module"]
             policy.check(id, &Ticket::default().build()).unwrap_err(),
             TicketRefusal::AlreadyUsed
         );
-        // Another invocation is its own first use.
+        // Another operation is its own first use.
         policy
             .check(operation_id(1), &Ticket::default().build())
             .unwrap();
@@ -744,5 +753,28 @@ modules = ["test.plain.module"]
             TicketRefusal::Key
         );
         granted.check(id, &Ticket::default().build()).unwrap();
+    }
+
+    #[test]
+    fn churn_of_other_operations_never_frees_a_spent_use_and_the_end_of_the_operation_does() {
+        let policy = policy(true);
+        let first = operation_id(0);
+        policy.check(first, &Ticket::default().build()).unwrap();
+        // 4104 other operations each take their one use while `first` is still running.
+        for _ in 1..=4104 {
+            let other = operation_id(0);
+            policy.check(other, &Ticket::default().build()).unwrap();
+            policy.operation_ended(other);
+        }
+        assert_eq!(
+            policy.check(first, &Ticket::default().build()).unwrap_err(),
+            TicketRefusal::AlreadyUsed
+        );
+        policy.operation_ended(first);
+        assert_eq!(
+            policy.spent_operations(),
+            0,
+            "nothing is remembered after the end"
+        );
     }
 }
