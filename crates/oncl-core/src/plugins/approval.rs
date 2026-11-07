@@ -884,7 +884,8 @@ mod tests {
             network: ConsentNetwork::None,
         };
         let d = base.digest();
-        let variants: Vec<(&str, Box<dyn Fn(&mut ConsentSummary)>)> = vec![
+        type Change = Box<dyn Fn(&mut ConsentSummary)>;
+        let variants: Vec<(&str, Change)> = vec![
             ("id", Box::new(|s| s.plugin.id = "q".into())),
             (
                 "package",
