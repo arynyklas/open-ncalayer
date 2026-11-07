@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-market"
 description = "MarketSign as an OpenNCALayer plugin: CAdES and XMLDSig signatures for omarket.kz"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

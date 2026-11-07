@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-dogovor24"
 description = "OpenNCALayer port of the Dogovor24 module: CAdES with a time-stamp, batches, and ESEDO CMS"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

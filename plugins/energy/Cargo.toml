@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-energy"
 description = "OpenNCALayer port of Sign Energy (kz.energy.sign): key details and CMS signatures of documents, silent with a key remembered in the connection"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
