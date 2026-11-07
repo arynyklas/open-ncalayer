@@ -136,7 +136,7 @@ fn a_manifest_without_operations_has_none() {
 }
 
 #[test]
-fn every_shipped_manifest_parses_and_declares_no_operations() {
+fn every_shipped_manifest_parses_and_what_it_declares_is_runnable_in_the_window() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
     let mut count = 0;
     for entry in std::fs::read_dir(&root).unwrap() {
@@ -147,11 +147,19 @@ fn every_shipped_manifest_parses_and_declares_no_operations() {
         let text = std::fs::read_to_string(&path).unwrap();
         let manifest = Manifest::from_toml(&text)
             .unwrap_or_else(|e| panic!("{} no longer parses: {e}", path.display()));
-        assert!(
-            manifest.operations().is_empty(),
-            "{} declares operations",
-            path.display()
-        );
+        for op in manifest.operations() {
+            let at = format!("{} {}", path.display(), op.name());
+            assert!(op.runnable() && !op.is_derived(), "{at}: not runnable");
+            // A key use is validated online and time-stamped through the PKI endpoints: with
+            // `network = "none"` the manual window refuses it before the key
+            // (crates/oncl-core/tests/plugin_ports_manual/network.rs).
+            if !op.uses().keys().is_empty() {
+                assert!(
+                    matches!(op.uses().network(), oncl_plugin::operations::Network::Pki),
+                    "{at}: a key use needs network = \"pki\""
+                );
+            }
+        }
         count += 1;
     }
     assert!(count >= 34, "only {count} manifests found");
