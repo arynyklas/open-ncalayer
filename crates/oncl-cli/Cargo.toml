@@ -27,6 +27,8 @@ oncl-xml.workspace = true
 oncl-pdf.workspace = true
 oncl-token.workspace = true
 oncl-plugin = { workspace = true, default-features = false }
+# `capability_text`: the English words of an operation's key use and profile.
+oncl-flows.workspace = true
 oncl-pdk.workspace = true
 # The streaming HTTP client of the typed contract (`--endpoint`): ureq only, no server stack.
 oncl-api = { path = "../oncl-api", features = ["client"] }

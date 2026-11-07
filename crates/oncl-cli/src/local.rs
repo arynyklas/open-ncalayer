@@ -180,6 +180,13 @@ fn validation(
 }
 pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     control.check()?;
+    // Listing a manifest opens no key, engine or validation material.
+    if let Command::Plugin {
+        command: crate::plugin::PluginCommand::Operations(args),
+    } = &cli.command
+    {
+        return crate::plugin_list::run(args, cli, &control);
+    }
     let action = match &cli.command {
         Command::Hash { .. } => Action::Hash,
         Command::Verify { .. } => Action::Verify,
@@ -334,7 +341,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             .as_ref()
             .ok_or(OperationError::InvalidContext)?;
         grant = grant.with_plugins([crate::plugin::permission(
-            command.args(),
+            command.call_args().ok_or(OperationError::InvalidContext)?,
             &plugin_id,
             selector.as_ref(),
             checked,
@@ -492,6 +499,9 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             &engine,
             command,
             &plugin_id,
+            plugin_checked
+                .as_ref()
+                .ok_or(OperationError::InvalidContext)?,
             selector.as_ref(),
             cli,
             &mut ctx,
