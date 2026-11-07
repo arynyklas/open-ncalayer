@@ -1,0 +1,713 @@
+// The Plugins page of the tools window: the operations of the installed plugins that the manual
+// window can run, an operation's form, the key, the confirmation that names the action, the run
+// and its result. Every text is composed in Rust (the host's words in the three languages of the
+// program); a plugin's own words are only ever in a `PluginFrame`, apart from the host's lines.
+//
+// Keyboard: every control is named and on the Tab ring; the confirmation page puts the focus on
+// «Cancel» (the default: Enter alone never confirms), Escape cancels the step from wherever the
+// focus is, and the long text of the confirmation scrolls by the keyboard (the strip at the edge
+// of its body is on the Tab ring: the arrows, PageUp/PageDown, Home and End).
+
+import { Button, CheckBox, ComboBox, LineEdit, Palette, StandardListView, TextEdit } from "std-widgets.slint";
+import { ReportRow, ReportView } from "report.slint";
+import { DialogScroll, ErrorText, EscapeScope, FieldLabel, Heading, Hint, Metrics, NameText, PluginFrame, Subheading, Tone } from "common.slint";
+
+// One operation of the list.
+export struct PluginOperationRow {
+    // «Operation sign-file»: the host's words (an identifier checked at parse).
+    heading: string,
+    // Whether it uses the key (the only operations this window runs).
+    key-line: string,
+    // The plugin's label of it, in a frame.
+    label-caption: string,
+    label: string,
+    open-label: string,
+    can-open: bool,
+}
+
+// The operations of one plugin.
+export struct PluginGroupRow {
+    // «Plugin id, version»: the host's words.
+    heading: string,
+    // The plugin's own name, in a frame.
+    name-caption: string,
+    name: string,
+    operations: [PluginOperationRow],
+}
+
+// An installed plugin that offers nothing to this window, or cannot be read.
+export struct PluginHiddenRow {
+    line: string,
+    // The plugin's own name, in a frame (empty when its package could not be read).
+    name-caption: string,
+    name: string,
+}
+
+// One field of an operation's form.
+export struct PluginFormField {
+    // 0: a document, 1: a text, 2: a choice, 3: a yes/no, 4: a language.
+    kind: int,
+    label: string,
+    placeholder: string,
+    text: string,
+    choices: [string],
+    index: int,
+    flag: bool,
+}
+
+export global PluginsState {
+    // 0: the list, 1: the form, 2: the key, 3: the confirmation, 4: running, 5: the result.
+    in property <int> step;
+    in property <string> title;
+    in property <string> error;
+    in property <bool> busy;
+    // The labels of the controls (the host's words).
+    in property <string> refresh-label;
+    in property <string> open-label;
+    in property <string> continue-label;
+    in property <string> back-label;
+    in property <string> cancel-label;
+    in property <string> again-label;
+    in property <string> finish-label;
+
+    // The list.
+    in property <string> intro;
+    in property <string> list-note;
+    in property <[PluginGroupRow]> groups;
+    in property <string> hidden-heading;
+    in property <string> hidden-why;
+    in property <[PluginHiddenRow]> hidden;
+
+    // The form.
+    in property <string> form-intro;
+    in property <string> label-caption;
+    in property <string> label;
+    in property <[PluginFormField]> fields;
+    in property <string> store-label;
+    in property <string> store-placeholder;
+    in-out property <string> store-path;
+
+    // The key.
+    in property <string> password-label;
+    in-out property <string> password;
+    in property <string> open-store-label;
+    in property <string> choose-label;
+    in property <string> show-consent-label;
+    in property <[StandardListViewItem]> certs;
+    in-out property <int> cert-index: -1;
+
+    // The confirmation.
+    in property <string> c-title;
+    in property <string> c-lead;
+    in property <[string]> c-trusted;
+    in property <string> c-package-caption;
+    in property <string> c-package-sha;
+    in property <[string]> c-file-lines;
+    in property <string> c-file-sha-caption;
+    in property <string> c-file-sha;
+    in property <string> c-prehash-caption;
+    in property <string> c-prehash;
+    in property <string> c-key-heading;
+    in property <[string]> c-key-lines;
+    in property <string> c-fingerprint-caption;
+    in property <string> c-fingerprint;
+    in property <string> c-inputs-caption;
+    in property <[string]> c-inputs;
+    in property <string> c-ttl;
+    in property <string> c-trust-note;
+    in property <string> c-frame-caption;
+    in property <string> c-frame-name-caption;
+    in property <string> c-frame-name;
+    in property <string> c-frame-label;
+    in property <[string]> c-frame-lines;
+    // The button that agrees names the action; it works only when the confirmation is prepared
+    // and has been on the page for a moment.
+    in property <string> confirm-label;
+    in property <bool> confirm-enabled;
+    in property <string> confirm-hint;
+
+    // Running and the result.
+    in property <string> running;
+    in property <string> report-headline;
+    in property <int> report-tone: 3;
+    in property <[ReportRow]> report-rows;
+    in property <string> reply-caption;
+    in property <string> reply;
+    in property <string> reply-cut;
+    in property <string> result-note;
+
+    callback refresh();
+    // Group index, operation index.
+    callback open-operation(int, int);
+    callback field-text(int, string);
+    callback field-choice(int, int);
+    callback field-flag(int, bool);
+    callback browse-field(int);
+    callback browse-store();
+    callback form-continue();
+    callback unlock();
+    callback cert-clicked(int);
+    callback cert-chosen(int);
+    callback confirm();
+    // The step's own cancel: Cancel, Escape.
+    callback cancel();
+    callback back();
+    callback again();
+    callback finish();
+}
+
+// The confirmation: its first focus is on «Cancel»; Enter there cancels.
+component ConsentStep inherits VerticalLayout {
+    in property <length> room: 260px;
+    spacing: Metrics.gap;
+    init => {
+        cancel-button.focus();
+    }
+    Text {
+        text: PluginsState.c-lead;
+        wrap: word-wrap;
+    }
+
+    DialogScroll {
+        max-height: root.room;
+        for line in PluginsState.c-trusted: NameText {
+            text: line;
+        }
+        FieldLabel {
+            text: PluginsState.c-package-caption;
+        }
+
+        LineEdit {
+            read-only: true;
+            text: PluginsState.c-package-sha;
+            accessible-label: PluginsState.c-package-caption;
+        }
+
+        for line in PluginsState.c-file-lines: NameText {
+            text: line;
+        }
+        FieldLabel {
+            text: PluginsState.c-file-sha-caption;
+        }
+
+        LineEdit {
+            read-only: true;
+            text: PluginsState.c-file-sha;
+            accessible-label: PluginsState.c-file-sha-caption;
+        }
+
+        if PluginsState.c-prehash != "": VerticalLayout {
+            spacing: 4px;
+            FieldLabel {
+                text: PluginsState.c-prehash-caption;
+            }
+
+            LineEdit {
+                read-only: true;
+                text: PluginsState.c-prehash;
+                accessible-label: PluginsState.c-prehash-caption;
+            }
+        }
+        Subheading {
+            text: PluginsState.c-key-heading;
+        }
+
+        for line in PluginsState.c-key-lines: NameText {
+            text: line;
+        }
+        FieldLabel {
+            text: PluginsState.c-fingerprint-caption;
+        }
+
+        LineEdit {
+            read-only: true;
+            text: PluginsState.c-fingerprint;
+            accessible-label: PluginsState.c-fingerprint-caption;
+        }
+
+        if PluginsState.c-inputs.length > 0: VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: PluginsState.c-inputs-caption;
+                wrap: word-wrap;
+            }
+
+            for line in PluginsState.c-inputs: NameText {
+                text: line;
+            }
+        }
+        Text {
+            text: PluginsState.c-ttl;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: PluginsState.c-trust-note;
+            wrap: word-wrap;
+        }
+
+        PluginFrame {
+            caption: PluginsState.c-frame-name-caption;
+            label: PluginsState.c-frame-name;
+        }
+
+        PluginFrame {
+            caption: PluginsState.c-frame-caption;
+            label: PluginsState.c-frame-label;
+            lines: PluginsState.c-frame-lines;
+        }
+    }
+
+    if PluginsState.error != "": ErrorText {
+        text: PluginsState.error;
+    }
+    if !PluginsState.confirm-enabled && PluginsState.confirm-hint != "": Hint {
+        text: PluginsState.confirm-hint;
+    }
+    HorizontalLayout {
+        spacing: Metrics.gap;
+        alignment: start;
+        // The one button that agrees; it names the action. Enter does not press it: the focus
+        // starts on «Cancel».
+        Button {
+            text: PluginsState.confirm-label;
+            enabled: PluginsState.confirm-enabled;
+            accessible-label: PluginsState.confirm-label;
+            clicked => {
+                PluginsState.confirm();
+            }
+        }
+
+        // The default.
+        cancel-button := Button {
+            text: PluginsState.cancel-label;
+            primary: true;
+            accessible-label: PluginsState.cancel-label;
+            clicked => {
+                PluginsState.cancel();
+            }
+        }
+    }
+}
+
+// The key step: its first focus is the password.
+component KeyStep inherits VerticalLayout {
+    spacing: 8px;
+    init => {
+        password-edit.focus();
+    }
+    FieldLabel {
+        text: PluginsState.password-label;
+    }
+
+    password-edit := LineEdit {
+        enabled: !PluginsState.busy;
+        input-type: password;
+        text <=> PluginsState.password;
+        accessible-label: PluginsState.password-label;
+        // Enter opens the key store and shows its certificates; it agrees to nothing.
+        accepted => {
+            PluginsState.unlock();
+        }
+    }
+
+    if PluginsState.error != "": ErrorText {
+        text: PluginsState.error;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: PluginsState.open-store-label;
+            primary: PluginsState.certs.length == 0;
+            enabled: !PluginsState.busy;
+            accessible-label: PluginsState.open-store-label;
+            clicked => {
+                PluginsState.unlock();
+            }
+        }
+
+        Button {
+            text: PluginsState.back-label;
+            enabled: !PluginsState.busy;
+            accessible-label: PluginsState.back-label;
+            clicked => {
+                PluginsState.back();
+            }
+        }
+
+        Button {
+            text: PluginsState.cancel-label;
+            accessible-label: PluginsState.cancel-label;
+            clicked => {
+                PluginsState.cancel();
+            }
+        }
+    }
+
+    if PluginsState.certs.length > 0: VerticalLayout {
+        spacing: 8px;
+        FieldLabel {
+            text: PluginsState.choose-label;
+        }
+
+        FocusScope {
+            // The list is the stop of the Tab ring (it has its own name); this scope only takes
+            // Enter from it.
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                if event.text == "\n" && PluginsState.cert-index >= 0 {
+                    PluginsState.cert-chosen(PluginsState.cert-index);
+                    return accept;
+                }
+                reject
+            }
+            StandardListView {
+                height: 120px;
+                model: PluginsState.certs;
+                current-item <=> PluginsState.cert-index;
+                accessible-label: PluginsState.choose-label;
+                item-pointer-event(i, event, position) => {
+                    if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                        PluginsState.cert-clicked(i);
+                    }
+                }
+            }
+        }
+
+        // Prepares the confirmation: nothing is signed by it.
+        Button {
+            text: PluginsState.show-consent-label;
+            enabled: PluginsState.cert-index >= 0 && !PluginsState.busy;
+            accessible-label: PluginsState.show-consent-label;
+            clicked => {
+                PluginsState.cert-chosen(PluginsState.cert-index);
+            }
+        }
+    }
+}
+
+export component PluginsPage inherits EscapeScope {
+    // How tall the confirmation's scrolling body may be: what the window leaves.
+    in property <length> room: 260px;
+    escape => {
+        PluginsState.cancel();
+    }
+    VerticalLayout {
+        spacing: 8px;
+        alignment: start;
+        Heading {
+            text: PluginsState.title;
+            accessible-role: text;
+        }
+
+        if PluginsState.step == 0: VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: PluginsState.intro;
+                wrap: word-wrap;
+            }
+
+            if PluginsState.list-note != "": Text {
+                text: PluginsState.list-note;
+                wrap: word-wrap;
+                font-weight: 600;
+                accessible-role: text;
+            }
+            for group[gi] in PluginsState.groups: VerticalLayout {
+                spacing: 4px;
+                Subheading {
+                    text: group.heading;
+                    wrap: char-wrap;
+                }
+
+                PluginFrame {
+                    caption: group.name-caption;
+                    label: group.name;
+                }
+
+                for op[oi] in group.operations: VerticalLayout {
+                    spacing: 4px;
+                    padding-left: 12px;
+                    NameText {
+                        text: op.heading;
+                        font-weight: 700;
+                    }
+
+                    Hint {
+                        text: op.key-line;
+                    }
+
+                    PluginFrame {
+                        caption: op.label-caption;
+                        label: op.label;
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: PluginsState.open-label;
+                            enabled: op.can-open && !PluginsState.busy;
+                            accessible-label: op.open-label;
+                            clicked => {
+                                PluginsState.open-operation(gi, oi);
+                            }
+                        }
+                    }
+                }
+            }
+            if PluginsState.hidden.length > 0: VerticalLayout {
+                spacing: 4px;
+                Subheading {
+                    text: PluginsState.hidden-heading;
+                }
+
+                for row in PluginsState.hidden: VerticalLayout {
+                    spacing: 2px;
+                    NameText {
+                        text: row.line;
+                    }
+
+                    if row.name != "": PluginFrame {
+                        caption: row.name-caption;
+                        label: row.name;
+                    }
+                }
+                Hint {
+                    text: PluginsState.hidden-why;
+                }
+            }
+            if PluginsState.error != "": ErrorText {
+                text: PluginsState.error;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: PluginsState.refresh-label;
+                    enabled: !PluginsState.busy;
+                    accessible-label: PluginsState.refresh-label;
+                    clicked => {
+                        PluginsState.refresh();
+                    }
+                }
+            }
+        }
+        if PluginsState.step == 1: VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: PluginsState.form-intro;
+                wrap: word-wrap;
+            }
+
+            PluginFrame {
+                caption: PluginsState.label-caption;
+                label: PluginsState.label;
+            }
+
+            for field[i] in PluginsState.fields: VerticalLayout {
+                spacing: 4px;
+                if field.kind == 0: VerticalLayout {
+                    spacing: 4px;
+                    FieldLabel {
+                        text: field.label;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            text: field.text;
+                            placeholder-text: field.placeholder;
+                            accessible-label: field.label;
+                            edited(text) => {
+                                PluginsState.field-text(i, text);
+                            }
+                        }
+
+                        Button {
+                            text: @tr("Browse…");
+                            accessible-label: @tr("Browse…") + " " + field.label;
+                            clicked => {
+                                PluginsState.browse-field(i);
+                            }
+                        }
+                    }
+                }
+                if field.kind == 1: VerticalLayout {
+                    spacing: 4px;
+                    FieldLabel {
+                        text: field.label;
+                    }
+
+                    LineEdit {
+                        text: field.text;
+                        accessible-label: field.label;
+                        edited(text) => {
+                            PluginsState.field-text(i, text);
+                        }
+                    }
+                }
+                if field.kind == 2 || field.kind == 4: VerticalLayout {
+                    spacing: 4px;
+                    FieldLabel {
+                        text: field.label;
+                    }
+
+                    ComboBox {
+                        model: field.choices;
+                        current-index: field.index;
+                        accessible-label: field.label;
+                        selected(value) => {
+                            PluginsState.field-choice(i, self.current-index);
+                        }
+                    }
+                }
+                if field.kind == 3: CheckBox {
+                    text: field.label;
+                    checked: field.flag;
+                    accessible-label: field.label;
+                    toggled => {
+                        PluginsState.field-flag(i, self.checked);
+                    }
+                }
+            }
+            FieldLabel {
+                text: PluginsState.store-label;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> PluginsState.store-path;
+                    placeholder-text: PluginsState.store-placeholder;
+                    accessible-label: PluginsState.store-label;
+                    accepted => {
+                        PluginsState.form-continue();
+                    }
+                }
+
+                Button {
+                    text: @tr("Browse…");
+                    accessible-label: @tr("Browse…") + " " + PluginsState.store-label;
+                    clicked => {
+                        PluginsState.browse-store();
+                    }
+                }
+            }
+
+            if PluginsState.error != "": ErrorText {
+                text: PluginsState.error;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button {
+                    text: PluginsState.continue-label;
+                    primary: true;
+                    enabled: !PluginsState.busy;
+                    accessible-label: PluginsState.continue-label;
+                    clicked => {
+                        PluginsState.form-continue();
+                    }
+                }
+
+                Button {
+                    text: PluginsState.back-label;
+                    accessible-label: PluginsState.back-label;
+                    clicked => {
+                        PluginsState.back();
+                    }
+                }
+            }
+        }
+        if PluginsState.step == 2: KeyStep { }
+        if PluginsState.step == 3: ConsentStep {
+            room: root.room;
+        }
+        if PluginsState.step == 4: VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: PluginsState.running;
+                wrap: word-wrap;
+                accessible-role: text;
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: PluginsState.cancel-label;
+                    accessible-label: PluginsState.cancel-label;
+                    clicked => {
+                        PluginsState.cancel();
+                    }
+                }
+            }
+        }
+        if PluginsState.step == 5: VerticalLayout {
+            spacing: 8px;
+            ReportView {
+                headline: PluginsState.report-headline;
+                tone: PluginsState.report-tone;
+                rows: PluginsState.report-rows;
+            }
+
+            if PluginsState.reply != "": VerticalLayout {
+                spacing: 4px;
+                // The plugin's reply is its own text: in the plugin's frame, selectable, and
+                // read by the keyboard.
+                Rectangle {
+                    border-width: 2px;
+                    border-color: Tone.warning();
+                    border-radius: 4px;
+                    background: Palette.alternate-background;
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 4px;
+                        Text {
+                            text: PluginsState.reply-caption;
+                            wrap: word-wrap;
+                            color: Tone.quiet();
+                        }
+
+                        TextEdit {
+                            read-only: true;
+                            wrap: word-wrap;
+                            min-height: 80px;
+                            text: PluginsState.reply;
+                            accessible-label: PluginsState.reply-caption;
+                        }
+                    }
+                }
+
+                if PluginsState.reply-cut != "": Hint {
+                    text: PluginsState.reply-cut;
+                }
+            }
+            Hint {
+                text: PluginsState.result-note;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button {
+                    text: PluginsState.finish-label;
+                    primary: true;
+                    accessible-label: PluginsState.finish-label;
+                    clicked => {
+                        PluginsState.finish();
+                    }
+                }
+
+                Button {
+                    text: PluginsState.again-label;
+                    accessible-label: PluginsState.again-label;
+                    clicked => {
+                        PluginsState.again();
+                    }
+                }
+            }
+        }
+    }
+}

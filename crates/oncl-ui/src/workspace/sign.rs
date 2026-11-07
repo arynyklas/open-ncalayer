@@ -1410,6 +1410,7 @@ mod tests {
             tokens: Tokens::disabled(),
             clock: Arc::new(now),
             settings_path: w.dir.path().join("settings.json"),
+            plugins: std::sync::Arc::new(super::super::plugins::NoManualPlugins),
         };
         let ws = test_workspace(services);
         ws.sign.borrow_mut().arm_after = Duration::from_millis(40);

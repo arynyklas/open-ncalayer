@@ -56,7 +56,11 @@ pub use windows::{
 };
 #[doc(hidden)]
 pub use workspace::progress;
-pub use workspace::{DesktopEngineServices, JobControl, desktop_limits, open_workspace};
+pub use workspace::{
+    DesktopEngineServices, JobControl, ManualListing, ManualPluginSource, NoManualPlugins,
+    OfferError, OfferedOperation, PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations,
+    desktop_limits, open_workspace, plugin_offer,
+};
 
 mod ui {
     slint::include_modules!();

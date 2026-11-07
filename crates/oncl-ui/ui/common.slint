@@ -85,6 +85,40 @@ export component NameText inherits Text {
     wrap: char-wrap;
 }
 
+// What a plugin says in its own words (its name, its label of an operation, an XPath it
+// fixed): in a frame of its own, under a caption that says whose words they are, apart from
+// the program's own lines. The installation window and the Plugins page of the tools window
+// draw it alike.
+export component PluginFrame inherits Rectangle {
+    in property <string> caption;
+    in property <string> label;
+    // More of the plugin's own text (its XPaths), in the same frame.
+    in property <[string]> lines;
+    border-width: 2px;
+    border-color: Tone.warning();
+    border-radius: 4px;
+    background: Palette.alternate-background;
+    VerticalLayout {
+        padding: 6px;
+        spacing: 2px;
+        Text {
+            text: root.caption;
+            wrap: word-wrap;
+            color: Tone.quiet();
+        }
+
+        NameText {
+            text: root.label;
+            font-italic: true;
+        }
+
+        for text in root.lines: NameText {
+            text: text;
+            font-italic: true;
+        }
+    }
+}
+
 // A label above a field.
 export component FieldLabel inherits Text {
     font-weight: 600;

@@ -16,6 +16,7 @@ mod controller;
 mod evidence;
 mod jobs;
 mod operations;
+mod plugins;
 #[doc(hidden)]
 pub mod progress;
 mod sign;
@@ -30,6 +31,10 @@ pub(crate) use self::operations::{
     SignInput, SignOptions, SignSpec, StampOptions, ToolSpec, VerifyFormat, VerifyOptions,
     batch_operation_error, evidence_limits, open_regular, plan_output, read_limited, run_tool,
     sign_operation, tsa_spec, view_of_summary,
+};
+pub use self::plugins::{
+    ManualListing, ManualPluginSource, NoManualPlugins, OfferError, OfferedOperation,
+    PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, plugin_offer,
 };
 
 use std::cell::{Cell, RefCell};
@@ -68,6 +73,8 @@ pub struct DesktopEngineServices {
     pub clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
     /// `settings.json`: where the recent files and favourite certificates are kept.
     pub settings_path: PathBuf,
+    /// The plugins the Plugins page offers (read each time the page lists them).
+    pub plugins: Arc<dyn ManualPluginSource>,
 }
 
 /// The pages of the window, as the sidebar numbers them.
@@ -81,6 +88,7 @@ enum Output {
     Hash(HashOutput, i32),
     Inspect(InspectOutput),
     Sign(sign::SignOutput),
+    Plugin(plugins::PluginOutput),
     /// The report of a run of a tool that uses no key.
     Tool(BatchView),
 }
@@ -95,6 +103,7 @@ struct Workspace {
     inspect_kind: Cell<i32>,
     sign: RefCell<sign::State>,
     tools: RefCell<tools::State>,
+    plugins: RefCell<plugins::State>,
 }
 
 thread_local! {
@@ -150,6 +159,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
     tools::connect(&ui);
+    plugins::connect(&ui);
     ui.window().on_close_requested(|| {
         if closing_is_blocked() {
             return CloseRequestResponse::KeepWindowShown;
@@ -167,6 +177,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
         tools: RefCell::default(),
+        plugins: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -193,6 +204,7 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
     tools::connect(&ui);
+    plugins::connect(&ui);
     let settings_path = services.settings_path.clone();
     let workspace = Rc::new(Workspace {
         ui,
@@ -204,6 +216,7 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
         tools: RefCell::default(),
+        plugins: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -223,6 +236,7 @@ fn close() {
         return;
     };
     abandon_signing(&open);
+    plugins::abandon(&open);
     open.controller.borrow_mut().close();
     if let Err(e) = open.ui.hide() {
         tracing::warn!(error = %e, "cannot hide the tools window");
@@ -235,6 +249,9 @@ fn cancel(open: &Rc<Workspace>) {
     if open.ui.get_section() == SECTION_SIGN {
         // Escape and the status line's Cancel mean what the page's Cancel means at its step.
         return sign::cancel(open);
+    }
+    if open.ui.get_section() == plugins::SECTION {
+        return plugins::cancel(open);
     }
     if open.controller.borrow_mut().cancel() {
         open.ui
@@ -366,7 +383,7 @@ fn start(
         match job {
             Job::Hash => t.hashing,
             Job::Inspect => t.inspecting,
-            Job::Sign | Job::Tool => t.working,
+            Job::Sign | Job::Tool | Job::Plugin => t.working,
         }
         .into(),
     );
@@ -528,7 +545,10 @@ fn apply_progress(stamp: Stamp, update: Update) {
         };
         // «Cancelling…» stays until the action ends; the signing page tells its own state
         // while it waits for the user's confirmation.
-        if control.is_cancelled() || (job == Job::Sign && !sign::shows_progress(open)) {
+        if control.is_cancelled()
+            || (job == Job::Sign && !sign::shows_progress(open))
+            || (job == Job::Plugin && !plugins::shows_progress(open))
+        {
             return;
         }
         let (fraction, text) = describe(Texts::of(open.locale.get()), update);
@@ -581,7 +601,7 @@ fn closing_is_blocked() -> bool {
 }
 
 fn closing_is_blocked_for(open: &Rc<Workspace>) -> bool {
-    if sign::is_running(open) {
+    if sign::is_running(open) || plugins::is_running(open) {
         open.ui.set_status_kind(4);
         open.ui
             .set_status_text(Texts::of(open.locale.get()).signing_running.into());
@@ -708,6 +728,19 @@ fn settle(stamp: Stamp, result: Result<Output, JobError>) {
                 }
             }
         }
+        // The page tells the status line itself: «done» only for a result it can vouch for.
+        Settled::Done(_, Output::Plugin(out)) => {
+            done(ui, t.ready);
+            plugins::settled(&open, Ok(out));
+        }
+        Settled::Cancelled(Job::Plugin) => {
+            done(ui, t.ready);
+            plugins::settled(&open, Err(JobError::Cancelled));
+        }
+        Settled::Failed(Job::Plugin, error) => {
+            done(ui, t.ready);
+            plugins::settled(&open, Err(error));
+        }
         Settled::Cancelled(Job::Sign) => {
             sign::settled(&open, Err(JobError::Cancelled));
             done(ui, t.ready);
@@ -726,6 +759,7 @@ fn settle(stamp: Stamp, result: Result<Output, JobError>) {
                 Job::Hash => SECTION_HASH,
                 Job::Inspect => SECTION_INSPECT,
                 Job::Sign => SECTION_SIGN,
+                Job::Plugin => plugins::SECTION,
                 // The error goes next to the fields of the page the tool runs on.
                 Job::Tool => open.ui.get_section(),
             };
