@@ -16,6 +16,10 @@
 
 use crate::manifest::{HttpPrefix, Localized};
 use crate::{Capabilities, runtime};
+use oncl_flows::capabilities::{
+    AddedLine, CapabilityLine, KeyUseKind, NetworkLine, OperationConsent, ProfileFact, TsaFamily,
+    XadesLevelKind,
+};
 use oncl_pdk::abi::{C14n, CmsOutput, Import, Placement, XadesLevel};
 use semver::{BuildMetadata, Prerelease, Version};
 use serde::Deserialize;
@@ -246,6 +250,63 @@ impl Operation {
     /// here. Hosts MUST NOT run an operation for which this is `false`.
     pub fn runnable(&self) -> bool {
         !self.is_derived()
+    }
+
+    /// What the install consent says of the operation: its name, and lines built only from
+    /// checked fields (the kind of key use and the profile the core forces, the network,
+    /// the `server` flag, and, for an update, why it is `added`: new or wider than the
+    /// installed one). The label is the plugin's own text: it goes into
+    /// [`OperationConsent::label`] and never into a line.
+    pub fn consent(&self, added: Option<&AddedOperation>) -> OperationConsent {
+        let mut lines = Vec::new();
+        if let Some(added) = added {
+            for reason in &added.reasons {
+                lines.push(CapabilityLine::Added(match reason {
+                    AddedReason::New => AddedLine::New,
+                    AddedReason::Changed => AddedLine::Changed,
+                    AddedReason::KeyUse => AddedLine::KeyUse,
+                    AddedReason::Imports(names) => {
+                        AddedLine::Imports(names.iter().map(|n| (*n).to_owned()).collect())
+                    }
+                    AddedReason::Network => AddedLine::Network,
+                    AddedReason::Server => AddedLine::Server,
+                }));
+            }
+        }
+        if self.uses.key.is_empty() {
+            lines.push(CapabilityLine::NoKey);
+        }
+        for key in &self.uses.key {
+            lines.push(CapabilityLine::KeyUse(match key.kind {
+                KeyKind::Raw => KeyUseKind::Raw,
+                KeyKind::Cms => KeyUseKind::Cms,
+                KeyKind::CmsEx => KeyUseKind::CmsEx,
+                KeyKind::Xml => KeyUseKind::Xml,
+                KeyKind::XmlEx => KeyUseKind::XmlEx,
+                KeyKind::Xades => KeyUseKind::Xades,
+            }));
+            let facts = key.profile.facts();
+            if !facts.is_empty() {
+                lines.push(CapabilityLine::KeyProfile(facts));
+            }
+        }
+        lines.push(CapabilityLine::OperationNetwork(match &self.uses.network {
+            Network::None => NetworkLine::None,
+            Network::Pki => NetworkLine::Pki,
+            Network::Urls(urls) => {
+                NetworkLine::Urls(urls.iter().map(ToString::to_string).collect())
+            }
+        }));
+        lines.push(CapabilityLine::OperationServer(self.server));
+        OperationConsent {
+            name: self.name.clone(),
+            lines,
+            label: [
+                self.label.ru.clone(),
+                self.label.kk.clone(),
+                self.label.en.clone(),
+            ],
+        }
     }
 
     /// The canonical encoding of the whole declaration but the label: what a later change
@@ -946,6 +1007,67 @@ pub enum Profile {
 }
 
 impl Profile {
+    /// The profile in words: what the core forces on the call, as [`ProfileFact`]s.
+    fn facts(&self) -> Vec<ProfileFact> {
+        let timestamp = |t: Timestamp| match t {
+            Timestamp::None => ProfileFact::NoTimestamp,
+            Timestamp::Basics => ProfileFact::Timestamp(TsaFamily::Basics),
+            Timestamp::Kalkan => ProfileFact::Timestamp(TsaFamily::Kalkan),
+        };
+        let attached = |a: bool| {
+            if a {
+                ProfileFact::Attached
+            } else {
+                ProfileFact::Detached
+            }
+        };
+        let element = |e: &Option<Source>| match e {
+            None => ProfileFact::XmlWholeDocument,
+            Some(Source::Fixed(xpath)) => ProfileFact::XmlElement(xpath.clone()),
+            Some(Source::Param(_)) => ProfileFact::XmlElementParam,
+        };
+        match self {
+            Profile::Raw => Vec::new(),
+            Profile::Cms(p) => vec![attached(p.attached), timestamp(p.timestamp)],
+            Profile::CmsEx(p) => {
+                let mut facts = vec![attached(p.encapsulate)];
+                if p.content_form == ContentForm::Digest {
+                    facts.push(ProfileFact::DigestOnly);
+                }
+                facts.push(timestamp(p.timestamp));
+                if p.certificates == Certificates::Chain {
+                    facts.push(ProfileFact::ChainCertificates);
+                }
+                if p.signing_time == SigningTime::None {
+                    facts.push(ProfileFact::NoSigningTime);
+                }
+                facts
+            }
+            Profile::Xml(p) => vec![element(&p.element)],
+            Profile::XmlEx(p) => vec![element(&p.element)],
+            Profile::Xades(p) => {
+                let tsa = match p.tsa {
+                    XadesTsa::Basics => TsaFamily::Basics,
+                    XadesTsa::Kalkan => TsaFamily::Kalkan,
+                };
+                match p.level {
+                    XadesLevel::B => vec![
+                        ProfileFact::Xades(XadesLevelKind::B),
+                        ProfileFact::NoTimestamp,
+                    ],
+                    XadesLevel::T => vec![
+                        ProfileFact::Xades(XadesLevelKind::T),
+                        ProfileFact::Timestamp(tsa),
+                    ],
+                    XadesLevel::Lt => vec![
+                        ProfileFact::Xades(XadesLevelKind::Lt),
+                        ProfileFact::Timestamp(tsa),
+                    ],
+                }
+            }
+        }
+    }
+
     fn encode(&self, kind: KeyKind, values: Option<ParamValues<'_>>) -> Option<Vec<u8>> {
         let mut w = Writer::new(b"ONCLOPT1\0");
         w.u8(kind.tag());

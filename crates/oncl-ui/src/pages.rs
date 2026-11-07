@@ -20,9 +20,9 @@ use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, StandardListVi
 use crate::prompter::select_language;
 use crate::ui::{
     AboutWindow, ChoiceDialog, ConfirmDialog, CsrDialog, FileDialog, ImportDialog,
-    InstallPluginWindow, KeyDialog, KeyItem, MessageDialog, Metrics, PasswordDialog, PluginsWindow,
-    ReaderDialog, SaveDialog, SettingsWindow, StopOriginalWindow, StorageDialog, StorageRow,
-    TlsWizardWindow,
+    InstallPluginWindow, KeyDialog, KeyItem, MessageDialog, Metrics, OperationBlock,
+    PasswordDialog, PluginsWindow, ReaderDialog, SaveDialog, SettingsWindow, StopOriginalWindow,
+    StorageDialog, StorageRow, TlsWizardWindow,
 };
 use crate::{offscreen, scale};
 
@@ -312,11 +312,31 @@ fn install_plugin_window_installs_only_on_a_deliberate_press() {
         SharedString::from(long_error()),
         SharedString::from(long_name()),
     ])));
+    // Many operations, each with long lines and a long label of the plugin's: the body
+    // scrolls, the actions stay.
+    ui.set_operations_heading(long_error().into());
+    let blocks: Vec<OperationBlock> = (0..12)
+        .map(|_| OperationBlock {
+            heading: long_name().into(),
+            lines: ModelRc::new(VecModel::from(vec![
+                SharedString::from(long_error()),
+                SharedString::from(long_name()),
+            ])),
+            calls: long_error().into(),
+            label: long_name().into(),
+        })
+        .collect();
+    ui.set_operations(ModelRc::new(VecModel::from(blocks)));
     actions_stay_reachable(
         &ui,
         Class::Dialog,
         |ui| ui.get_actions_reachable(),
         "install plugin",
+    );
+    assert!(
+        ui.get_body_content() > 1000.0,
+        "a long operation list is long, and scrolls: {}",
+        ui.get_body_content()
     );
     ui.set_can_install(true);
     let answers = Rc::new(std::cell::RefCell::new(Vec::new()));

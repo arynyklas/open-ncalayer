@@ -5,6 +5,14 @@
 //! after the window appears: a click or a key meant for another window does not install.
 //! One window at a time; requests coming meanwhile wait their turn. Closing the window is
 //! «Отмена». Its texts are composed here.
+//!
+//! A package that declares `[[operations]]` has each of them in the window as a trusted
+//! block (the host's words, built from checked fields: the operation's identifier, the kind
+//! of key use and the signing profile the core forces, the network, whether servers and the
+//! CLI may use it and, for an update, what is new or wider) and, apart, an untrusted frame
+//! with the plugin's own label ([`MAX_UNTRUSTED_LABEL`] characters, plain text). An update
+//! held for consent ([`InstallPluginRequest::update`]) is asked in the same window; its
+//! confirming button says «Обновить», not «Установить».
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -13,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use oncl_flows::Locale;
-use oncl_flows::capabilities::{CapabilityLine, capability_text};
+use oncl_flows::capabilities::{CapabilityLine, OperationConsent, capability_text};
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, PlatformError, SharedString, VecModel,
 };
@@ -21,12 +29,16 @@ use slint::{
 use crate::foreground;
 use crate::plugins_view::{LocalizedText, ReplacedBundle};
 use crate::prompter::select_desktop_language;
-use crate::ui::InstallPluginWindow;
+use crate::ui::{InstallPluginWindow, OperationBlock};
 use crate::view::page_text;
 use crate::windows::{self, Desktop};
 
 /// How long after the window appears «Установить» is enabled.
 pub const INSTALL_DELAY: Duration = Duration::from_millis(1500);
+
+/// The most characters of a plugin's own label the window shows (then `…`): the manifest
+/// allows 80, the frame a little less so that it stays a note, not a paragraph.
+pub const MAX_UNTRUSTED_LABEL: usize = 60;
 
 /// A plugin about to be installed, and what to do with the user's answer.
 pub struct InstallPluginRequest {
@@ -39,6 +51,10 @@ pub struct InstallPluginRequest {
     pub replacing: Option<InstalledVersion>,
     /// What it may do.
     pub capabilities: Vec<CapabilityLine>,
+    /// What its `[[operations]]` do, each a trusted block and an untrusted label.
+    pub operations: Vec<OperationConsent>,
+    /// An update held for consent, not a first install: the window says so.
+    pub update: bool,
     /// From a file the user chose, not from the catalog.
     pub local: bool,
     /// Called once with the answer (`true`: install), on a thread of its own: it may take
@@ -140,6 +156,25 @@ fn create(desktop: &Rc<Desktop>, request: InstallPluginRequest) -> Result<(), Pl
     ui.set_may(texts.may.into());
     let lines: Vec<SharedString> = texts.capabilities.into_iter().map(Into::into).collect();
     ui.set_capabilities(ModelRc::new(VecModel::from(lines)));
+    ui.set_window_title(texts.title.into());
+    ui.set_confirm_text(texts.confirm.into());
+    ui.set_operations_heading(texts.operations_heading.into());
+    let blocks: Vec<OperationBlock> = texts
+        .operations
+        .into_iter()
+        .map(|b| OperationBlock {
+            heading: b.heading.into(),
+            lines: ModelRc::new(VecModel::from(
+                b.lines
+                    .into_iter()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>(),
+            )),
+            calls: b.calls.into(),
+            label: b.label.into(),
+        })
+        .collect();
+    ui.set_operations(ModelRc::new(VecModel::from(blocks)));
     ui.set_warning(texts.warning.into());
     ui.on_answer(answer);
     ui.window().on_close_requested(|| {
@@ -202,6 +237,10 @@ fn answer_with(decide: Box<dyn FnOnce(bool) + Send>, yes: bool) {
 /// The window's texts for `request` in `l`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowTexts {
+    title: String,
+    confirm: String,
+    operations_heading: String,
+    operations: Vec<BlockTexts>,
     asker: String,
     plugin: String,
     replacing: String,
@@ -211,18 +250,77 @@ struct WindowTexts {
     warning: String,
 }
 
+/// One operation: `heading` and `lines` are the host's words (checked fields only), `calls`
+/// and `label` the plugin's frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockTexts {
+    heading: String,
+    lines: Vec<String>,
+    calls: String,
+    label: String,
+}
+
+/// A plugin's own text for the frame: control characters and bidirectional controls gone
+/// ([`page_text`]), at most [`MAX_UNTRUSTED_LABEL`] characters, then `…`. Drawn as plain
+/// text: there is no markup in a Slint `Text`.
+fn untrusted_label(text: &str) -> String {
+    let cleaned = page_text(text);
+    let mut chars = cleaned.chars();
+    let mut shown: String = chars.by_ref().take(MAX_UNTRUSTED_LABEL).collect();
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+fn block(operation: &OperationConsent, l: Locale) -> BlockTexts {
+    let t = Texts::of(l);
+    BlockTexts {
+        // The identifier was checked at parse (`^[a-z][a-z0-9-]{0,31}$`).
+        heading: t.operation.replace("{name}", &operation.name),
+        lines: operation
+            .lines
+            .iter()
+            .map(|c| capability_text(c, l))
+            .collect(),
+        calls: t.calls.to_owned(),
+        label: untrusted_label(operation.label(l)),
+    }
+}
+
 fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
     let t = Texts::of(l);
     WindowTexts {
+        title: if request.update {
+            t.title_update
+        } else {
+            t.title_install
+        }
+        .to_owned(),
+        confirm: if request.update {
+            t.confirm_update
+        } else {
+            t.confirm_install
+        }
+        .to_owned(),
+        operations_heading: if request.operations.is_empty() {
+            String::new()
+        } else {
+            t.operations.to_owned()
+        },
+        operations: request.operations.iter().map(|o| block(o, l)).collect(),
         asker: request
             .origin
             .as_ref()
             .map(|origin| t.asker.replace("{0}", &page_text(origin)))
             .unwrap_or_default(),
-        plugin: t
-            .plugin
-            .replace("{name}", request.name.get(l))
-            .replace("{version}", &request.version),
+        plugin: if request.update {
+            t.plugin_update
+        } else {
+            t.plugin
+        }
+        .replace("{name}", request.name.get(l))
+        .replace("{version}", &request.version),
         replacing: request
             .replacing
             .as_ref()
@@ -248,10 +346,12 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
                     .replace("{version}", &r.version)
             })
             .unwrap_or_default(),
-        may: if request.capabilities.is_empty() {
+        may: if !request.capabilities.is_empty() {
+            if request.update { t.may_update } else { t.may }.to_owned()
+        } else if request.operations.is_empty() {
             t.nothing.to_owned()
         } else {
-            t.may.to_owned()
+            String::new()
         },
         capabilities: request
             .capabilities
@@ -272,6 +372,19 @@ struct Texts {
     asker: &'static str,
     /// `{name}`, `{version}`.
     plugin: &'static str,
+    /// `{name}`, `{version}`: an update.
+    plugin_update: &'static str,
+    title_install: &'static str,
+    title_update: &'static str,
+    confirm_install: &'static str,
+    confirm_update: &'static str,
+    may_update: &'static str,
+    /// The heading of the operations.
+    operations: &'static str,
+    /// `{name}`: an operation's identifier.
+    operation: &'static str,
+    /// The frame of the plugin's own label.
+    calls: &'static str,
     /// `{version}`, `{source}`: [`Texts::installed_local`] or [`Texts::installed_catalog`].
     replacing: &'static str,
     installed_local: &'static str,
@@ -289,6 +402,15 @@ impl Texts {
             Locale::Kk => &Texts {
                 asker: "{0} сайты плагинді орнатуды сұрайды",
                 plugin: "{name}, {version} нұсқасы",
+                plugin_update: "{name}, {version} нұсқасына жаңарту",
+                title_install: "Плагинді орнату",
+                title_update: "Плагинді жаңарту",
+                confirm_install: "Орнату",
+                confirm_update: "Жаңарту",
+                may_update: "Жаңарту қосымша мыналарды істей алады:",
+                operations: "Плагин қолмен жұмыс терезесінде мына әрекеттерді ұсынады (әрқайсысын хост сипаттайды):",
+                operation: "Әрекет {name}",
+                calls: "Плагин оны былай атайды (плагиннің өз сөзі, тексерілмеген):",
                 replacing: "Орнатылған {version} нұсқасын ({source}) алмастырады",
                 installed_local: "жергілікті, файлдан",
                 installed_catalog: "каталогтан",
@@ -300,6 +422,15 @@ impl Texts {
             Locale::Ru => &Texts {
                 asker: "Сайт {0} просит установить плагин",
                 plugin: "{name}, версия {version}",
+                plugin_update: "{name}, обновление до версии {version}",
+                title_install: "Установка плагина",
+                title_update: "Обновление плагина",
+                confirm_install: "Установить",
+                confirm_update: "Обновить",
+                may_update: "Обновление сможет ещё:",
+                operations: "Плагин предлагает в окне ручных инструментов такие действия (каждое описывает программа):",
+                operation: "Действие {name}",
+                calls: "Плагин называет его так (слова самого плагина, не проверены):",
                 replacing: "Заменит установленную версию {version} ({source})",
                 installed_local: "локальную, из файла",
                 installed_catalog: "из каталога",
@@ -311,6 +442,15 @@ impl Texts {
             Locale::En => &Texts {
                 asker: "The site {0} asks to install a plugin",
                 plugin: "{name}, version {version}",
+                plugin_update: "{name}, update to version {version}",
+                title_install: "Plugin installation",
+                title_update: "Plugin update",
+                confirm_install: "Install",
+                confirm_update: "Update",
+                may_update: "The update will also be able to:",
+                operations: "The plugin offers these operations in the manual-tools window (the program describes each):",
+                operation: "Operation {name}",
+                calls: "The plugin calls it (the plugin's own words, not checked):",
                 replacing: "Replaces the installed version {version} ({source})",
                 installed_local: "local, from a file",
                 installed_catalog: "from the catalog",
@@ -331,8 +471,38 @@ mod tests {
     use crate::settings_view::fakes::{FakeOriginal, services};
     use crate::windows::{DesktopWindows, set_desktop_windows};
     use crate::{AboutInfo, offscreen};
+    use oncl_flows::capabilities::{AddedLine, KeyUseKind, NetworkLine, ProfileFact, TsaFamily};
     use slint::Model;
     use std::sync::mpsc::{Receiver, channel};
+
+    const ALL: [Locale; 3] = [Locale::Ru, Locale::Kk, Locale::En];
+
+    /// An operation as the host says it: a CMS signature, detached, with a time-stamp from
+    /// the basics TSA, the PKI network, manual only. The label and the plugin's name below
+    /// are marked texts the trusted lines must never contain.
+    fn operation(name: &str, label: &str) -> OperationConsent {
+        OperationConsent {
+            name: name.to_owned(),
+            lines: vec![
+                CapabilityLine::KeyUse(KeyUseKind::Cms),
+                CapabilityLine::KeyProfile(vec![
+                    ProfileFact::Detached,
+                    ProfileFact::Timestamp(TsaFamily::Basics),
+                ]),
+                CapabilityLine::OperationNetwork(NetworkLine::Pki),
+                CapabilityLine::OperationServer(false),
+            ],
+            label: [label.to_owned(), label.to_owned(), label.to_owned()],
+        }
+    }
+
+    fn with_operations(operations: Vec<OperationConsent>, update: bool) -> InstallPluginRequest {
+        let (mut request, _rx) = request(false, None);
+        request.capabilities.clear();
+        request.operations = operations;
+        request.update = update;
+        request
+    }
 
     fn desktop(root: &std::path::Path, locale: Locale) {
         offscreen::install();
@@ -362,6 +532,8 @@ mod tests {
                 version: "1.0.0".to_owned(),
             }),
             replacing: None,
+            operations: Vec::new(),
+            update: false,
             capabilities: vec![
                 CapabilityLine::Keys,
                 CapabilityLine::Dialogs,
@@ -517,6 +689,231 @@ mod tests {
             "Заменит установленную версию 0.0.9 (локальную, из файла)"
         );
         assert!(texts(&request, Locale::Kk).replacing.contains("0.0.9"));
+    }
+
+    #[test]
+    fn without_operations_the_window_is_as_it_was() {
+        for l in ALL {
+            let (request, _rx) = request(false, None);
+            let t = texts(&request, l);
+            assert!(
+                t.operations.is_empty() && t.operations_heading.is_empty(),
+                "{l:?}"
+            );
+            assert_eq!(t.title, Texts::of(l).title_install);
+            assert_eq!(t.confirm, Texts::of(l).confirm_install);
+            assert_eq!(t.may, Texts::of(l).may);
+            assert_eq!(t.plugin, texts(&request, l).plugin);
+        }
+        assert_eq!(
+            texts(&with_operations(Vec::new(), false), Locale::En).may,
+            "The plugin will only answer the sites' requests."
+        );
+    }
+
+    #[test]
+    fn a_signing_operation_is_said_in_the_hosts_words_in_every_language() {
+        let request = with_operations(vec![operation("sign-file", "LABEL-ONE")], false);
+        let en = texts(&request, Locale::En);
+        assert_eq!(en.operations.len(), 1);
+        assert_eq!(en.operations[0].heading, "Operation sign-file");
+        assert_eq!(
+            en.operations[0].lines,
+            [
+                "signs with your key: a CMS (PKCS#7) signature",
+                "signature form (fixed by the core): detached (the content is not inside); \
+                 time-stamp from the basics TSA",
+                "network: the PKI servers of the core only",
+                "the manual window only (not for servers or the CLI)",
+            ]
+        );
+        assert_eq!(
+            en.operations[0].calls,
+            "The plugin calls it (the plugin's own words, not checked):"
+        );
+        assert_eq!(en.operations[0].label, "LABEL-ONE");
+        assert_eq!(en.may, "", "no capabilities: no heading for them");
+        let ru = texts(&request, Locale::Ru);
+        assert_eq!(
+            ru.operations[0].lines[0],
+            "подписывает вашим ключом: подпись CMS (PKCS#7)"
+        );
+        let kk = texts(&request, Locale::Kk);
+        for (a, b, c) in [(&ru.operations[0], &kk.operations[0], &en.operations[0])] {
+            assert!(a.heading != b.heading && a.heading != c.heading && b.heading != c.heading);
+            assert!(a.calls != b.calls && a.calls != c.calls && b.calls != c.calls);
+            for ((x, y), z) in a.lines.iter().zip(&b.lines).zip(&c.lines) {
+                assert!(x != y && x != z && y != z, "{x} | {y} | {z}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_window_text_exists_and_differs_in_every_language() {
+        let all = |f: fn(&Texts) -> &'static str| {
+            let ru = f(Texts::of(Locale::Ru));
+            let kk = f(Texts::of(Locale::Kk));
+            let en = f(Texts::of(Locale::En));
+            assert!(!ru.is_empty() && !kk.is_empty() && !en.is_empty());
+            assert!(ru != kk && ru != en && kk != en, "{ru} | {kk} | {en}");
+        };
+        all(|t| t.title_install);
+        all(|t| t.title_update);
+        all(|t| t.confirm_install);
+        all(|t| t.confirm_update);
+        all(|t| t.plugin_update);
+        all(|t| t.may_update);
+        all(|t| t.operations);
+        all(|t| t.operation);
+        all(|t| t.calls);
+    }
+
+    #[test]
+    fn several_operations_each_have_their_own_block() {
+        let request = with_operations(
+            vec![operation("sign-a", "A"), operation("sign-b", "B")],
+            false,
+        );
+        for l in ALL {
+            let t = texts(&request, l);
+            assert_eq!(t.operations.len(), 2);
+            assert!(t.operations[0].heading.contains("sign-a"));
+            assert!(t.operations[1].heading.contains("sign-b"));
+            assert_eq!(t.operations[1].label, "B");
+        }
+    }
+
+    #[test]
+    fn an_update_names_what_is_new_or_wider_and_a_narrowing_says_nothing() {
+        let mut wider = operation("fetch", "Fetch");
+        wider
+            .lines
+            .insert(0, CapabilityLine::Added(AddedLine::Network));
+        wider.lines[3] = CapabilityLine::OperationNetwork(NetworkLine::Urls(vec![
+            "https://api.example.kz/".to_owned(),
+        ]));
+        let mut new_key = operation("sign", "Sign");
+        new_key
+            .lines
+            .insert(0, CapabilityLine::Added(AddedLine::New));
+        new_key
+            .lines
+            .insert(1, CapabilityLine::Added(AddedLine::KeyUse));
+        let unchanged = operation("keep", "Keep");
+        let request = with_operations(vec![wider, new_key, unchanged], true);
+        for l in ALL {
+            let t = texts(&request, l);
+            let net = &t.operations[0].lines;
+            assert_eq!(
+                net[0],
+                capability_text(&CapabilityLine::Added(AddedLine::Network), l)
+            );
+            assert!(
+                net.iter().any(|x| x.contains("https://api.example.kz/")),
+                "{net:?}"
+            );
+            assert_eq!(
+                t.operations[1].lines[0],
+                capability_text(&CapabilityLine::Added(AddedLine::New), l)
+            );
+            assert_eq!(
+                t.operations[1].lines[1],
+                capability_text(&CapabilityLine::Added(AddedLine::KeyUse), l)
+            );
+            // Narrowed or unchanged: no «new or wider» line.
+            let marker = capability_text(&CapabilityLine::Added(AddedLine::New), l);
+            let prefix = marker.split(':').next().unwrap().to_owned();
+            assert!(
+                t.operations[2]
+                    .lines
+                    .iter()
+                    .all(|x| !x.starts_with(&prefix)),
+                "{l:?}: {:?}",
+                t.operations[2].lines
+            );
+        }
+        let en = texts(&request, Locale::En);
+        assert_eq!(en.title, "Plugin update");
+        assert_eq!(en.confirm, "Update");
+        assert_eq!(en.plugin, "Example plugin, update to version 0.1.0");
+    }
+
+    #[test]
+    fn the_plugins_words_never_reach_the_trusted_block() {
+        let mut op = operation("sign-file", "UNTRUSTED-LABEL");
+        op.label = [
+            "РУ-МЕТКА-ПЛАГИНА".to_owned(),
+            "КК-МЕТКА-ПЛАГИНА".to_owned(),
+            "EN-LABEL-PLUGIN".to_owned(),
+        ];
+        let request = with_operations(vec![op], true);
+        for l in ALL {
+            let t = texts(&request, l);
+            let block = &t.operations[0];
+            let trusted = format!("{}\n{}", block.heading, block.lines.join("\n"));
+            for secret in [
+                request.name.get(l).to_owned(),
+                request.name.ru.clone(),
+                request.name.kk.clone(),
+                request.name.en.clone(),
+                "МЕТКА-ПЛАГИНА".to_owned(),
+                "EN-LABEL-PLUGIN".to_owned(),
+                "UNTRUSTED-LABEL".to_owned(),
+            ] {
+                assert!(!trusted.contains(&secret), "{l:?}: {secret} in {trusted}");
+            }
+            assert!(
+                block.label.contains("МЕТКА-ПЛАГИНА") || block.label.contains("EN-LABEL"),
+                "the label is in the frame: {}",
+                block.label
+            );
+            assert_ne!(block.calls, "");
+        }
+    }
+
+    #[test]
+    fn the_untrusted_label_is_plain_clean_and_cut_with_an_ellipsis() {
+        assert_eq!(untrusted_label("Sign a file"), "Sign a file");
+        // Markup stays text; controls and bidi are gone.
+        assert_eq!(untrusted_label("<b>x</b>\u{202E}\n\u{7}y"), "<b>x</b>y");
+        let long = "я".repeat(MAX_UNTRUSTED_LABEL + 5);
+        let shown = untrusted_label(&long);
+        assert_eq!(shown.chars().count(), MAX_UNTRUSTED_LABEL + 1);
+        assert!(shown.ends_with('…'));
+        let exact = "я".repeat(MAX_UNTRUSTED_LABEL);
+        assert_eq!(untrusted_label(&exact), exact);
+    }
+
+    #[test]
+    fn the_confirming_button_names_its_action() {
+        let dir = tempfile::tempdir().unwrap();
+        desktop(dir.path(), Locale::Ru);
+        let (request, _rx) = request(false, None);
+        enqueue(request);
+        let ui = the_window();
+        assert_eq!(ui.get_confirm_text(), "Установить");
+        assert_eq!(ui.get_window_title(), "Установка плагина");
+        ui.invoke_answer(false);
+        let mut update = with_operations(vec![operation("sign-file", "Sign")], true);
+        update.update = true;
+        enqueue(update);
+        let ui = the_window();
+        assert_eq!(ui.get_confirm_text(), "Обновить");
+        assert_eq!(ui.get_window_title(), "Обновление плагина");
+        assert_eq!(ui.get_operations().row_count(), 1);
+        let block = ui.get_operations().row_data(0).unwrap();
+        assert_eq!(block.heading, "Действие sign-file");
+        assert_eq!(block.label, "Sign");
+        assert_eq!(block.lines.row_count(), 4);
+        ui.invoke_answer(false);
+        for l in ALL {
+            for update in [false, true] {
+                let t = texts(&with_operations(Vec::new(), update), l);
+                for plain in ["OK", "ОК", "Ok", "Ок", "Да", "Yes", "Иә"] {
+                    assert_ne!(t.confirm, plain);
+                }
+            }
+        }
     }
 
     #[test]

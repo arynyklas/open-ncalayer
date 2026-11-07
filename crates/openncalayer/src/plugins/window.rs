@@ -40,6 +40,8 @@ pub fn install_request(
             local: source == Source::Local,
         }),
         capabilities: request.capabilities.lines(),
+        operations: request.operations,
+        update: false,
         local: request.local,
         decide,
     }
@@ -134,6 +136,7 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                 pending_update: p.pending_update.map(|update| PendingUpdate {
                     version: update.version.to_string(),
                     added: update.lines(),
+                    operations: update.operations,
                 }),
                 id: p.id,
             })
@@ -215,6 +218,7 @@ mod tests {
                 shared: true,
                 builtin: false,
             },
+            operations: Vec::new(),
             local: true,
         };
         let shown = install_request(request, Box::new(|_| {}));
@@ -285,6 +289,7 @@ mod tests {
                             },
                             operations: Vec::new(),
                         },
+                        operations: Vec::new(),
                     }),
                 },
             ],
@@ -327,6 +332,7 @@ mod tests {
             Some(PendingUpdate {
                 version: "2.1.0".to_owned(),
                 added: vec![CapabilityLine::Files],
+                operations: Vec::new(),
             })
         );
         assert!(shown.available[0].needed && shown.available[0].needed_by.is_none());

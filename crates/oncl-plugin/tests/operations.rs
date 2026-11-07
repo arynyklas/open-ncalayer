@@ -1963,3 +1963,171 @@ fn the_abi_option_structs_are_all_classified() {
         abi_guard::xades as fn(&_),
     );
 }
+
+// ---- the install consent (MP5c) ---------------------------------------------------------
+
+mod consent {
+    use super::*;
+    use oncl_flows::capabilities::{
+        AddedLine, CapabilityLine, KeyUseKind, NetworkLine, ProfileFact, TsaFamily, XadesLevelKind,
+    };
+
+    fn lines_of(text: &str) -> Vec<CapabilityLine> {
+        parse(text).unwrap().operations()[0].consent(None).lines
+    }
+
+    #[test]
+    fn the_reference_operation_is_said_from_checked_fields() {
+        let manifest = parse(&with(OP)).unwrap();
+        let consent = manifest.operations()[0].consent(None);
+        assert_eq!(consent.name, "sign-file");
+        assert_eq!(
+            consent.lines,
+            [
+                CapabilityLine::KeyUse(KeyUseKind::CmsEx),
+                CapabilityLine::KeyProfile(vec![
+                    ProfileFact::Detached,
+                    ProfileFact::Timestamp(TsaFamily::Basics)
+                ]),
+                CapabilityLine::OperationNetwork(NetworkLine::Pki),
+                CapabilityLine::OperationServer(false),
+            ]
+        );
+        // The label is the plugin's: kept apart, never among the lines.
+        assert_eq!(
+            consent.label,
+            ["Подписать файл", "Файлға қол қою", "Sign a file"]
+        );
+    }
+
+    #[test]
+    fn server_network_and_profile_changes_show() {
+        let lines = lines_of(&edit("server  = false", "server  = true"));
+        assert!(lines.contains(&CapabilityLine::OperationServer(true)));
+        let lines = lines_of(&edit(
+            r#"network = "pki""#,
+            r#"network = ["https://api.example.kz/v1/"]"#,
+        ));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::OperationNetwork(NetworkLine::Urls(urls))
+                if urls == &["https://api.example.kz/v1/".to_owned()]
+        )));
+        let lines = lines_of(&edit("encapsulate  = false", "encapsulate  = true"));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f[0] == ProfileFact::Attached
+        )));
+        let lines = lines_of(&edit(
+            "timestamp    = \"basics\"",
+            "timestamp    = \"kalkan\"",
+        ));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::Timestamp(TsaFamily::Kalkan))
+        )));
+        let lines = lines_of(&edit(
+            "timestamp    = \"basics\"",
+            "timestamp    = \"none\"",
+        ));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::NoTimestamp)
+        )));
+    }
+
+    #[test]
+    fn an_operation_without_a_key_says_so() {
+        let text = edit(
+            "imports = [\"keys_select\", \"keys_describe\", \"keys_sign_cms_ex\", \"hash\"]",
+            "imports = [\"hash\"]",
+        );
+        let text = text.replace("interactive = [\"keys_select\"]\n", "");
+        let start = text.find("[[operations.uses.key]]").unwrap();
+        let lines = lines_of(&text[..start]);
+        assert_eq!(lines[0], CapabilityLine::NoKey, "{lines:?}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| matches!(l, CapabilityLine::KeyProfile(_)))
+        );
+    }
+
+    #[test]
+    fn an_update_names_what_is_new_or_wider() {
+        let old = with(OP);
+        let new = edit("server  = false", "server  = true").replace(
+            r#"network = "pki""#,
+            r#"network = ["https://api.example.kz/v1/"]"#,
+        );
+        let new = parse(&new).unwrap();
+        let added = new.added_over(&parse(&old).unwrap());
+        let consent = new.operations()[0].consent(added.operations.first());
+        assert!(
+            consent
+                .lines
+                .contains(&CapabilityLine::Added(AddedLine::Server))
+        );
+        // Pki → URLs: a wider network by the core's own ruling.
+        assert!(
+            consent
+                .lines
+                .contains(&CapabilityLine::Added(AddedLine::Network))
+        );
+        // Nothing marked when nothing is added.
+        let same = parse(&old).unwrap();
+        let none = same.operations()[0].consent(None);
+        assert!(
+            !none
+                .lines
+                .iter()
+                .any(|l| matches!(l, CapabilityLine::Added(_)))
+        );
+    }
+
+    #[test]
+    fn xml_and_xades_profiles_are_said_in_words() {
+        let lines = lines_of(&op_of(
+            "xades",
+            "keys_sign_xades",
+            "\"pki\"",
+            "level = \"t\"\ntsa = \"kalkan\"",
+        ));
+        assert_eq!(
+            lines[0],
+            CapabilityLine::KeyUse(KeyUseKind::Xades),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::Xades(XadesLevelKind::T))
+                && f.contains(&ProfileFact::Timestamp(TsaFamily::Kalkan))
+        )));
+        let lines = lines_of(&op_of(
+            "xades",
+            "keys_sign_xades",
+            "\"none\"",
+            "level = \"b\"",
+        ));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::Xades(XadesLevelKind::B))
+                && f.contains(&ProfileFact::NoTimestamp)
+        )));
+        let lines = lines_of(&op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"none\"",
+            "element = \"/a/b\"",
+        ));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f.contains(&ProfileFact::XmlElement("/a/b".to_owned()))
+        )));
+        let lines = lines_of(&op_of("xml", "keys_sign_xml", "\"none\"", ""));
+        assert!(lines.iter().any(|l| matches!(
+            l,
+            CapabilityLine::KeyProfile(f) if f == &[ProfileFact::XmlWholeDocument]
+        )));
+    }
+}
