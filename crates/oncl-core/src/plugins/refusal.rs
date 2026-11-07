@@ -98,11 +98,14 @@ pub enum PluginRefusalCode {
     /// A fact of the use (a version or grant id) is too long to be audited, so the use
     /// does not run.
     AuditFactTooLong,
+    /// The CLI cannot compute the expected content of a digest-form bound key use before the
+    /// key is opened, so it refuses to grant it.
+    ContentBindingUnavailable,
 }
 
 impl PluginRefusalCode {
     /// Every subcode, in a fixed order. New subcodes are appended, never inserted.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::TicketMissing,
         Self::ApprovalMissing,
         Self::TicketUses,
@@ -149,6 +152,7 @@ impl PluginRefusalCode {
         Self::ApprovalTtlInvalid,
         Self::ApprovalRandomUnavailable,
         Self::AuditFactTooLong,
+        Self::ContentBindingUnavailable,
     ];
 }
 
@@ -202,6 +206,7 @@ impl PluginRefusalCode {
             Self::ApprovalTtlInvalid => "approval-ttl-invalid",
             Self::ApprovalRandomUnavailable => "approval-random-unavailable",
             Self::AuditFactTooLong => "audit-fact-too-long",
+            Self::ContentBindingUnavailable => "content-binding-unavailable",
         }
     }
     /// The subcode of an id, if it is one.
@@ -247,6 +252,7 @@ impl PluginRefusalCode {
             | Self::ApprovalReplayed
             | Self::NotGranted
             | Self::AuditFactTooLong
+            | Self::ContentBindingUnavailable
             | Self::UnknownPlugin
             | Self::NotManual
             | Self::DerivedUnsupported
@@ -374,7 +380,7 @@ mod tests {
 
     /// The whole list of ids. Adding a subcode means appending here on purpose; an id is
     /// never edited, removed or reordered (clients and journals keep the strings).
-    const PINNED: [&str; 46] = [
+    const PINNED: [&str; 47] = [
         "ticket-missing",
         "approval-missing",
         "ticket-uses",
@@ -421,6 +427,7 @@ mod tests {
         "approval-ttl-invalid",
         "approval-random-unavailable",
         "audit-fact-too-long",
+        "content-binding-unavailable",
     ];
 
     #[test]
@@ -523,6 +530,8 @@ mod tests {
         for r in [ApprovalRejected::Replayed, ApprovalRejected::Uses] {
             seen.insert(r.into());
         }
+        // Raised by the CLI's operator grant, not by a Core reason enum.
+        seen.insert(PluginRefusalCode::ContentBindingUnavailable);
         let all: std::collections::BTreeSet<_> = PluginRefusalCode::ALL.into_iter().collect();
         assert_eq!(
             seen, all,

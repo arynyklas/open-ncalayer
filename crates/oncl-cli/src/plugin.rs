@@ -23,14 +23,14 @@ use oncl_core::{
     Engine, ErrorCode, OperationContext, OperationError,
     keys::{KeyRequest, KeySelector},
     plugins::{
-        CallerContext, PluginBindings, PluginCall, PluginKeyBinding, PluginParam, PluginPermission,
-        PluginRefusalCode, PluginRegistry, PluginRequestError,
+        CallerContext, ContentBinding, PluginBindings, PluginCall, PluginKeyBinding, PluginParam,
+        PluginPermission, PluginRefusalCode, PluginRegistry, PluginRequestError,
     },
 };
 use oncl_pdk::abi::Import;
 use oncl_pki::resource::{ConfigurationReservation, ProcessingError, SharedBudget};
 use oncl_plugin::operations::{Param, ParamKind};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Subcommand)]
@@ -316,6 +316,8 @@ pub struct Checked {
     pub bytes: Option<BytesGrant>,
     /// The declared parameters of the operation (empty for a plugin without declarations).
     pub params: Vec<oncl_plugin::operations::Param>,
+    /// Where the request builder leaves the bytes of the bound parameter for the grant.
+    pub bound: Option<(String, Arc<OnceLock<oncl_core::plugins::ContentBinding>>)>,
 }
 /// The CLI's `--plugin-bytes` grant of one declared operation (the operator accepted that the
 /// plugin chooses the signed bytes); the ticket of the key use must otherwise match the
@@ -325,8 +327,17 @@ pub struct BytesGrant {
     operation: String,
     caller: String,
     uses: Vec<(oncl_plugin::operations::KeyKind, Option<[u8; 32]>)>,
+    /// With typed parameters: the bytes of the parameter the key use is bound to, set once the
+    /// request is built. The ticket's content must equal them. `None`: a free request, which
+    /// binds the operation and options only.
+    bound: Option<Arc<OnceLock<oncl_core::plugins::ContentBinding>>>,
 }
 impl BytesGrant {
+    /// Whether the grant binds content that Core would hand over as a digest, which the CLI
+    /// cannot compute before the key is opened.
+    pub fn content_unavailable(&self, ticket: &oncl_core::plugins::PluginUse) -> bool {
+        self.bound.is_some() && ticket.content().prehashed
+    }
     /// Whether `ticket` is the one key use this grant allows.
     pub fn check(
         &self,
@@ -349,6 +360,11 @@ impl BytesGrant {
         // A profile that names a parameter cannot be matched without a value: refused.
         if *options != Some(*ticket.options_sha256()) {
             return Err(R::Options);
+        }
+        if let Some(slot) = &self.bound
+            && slot.get() != Some(ticket.content())
+        {
+            return Err(R::Content);
         }
         Ok(())
     }
@@ -381,6 +397,7 @@ fn check_declaration(
             imports: named,
             bytes: None,
             params: Vec::new(),
+            bound: None,
         });
     }
     let operation = manifest
@@ -405,7 +422,22 @@ fn check_declaration(
     }
     // A profile that names a text parameter is matched with the value `--param` gave it.
     let value = |name: &str| args.text(name);
+    let bound = (has_key && args.plugin_bytes && args.builds_request())
+        .then(|| {
+            operation
+                .uses()
+                .keys()
+                .iter()
+                .find_map(|k| match k.content() {
+                    oncl_plugin::operations::Content::Bound(name) => {
+                        Some((name.clone(), Arc::new(OnceLock::new())))
+                    }
+                    _ => None,
+                })
+        })
+        .flatten();
     let bytes = (has_key && args.plugin_bytes).then(|| BytesGrant {
+        bound: bound.as_ref().map(|(_, slot)| slot.clone()),
         plugin: manifest.id.clone(),
         operation: operation.name().to_owned(),
         caller: args.caller.clone(),
@@ -420,6 +452,7 @@ fn check_declaration(
         imports,
         bytes,
         params: operation.params().to_vec(),
+        bound,
     })
 }
 fn pki_endpoint(text: &str) -> Option<(oncl_pki::http::HttpMethod, &str)> {
@@ -544,6 +577,7 @@ fn typed_request(
     id: &str,
     args: &PluginCallArgs,
     declared: &[Param],
+    bound: Option<&(String, Arc<OnceLock<oncl_core::plugins::ContentBinding>>)>,
     ctx: &mut OperationContext,
 ) -> Result<String, OperationError> {
     let kind = |name: &str| declared.iter().find(|p| p.name == name).map(|p| &p.kind);
@@ -580,6 +614,16 @@ fn typed_request(
             owned.push((&param.name, Owned::Flag(false)));
         }
     }
+    if let Some((name, slot)) = bound
+        && let Some((_, value)) = owned.iter().find(|(n, _)| n == name)
+    {
+        let binding = match value {
+            Owned::Document(bytes) => ContentBinding::bytes(bytes.as_bytes()),
+            Owned::Text(text) => ContentBinding::bytes(text.as_bytes()),
+            Owned::Flag(_) => return Err(refuse(PluginRequestError::WrongKind(name.clone()))),
+        };
+        let _ = slot.set(binding);
+    }
     let params: Vec<(&str, PluginParam<'_>)> = owned
         .iter()
         .map(|(name, value)| {
@@ -611,7 +655,14 @@ pub fn call(
     let args = command.call_args().ok_or(OperationError::InvalidContext)?;
     // A request built from typed parameters is refused before a secret is asked for.
     let built = if args.builds_request() {
-        Some(typed_request(engine, id, args, &checked.params, ctx)?)
+        Some(typed_request(
+            engine,
+            id,
+            args,
+            &checked.params,
+            checked.bound.as_ref(),
+            ctx,
+        )?)
     } else {
         None
     };
@@ -706,6 +757,7 @@ mod tests {
             operation: "sign".into(),
             caller: "op".into(),
             uses: vec![(KeyKind::Raw, Some(DECLARED_HASH))],
+            bound: None,
         }
     }
     fn ticket(operation: &str, caller: &str, kind: KeyKind, options: [u8; 32]) -> PluginUse {
@@ -831,6 +883,12 @@ element = "param:xp"
         // Typed: the grant covers exactly the profile with that element, and no other.
         let granted = checked(&["--param", "xp=/root/a", "--param-file", "file=f"])
             .bytes
+            .unwrap();
+        granted
+            .bound
+            .as_ref()
+            .unwrap()
+            .set(ContentBinding::bytes(b"x"))
             .unwrap();
         granted
             .check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a")))

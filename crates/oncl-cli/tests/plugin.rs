@@ -1299,7 +1299,7 @@ fn a_declared_operation_without_parameters_builds_its_request_from_the_template(
 // audit line says so.
 
 fn signed_typed(w: &World) -> (Typed, String, String) {
-    let t = typed_with(DECLARED, b"hello");
+    let t = typed_with(DECLARED, b"plugin message");
     std::fs::write(&t.p.module, wasm(&sign_raw_call())).unwrap();
     (
         t,
@@ -1354,7 +1354,10 @@ fn a_typed_key_use_needs_plugin_bytes_and_is_audited_without_the_document() {
     ] {
         assert!(audit.contains(expected), "{expected:?} missing in {audit}");
     }
-    assert!(!log.contains("aGVsbG8"), "the document is never recorded");
+    assert!(
+        !log.contains("cGx1Z2luIG1lc3NhZ2U"),
+        "the document is never recorded"
+    );
     let before = log.find("plugin_use").unwrap();
     let after = log.find("private_use").unwrap();
     assert!(before < after, "recorded before the key is used: {log}");
@@ -1392,4 +1395,31 @@ fn help_lists_the_plugin_surface() {
             assert!(text(&result).contains(needle), "{args:?}: {needle:?}");
         }
     }
+}
+
+#[test]
+fn a_typed_key_use_signs_exactly_the_passed_bytes() {
+    let w = world();
+    let (t, get, post) = signed_typed(&w);
+    // The module signs "plugin message"; the operator passed other bytes.
+    std::fs::write(&t.file, b"another document").unwrap();
+    let file = file_arg(&t);
+    let key = key_args(&w, &get, &post);
+    let mut args = vec!["--param-file", file.as_str()];
+    args.extend(&key);
+    args.push("--plugin-bytes");
+    let denied = run(&call_typed(&t, &args), b"");
+    assert_eq!(denied.status.code(), Some(1), "{denied:?}");
+    let line = stderr(&denied);
+    assert!(
+        line.contains("oncl: PermissionDenied; subcode=content-mismatch; applied=NotApplied")
+            && !line.contains("private_use"),
+        "{line}"
+    );
+    // A free request binds the operation and options only, as documented.
+    let free = run(
+        &base(&t.p, &[key.as_slice(), &["--plugin-bytes"]].concat()),
+        b"",
+    );
+    assert_eq!(free.status.code(), Some(0), "{free:?} {}", stderr(&free));
 }

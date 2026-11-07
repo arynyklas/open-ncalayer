@@ -243,7 +243,15 @@ fn human(report: &Report) -> String {
                 let _ = write!(out, " (at most {n} characters)");
             }
             if let Some(choices) = &param.choices {
-                let _ = write!(out, " ({})", choices.join(" | "));
+                let _ = write!(
+                    out,
+                    " ({})",
+                    choices
+                        .iter()
+                        .map(|c| format!("{c:?}"))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                );
             }
         }
         if op.keys.is_empty() {
