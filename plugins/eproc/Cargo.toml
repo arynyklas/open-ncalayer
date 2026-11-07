@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-eproc"
 description = "OpenNCALayer port of the Samruk-Kazyna e-procurement module (kz.sapa.eproc): XML signatures with one-time chain tokens"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

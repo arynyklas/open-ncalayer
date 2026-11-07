@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.dogovor24"
-version = "1.0.0-beta.1"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.2"
+min_core = "0.1.0-alpha.7"
 modules = ["kz.dogovor24.module"]
 
 [name]
@@ -19,3 +19,26 @@ version = "1.0.5"
 
 [capabilities]
 keys = true
+
+[[operations]]
+name = "sign-cms"
+module = "kz.dogovor24.module"
+manual = true
+request = '{"module":"kz.dogovor24.module","method":"signCMS","args":["{file:base64}"]}'
+label = { ru = "Подписать CMS с меткой времени (данные внутри)", kk = "Уақыт белгісі бар CMS қол қою (деректер ішінде)", en = "Sign a time-stamped CMS (attached)" }
+
+[[operations.params]]
+name = "file"
+kind = "document"
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "keys_sign_cms_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:file"
+
+[operations.uses.key.profile]
+encapsulate = true
+timestamp = "kalkan"

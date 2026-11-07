@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-dogovor24"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-efactoring"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-energy"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-eproc"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
 ]
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-market"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",

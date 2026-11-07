@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.eproc"
-version = "1.0.0-beta.1"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.2"
+min_core = "0.1.0-alpha.7"
 modules = ["kz.sapa.eproc.osgi.EprocModule"]
 
 [name]
@@ -19,3 +19,57 @@ version = "1.0"
 
 [capabilities]
 keys = true
+
+[[operations]]
+name = "sign-xml"
+module = "kz.sapa.eproc.osgi.EprocModule"
+manual = true
+request = '{"module":"kz.sapa.eproc.osgi.EprocModule","method":"signXml","uid":"manual","storageName":"PKCS12","keyType":"SIGNATURE","xml":"{xml}"}'
+label = { ru = "Подписать XML-документ целиком", kk = "XML құжатына тұтас қол қою", en = "Sign a whole XML document" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[operations.uses]
+imports = ["keys_select", "random", "keys_sign_xml"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml"
+content = "param:xml"
+
+[[operations]]
+name = "sign-xml-element"
+module = "kz.sapa.eproc.osgi.EprocModule"
+manual = true
+request = '{"module":"kz.sapa.eproc.osgi.EprocModule","method":"signXml","uid":"manual","storageName":"PKCS12","keyType":"SIGNATURE","xml":"{xml}","tbsElementXPath":"{tbs}","signatureParentElementXPath":"{parent}"}'
+label = { ru = "Подписать элемент XML (XPath)", kk = "XML элементіне қол қою (XPath)", en = "Sign an XML element (XPath)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[[operations.params]]
+name = "tbs"
+kind = "text"
+max_chars = 256
+
+[[operations.params]]
+name = "parent"
+kind = "text"
+max_chars = 256
+
+[operations.uses]
+imports = ["keys_select", "random", "keys_sign_xml"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml"
+content = "param:xml"
+
+[operations.uses.key.profile]
+element = "param:tbs"
+parent = "param:parent"
