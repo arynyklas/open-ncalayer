@@ -32,8 +32,11 @@ const MAX_CHUNKS: usize = 24;
 /// Plugin refusals one bound operation may write to the journal; later ones are traced only,
 /// so a plugin that keeps asking cannot push earlier records out of the journal.
 const MAX_JOURNALED_REFUSALS: u8 = 4;
-/// Refusals the guard remembers for the host to drain ([`DurableAuditGuard::take_plugin_refusals`]).
+/// Refusals the guard remembers for the host to drain ([`DurableAuditGuard::take_plugin_refusals`]):
+/// at most this many in all, and [`REFUSALS_PER_OPERATION`] per operation, so one noisy
+/// operation cannot evict another's.
 const REFUSAL_LOG: usize = 64;
+const REFUSALS_PER_OPERATION: usize = 8;
 /// Version of the plugin record layout inside the chunks.
 const PLUGIN_RECORD_VERSION: u8 = 1;
 
@@ -221,6 +224,12 @@ pub struct PluginGrantFacts {
 /// The host's check of a ticketed plugin key use against the operator's grants. It runs inside
 /// [`KeyUseGuard::before_use`], before the journal is touched and before the key is applied.
 /// `Err` refuses the use (the plugin sees `PermissionDenied`; the reason is journaled).
+///
+/// `check` runs while the journal's one lock is held, before the operation's binding and
+/// deadline are looked at: it must not call back into the guard, must be quick, and a grant
+/// it consumes is consumed even if the journal then refuses the use (a failed write, a full
+/// journal). It should keep `grant_id` short; a text over 255 bytes refuses the use as
+/// [`TicketRefusal::AuditFactTooLong`].
 pub trait PluginTicketPolicy: Send + Sync {
     fn check(
         &self,
@@ -719,6 +728,21 @@ impl DurableAuditGuard {
             ticket_digest = %hex(&ticket.digest()),
             "a plugin key use was refused before the key"
         );
+        // Bounded per operation first (a noisy operation evicts its own oldest, never
+        // another's), then overall.
+        let mine = state
+            .plugin_refusals
+            .iter()
+            .filter(|(id, _)| *id == event.operation_id)
+            .count();
+        if mine >= REFUSALS_PER_OPERATION
+            && let Some(at) = state
+                .plugin_refusals
+                .iter()
+                .position(|(id, _)| *id == event.operation_id)
+        {
+            state.plugin_refusals.remove(at);
+        }
         if state.plugin_refusals.len() == REFUSAL_LOG {
             state.plugin_refusals.pop_front();
         }
@@ -734,7 +758,11 @@ impl DurableAuditGuard {
         ticket: &PluginUse,
         subcode: PluginRefusalCode,
     ) -> io::Result<()> {
-        if state.health != AuditHealth::Healthy {
+        if state.health != AuditHealth::Healthy
+            || !matches!(event.action, Action::Sign | Action::SignDigest)
+        {
+            // An action the frame cannot encode is traced, never journaled: an
+            // undecodable frame would brick the journal.
             return Err(blocked());
         }
         let binding = state
@@ -790,7 +818,7 @@ impl DurableAuditGuard {
             }
         }
         let first = state.sequence.checked_add(1).ok_or_else(blocked)?;
-        let terminal_seq = first + detail.len() as u64;
+        let terminal_seq = first.checked_add(detail.len() as u64).ok_or_else(blocked)?;
         let operation_id = event.operation_id.get();
         let mut frames = Vec::with_capacity(detail.len() + 1);
         for (index, chunk) in detail.into_iter().enumerate() {
@@ -820,6 +848,7 @@ impl DurableAuditGuard {
         let frames = self.records()?;
         let mut chunks: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut out: Vec<PluginJournalRecord> = Vec::new();
+        let mut by_use: HashMap<u64, usize> = HashMap::new();
         for frame in frames {
             match frame.kind {
                 RecordKind::PluginDetail => {
@@ -840,6 +869,9 @@ impl DurableAuditGuard {
                     };
                     let (_, blob) = chunks.swap_remove(position);
                     let (facts, refusal) = plugin_record(&blob).ok_or_else(damaged)?;
+                    if refusal.is_none() {
+                        by_use.insert(frame.use_id, out.len());
+                    }
                     out.push(PluginJournalRecord {
                         use_id: frame.use_id,
                         operation_id: frame.operation_id,
@@ -849,11 +881,8 @@ impl DurableAuditGuard {
                     });
                 }
                 RecordKind::Final => {
-                    if let Some(record) = out
-                        .iter_mut()
-                        .find(|r| r.use_id == frame.use_id && r.refusal.is_none())
-                    {
-                        record.finished = Some((frame.applied, frame.succeeded));
+                    if let Some(&at) = by_use.get(&frame.use_id) {
+                        out[at].finished = Some((frame.applied, frame.succeeded));
                     }
                 }
                 _ => (),
@@ -1005,11 +1034,14 @@ impl DurableAuditGuard {
     /// Lets ticketed plugin key uses through, when `policy` accepts them (the operator's
     /// grants); without a policy every such use is refused with [`TicketRefusal::NoGuard`].
     /// Call it right after `create`/`open`, before the guard is cloned.
-    pub fn with_plugin_policy(mut self, policy: Arc<dyn PluginTicketPolicy>) -> Self {
-        Arc::get_mut(&mut self.shared)
-            .expect("with_plugin_policy is called before the guard is shared")
-            .policy = Some(policy);
-        self
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` if the guard was already cloned or bound: the policy would not be
+    /// seen by the other holders.
+    pub fn with_plugin_policy(mut self, policy: Arc<dyn PluginTicketPolicy>) -> io::Result<Self> {
+        Arc::get_mut(&mut self.shared).ok_or_else(invalid)?.policy = Some(policy);
+        Ok(self)
     }
     /// The plugin refusals recorded for `operation`, oldest first, without removing them.
     pub fn plugin_refusals(&self, operation: OperationId) -> Vec<TicketRefusal> {
@@ -1547,7 +1579,7 @@ impl KeyUseGuard for DurableAuditGuard {
         // refused is journaled with its subcode (never a BEGIN: the key is not applied).
         // Plugin operations without declarations carry no ticket and run as before, with no
         // plugin record (`declared=false` is the absence of one).
-        let mut plugin = None;
+        let mut plugin: Option<Vec<PluginChunk>> = None;
         if let Some(ticket) = event.plugin() {
             let decided = match self.shared.policy.as_deref() {
                 Some(policy) => policy.check(event.operation_id, ticket),
@@ -1558,7 +1590,22 @@ impl KeyUseGuard for DurableAuditGuard {
                     let mut record =
                         PluginAuditRecord::from_ticket(ticket, None, Some(facts.grant_id));
                     record.declared = facts.declared;
-                    plugin = Some(record);
+                    // A fact that cannot be journaled refuses the use here, before the
+                    // journal is touched: it must not poison the service's audit health,
+                    // and an unauditable use does not run.
+                    match plugin_frames(&record, None) {
+                        Ok(chunks) => plugin = Some(chunks),
+                        Err(_) => {
+                            Self::refuse_plugin(
+                                &mut state,
+                                &self.shared.config,
+                                event,
+                                ticket,
+                                TicketRefusal::AuditFactTooLong,
+                            );
+                            return Err(OperationError::PermissionDenied);
+                        }
+                    }
                 }
                 Err(reason) => {
                     Self::refuse_plugin(&mut state, &self.shared.config, event, ticket, reason);
@@ -1594,10 +1641,7 @@ impl KeyUseGuard for DurableAuditGuard {
                 return Err(blocked());
             }
             journal_touched.set(true);
-            let detail = match &plugin {
-                Some(record) => plugin_frames(record, None)?,
-                None => Vec::new(),
-            };
+            let detail = plugin.take().unwrap_or_default();
             // One reserved FINAL per pending BEGIN plus a recovery/probe frame; the plugin
             // chunks of this use come before its BEGIN in the same write.
             let reserved = (state.pending.len() as u64 + 3 + detail.len() as u64) * FRAME_BYTES;

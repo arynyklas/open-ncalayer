@@ -467,16 +467,16 @@ impl ServerConfig {
             || self.plugins.len() > 16
             || self.plugins.iter().any(|p| {
                 p.id.is_empty()
-                    || p.id.len() > 128
+                    || p.id.len() > 64
                     || p.max_memory == 0
                     || p.max_memory > oncl_plugin::MAX_MEMORY
                     || p.max_transfer == 0
                     || p.max_transfer > oncl_plugin::MAX_TRANSFER
                     || p.permissions.len() > 256
                     || p.permissions.iter().any(|g| {
-                        g.token.len() > 128
+                        g.token.len() > 64
                             || g.operation.is_empty()
-                            || g.operation.len() > 128
+                            || g.operation.len() > 64
                             || g.imports.len() > 72
                             || g.keys.len() > 8
                             || (g.plugin_bytes && g.keys.is_empty())

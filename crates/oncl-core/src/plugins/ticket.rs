@@ -418,6 +418,9 @@ pub enum TicketRefusal {
     /// No operator grant covers the ticket (the server or CLI has no `plugin_bytes` grant for
     /// the plugin, operation and key).
     NotGranted,
+    /// A fact of the use (a version or grant id) is too long to be audited: an unauditable
+    /// use does not run.
+    AuditFactTooLong,
 }
 
 /// Why [`PluginConsentGuard::grant`] did not take an approval.
@@ -666,12 +669,18 @@ pub(crate) fn trace_authorised(event: &KeyUseEvent, record: &PluginAuditRecord) 
         plugin_operation = %record.operation,
         ticket_digest = %hex(&record.ticket_digest),
         approval_nonce_sha256 = record.approval_nonce_sha256.map(|h| hex(&h)).as_deref(),
-        content_sha256 = %hex(&record.content_sha256),
-        content_len = record.content_len,
         options_sha256 = %hex(&record.options_sha256),
         caller = record.caller.as_str(),
         declared = record.declared,
         "a plugin key use was authorised"
+    );
+    // The content digest identifies a document: debug level only.
+    tracing::debug!(
+        target: "oncl::plugin_audit",
+        operation = event.operation_id.get(),
+        content_sha256 = %hex(&record.content_sha256),
+        content_len = record.content_len,
+        "content of an authorised plugin key use"
     );
 }
 

@@ -1686,6 +1686,7 @@ fn policy_guard(
     DurableAuditGuard::create(config(path))
         .unwrap()
         .with_plugin_policy(Arc::new(Policy(Mutex::new(answers))))
+        .unwrap()
 }
 
 #[test]
@@ -1872,7 +1873,7 @@ fn refusals_of_one_operation_are_journaled_at_most_four_times() {
         assert!(guard.before_use(&plugin_event(&ctx, &key, b"d")).is_err());
     }
     assert_eq!(guard.plugin_records().unwrap().len(), 4);
-    assert_eq!(guard.plugin_refusals(ctx.id()).len(), 9);
+    assert_eq!(guard.plugin_refusals(ctx.id()).len(), 8);
     assert_eq!(guard.health(), AuditHealth::Healthy);
 }
 
@@ -2052,4 +2053,317 @@ fn an_old_format_journal_is_still_read_recovered_and_extended() {
     assert!(last.kind.is_final());
     assert_eq!(last.applied, AppliedState::Unknown);
     assert_eq!(guard.health(), AuditHealth::Healthy);
+}
+
+/// Removes frame `drop` from a journal image and renumbers what follows so that every
+/// sequence number and use id is consistent again (checksums recomputed): the only thing wrong
+/// with the result is what the removal itself removed.
+fn without_frame(bytes: &[u8], drop: usize) -> Vec<u8> {
+    let frame = FRAME_BYTES as usize;
+    let mut out = Vec::new();
+    for (index, original) in bytes.chunks(frame).enumerate() {
+        if index == drop {
+            continue;
+        }
+        let mut f = original.to_vec();
+        if index > drop {
+            let seq = u64::from_le_bytes(f[24..32].try_into().unwrap()) - 1;
+            f[24..32].copy_from_slice(&seq.to_le_bytes());
+            // Chunks, BEGIN and FINAL name the BEGIN's sequence in their use id.
+            let use_id = u64::from_le_bytes(f[32..40].try_into().unwrap()) - 1;
+            f[32..40].copy_from_slice(&use_id.to_le_bytes());
+        } else if f[104] == 4 {
+            // Chunks before the removed one name a BEGIN that moved up by one.
+            let use_id = u64::from_le_bytes(f[32..40].try_into().unwrap()) - 1;
+            f[32..40].copy_from_slice(&use_id.to_le_bytes());
+        }
+        let mut hash = oncl_pki::digest::HashState::new(oncl_pki::key::HashAlg::Sha256);
+        hash.update(&f[..128]);
+        f[128..].copy_from_slice(hash.finish().as_bytes());
+        out.extend_from_slice(&f);
+    }
+    out
+}
+
+#[test]
+fn a_chunk_run_that_is_short_of_its_count_is_damage_even_with_consistent_numbers() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let bound = binding(&guard, &ctx, &key);
+    let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+    guard.finish(receipt, done()).unwrap();
+    drop(bound);
+    drop(guard);
+    let file = journal(&path);
+    let bytes = std::fs::read(&file).unwrap();
+    let frames = bytes.len() / FRAME_BYTES as usize;
+    // Header, k chunks, BEGIN, FINAL: remove the last chunk.
+    std::fs::write(&file, without_frame(&bytes, frames - 3)).unwrap();
+    match DurableAuditGuard::open(config(&path)) {
+        Err(_) => (),
+        Ok(guard) => {
+            assert_ne!(guard.health(), AuditHealth::Healthy);
+            assert!(
+                guard.recover().is_err(),
+                "a short chunk run is not repaired"
+            );
+        }
+    }
+    // The control: removing nothing that matters (a chunk-free journal image) still opens.
+    std::fs::write(&file, &bytes).unwrap();
+    let guard = DurableAuditGuard::open(config(&path)).unwrap();
+    assert_eq!(guard.plugin_records().unwrap().len(), 1);
+}
+
+#[test]
+fn a_segment_too_small_for_a_plugin_use_refuses_before_writing_anything() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let tiny = AuditConfig::new(path.clone(), FRAME_BYTES * 4, FRAME_BYTES * 12, 3, 32).unwrap();
+    let guard = DurableAuditGuard::create(tiny)
+        .unwrap()
+        .with_plugin_policy(Arc::new(Policy(Mutex::new(vec![granted()]))))
+        .unwrap();
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let error = guard
+        .before_use(&plugin_event(&ctx, &key, b"doc"))
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), ErrorCode::AuditFailed);
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    // Not a frame of the use reached the journal.
+    // (A rotation may have added a segment header; nothing else.)
+    assert!(
+        guard
+            .records()
+            .unwrap()
+            .iter()
+            .all(|r| r.kind == RecordKind::Header)
+    );
+}
+
+#[test]
+fn many_plugin_uses_rotate_segments_without_splitting_a_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, (0..14).map(|_| granted()).collect());
+    let key = KeyId::new("key").unwrap();
+    for i in 0..14u8 {
+        let ctx = context();
+        let bound = binding(&guard, &ctx, &key);
+        let receipt = guard
+            .before_use(&plugin_event(&ctx, &key, &[i]))
+            .unwrap_or_else(|e| panic!("use {i}: {e:?}"));
+        guard.finish(receipt, done()).unwrap();
+        drop(bound);
+        assert_eq!(guard.health(), AuditHealth::Healthy, "use {i}");
+    }
+    let records = guard.plugin_records().unwrap();
+    assert!(records.len() >= 3 && records.len() <= 14);
+    assert!(
+        records
+            .iter()
+            .all(|r| r.finished == Some((AppliedState::Applied, true)))
+    );
+    assert_eq!(records.last().unwrap().facts.content_len, 1);
+    // Every segment is whole frames within the configured size.
+    for entry in std::fs::read_dir(&path).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some_and(|e| e == "log") {
+            let len = entry.metadata().unwrap().len();
+            assert!(len % FRAME_BYTES == 0 && len <= 4096, "{len}");
+        }
+    }
+    drop(guard);
+    let reopened = DurableAuditGuard::open(config(&path)).unwrap();
+    assert_eq!(reopened.plugin_records().unwrap().len(), records.len());
+}
+
+// ---- MP3a-3 review fixes ----------------------------------------------------------------
+
+fn ticket_with(key: &KeyId, version: &str) -> PluginUse {
+    PluginUse::for_tests(
+        PluginIdentity {
+            id: "org.example.sign".to_owned(),
+            package: PackageHash::File([7; 32]),
+            version: version.to_owned(),
+        },
+        "sign",
+        CallerContext::ServiceClient("tok-1".to_owned()),
+        KeyKind::Raw,
+        1,
+        key.clone(),
+        ContentBinding::prehashed(b"x"),
+        [9; 32],
+        [8; 32],
+    )
+}
+
+/// A refusal of an event whose action the journal cannot encode never writes an
+/// undecodable frame: the journal stays readable and the refusal is traced and remembered.
+#[test]
+fn a_refusal_of_an_unjournalable_action_writes_nothing_and_leaves_the_journal_readable() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![Err(TicketRefusal::Action)]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let bound = binding(&guard, &ctx, &key);
+    let ev = KeyUseEvent::new(&ctx, key.clone(), Action::Hash)
+        .with_plugin_ticket_for_tests(ticket(&key, b"d"));
+    assert!(guard.before_use(&ev).is_err());
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+    assert_eq!(guard.records().unwrap().len(), 1, "only the header");
+    assert_eq!(guard.plugin_refusals(ctx.id()), vec![TicketRefusal::Action]);
+    drop(bound);
+    drop(guard);
+    let reopened = DurableAuditGuard::open(config(&path)).unwrap();
+    assert!(reopened.records().is_ok());
+    reopened.recover().unwrap();
+}
+
+/// A text that cannot be journaled (a version or grant id over 255 bytes) refuses the use
+/// as `audit-fact-too-long`, key not applied, BEFORE the journal is touched: health stays.
+#[test]
+fn an_unauditable_fact_refuses_the_use_without_poisoning_audit_health() {
+    for (version, grant) in [
+        (format!("1.2.3-{}", "a".repeat(300)), "g".to_owned()),
+        ("1.0.0".to_owned(), "g".repeat(300)),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = policy_guard(
+            &temp.path().join("audit"),
+            vec![Ok(PluginGrantFacts {
+                grant_id: grant,
+                declared: true,
+            })],
+        );
+        let ctx = context();
+        let key = KeyId::new("key").unwrap();
+        let _bound = binding(&guard, &ctx, &key);
+        let ev = event(&ctx, &key).with_plugin_ticket_for_tests(ticket_with(&key, &version));
+        let error = guard.before_use(&ev).err().expect("refused");
+        assert_eq!(error.code(), ErrorCode::PermissionDenied);
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert_eq!(guard.health(), AuditHealth::Healthy);
+        assert_eq!(
+            guard.plugin_refusals(ctx.id()),
+            vec![TicketRefusal::AuditFactTooLong]
+        );
+        assert_eq!(
+            TicketRefusal::AuditFactTooLong.subcode().id(),
+            "audit-fact-too-long"
+        );
+        // No BEGIN; a refusal record may exist only when its own facts fit.
+        assert!(
+            guard
+                .records()
+                .unwrap()
+                .iter()
+                .all(|r| r.kind != RecordKind::Begin)
+        );
+        // The next, ordinary use of the service is unaffected.
+        let ctx2 = context();
+        let _b2 = binding(&guard, &ctx2, &key);
+        let plain = guard.before_use(&event(&ctx2, &key)).unwrap();
+        guard.finish(plain, done()).unwrap();
+    }
+}
+
+#[test]
+fn a_refusal_frame_without_its_chunks_is_damage() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![Err(TicketRefusal::Content)]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let bound = binding(&guard, &ctx, &key);
+    assert!(guard.before_use(&plugin_event(&ctx, &key, b"d")).is_err());
+    drop(bound);
+    drop(guard);
+    let file = journal(&path);
+    let mut bytes = std::fs::read(&file).unwrap();
+    // Header, k chunks, PluginRefusal: remove every chunk.
+    while bytes.len() / FRAME_BYTES as usize > 2 {
+        bytes = without_frame(&bytes, 1);
+    }
+    std::fs::write(&file, &bytes).unwrap();
+    match DurableAuditGuard::open(config(&path)) {
+        Err(_) => (),
+        Ok(guard) => assert!(guard.recover().is_err() || guard.records().is_err()),
+    }
+}
+
+/// Refusals reserve room for their own chunks: three refusals in a small segment rotate
+/// before the third, not after it overflows.
+#[test]
+fn refusal_frames_are_reserved_in_the_segment() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let cfg = AuditConfig::new(path.clone(), FRAME_BYTES * 15, FRAME_BYTES * 80, 3, 32).unwrap();
+    let guard = DurableAuditGuard::create(cfg)
+        .unwrap()
+        .with_plugin_policy(Arc::new(Policy(Mutex::new(
+            (0..3).map(|_| Err(TicketRefusal::Content)).collect(),
+        ))))
+        .unwrap();
+    let key = KeyId::new("key").unwrap();
+    for _ in 0..3 {
+        let ctx = context();
+        let _b = binding(&guard, &ctx, &key);
+        assert!(guard.before_use(&plugin_event(&ctx, &key, b"d")).is_err());
+    }
+    assert_eq!(guard.plugin_records().unwrap().len(), 3);
+    let logs = std::fs::read_dir(&path)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|x| x == "log")
+        })
+        .count();
+    assert_eq!(logs, 2, "rotated before the third refusal");
+}
+
+#[test]
+fn a_guard_that_is_already_shared_cannot_take_a_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = DurableAuditGuard::create(config(&temp.path().join("audit"))).unwrap();
+    let shared = guard.clone();
+    assert!(
+        guard
+            .with_plugin_policy(Arc::new(Policy(Mutex::new(Vec::new()))))
+            .is_err()
+    );
+    drop(shared);
+}
+
+#[test]
+fn the_in_memory_refusal_queue_is_bounded_per_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = policy_guard(
+        &temp.path().join("audit"),
+        (0..200).map(|_| Err(TicketRefusal::Content)).collect(),
+    );
+    let key = KeyId::new("key").unwrap();
+    let noisy = context();
+    let quiet = context();
+    let _bq = binding(&guard, &quiet, &key);
+    assert!(guard.before_use(&plugin_event(&quiet, &key, b"d")).is_err());
+    for _ in 0..150 {
+        assert!(guard.before_use(&plugin_event(&noisy, &key, b"d")).is_err());
+    }
+    assert_eq!(
+        guard.plugin_refusals(quiet.id()).len(),
+        1,
+        "never evicted by another"
+    );
+    assert_eq!(guard.plugin_refusals(noisy.id()).len(), 8);
 }
