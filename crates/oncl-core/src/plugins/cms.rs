@@ -63,7 +63,7 @@ impl Backend<'_, '_> {
         import: Import,
         bytes: &[u8],
     ) -> Result<Vec<u8>, OperationError> {
-        let args = if import == Import::KeysSignCms {
+        let mut args = if import == Import::KeysSignCms {
             let args: abi::SignCmsArgs = decode(bytes)?;
             abi::SignCmsExArgs {
                 handle: args.handle,
@@ -89,12 +89,7 @@ impl Backend<'_, '_> {
         } else {
             decode::<abi::SignCmsExArgs>(bytes)?
         };
-        let binding = self
-            .bindings
-            .keys
-            .iter()
-            .find(|key| key.handle == args.handle)
-            .ok_or(OperationError::PermissionDenied)?;
+        let binding = self.bound_key(args.handle)?;
         self.authorize(import, Some(&binding.key.selector().key_id()))?;
         if self.state.released.contains(&args.handle) {
             return Err(OperationError::PermissionDenied);
@@ -114,6 +109,29 @@ impl Backend<'_, '_> {
                 "prehashed CMS requires detached signed messageDigest",
             )
             .into());
+        }
+        if self.declared.is_some() {
+            // R15: the content is signed as it is, never co-signed into a CMS it may hold,
+            // so the ticket's content is the content actually signed.
+            if matches!(args.cosign, abi::CoSign::Auto) {
+                args.cosign = abi::CoSign::Never;
+            }
+            let (kind, profile) = if import == Import::KeysSignCms {
+                (
+                    oncl_plugin::operations::KeyKind::Cms,
+                    Some(super::ticket::cms_profile(&args)),
+                )
+            } else {
+                (
+                    oncl_plugin::operations::KeyKind::CmsEx,
+                    super::ticket::cms_ex_profile(&args),
+                )
+            };
+            let content = match &args.content {
+                abi::CmsContent::Data(data) => ContentBinding::bytes(data.as_ref()),
+                abi::CmsContent::Digest(digest) => ContentBinding::prehashed(digest.as_ref()),
+            };
+            self.arm_ticket(binding, kind, content, profile)?;
         }
         let host = self
             .engine

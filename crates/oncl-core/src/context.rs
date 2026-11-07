@@ -38,6 +38,11 @@ pub struct OperationContext {
     pub(crate) plugin_pki: Option<crate::plugins::InvocationPkiAuthority>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_xml_output_limit: Option<u64>,
+    /// The ticket of the plugin key use in flight (see [`crate::plugins::PluginUse`]). Only
+    /// the plugin backend of this crate sets it, and `AuthorizedSigner::sign_digest` takes
+    /// it into the [`crate::keys::KeyUseEvent`]: one ticket, one use.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_ticket: std::sync::Mutex<Option<crate::plugins::PluginUse>>,
 }
 impl OperationContext {
     pub(crate) fn account_borrowed(

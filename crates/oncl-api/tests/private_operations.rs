@@ -3319,6 +3319,95 @@ async fn plugin_route_uses_operator_grants_the_original_context_and_typed_refusa
     assert_eq!(begins(&service), 1);
     service.stop().await;
 }
+
+/// A plugin operation that declares its key uses (`[[operations]]`) is ticketed by Core; the
+/// server has no `plugin_bytes` grant to match a ticket against yet, so its key use is
+/// refused before the audit journal and the key (stage MP3a-1). The same grant for a plugin
+/// without declarations (the test above) is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declared_plugin_operation_key_use_is_refused_before_audit_and_key() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::config::{PluginConfig, PluginGrant};
+    let pki = Pki::start();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("declared.toml");
+    let wasm = dir.path().join("declared.wasm");
+    std::fs::write(
+        &manifest,
+        r#"id = "test.declared"
+name.ru = "synthetic"
+name.kk = "synthetic"
+name.en = "synthetic"
+version = "1.0.0"
+min_core = "0.1.0-alpha.7"
+modules = ["test.declared.module"]
+[capabilities]
+keys = true
+[[operations]]
+name = "run"
+module = "test.declared.module"
+server = true
+request = '{"module":"test.declared.module","method":"m","args":["{file:base64}"]}'
+label = { ru = "а", kk = "ә", en = "a" }
+[[operations.params]]
+name = "file"
+kind = "document"
+max_bytes = 4096
+[operations.uses]
+imports = ["keys_sign_raw"]
+network = "pki"
+[[operations.uses.key]]
+kind = "raw"
+content = "param:file"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &wasm,
+        private_support::plugin::wasm(&[(
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle: 1,
+                data: MESSAGE.to_vec().into(),
+            }),
+        )]),
+    )
+    .unwrap();
+    let plugin = PluginConfig {
+        id: "test.declared".into(),
+        manifest,
+        wasm,
+        max_memory: 1 << 20,
+        max_transfer: 1 << 18,
+        permissions: vec![PluginGrant {
+            token: "test".into(),
+            operation: "run".into(),
+            imports: vec!["keys_sign_raw".into()],
+            keys: vec!["ops-key".into()],
+            pki_endpoints: vec![
+                format!("{}/ocsp", pki.origin),
+                format!("{}/root.crl", pki.origin),
+                format!("{}/inter.crl", pki.origin),
+            ],
+        }],
+    };
+    let service = Running::start_with(|config, dir| {
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Sign];
+        config.tokens[0].keys = vec!["ops-key".into()];
+        config.plugins = vec![plugin];
+    })
+    .await;
+    let body = r#"{"items":[{"id":"p","operation":{"kind":"plugin","plugin":"test.declared","operation":"run","args":"{}","keys":[{"handle":1,"name":"ops-key"}]}}],"parts":[]}"#;
+    let (status, _, response) = service.post(FORM, multipart(body, &[])).await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(error["code"], "PermissionDenied");
+    assert_eq!(error["applied"], "NotApplied");
+    assert_eq!(begins(&service), 0, "the journal is never touched");
+    service.stop().await;
+}
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     let out = std::process::Command::new("openssl")
         .args(["dgst", "-sha256", "-binary"])

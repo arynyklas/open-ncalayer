@@ -93,13 +93,16 @@ struct Installed {
     args: std::path::PathBuf,
 }
 fn install(calls: &[(Import, Vec<u8>)]) -> Installed {
+    install_with(MANIFEST, calls)
+}
+fn install_with(manifest_text: &str, calls: &[(Import, Vec<u8>)]) -> Installed {
     let dir = tempfile::tempdir().unwrap();
     let (manifest, module, args) = (
         dir.path().join("plugin.toml"),
         dir.path().join("plugin.wasm"),
         dir.path().join("args.json"),
     );
-    std::fs::write(&manifest, MANIFEST).unwrap();
+    std::fs::write(&manifest, manifest_text).unwrap();
     std::fs::write(&module, wasm(calls)).unwrap();
     std::fs::write(&args, b"{}").unwrap();
     Installed {
@@ -223,6 +226,78 @@ fn bound_key_signs_only_the_authorized_handle_with_strict_private_checks() {
     let unauthorized = run(&base(&signed, &extra), b"");
     assert_eq!(unauthorized.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("AuthorityRequired"));
+}
+/// A plugin operation that declares its key uses is ticketed by Core; the CLI has no
+/// `--plugin-bytes` grant yet, so its key use is refused before the key is applied. The test
+/// above (a plugin without declarations) is unchanged.
+#[test]
+fn declared_operation_key_use_is_refused_before_the_key() {
+    let w = world();
+    let manifest = r#"id = "test.cli"
+name.ru = "CLI synthetic"
+name.kk = "CLI synthetic"
+name.en = "CLI synthetic"
+version = "1.0.0"
+min_core = "0.1.0-alpha.7"
+modules = ["test.cli.module"]
+[capabilities]
+keys = true
+[[operations]]
+name = "sign"
+module = "test.cli.module"
+server = true
+request = '{"module":"test.cli.module","method":"m","args":["{file:base64}"]}'
+label = { ru = "а", kk = "ә", en = "a" }
+[[operations.params]]
+name = "file"
+kind = "document"
+max_bytes = 4096
+[operations.uses]
+imports = ["keys_sign_raw"]
+network = "pki"
+[[operations.uses.key]]
+kind = "raw"
+content = "param:file"
+"#;
+    let declared = install_with(
+        manifest,
+        &[(
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle: 1,
+                data: b"plugin message".to_vec().into(),
+            }),
+        )],
+    );
+    let get = format!("GET={}/ocsp", w.origin);
+    let post = format!("POST={}/ocsp", w.origin);
+    let extra = [
+        "--allow-import",
+        "keys_sign_raw",
+        "--key",
+        path(&w.rsa_key),
+        "--secret-file",
+        path(&w.secret),
+        "--authorize",
+        "--root",
+        path(&w.root),
+        "--pki-endpoint",
+        &w.origin,
+        "--as-of",
+        "1793620800",
+        "--plugin-pki-endpoint",
+        &get,
+        "--plugin-pki-endpoint",
+        &post,
+    ];
+    let denied = run(&base(&declared, &extra), b"");
+    assert_eq!(denied.status.code(), Some(1), "{denied:?}");
+    let text = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        text.contains("PermissionDenied") && !text.contains("private_use"),
+        "{text}"
+    );
+    assert!(denied.stdout.is_empty());
 }
 #[test]
 fn mandatory_prompt_is_typed_interaction_required_without_a_ui() {

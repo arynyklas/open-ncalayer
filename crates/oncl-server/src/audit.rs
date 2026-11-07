@@ -1026,6 +1026,14 @@ impl DurableAuditGuard {
 }
 impl KeyUseGuard for DurableAuditGuard {
     fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
+        // A key use that carries a plugin ticket belongs to a plugin operation that declares
+        // its key uses (docs/design/manual-plugins.md 4.2/4.7). The server has no
+        // `plugin_bytes` grant to check a ticket against yet (stage MP8), so every such use
+        // is refused here, before the journal is touched or the key is applied. Plugin
+        // operations without declarations carry no ticket and run as before.
+        if event.plugin().is_some() {
+            return Err(OperationError::PermissionDenied);
+        }
         let mut state = self.lock().map_err(|_| OperationError::AuditFailed)?;
         // Refusals decided before any journal I/O (expired deadline, closed or
         // unknown binding, table capacity) are per-request outcomes. Only a

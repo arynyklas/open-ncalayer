@@ -503,6 +503,8 @@ Handle ключа токена держит PIN-код в памяти ядра 
 
 Что обязаны гарантировать MP2/MP3a: (MP2) `BoundKey` строится из той же привязки, что держит backend; HTTP — PKI-транспорт хозяина и общий `OcspCache`; `BoundInteraction` — свежий на вызов. (MP3a) каждый handle от плагина сверяется с единственным привязанным (для прочих — тот же `PermissionDenied`); `keys_release` привязанного handle — идемпотентный no-op; `keys_describe`/`keys_chain` отдаются из единственной привязки; `max_uses = 1` — через билет.
 
+Состояние MP3a-1 (`oncl-core`, `docs/dev/sdk.md`, «Key-use ticket»): для операции, объявленной в манифесте, Core строит билет `PluginUse` из тех же декодированных `args`, что идут в движок (вид, SHA-256 эффективного содержимого, `options_sha256` через `Profile::encode`, единственный привязанный ключ, `max_uses = 1`), кладёт его в `OperationContext` и `sign_digest` переносит в `KeyUseEvent::plugin()`; `PluginConsentGuard::before_use` разрешает применение ключа только по билету и неизрасходованному `PluginApproval`, иначе `PermissionDenied` до ключа. `cosign = Auto` принудительно `Never` до построения билета. Серверный `DurableAuditGuard` и CLI `Authority` пока отказывают во всяком билетированном применении (гранты `plugin_bytes` — MP8/MP9); операции без объявлений не меняются. Выдача `PluginApproval` из профиля и замороженного ввода — MP3a-2.
+
 ### `dialogs`
 
 | Функция | Аргумент | Результат |

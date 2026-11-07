@@ -212,7 +212,42 @@ normalized. The output is compact JSON with object keys sorted (the template's k
 not kept), integers as written; a template number that is not an `i64`/`u64` is refused
 (`InvalidTemplate`) rather than re-printed. Undeclared, non-manual, `derived` and URL-network
 operations and bad parameters are refused with `PluginRequestError`, always `NotApplied`,
-before any key is used. Consent and key-use approval are not part of this API.
+before any key is used. Consent is not part of this API; the key-use ticket and its guard follow.
+
+#### Key-use ticket and `PluginConsentGuard` (`plugins`)
+
+A plugin call of an operation the manifest **declares** (any `[[operations]]` with that name,
+however the grant was made) is ticketed. For each of `keys_sign_raw/cms/cms_ex/xml/xml_ex/
+xades` Core decodes the arguments once, builds a `plugins::PluginUse` from that same decoded
+value and parks it in the operation context; `AuthorizedSigner::sign_digest` moves it into the
+`KeyUseEvent` (`KeyUseEvent::plugin()`, `None` for every document use and for plugin
+operations without declarations). The ticket names the plugin identity (`id`, `PackageHash`,
+version), the declared operation, the caller, the signature kind, the handle and `KeyId` of
+the one bound key, a `ContentBinding` (SHA-256 and length of the bytes signed; `prehashed`
+for a CMS `Digest` input) and `options_sha256`. The options hash is the SHA-256 of
+`oncl_plugin::operations::Profile::encode` over a profile built from the actual arguments, the
+very encoder `KeyUse::options_sha256` uses for the declared profile. Arguments no profile can
+express (a co-signed CMS, `attrs.extra`, `econtent_type`, a `digest` choice, `Extra`
+certificates, a custom TSA, a non-default signingTime, XML `transforms`/`signature_id`/
+signing-time object, a XAdES chain) are refused before the key is opened. `cosign = Auto` is
+forced to `Never` first, so the ticket's content is the effective content. An import whose kind
+the operation does not declare, or whose declared content is `derived`, is refused. A declared
+operation binds at most one key; every key-taking import (`keys_describe`, `keys_chain`,
+`keys_release`, the signing imports) answers any other handle with the one `PermissionDenied`,
+and `keys_release` of the bound handle is idempotent. A ticket allows exactly one use
+(`max_uses = 1`).
+
+`PluginConsentGuard` (a `KeyUseGuard`) is the guard of a plugin engine. `before_use` refuses
+(`PermissionDenied`, key not applied; the reason is `last_refusal()`) unless the event carries a
+ticket and the guard holds an unexpired `PluginApproval` for the same invocation, plugin
+identity, operation, caller, key and handle with one unspent `ApprovedUse` whose kind, content
+and options hash equal the ticket's; the use is then spent. With no approval it refuses
+everything, and a document key use (no ticket) too: give documents their own engine. A
+`PluginApproval` (not `Clone`, not `Deserialize`) is built by the host from the consent it
+collected and armed with `grant`; its nonce is accepted once. Building approvals from the
+declared profile and the frozen input is the next stage. The server (`DurableAuditGuard`) and
+CLI (`Authority`) guards refuse every ticketed use until their own grants exist (`plugin_bytes`
+in MP8/MP9); plugins without declarations are unchanged.
 
 ## 6. Semver, versions and migration
 

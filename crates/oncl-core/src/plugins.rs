@@ -23,9 +23,14 @@ use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 mod capabilities;
 mod cms;
 mod manual;
+mod ticket;
 mod xml;
 pub use manual::{
     PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
+};
+pub use ticket::{
+    ApprovalRejected, ApprovedUse, ContentBinding, PluginApproval, PluginConsentGuard, PluginUse,
+    TicketRefusal,
 };
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
@@ -371,6 +376,7 @@ struct Backend<'a, 'b> {
     capabilities: &'a oncl_plugin::Capabilities,
     shared: &'a oncl_plugin::SharedState,
     transfer: usize,
+    declared: Option<ticket::Declared<'a>>,
 }
 struct BackendState {
     failure: Option<OperationError>,
@@ -434,14 +440,15 @@ impl Backend<'_, '_> {
                 if self.state.released.contains(&args.handle) {
                     return Err(OperationError::PermissionDenied);
                 }
-                let key = self
-                    .bindings
-                    .keys
-                    .iter()
-                    .find(|key| key.handle == args.handle)
-                    .ok_or(OperationError::PermissionDenied)?;
+                let key = self.bound_key(args.handle)?;
                 let id = key.key.selector().key_id();
                 self.authorize(import, Some(&id))?;
+                self.arm_ticket(
+                    key,
+                    oncl_plugin::operations::KeyKind::Raw,
+                    ContentBinding::bytes(args.data.as_ref()),
+                    Some(oncl_plugin::operations::Profile::Raw),
+                )?;
                 let request = KeyRequest::new(key.key.selector(), key.key.secret());
                 let mut output = Vec::new();
                 // Source-bound Sign, not signer()/SignDigest and not a new context or policy.
@@ -535,6 +542,7 @@ impl CapabilityBackend for Backend<'_, '_> {
             capabilities: self.capabilities,
             shared: self.shared,
             transfer: self.transfer,
+            declared: self.declared,
         };
         let result = (|| {
             let workspace = (args.len() as u64)
@@ -547,7 +555,10 @@ impl CapabilityBackend for Backend<'_, '_> {
                 host_work: 0,
             });
             scoped.ctx.scope.account_container(args.len() as u64)?;
-            scoped.execute(import, args)
+            let result = scoped.execute(import, args);
+            // A ticket the import did not use must not reach another key use.
+            scoped.clear_ticket();
+            result
         })();
         scoped.state.admission = None;
         scoped.failed(result)
@@ -605,6 +616,14 @@ impl Engine {
                 ProcessingError::InvalidInput("duplicate or zero plugin key handle").into(),
             );
         }
+        let declared = installed
+            .manifest
+            .operations()
+            .iter()
+            .any(|o| o.name() == call.operation);
+        if declared && bindings.keys.len() > 1 {
+            return Err(OperationError::PermissionDenied);
+        }
         let invocation = InvocationScope::new(ctx);
         let ctx = &mut *invocation.ctx;
         let limits = installed.compiled.limits();
@@ -659,6 +678,15 @@ impl Engine {
             capabilities: &installed.capabilities,
             transfer: limits.max_transfer,
             shared: &installed.shared,
+            declared: installed
+                .manifest
+                .operations()
+                .iter()
+                .find(|o| o.name() == call.operation)
+                .map(|operation| ticket::Declared {
+                    identity: &installed.identity,
+                    operation,
+                }),
         };
         let result = installed.compiled.call_headless(
             &mut backend,

@@ -35,6 +35,11 @@ impl KeyId {
         }
         Ok(Self(Arc::from(format!("named:{name}"))))
     }
+    /// The canonical text, for hashing into a ticket digest.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 #[derive(Clone)]
 enum Source {
@@ -436,6 +441,8 @@ pub struct KeyUseEvent {
     pub key_id: KeyId,
     pub action: Action,
     batch_item: Option<BatchItemOrdinal>,
+    #[cfg(feature = "plugins")]
+    plugin: Option<crate::plugins::PluginUse>,
 }
 impl KeyUseEvent {
     /// Describe the original invocation/item. This grants no private-key authority.
@@ -445,10 +452,22 @@ impl KeyUseEvent {
             key_id,
             action,
             batch_item: ctx.batch_item,
+            #[cfg(feature = "plugins")]
+            plugin: None,
         }
     }
     pub fn batch_item(&self) -> Option<BatchItemOrdinal> {
         self.batch_item
+    }
+    /// The ticket of a plugin's key use: set (by Core, from the arguments the engine is
+    /// about to run) only for the signing imports of a plugin operation that declares its
+    /// key uses. `None` for every document use and for a plugin operation without
+    /// declarations. A guard of a plugin engine MUST refuse an event without one; a
+    /// document guard MUST refuse one with one (consent to a document is not consent to a
+    /// plugin).
+    #[cfg(feature = "plugins")]
+    pub fn plugin(&self) -> Option<&crate::plugins::PluginUse> {
+        self.plugin.as_ref()
     }
 }
 /// Non-cloneable successful host receipt, returned to the same guard after use.
@@ -626,11 +645,22 @@ impl AuthorizedSigner<'_> {
             validation.check_private(&self.ctx.leases[self.index].entry.cert, self.ctx)?;
         }
         self.ctx.network_status()?;
-        let event = KeyUseEvent::new(
+        #[cfg_attr(not(feature = "plugins"), allow(unused_mut))]
+        let mut event = KeyUseEvent::new(
             self.ctx,
             self.ctx.leases[self.index].id.clone(),
             self.action,
         );
+        // One ticket, one use: a second `sign_digest` of the same plugin call finds none.
+        #[cfg(feature = "plugins")]
+        {
+            event.plugin = self
+                .ctx
+                .plugin_ticket
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
         let receipt = self.guard.before_use(&event).inspect_err(|_| {
             self.ctx
                 .private_use_stopped
