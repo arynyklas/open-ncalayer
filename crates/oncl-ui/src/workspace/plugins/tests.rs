@@ -331,6 +331,45 @@ fn registry_and_listing(origin: &str) -> (PluginRegistry, ManualListing) {
     (registry, listing)
 }
 
+/// The registry with only the `cms` plugin.
+fn registry_without_raw(origin: &str) -> PluginRegistry {
+    let (_, listing) = registry_and_listing(origin);
+    let _ = listing;
+    let mut registry = PluginRegistry::new();
+    let manifest = cms_manifest();
+    registry
+        .install(
+            manifest.clone(),
+            PackageHash::File([4; 32]),
+            &wasm(&[cms_call(DOC)], &extra_imports(&manifest)),
+            InstanceLimits {
+                max_memory: 1 << 20,
+                max_transfer: 1 << 16,
+                ..InstanceLimits::default()
+            },
+            Vec::new(),
+        )
+        .unwrap();
+    for op in manifest.manual_operations() {
+        registry
+            .allow_declared_with_pki(
+                &manifest.id,
+                op.name(),
+                manual(),
+                [
+                    (HttpMethod::Get, format!("{origin}/ocsp")),
+                    (HttpMethod::Post, format!("{origin}/ocsp")),
+                    (HttpMethod::Post, format!("{origin}/tsa")),
+                ]
+                .iter()
+                .map(|(m, u)| (*m, u.as_str())),
+                &["127.0.0.1"],
+            )
+            .unwrap();
+    }
+    registry
+}
+
 fn extra_imports(manifest: &Manifest) -> Vec<Import> {
     let mut all: Vec<Import> = Vec::new();
     for import in manifest
@@ -349,16 +388,24 @@ fn extra_imports(manifest: &Manifest) -> Vec<Import> {
 struct TestPlugins {
     kit: PluginEngineKit,
     origin: String,
+    /// Makes the `test.raw` plugin vanish from the registry (turned off or withdrawn).
+    hide_raw: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ManualPluginSource for TestPlugins {
     fn offer(&self) -> Result<PluginOffer, OfferError> {
-        let (registry, listing) = registry_and_listing(&self.origin);
+        let (registry, mut listing) = registry_and_listing(&self.origin);
+        let mut registry = registry;
+        if self.hide_raw.load(std::sync::atomic::Ordering::SeqCst) {
+            listing.operations.retain(|o| o.plugin_id != "test.raw");
+            registry = registry_without_raw(&self.origin);
+        }
         plugin_offer(registry, manual(), listing, &self.kit)
     }
 }
 
 pub(super) struct Rig {
+    pub(super) hide: Arc<std::sync::atomic::AtomicBool>,
     pub(super) w: World,
     pub(super) ws: Rc<Workspace>,
     /// Where the user's files are.
@@ -384,9 +431,11 @@ pub(super) fn rig() -> Rig {
     let w = world();
     std::fs::create_dir_all(w.dir.path().join("spool-plugins")).unwrap();
     let (engine, guard) = engine(&w);
+    let hide = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let source = Arc::new(TestPlugins {
         kit: kit(&w),
         origin: w.origin.clone(),
+        hide_raw: Arc::clone(&hide),
     });
     let services = DesktopEngineServices {
         engine: Arc::new(engine),
@@ -404,6 +453,7 @@ pub(super) fn rig() -> Rig {
     ws.ui.set_section(super::SECTION);
     ws.ui.invoke_section_changed(super::SECTION);
     let rig = Rig {
+        hide,
         w,
         ws,
         files: tempfile::tempdir().unwrap(),
@@ -821,6 +871,9 @@ fn show(rig: &Rig) {
         .ui
         .window()
         .set_size(slint::PhysicalSize::new(900, 580));
+    // Showing the window may fire the page's open: the list is read again, then it is quiet.
+    slint::platform::update_timers_and_animations();
+    until("the window is quiet", || !rig.ws.ui.get_busy());
 }
 
 #[test]
@@ -1131,6 +1184,7 @@ fn the_run_declines_without_a_decision_and_never_uses_the_key() {
         let source = TestPlugins {
             kit: kit(&rig.w),
             origin: rig.w.origin.clone(),
+            hide_raw: Arc::default(),
         };
         Arc::new(source.offer().unwrap())
     };
@@ -1201,32 +1255,119 @@ fn sources(root: &StdPath, dir: &StdPath, skip: &[&str], out: &mut Vec<(String, 
     }
 }
 
-/// The code of a source file: comment lines gone, and an inline test module (`#[cfg(test)] mod x {`)
-/// with everything after it (the test modules of the workspace are at the end of their files).
-fn code_of(text: &str) -> String {
-    let mut cut = text.len();
-    for (at, _) in text.match_indices("#[cfg(test)]") {
-        let rest = text[at + "#[cfg(test)]".len()..].trim_start();
-        if rest
-            .lines()
-            .next()
-            .is_some_and(|l| l.starts_with("mod ") && l.trim_end().ends_with('{'))
-        {
-            cut = at;
-            break;
+/// The identifiers of Rust source, with comments, string and char literals gone: a parse of
+/// the lexical level, so a use as a path value, after an inline test module, in a macro body or
+/// split over lines is still found, and a mention in a comment or a string is not.
+fn idents(text: &str) -> Vec<String> {
+    let c: Vec<char> = text.chars().collect();
+    let (mut i, mut out) = (0, Vec::new());
+    while i < c.len() {
+        match c[i] {
+            '/' if c.get(i + 1) == Some(&'/') => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if c.get(i + 1) == Some(&'*') => {
+                let mut depth = 0;
+                while i < c.len() {
+                    if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            'r' if matches!(c.get(i + 1), Some('"' | '#')) && {
+                let mut j = i + 1;
+                while c.get(j) == Some(&'#') {
+                    j += 1;
+                }
+                c.get(j) == Some(&'"')
+            } =>
+            {
+                let mut hashes = 0;
+                i += 1;
+                while c[i] == '#' {
+                    hashes += 1;
+                    i += 1;
+                }
+                i += 1;
+                while i < c.len() {
+                    if c[i] == '"' && (0..hashes).all(|k| c.get(i + 1 + k) == Some(&'#')) {
+                        i += 1 + hashes;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '"' => {
+                i += 1;
+                while i < c.len() && c[i] != '"' {
+                    i += if c[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            '\'' if c.get(i + 2) == Some(&'\'') || (c.get(i + 1) == Some(&'\\')) => {
+                i += 2;
+                while i < c.len() && c[i] != '\'' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            ch if ch.is_alphabetic() || ch == '_' => {
+                let start = i;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+                    i += 1;
+                }
+                out.push(c[start..i].iter().collect());
+            }
+            _ => i += 1,
         }
     }
-    text[..cut]
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    out
+}
+
+fn count(text: &str, ident: &str) -> usize {
+    idents(text).iter().filter(|i| *i == ident).count()
+}
+
+#[test]
+fn the_scanner_finds_the_evasions_and_ignores_comments_and_strings() {
+    let needle = concat!("after_user", "_confirmed");
+    // A second use as a path value, not a call.
+    assert_eq!(
+        count(&format!("let f = UserConfirmation::{needle};"), needle),
+        1
+    );
+    // A call after an inline test module, in a macro, over two lines.
+    let late = format!(
+        "#[cfg(test)]\nmod t {{ fn a() {{}} }}\nfn b() {{ UserConfirmation::\n{needle}(x) }}"
+    );
+    assert_eq!(count(&late, needle), 1);
+    assert_eq!(
+        count(&format!("m!(UserConfirmation::{needle}(s))"), needle),
+        1
+    );
+    // A comment, a doc line, a string and a raw string are not uses.
+    let quiet = format!(
+        "// {needle}\n/// {needle}\n/* {needle} */ let s = \"{needle}\"; let r = r#\"{needle}\"#;"
+    );
+    assert_eq!(count(&quiet, needle), 0);
 }
 
 /// `UserConfirmation::after_user_confirmed` is the host's duty: the one who calls it says the
-/// user confirmed. It is called in ONE place of the whole workspace (outside Core, which
-/// defines it): `consent::user_confirmed`; and that function is called from ONE place: the
-/// handler of the confirm button. A second call site, anywhere, fails this test.
+/// user confirmed. In the whole workspace outside Core (which defines it) it appears ONCE:
+/// in `consent::user_confirmed`, which needs a `PressToken`; the token is made by `press()`,
+/// which only the confirm button's handler calls. A second use anywhere fails this test, and so
+/// does a use that clippy's `disallowed-methods` (clippy.toml) would flag.
 #[test]
 fn the_users_confirmation_is_made_in_one_place_only() {
     let root = oncl_testkit::workspace_root();
@@ -1238,43 +1379,43 @@ fn the_users_confirmation_is_made_in_one_place_only() {
         }
     }
     assert!(all.len() > 100, "the scan found {} sources", all.len());
-    let needle = concat!("after_user", "_confirmed(");
-    let calls: Vec<(&str, usize)> = all
+    let needle = concat!("after_user", "_confirmed");
+    let uses: Vec<(&str, usize)> = all
         .iter()
-        .filter(|(rel, _)| !rel.ends_with("/tests.rs"))
-        .map(|(rel, text)| (rel.as_str(), code_of(text).matches(needle).count()))
+        .filter(|(rel, _)| !rel.ends_with("plugins/tests.rs"))
+        .map(|(rel, text)| (rel.as_str(), count(text, needle)))
         .filter(|(_, n)| *n > 0)
         .collect();
     assert_eq!(
-        calls,
-        [("crates/oncl-ui/src/workspace/plugins/consent.rs", 1)],
-        "the user's confirmation is made in exactly one place"
+        uses,
+        [("crates/oncl-ui/src/workspace/plugins/consent.rs", 1)]
     );
-    // The wrapper: defined there, called from the button's handler and nowhere else.
-    let wrapper = concat!("consent::user_confirmed", "(");
-    let users: Vec<(&str, usize)> = all
-        .iter()
-        .filter(|(rel, _)| !rel.ends_with("/tests.rs"))
-        .map(|(rel, text)| (rel.as_str(), code_of(text).matches(wrapper).count()))
-        .filter(|(_, n)| *n > 0)
-        .collect();
-    assert_eq!(
-        users,
-        [("crates/oncl-ui/src/workspace/plugins/mod.rs", 1)],
-        "the wrapper is called from the confirm handler only"
-    );
-    // And that one call is inside `fn confirm`, after the controller let the press through.
-    let (_, page) = all
+    // The wrapper's calls outside the test modules' helper, and the token's makers.
+    let page = &all
         .iter()
         .find(|(rel, _)| rel == "crates/oncl-ui/src/workspace/plugins/mod.rs")
-        .unwrap();
+        .unwrap()
+        .1;
+    assert_eq!(count(page, "user_confirmed"), 1, "one call of the wrapper");
+    assert_eq!(
+        count(page, "press"),
+        2,
+        "the maker and the button's handler only"
+    );
     let handler = page.split("fn confirm(open").nth(1).unwrap();
     let handler = &handler[..handler.find("\n}\n").unwrap()];
-    assert!(handler.contains(wrapper));
-    assert!(
-        handler.find("Event::Confirm").unwrap() < handler.find(wrapper).unwrap(),
-        "the confirmation is made after the controller's decision"
-    );
+    assert_eq!(count(handler, "press"), 1);
+    assert_eq!(count(handler, "user_confirmed"), 1);
+    assert!(handler.find("Event::Confirm").unwrap() < handler.find("user_confirmed").unwrap());
+    for (rel, text) in &all {
+        if rel.contains("/workspace/plugins/") {
+            assert_eq!(
+                count(text, "PressToken") > 0,
+                rel.ends_with("/mod.rs") || rel.ends_with("consent.rs"),
+                "{rel}"
+            );
+        }
+    }
 }
 
 /// Every control of the page says what it is to a screen reader, and no focus scope is a silent
@@ -1481,6 +1622,7 @@ fn direct_run(
     let source = TestPlugins {
         kit: kit(&rig.w),
         origin: rig.w.origin.clone(),
+        hide_raw: Arc::default(),
     };
     let offer = Arc::new(source.offer().unwrap());
     let operation = offer
@@ -1509,7 +1651,8 @@ fn direct_run(
     let (tx, rx) = std::sync::mpsc::channel();
     let control = Arc::new(crate::workspace::JobControl::default());
     match run(spec, &control, &rx, |prepared| {
-        let confirmation = super::consent::user_confirmed(&prepared.summary);
+        let confirmation =
+            super::consent::user_confirmed(&prepared.summary, super::press_for_tests());
         tx.send(Decision::Proceed(confirmation)).unwrap();
     }) {
         RunOutcome::Done(report) => report,
@@ -1558,4 +1701,83 @@ fn while_the_confirmation_is_prepared_the_buttons_keep_their_real_names() {
         t.confirm_label.replace("{0}", "sign-raw")
     );
     assert!(!rig.ui().get_confirm_enabled());
+}
+
+#[test]
+fn the_confirmation_is_armed_only_after_its_quiet_delay() {
+    // The delay itself is pinned (a default of zero would let a burst of clicks land on the
+    // button the moment it appears), and a fresh page honours it.
+    assert_eq!(super::ARM_AFTER, Duration::from_millis(600));
+    assert_eq!(super::State::new().arm_after, super::ARM_AFTER);
+    let rig = rig();
+    rig.ws.plugins.borrow_mut().arm_after = super::ARM_AFTER;
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_consent_raw(&doc);
+    super::tick(&rig.ws);
+    assert!(!rig.ui().get_confirm_enabled(), "not armed at once");
+    rig.ui().invoke_confirm();
+    assert_eq!(rig.step(), Step::Consent);
+    assert_eq!(rig.applications(), 0);
+}
+
+#[test]
+fn the_registry_is_read_on_every_open_and_again_when_the_run_is_prepared() {
+    let rig = rig();
+    assert_eq!(rig.ui().get_groups().row_count(), 2);
+    // A plugin withdrawn while the window is open: the next open of the page does not list it.
+    rig.hide.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.ws.ui.set_section(6);
+    rig.ws.ui.invoke_section_changed(6);
+    rig.ws.ui.set_section(super::SECTION);
+    rig.ws.ui.invoke_section_changed(super::SECTION);
+    until("the list is read again", || !rig.ws.ui.get_busy());
+    assert_eq!(rig.ui().get_groups().row_count(), 1);
+    rig.hide.store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.ui().invoke_refresh();
+    until("the list is read again", || !rig.ws.ui.get_busy());
+    assert_eq!(rig.ui().get_groups().row_count(), 2);
+    // Withdrawn between the key page and the confirmation: refused, nothing shown.
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_key_raw(&doc);
+    rig.unlocked();
+    rig.hide.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.ui().invoke_cert_chosen(0);
+    until("the answer", || !rig.ws.ui.get_busy());
+    rig.hide.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(rig.step(), Step::Key);
+    assert_eq!(rig.ui().get_error(), Texts::of(Locale::En).stale);
+    assert!(rig.ws.plugins.borrow().shown.is_none());
+    assert_eq!(rig.applications(), 0);
+}
+
+#[test]
+fn an_operation_the_engine_cannot_run_is_not_offered() {
+    let (registry, mut listing) = registry_and_listing("http://127.0.0.1:9");
+    listing.operations.push(OfferedOperation {
+        plugin_id: "test.raw".into(),
+        plugin_version: "1.2.3".into(),
+        plugin_name: listing.operations[0].plugin_name.clone(),
+        operation: "not-declared".into(),
+        label: listing.operations[0].label.clone(),
+        params: Vec::new(),
+        uses_key: true,
+        pki_endpoints: Vec::new(),
+    });
+    let w = world();
+    std::fs::create_dir_all(w.dir.path().join("spool-plugins")).unwrap();
+    let offer = plugin_offer(registry, manual(), listing, &kit(&w)).unwrap();
+    assert!(
+        offer
+            .listing
+            .operations
+            .iter()
+            .all(|o| o.operation != "not-declared")
+    );
+    assert!(
+        offer
+            .listing
+            .operations
+            .iter()
+            .any(|o| o.operation == "sign-raw")
+    );
 }

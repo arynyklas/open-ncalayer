@@ -178,6 +178,14 @@ pub fn plugin_offer(
     if let Some(gate) = &kit.activity {
         engine = engine.with_activity(Arc::clone(gate));
     }
+    // What the engine cannot run (not declared, not manual, derived, a URL network) is not
+    // offered, by the engine's own predicate.
+    let mut listing = listing;
+    listing.operations.retain(|o| {
+        engine
+            .plugin_operations(&o.plugin_id)
+            .is_ok_and(|declared| declared.iter().any(|d| d.name() == o.operation))
+    });
     Ok(PluginOffer {
         engine: Arc::new(engine),
         guard,

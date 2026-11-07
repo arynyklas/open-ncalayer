@@ -64,6 +64,20 @@ use crate::ui::{
     PluginFormField, PluginGroupRow, PluginHiddenRow, PluginOperationRow, PluginsState,
 };
 
+/// The press of the confirm button, as a value: [`consent::user_confirmed`] needs one, and the
+/// only place that makes one is [`press`], called by the button's handler alone (a test scans
+/// for that). A second use of the user's confirmation cannot be written without one.
+pub(super) struct PressToken(());
+
+fn press() -> PressToken {
+    PressToken(())
+}
+
+#[cfg(test)]
+pub(super) fn press_for_tests() -> PressToken {
+    PressToken(())
+}
+
 /// The page's place in the window's sidebar.
 pub(super) const SECTION: i32 = 8;
 
@@ -115,6 +129,9 @@ pub(super) struct State {
     /// Answers the run's worker that waits for the user's decision.
     decision: Option<Sender<Decision>>,
     shown: Option<Shown>,
+    /// The operation of the run in progress, from the registry snapshot the run was prepared
+    /// from (not the list's, which may be older).
+    running_op: Option<OfferedOperation>,
     result: Option<ResultView>,
     /// A message for the step the page is on (an idle close, a refused operation).
     notice: String,
@@ -144,6 +161,7 @@ impl State {
             pending_op: None,
             decision: None,
             shown: None,
+            running_op: None,
             result: None,
             notice: String::new(),
             since: Instant::now(),
@@ -218,8 +236,10 @@ fn busy(open: &Rc<Workspace>) -> bool {
 /// progress goes on, and the status line tells it).
 pub(super) fn section_changed(open: &Rc<Workspace>, section: i32) {
     if section == SECTION {
-        let unread = open.plugins.borrow().reading == Plugins::Unread;
-        if unread {
+        // Every open of the page reads the installed plugins again: a plugin turned off or
+        // withdrawn meanwhile does not stay runnable in a window that was open.
+        let at_list = open.plugins.borrow().controller.step() == Step::List;
+        if at_list {
             refresh(open);
         } else {
             render(open);
@@ -394,6 +414,13 @@ fn open_operation(open: &Rc<Workspace>, group: i32, index: i32) {
 
 /// The offered operation the page is on.
 fn current_operation(st: &State) -> Option<OfferedOperation> {
+    if matches!(
+        st.controller.step(),
+        Step::Consent | Step::Running | Step::Result
+    ) && st.running_op.is_some()
+    {
+        return st.running_op.clone();
+    }
     let offer = st.offer.as_ref()?;
     offer
         .listing
@@ -668,7 +695,7 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
 
 /// The run's worker: freeze, prepare, wait for the user, call. The password moves into it.
 fn start_run(open: &Rc<Workspace>) {
-    let (spec, rx, op) = {
+    let (spec, rx, op, source) = {
         let mut st = state(open);
         let (Some(offer), Some(operation)) = (st.offer.clone(), current_operation(&st)) else {
             st.controller.dispatch(Event::PrepareFailed);
@@ -692,6 +719,8 @@ fn start_run(open: &Rc<Workspace>) {
         st.decision = Some(tx);
         let op = st.controller.id();
         st.pending_op = Some(op);
+        st.running_op = Some(operation.clone());
+        let source = Arc::clone(&open.services.plugins);
         let spec = RunSpec {
             offer,
             operation,
@@ -704,9 +733,30 @@ fn start_run(open: &Rc<Workspace>) {
             ttl: st.approval_ttl,
             idle: st.consent_idle,
         };
-        (spec, rx, op)
+        (spec, rx, op, source)
     };
     start(open, Job::Plugin, move |_, control| {
+        // The registry is read again for THIS run: what is prepared, confirmed and called is
+        // the current registry, and an operation that vanished meanwhile (a plugin turned off,
+        // withdrawn, updated) is refused before anything is shown.
+        let mut spec = spec;
+        let fresh = source.offer().ok().map(Arc::new).and_then(|offer| {
+            let same = |o: &&OfferedOperation| {
+                o.plugin_id == spec.operation.plugin_id
+                    && o.plugin_version == spec.operation.plugin_version
+                    && o.operation == spec.operation.operation
+                    && o.uses_key
+            };
+            let operation = offer.listing.operations.iter().find(same)?.clone();
+            Some((offer, operation))
+        });
+        let Some((offer, operation)) = fresh else {
+            return Ok(Output::Plugin(PluginOutput::Run(RunOutcome::NotPrepared(
+                NotPrepared::Registry,
+            ))));
+        };
+        spec.offer = offer;
+        spec.operation = operation;
         let outcome = run::run(spec, control, &rx, move |prepared| {
             super::deliver(move || with_open(|open| prepared_arrived(open, op, prepared)));
         });
@@ -725,9 +775,11 @@ fn prepared_arrived(open: &Rc<Workspace>, op: u64, prepared: Prepared) {
         // The user left meanwhile: the waiting worker is told so by whoever left.
         return;
     }
+    st.offer = Some(Arc::clone(&prepared.offer));
+    st.running_op = Some(prepared.operation.clone());
     let composed = (|| {
         let offer = st.offer.clone()?;
-        let operation = current_operation(&st)?;
+        let operation = prepared.operation.clone();
         let operations = offer.engine.plugin_operations(&operation.plugin_id).ok()?;
         let declared = operations
             .into_iter()
@@ -834,7 +886,7 @@ fn confirm(open: &Rc<Workspace>) {
     let confirmation = st
         .shown
         .as_ref()
-        .map(|shown| consent::user_confirmed(&shown.summary));
+        .map(|shown| consent::user_confirmed(&shown.summary, press()));
     let sent = match (confirmation, st.decision.take()) {
         (Some(confirmation), Some(tx)) => tx.send(Decision::Proceed(confirmation)).is_ok(),
         _ => false,
@@ -951,6 +1003,7 @@ fn clear_session(open: &Rc<Workspace>) {
         let mut st = state(open);
         st.shown = None;
         st.shown_at = None;
+        st.running_op = None;
         st.result = None;
         st.fields.clear();
         st.values.clear();

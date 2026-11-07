@@ -355,7 +355,14 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
 /// **The host's duty** (and the only caller in the workspace): call it from the handler of that
 /// button after the controller let the press through, with the very summary the page was
 /// composed from. Never ahead of time, never from a stored answer.
-pub(super) fn user_confirmed(shown: &ConsentSummary) -> UserConfirmation {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the one place in the workspace that makes the user's confirmation"
+)]
+pub(super) fn user_confirmed(
+    shown: &ConsentSummary,
+    _pressed: super::PressToken,
+) -> UserConfirmation {
     UserConfirmation::after_user_confirmed(shown)
 }
 
@@ -704,6 +711,6 @@ element = "param:path"
         let mut b = summary();
         b.content.sha256[0] ^= 1;
         assert_ne!(a.digest(), b.digest());
-        let _confirmation = user_confirmed(&a);
+        let _confirmation = user_confirmed(&a, super::super::press_for_tests());
     }
 }

@@ -66,6 +66,9 @@ pub(super) enum Decision {
 /// What the page is told when the confirmation is prepared: the trusted summary Core made, and
 /// what the page needs besides it.
 pub(super) struct Prepared {
+    /// The registry snapshot the run was prepared on, and the operation in it.
+    pub(super) offer: Arc<PluginOffer>,
+    pub(super) operation: OfferedOperation,
     pub(super) summary: ConsentSummary,
     /// The name of the file the user picked, as its path gives it.
     pub(super) file_name: String,
@@ -243,6 +246,8 @@ fn run_inner(
         .plugin_prepare(&call, &mut ctx)
         .map_err(NotPrepared::Prepare)?;
     prepared(Prepared {
+        offer: Arc::clone(&offer),
+        operation: operation.clone(),
         summary: prepared_key_use.summary().clone(),
         file_name,
         entered,
