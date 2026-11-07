@@ -146,39 +146,72 @@ fn create_raw_sign_is_a_valid_rsa_signature_over_the_document() {
     assert!(object["signerCert"].is_string(), "{object}");
 }
 
+const OPERATIONS: [&str; 7] = [
+    "sign-xml",
+    "sign-xml-element",
+    "create-cms",
+    "create-cms-attached",
+    "create-cms-timestamp",
+    "create-cms-attached-timestamp",
+    "create-raw-sign",
+];
+
+fn run_operation(operation: &str, options: &RunOptions) -> PortRun {
+    let xml = [
+        ("xml", PluginParam::Text(XML)),
+        ("tbs", PluginParam::Text("/r/data")),
+        ("parent", PluginParam::Text("/r/s")),
+    ];
+    let doc = [("file", PluginParam::Document(DOC))];
+    let params: &[(&str, PluginParam<'_>)] = match operation {
+        "sign-xml" => &xml[..1],
+        "sign-xml-element" => &xml[..],
+        _ => &doc[..],
+    };
+    run_port_operation(PORT, operation, params, options)
+}
+
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn a_wrong_profile_field_is_refused_before_the_key() {
     // Each tampered declaration says something other than what the module passes to the
-    // key import: Core's ticket compares, and nothing is signed.
-    let xml = [("xml", PluginParam::Text(XML))];
-    let doc = [("file", PluginParam::Document(DOC))];
-    for (operation, params, from, to) in [
+    // key import: Core's ticket compares, and nothing is signed. `create-raw-sign` has no
+    // options to tamper (a raw profile has no fields).
+    let with_profile = "content = \"param:file\"";
+    let tampers: [(&'static str, &'static str, &'static str); 6] = [
         (
             "sign-xml",
-            &xml[..],
             "strip_whitespace = true",
             "strip_whitespace = false",
         ),
         (
+            "sign-xml-element",
+            "base64_line_breaks = false",
+            "base64_line_breaks = true",
+        ),
+        (
+            "create-cms",
+            with_profile,
+            "content = \"param:file\"\n\n[operations.uses.key.profile]\nencapsulate = true",
+        ),
+        (
             "create-cms-attached",
-            &doc[..],
             "encapsulate = true",
             "encapsulate = false",
         ),
         (
             "create-cms-timestamp",
-            &doc[..],
             "timestamp = \"kalkan\"",
             "timestamp = \"basics\"",
         ),
-    ] {
-        let run = run_port_operation(
-            PORT,
-            operation,
-            params,
-            &RunOptions::tampered(operation, from, to),
-        );
+        (
+            "create-cms-attached-timestamp",
+            "timestamp = \"kalkan\"",
+            "timestamp = \"none\"",
+        ),
+    ];
+    for (operation, from, to) in tampers {
+        let run = run_operation(operation, &RunOptions::tampered(operation, from, to));
         assert_refused_before_the_key(&run);
         assert_eq!(run.call.refusals(), [TicketRefusal::Options], "{operation}");
         assert_eq!(
@@ -187,4 +220,78 @@ fn a_wrong_profile_field_is_refused_before_the_key() {
             "{operation}"
         );
     }
+}
+
+/// Every import an operation declares is needed: with any one deleted the manifest is refused
+/// or the call does not succeed (`Denied`, even after the key use for `keys_release`).
+#[test]
+#[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
+fn every_declared_import_is_needed() {
+    let manifest = oncl_plugin::Manifest::from_toml(&manifest_text(PORT)).unwrap();
+    for operation in OPERATIONS {
+        let op = manifest
+            .operations()
+            .iter()
+            .find(|o| o.name() == operation)
+            .unwrap();
+        for import in op.uses().imports() {
+            let name = import.name();
+            let tamper = move |text: &str| {
+                let start = text.find(&format!("name = \"{operation}\"\n")).unwrap();
+                let end = text[start..]
+                    .find("\n[[operations]]")
+                    .map_or(text.len(), |n| start + n);
+                let at = start + text[start..end].find("imports = [").unwrap();
+                let line_end = at + text[at..].find('\n').unwrap();
+                let line = &text[at..line_end];
+                let new = line
+                    .replace(&format!(", \"{name}\""), "")
+                    .replace(&format!("\"{name}\", "), "");
+                assert_ne!(new, line, "{operation}: {name}");
+                format!("{}{}{}", &text[..at], new, &text[line_end..])
+            };
+            let options = RunOptions {
+                tamper: Some(Box::new(tamper)),
+                ..RunOptions::default()
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_operation(operation, &options)
+            }));
+            if let Ok(run) = outcome {
+                assert!(
+                    run.call.error().is_some() || run.call.applied() != AppliedState::Applied,
+                    "{operation} works without {name}"
+                );
+            }
+        }
+    }
+}
+
+/// The oracle refuses what a signature wrapping would need: an unknown transform, a second
+/// element with the signed Id placed before the signed one, a signature without references.
+#[test]
+#[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
+fn the_xml_oracle_rejects_wrapping_shapes() {
+    let params = [
+        ("xml", PluginParam::Text(XML)),
+        ("tbs", PluginParam::Text("/r/data")),
+        ("parent", PluginParam::Text("/r/s")),
+    ];
+    let run = run_port_operation(PORT, "sign-xml-element", &params, &RunOptions::default());
+    assert_applied(&run);
+    let signed = response_object(&run).as_str().unwrap().to_owned();
+    let c14n = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+    assert!(signed.contains(c14n), "{signed}");
+    let unknown = signed.replacen(c14n, "urn:unknown-transform", 1);
+    oracle::assert_xml_rejected_for(unknown.as_bytes(), &run.cert, "");
+    let duplicate = signed.replacen(
+        "<data Id=\"d1\">",
+        "<data Id=\"d1\">x</data><data Id=\"d1\">",
+        1,
+    );
+    oracle::assert_xml_rejected_for(duplicate.as_bytes(), &run.cert, "ambiguous");
+    let start = signed.find("<ds:Reference").unwrap();
+    let end = signed.find("</ds:Reference>").unwrap() + "</ds:Reference>".len();
+    let none = format!("{}{}", &signed[..start], &signed[end..]);
+    oracle::assert_xml_rejected_for(none.as_bytes(), &run.cert, "no references");
 }
