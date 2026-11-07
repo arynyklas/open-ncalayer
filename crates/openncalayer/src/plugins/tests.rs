@@ -1275,6 +1275,51 @@ fn an_update_that_widens_an_operations_network_waits_for_the_user() {
     assert_eq!(installed, v("0.1.0"));
 }
 
+/// The reasons the update of `old` to `new` waits for, per operation.
+fn held_reasons(
+    old: &[String],
+    new: &[String],
+) -> Vec<(String, Vec<oncl_plugin::operations::AddedReason>)> {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let release = sandbox.release("0.1.0", &example_ops("0.1.0", old));
+    sandbox.publish(1, vec![release.clone()]);
+    service.install_from_catalog(ID, None).unwrap();
+    let newer = sandbox.release("0.2.0", &example_ops("0.2.0", new));
+    sandbox.publish(2, vec![release, newer]);
+    service.check_now();
+    let pending = service.view().installed[0].pending_update.clone().unwrap();
+    pending
+        .added
+        .operations
+        .into_iter()
+        .map(|o| (o.name, o.reasons))
+        .collect()
+}
+
+#[test]
+fn switching_server_on_is_held_for_the_server_reason() {
+    use oncl_plugin::operations::AddedReason;
+    let key = operation("sign", "Sign", true, false);
+    let served = key.replacen("manual = true\n", "manual = true\nserver = true\n", 1);
+    assert_ne!(key, served);
+    assert_eq!(
+        held_reasons(&[key], &[served]),
+        [("sign".to_owned(), vec![AddedReason::Server])]
+    );
+}
+
+#[test]
+fn widening_the_network_is_held_for_the_network_reason() {
+    use oncl_plugin::operations::AddedReason;
+    let held = held_reasons(
+        &[operation("fetch", "Fetch", false, false)],
+        &[operation("fetch", "Fetch", false, true)],
+    );
+    assert_eq!(held.len(), 1);
+    assert!(held[0].1.contains(&AddedReason::Network), "{held:?}");
+}
+
 #[test]
 fn a_label_only_change_of_a_key_operation_applies_silently() {
     let (notices, installed) = updated(

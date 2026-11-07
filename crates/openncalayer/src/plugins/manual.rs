@@ -16,7 +16,7 @@
 use oncl_core::plugins::{CallerContext, PackageHash, PluginRegistry};
 use oncl_pki::http::HttpMethod;
 use oncl_plugin::operations::{Network, Operation, Param};
-use oncl_plugin::{InstanceLimits, Localized, NCA_PKI_HOSTS, Store};
+use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA, InstanceLimits, Localized, NCA_PKI_HOSTS, Store};
 use tracing::warn;
 
 use super::Version;
@@ -33,8 +33,8 @@ pub fn manual_caller() -> CallerContext {
 /// time-stamp and OCSP services (what `PkiUrl::Default` names). CRLs are fetched under the
 /// provenance of the certificate, not from this list.
 const PKI_ENDPOINTS: [(HttpMethod, &str); 2] = [
-    (HttpMethod::Post, "http://tsp.pki.gov.kz"),
-    (HttpMethod::Post, "http://ocsp.pki.gov.kz"),
+    (HttpMethod::Post, DEFAULT_TSA),
+    (HttpMethod::Post, DEFAULT_OCSP),
 ];
 
 /// One operation of an installed plugin that the manual window may offer.
@@ -212,6 +212,19 @@ mod tests {
                 .replace(ID, "kz.other.plugin")
                 + &operations.concat()
         })
+    }
+
+    #[test]
+    fn the_pki_endpoints_are_within_the_nca_hosts() {
+        for (_, url) in PKI_ENDPOINTS {
+            let host = url.trim_start_matches("http://");
+            assert!(
+                NCA_PKI_HOSTS
+                    .iter()
+                    .any(|h| host == *h || host.ends_with(&format!(".{h}"))),
+                "{url}"
+            );
+        }
     }
 
     #[test]
