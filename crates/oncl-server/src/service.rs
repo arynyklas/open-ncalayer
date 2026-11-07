@@ -365,6 +365,7 @@ fn install_plugins(
         registry
             .install(
                 manifest,
+                oncl_core::plugins::loose_package_hash(manifest_text.as_bytes(), &wasm),
                 &wasm,
                 oncl_plugin::InstanceLimits {
                     max_memory: plugin.max_memory,

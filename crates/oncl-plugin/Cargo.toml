@@ -116,6 +116,8 @@ required-features = ["distribution"]
 name = "modules"
 required-features = ["distribution"]
 [[test]]
+name = "operations"
+[[test]]
 name = "package"
 required-features = ["distribution"]
 [[test]]

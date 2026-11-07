@@ -200,6 +200,7 @@ pub fn registry(
     let mut registry = PluginRegistry::new();
     registry.install(
         manifest,
+        oncl_core::plugins::loose_package_hash(&manifest_bytes, &wasm),
         &wasm,
         oncl_plugin::InstanceLimits {
             max_memory: 1 << 20,

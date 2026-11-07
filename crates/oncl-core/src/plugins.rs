@@ -22,7 +22,11 @@ use std::cell::RefCell;
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 mod capabilities;
 mod cms;
+mod manual;
 mod xml;
+pub use manual::{
+    PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
+};
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
 #[derive(Clone, Debug)]
@@ -31,7 +35,7 @@ pub struct PluginPermission {
     operation: String,
     caller: CallerContext,
     imports: Vec<Import>,
-    keys: Vec<KeyId>,
+    keys: KeyScope,
     files: Vec<String>,
     endpoints: Vec<String>,
     pki_endpoints: Vec<PkiEndpoint>,
@@ -48,14 +52,14 @@ impl PluginPermission {
             operation: operation.into(),
             caller,
             imports: imports.into_iter().collect(),
-            keys: Vec::new(),
+            keys: KeyScope::Exact(Vec::new()),
             files: Vec::new(),
             endpoints: Vec::new(),
             pki_endpoints: Vec::new(),
         }
     }
     pub fn with_keys(mut self, keys: impl IntoIterator<Item = KeyId>) -> Self {
-        self.keys = keys.into_iter().collect();
+        self.keys = KeyScope::Exact(keys.into_iter().collect());
         self
     }
     pub fn with_files(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -89,9 +93,48 @@ impl PluginPermission {
             && self.operation == call.operation
             && self.caller == *caller
     }
+    /// Registry (host) side: a declared permission does not pin the key.
     fn permits(&self, import: Import, key: Option<&KeyId>) -> bool {
-        self.imports.contains(&import) && key.is_none_or(|key| self.keys.contains(key))
+        self.imports.contains(&import)
+            && key.is_none_or(|key| match &self.keys {
+                KeyScope::Exact(keys) => keys.contains(key),
+                KeyScope::Declared => true,
+            })
     }
+    /// Per-call grant side: the chosen key must be named exactly; a declared permission
+    /// can never stand in for it.
+    fn permits_grant(&self, import: Import, key: Option<&KeyId>) -> bool {
+        self.imports.contains(&import)
+            && key.is_none_or(|key| match &self.keys {
+                KeyScope::Exact(keys) => keys.contains(key),
+                KeyScope::Declared => false,
+            })
+    }
+    /// Registry policy built from a manifest declaration; see [`PluginRegistry::allow_declared`].
+    fn declared(
+        plugin_id: &str,
+        operation: &oncl_plugin::operations::Operation,
+        caller: CallerContext,
+    ) -> Self {
+        let mut p = Self::new(
+            plugin_id,
+            operation.name(),
+            caller,
+            operation.uses().imports().iter().copied(),
+        );
+        p.keys = KeyScope::Declared;
+        p
+    }
+}
+
+/// Which keys a permission covers.
+#[derive(Clone, Debug)]
+enum KeyScope {
+    /// Exactly these keys (the only scope of a permission built by the host's own code).
+    Exact(Vec<KeyId>),
+    /// The registry policy of a declared operation: any key, because the chosen key is
+    /// checked by the per-call grant, which can never be `Declared`.
+    Declared,
 }
 
 fn checked_endpoints(
@@ -122,6 +165,8 @@ struct Installed {
     policy: Arc<[PluginPermission]>,
     capabilities: oncl_plugin::Capabilities,
     shared: Arc<oncl_plugin::SharedState>,
+    identity: PluginIdentity,
+    manifest: Manifest,
 }
 /// Trusted installed code plus explicit host policy. Never discovers, downloads or updates code.
 #[derive(Default)]
@@ -139,9 +184,15 @@ impl PluginRegistry {
     pub fn new() -> Self {
         Self::default()
     }
+    /// `package` is [`PackageHash::File`] of the package file as read by
+    /// `oncl_plugin::Package::read` (prefer [`PluginRegistry::install_package`]) or, for a
+    /// host that has no package file, [`loose_package_hash`]. The registry cannot check it
+    /// against `manifest` and `wasm`. The registered identity is `{id, package, version}`
+    /// and nothing else.
     pub fn install(
         &mut self,
         manifest: Manifest,
+        package: PackageHash,
         wasm: &[u8],
         limits: InstanceLimits,
         policy: Vec<PluginPermission>,
@@ -163,6 +214,12 @@ impl PluginRegistry {
             .compile(&manifest, wasm)
             .map_err(|e| OperationError::Plugin(e.into()))?
             .with_limits(limits);
+        let identity = PluginIdentity {
+            id: manifest.id.clone(),
+            package,
+            version: manifest.version.to_string(),
+        };
+        let retained = manifest.clone();
         self.installed.insert(
             manifest.id,
             Installed {
@@ -170,6 +227,8 @@ impl PluginRegistry {
                 policy: policy.into(),
                 capabilities: manifest.capabilities,
                 shared: Arc::default(),
+                identity,
+                manifest: retained,
             },
         );
         Ok(())
@@ -327,13 +386,18 @@ struct CapabilityAdmission {
 }
 impl Backend<'_, '_> {
     fn authorize(&self, import: Import, key: Option<&KeyId>) -> Result<(), OperationError> {
-        let allowed = |permissions: &[PluginPermission]| {
-            permissions
-                .iter()
-                .any(|p| p.matches(&self.call, self.bindings.caller) && p.permits(import, key))
+        let allowed = |permissions: &[PluginPermission], grant: bool| {
+            permissions.iter().any(|p| {
+                p.matches(&self.call, self.bindings.caller)
+                    && if grant {
+                        p.permits_grant(import, key)
+                    } else {
+                        p.permits(import, key)
+                    }
+            })
         };
-        if !allowed(self.ctx.grant.plugin_permissions())
-            || !allowed(self.host)
+        if !allowed(self.ctx.grant.plugin_permissions(), true)
+            || !allowed(self.host, false)
             || key.is_some_and(|key| !self.ctx.grant.allows_key(key))
         {
             return Err(OperationError::PermissionDenied);

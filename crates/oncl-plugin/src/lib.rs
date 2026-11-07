@@ -23,6 +23,7 @@ mod host;
 pub mod manifest;
 #[cfg(feature = "distribution")]
 pub mod modules;
+pub mod operations;
 #[cfg(feature = "distribution")]
 pub mod package;
 mod runtime;
@@ -42,7 +43,7 @@ pub use caps::{
 };
 pub use host::HostServices;
 pub use manifest::{
-    Capabilities, HttpPrefix, Localized, Manifest, OriginPattern, Replaces, is_symbolic_name,
+    Added, Capabilities, HttpPrefix, Localized, Manifest, OriginPattern, Replaces, is_symbolic_name,
 };
 #[cfg(feature = "distribution")]
 pub use modules::{BUILT_IN, LoadedInfo, MemoryLimits, OnMissing, PluginModules};
@@ -76,6 +77,9 @@ pub enum PackageError {
     /// `plugin.toml` is not TOML of the expected shape, or breaks a rule of the format.
     #[error("the plugin manifest is malformed: {0}")]
     Manifest(String),
+    /// `[[operations]]` break a rule of the format.
+    #[error("the plugin manifest's operations are wrong: {0}")]
+    Operation(#[from] operations::OperationError),
     /// The package file could not be read.
     #[error("the plugin package could not be read: {0}")]
     Io(#[from] io::Error),
