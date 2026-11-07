@@ -156,6 +156,12 @@ jobs:
       - name: SDK dependency closure
         if: runner.os == 'Linux'
         run: cargo xtask sdk closure
+      # Offline and read-only (under 1 s warm): the lint of the `[[operations]]` of every
+      # `plugins/*/plugin.toml`. The modules are not built in this job, so the imports rule is
+      # skipped with a warning (`--require-wasm` is for a job that has packed the ports).
+      - name: Plugin operations lint
+        if: runner.os == 'Linux'
+        run: cargo xtask plugin-ops-check
 
   # The built-in modules' limits in a 32-bit process, where their memory is smallest.
   builtins-x86:
