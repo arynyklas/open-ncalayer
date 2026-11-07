@@ -67,6 +67,9 @@ impl KeyUseGuard for Authority {
         {
             return Err(OperationError::PermissionDenied);
         }
+        if let Some(ticket) = event.plugin() {
+            crate::plugin::audit_line(event.operation_id.get(), ticket);
+        }
         Ok(KeyUseReceipt::new(event.clone()))
     }
     fn finish(&self, receipt: KeyUseReceipt, outcome: KeyUseOutcome) -> Result<(), OperationError> {

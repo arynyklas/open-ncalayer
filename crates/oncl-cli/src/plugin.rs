@@ -9,31 +9,47 @@
 //! bind the signed bytes to a document, the key use needs the explicit `--plugin-bytes`. Core
 //! forces the declared signature options (there is no `--profile`: the profile is the
 //! manifest's). A plugin without declarations is unchanged.
+//!
+//! A declared operation may also be given typed parameters instead of a free `--args-file`
+//! (`--param`, `--param-file`, `--param-flag`): the request is then built by Core from the
+//! manifest's template exactly as the manual window builds it (docs/user/cli.md, "plugin").
+//! The CLI never prompts for consent: the operator who runs the command is the consenting
+//! party, and `--plugin-bytes` is that consent for a key use.
+//!
+//! `plugin operations` lists what a manifest declares (see [`crate::plugin_list`]).
 use crate::{args::Cli, bounded, local::Input, output, secrets};
 use clap::{Args, Subcommand};
 use oncl_core::{
-    Engine, OperationContext, OperationError,
+    Engine, ErrorCode, OperationContext, OperationError,
     keys::{KeyRequest, KeySelector},
     plugins::{
-        CallerContext, PluginBindings, PluginCall, PluginKeyBinding, PluginPermission,
-        PluginRegistry,
+        CallerContext, PluginBindings, PluginCall, PluginKeyBinding, PluginParam, PluginPermission,
+        PluginRefusalCode, PluginRegistry, PluginRequestError,
     },
 };
 use oncl_pdk::abi::Import;
 use oncl_pki::resource::{ConfigurationReservation, ProcessingError, SharedBudget};
+use oncl_plugin::operations::{Param, ParamKind};
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
-    Call(PluginCallArgs),
+    /// Runs one operation of a plugin under the operator's grants.
+    Call(Box<PluginCallArgs>),
+    /// Lists the operations a plugin manifest declares (and optionally checks its module).
+    Operations(crate::plugin_list::OperationsArgs),
 }
 #[derive(Args)]
 pub struct PluginCallArgs {
+    /// The plugin's `plugin.toml` (at most 64 KiB).
     #[arg(long)]
     pub manifest: PathBuf,
+    /// The plugin's WebAssembly module (at most 16 MiB).
     #[arg(long)]
     pub module: PathBuf,
+    /// The operation to run: a declared one (with `server = true`), or the label granted for a
+    /// plugin without declarations.
     #[arg(long)]
     pub operation: String,
     /// Trusted local operator label; never a browser origin or guest field.
@@ -42,26 +58,35 @@ pub struct PluginCallArgs {
     /// Exact host import names the operator allows (for example `hash`).
     #[arg(long)]
     pub allow_import: Vec<String>,
-    /// JSON arguments file (bounded; `-` is stdin).
+    /// Free JSON request for the module (bounded; `-` is stdin). A plugin without declared
+    /// operations needs it; a declared operation takes `--param*` instead.
     #[arg(long)]
-    pub args_file: String,
+    pub args_file: Option<String>,
+    /// Where the module's response is written (`-` is stdout); never overwrites.
     #[arg(long)]
     pub output: String,
+    /// PKCS#12 or JKS key container to bind as key handle `--key-handle`.
     #[arg(long)]
     pub key: Option<PathBuf>,
+    /// The entry of `--key` when it holds several.
     #[arg(long, requires = "key")]
     pub alias: Option<String>,
     /// Operator-configured key by name (see `--key-config`); no container path on the command line.
     #[arg(long, requires = "key_config", conflicts_with_all = ["key", "alias"])]
     pub key_name: Option<String>,
+    /// The operator's JSON key configuration that `--key-name` is looked up in.
     #[arg(long, requires = "key_name")]
     pub key_config: Option<PathBuf>,
+    /// The handle the module addresses the bound key by.
     #[arg(long, default_value_t = 1)]
     pub key_handle: u32,
+    /// File holding the key password (an owner-only directory).
     #[arg(long)]
     pub secret_file: Option<PathBuf>,
+    /// Ask for the key password on the terminal.
     #[arg(long, conflicts_with = "secret_file")]
     pub secret_interactive: bool,
+    /// Confirms this exact key use; required with a key. Nothing else ever asks.
     #[arg(long)]
     pub authorize: bool,
     /// Exact PKI base the guest's key validation may reach, as `GET=url`/`POST=url`.
@@ -71,21 +96,39 @@ pub struct PluginCallArgs {
     /// key use of an operation the manifest declares; the CLI cannot bind them to a document).
     #[arg(long)]
     pub plugin_bytes: bool,
+    /// Text, choice or locale value of a declared parameter: `NAME=VALUE`.
+    #[arg(long)]
+    pub param: Vec<String>,
+    /// A document parameter read from a file (`-` is stdin): `NAME=PATH`.
+    #[arg(long)]
+    pub param_file: Vec<String>,
+    /// A flag parameter set to true (an unnamed flag parameter is false).
+    #[arg(long)]
+    pub param_flag: Vec<String>,
     /// Not accepted: the signature profile of a declared operation comes from the manifest.
     #[arg(long, hide = true)]
     pub profile: Option<String>,
 }
-const MANIFEST_BYTES: u64 = 64 * 1024;
-const MODULE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MANIFEST_BYTES: u64 = 64 * 1024;
+pub(crate) const MODULE_BYTES: u64 = 16 * 1024 * 1024;
 const ARGUMENT_BYTES: usize = 1 << 18;
 
 impl PluginCommand {
-    pub fn args(&self) -> &PluginCallArgs {
-        let Self::Call(args) = self;
-        args
+    /// The `call` arguments; `None` for `operations`, which opens no key and no engine.
+    pub fn call_args(&self) -> Option<&PluginCallArgs> {
+        match self {
+            Self::Call(args) => Some(args.as_ref()),
+            Self::Operations(_) => None,
+        }
+    }
+    /// The `--output` destination of `call`.
+    pub fn output(&self) -> Option<&str> {
+        self.call_args().map(|args| args.output.as_str())
     }
     pub fn preflight(&self) -> Result<(), &'static str> {
-        let args = self.args();
+        let Some(args) = self.call_args() else {
+            return Ok(());
+        };
         if args.profile.is_some() {
             return Err("ProfileFromManifest");
         }
@@ -116,7 +159,12 @@ impl PluginCommand {
         {
             return Err("InvalidCombination");
         }
-        if args.args_file == "-" && args.secret_interactive {
+        args.preflight_params()?;
+        let stdin = args.stdin_claims();
+        if stdin > 1 {
+            return Err("StdinConflict");
+        }
+        if stdin == 1 && args.secret_interactive {
             return Err("SecretRequiresSeparateInput");
         }
         Ok(())
@@ -126,7 +174,9 @@ impl PluginCommand {
         control: &crate::control::Control,
         reservation: &mut oncl_pki::resource::ConfigurationReservation,
     ) -> Result<Option<crate::keysrc::Plan>, OperationError> {
-        let args = self.args();
+        let Some(args) = self.call_args() else {
+            return Ok(None);
+        };
         if let (Some(config), Some(name)) = (&args.key_config, &args.key_name) {
             return crate::keysrc::resolve(config, name, control, reservation).map(Some);
         }
@@ -139,9 +189,77 @@ impl PluginCommand {
             .transpose()
     }
     pub fn has_key(&self) -> bool {
-        let args = self.args();
-        args.key.is_some() || args.key_name.is_some()
+        self.call_args()
+            .is_some_and(|args| args.key.is_some() || args.key_name.is_some())
     }
+}
+impl PluginCallArgs {
+    /// Whether any typed parameter was given.
+    fn typed(&self) -> bool {
+        !(self.param.is_empty() && self.param_file.is_empty() && self.param_flag.is_empty())
+    }
+    /// Whether the request is built from the manifest's template and typed parameters rather
+    /// than read from a free file: whenever there is no `--args-file`.
+    fn builds_request(&self) -> bool {
+        self.args_file.is_none()
+    }
+    /// How many of the document sources read standard input.
+    fn stdin_claims(&self) -> usize {
+        usize::from(self.args_file.as_deref() == Some("-"))
+            + self
+                .param_file
+                .iter()
+                .filter(|entry| entry.split_once('=').is_some_and(|(_, path)| path == "-"))
+                .count()
+    }
+    /// Syntax of the typed parameters, before any file is opened. Values are never echoed.
+    fn preflight_params(&self) -> Result<(), &'static str> {
+        if self.typed() && self.args_file.is_some() {
+            return Err("InvalidCombination");
+        }
+        if self.param.len() > MAX_TYPED || self.param_file.len() > MAX_TYPED {
+            return Err("InvalidCombination");
+        }
+        if self.param_flag.len() > MAX_TYPED {
+            return Err("InvalidCombination");
+        }
+        let text = |entry: &String| {
+            entry
+                .split_once('=')
+                .is_some_and(|(name, _)| param_name(name))
+        };
+        let file = |entry: &String| {
+            entry
+                .split_once('=')
+                .is_some_and(|(name, path)| param_name(name) && !path.is_empty())
+        };
+        if !self.param.iter().all(text)
+            || !self.param_file.iter().all(file)
+            || !self.param_flag.iter().all(|name| param_name(name))
+        {
+            return Err("InvalidCombination");
+        }
+        Ok(())
+    }
+    /// The value of a `--param NAME=VALUE`, for the options a profile reads from a parameter.
+    fn text(&self, name: &str) -> Option<String> {
+        self.param.iter().find_map(|entry| {
+            entry
+                .split_once('=')
+                .filter(|(n, _)| *n == name)
+                .map(|(_, value)| value.to_owned())
+        })
+    }
+}
+/// The most parameters of each kind the command line may carry (a declared operation has at
+/// most [`oncl_plugin::operations::MAX_PARAMS`]).
+const MAX_TYPED: usize = oncl_plugin::operations::MAX_PARAMS;
+/// `^[a-z][a-z0-9_]{0,31}$`, the name of a declared parameter.
+fn param_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 /// The subcode of the refusal that ended this process's one command (the CLI runs exactly one
 /// operation per process, so a process-wide slot is unambiguous). Read by the failure line.
@@ -159,6 +277,36 @@ pub fn take_subcode() -> Option<&'static str> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
 }
+/// The operator's record of an authorised key use of a declared operation, written before the
+/// key is used (so a failing signature is still recorded). The CLI has no journal: stderr is
+/// the record. It names the trusted facts of the ticket, never the document, a parameter,
+/// a secret or the nonce (a CLI use has none: the operator's `--plugin-bytes` is the
+/// consent, recorded as `grant=cli-plugin-bytes`).
+pub fn audit_line(operation_id: u64, ticket: &oncl_core::plugins::PluginUse) {
+    let record = oncl_core::plugins::PluginAuditRecord::from_ticket(
+        ticket,
+        None,
+        Some("cli-plugin-bytes".to_owned()),
+    );
+    crate::diagnostic(format_args!(
+        "oncl: plugin_use operation_id={operation_id} plugin={} version={} package={}:{} \
+         operation={} caller={} declared={} grant={} content_sha256={} content_len={} \
+         prehashed={} options_sha256={} ticket={}",
+        record.plugin_id,
+        record.version,
+        record.package_kind,
+        crate::reports::Hex(&record.package_sha256),
+        record.operation,
+        record.caller.as_str(),
+        record.declared,
+        record.grant_id.as_deref().unwrap_or("none"),
+        crate::reports::Hex(&record.content_sha256),
+        record.content_len,
+        record.prehashed,
+        crate::reports::Hex(&record.options_sha256),
+        crate::reports::Hex(&record.ticket_digest),
+    ));
+}
 
 /// What the manifest declaration allows this command: the exact imports to grant and, for
 /// a key use of a declared operation under `--plugin-bytes`, the grant its ticket is checked
@@ -166,6 +314,8 @@ pub fn take_subcode() -> Option<&'static str> {
 pub struct Checked {
     pub imports: Vec<Import>,
     pub bytes: Option<BytesGrant>,
+    /// The declared parameters of the operation (empty for a plugin without declarations).
+    pub params: Vec<oncl_plugin::operations::Param>,
 }
 /// The CLI's `--plugin-bytes` grant of one declared operation (the operator accepted that the
 /// plugin chooses the signed bytes); the ticket of the key use must otherwise match the
@@ -218,6 +368,10 @@ fn check_declaration(
         .filter_map(|name| Import::from_name(name))
         .collect();
     if manifest.operations().is_empty() {
+        // A request built from typed parameters needs a declared operation.
+        if args.builds_request() {
+            return Err("not-declared");
+        }
         if args.plugin_bytes {
             crate::diagnostic(format_args!(
                 "oncl: warning: --plugin-bytes has no effect: the plugin declares no operations"
@@ -226,6 +380,7 @@ fn check_declaration(
         return Ok(Checked {
             imports: named,
             bytes: None,
+            params: Vec::new(),
         });
     }
     let operation = manifest
@@ -248,7 +403,8 @@ fn check_declaration(
     if !args.plugin_pki_endpoint.is_empty() && !matches!(operation.uses().network(), Network::Pki) {
         return Err("network-not-declared");
     }
-    let none: &dyn Fn(&str) -> Option<String> = &|_| None;
+    // A profile that names a text parameter is matched with the value `--param` gave it.
+    let value = |name: &str| args.text(name);
     let bytes = (has_key && args.plugin_bytes).then(|| BytesGrant {
         plugin: manifest.id.clone(),
         operation: operation.name().to_owned(),
@@ -257,10 +413,14 @@ fn check_declaration(
             .uses()
             .keys()
             .iter()
-            .map(|use_| (use_.kind(), use_.options_sha256(none)))
+            .map(|use_| (use_.kind(), use_.options_sha256(&value)))
             .collect(),
     });
-    Ok(Checked { imports, bytes })
+    Ok(Checked {
+        imports,
+        bytes,
+        params: operation.params().to_vec(),
+    })
 }
 fn pki_endpoint(text: &str) -> Option<(oncl_pki::http::HttpMethod, &str)> {
     let (method, url) = text.split_once('=')?;
@@ -293,7 +453,7 @@ pub fn permission(
             .filter_map(|e| pki_endpoint(e)),
     )
 }
-fn read_bounded_file(
+pub(crate) fn read_bounded_file(
     path: &PathBuf,
     maximum: u64,
     reservation: &mut ConfigurationReservation,
@@ -331,7 +491,7 @@ pub fn registry(
     selector: Option<&KeySelector>,
     budget: &Arc<SharedBudget>,
 ) -> Result<(PluginRegistry, ConfigurationReservation, String, Checked), OperationError> {
-    let args = command.args();
+    let args = command.call_args().ok_or(OperationError::InvalidContext)?;
     let mut reservation = budget.reserve_configuration(0, 0)?;
     let manifest_bytes = read_bounded_file(&args.manifest, MANIFEST_BYTES, &mut reservation, 64)?;
     let wasm = read_bounded_file(&args.module, MODULE_BYTES, &mut reservation, 4)?;
@@ -359,30 +519,126 @@ pub fn registry(
     )?;
     Ok((registry, reservation, id, checked))
 }
+/// One typed parameter, owned until the request is built.
+enum Owned {
+    Document(bounded::Bytes),
+    Text(String),
+    Flag(bool),
+}
+/// A refused request: the stable subcode is noted for the failure line, the error is the
+/// one Core gives it. Nothing was opened and no key was touched.
+fn refuse(error: PluginRequestError) -> OperationError {
+    record_subcode(PluginRefusalCode::from(&error).id());
+    error.into()
+}
+/// `NAME=VALUE`, already checked by the preflight.
+fn pair(entry: &str) -> Result<(&str, &str), OperationError> {
+    entry
+        .split_once('=')
+        .ok_or_else(|| ProcessingError::InvalidInput("malformed parameter").into())
+}
+/// The request of a declared operation: Core fills the manifest's template with the typed
+/// parameters, exactly as the manual window does (documents as standard base64).
+fn typed_request(
+    engine: &Engine,
+    id: &str,
+    args: &PluginCallArgs,
+    declared: &[Param],
+    ctx: &mut OperationContext,
+) -> Result<String, OperationError> {
+    let kind = |name: &str| declared.iter().find(|p| p.name == name).map(|p| &p.kind);
+    let mut owned: Vec<(&str, Owned)> = Vec::new();
+    for entry in &args.param {
+        let (name, value) = pair(entry)?;
+        owned.push((name, Owned::Text(value.to_owned())));
+    }
+    for entry in &args.param_file {
+        let (name, path) = pair(entry)?;
+        // A file is read only for a declared document, and never past its declared size (or
+        // the request limit): a larger one is refused as `param-too-large`.
+        let limit = match kind(name) {
+            Some(ParamKind::Document { max_bytes }) => {
+                usize::try_from((*max_bytes).min(ARGUMENT_BYTES as u64)).unwrap_or(ARGUMENT_BYTES)
+            }
+            None => return Err(refuse(PluginRequestError::UnknownParam(name.to_owned()))),
+            Some(_) => return Err(refuse(PluginRequestError::WrongKind(name.to_owned()))),
+        };
+        let mut input = Input::open(path)?;
+        let bytes = bounded::read(input.source(), limit, ctx).inspect_err(|error| {
+            if error.code() == ErrorCode::InputLimit {
+                record_subcode(PluginRefusalCode::ParamTooLarge.id());
+            }
+        })?;
+        owned.push((name, Owned::Document(bytes)));
+    }
+    for name in &args.param_flag {
+        owned.push((name, Owned::Flag(true)));
+    }
+    // A flag that is not named is off.
+    for param in declared {
+        if matches!(param.kind, ParamKind::Flag) && !owned.iter().any(|(n, _)| *n == param.name) {
+            owned.push((&param.name, Owned::Flag(false)));
+        }
+    }
+    let params: Vec<(&str, PluginParam<'_>)> = owned
+        .iter()
+        .map(|(name, value)| {
+            let value = match value {
+                Owned::Document(bytes) => PluginParam::Document(bytes.as_bytes()),
+                Owned::Flag(on) => PluginParam::Flag(*on),
+                Owned::Text(text) => match kind(name) {
+                    Some(ParamKind::Choice { .. }) => PluginParam::Choice(text),
+                    Some(ParamKind::Locale) => PluginParam::Locale(text),
+                    _ => PluginParam::Text(text),
+                },
+            };
+            (*name, value)
+        })
+        .collect();
+    engine
+        .plugin_server_request(id, &args.operation, &params)
+        .map_err(refuse)
+}
 pub fn call(
     engine: &Engine,
     command: &PluginCommand,
     id: &str,
+    checked: &Checked,
     selector: Option<&KeySelector>,
     cli: &Cli,
     ctx: &mut OperationContext,
 ) -> Result<i32, OperationError> {
-    let args = command.args();
+    let args = command.call_args().ok_or(OperationError::InvalidContext)?;
+    // A request built from typed parameters is refused before a secret is asked for.
+    let built = if args.builds_request() {
+        Some(typed_request(engine, id, args, &checked.params, ctx)?)
+    } else {
+        None
+    };
     let _secret_memory = ctx.resources().reserve_memory(16384)?;
     let secret = if selector.is_some() {
         Some(secrets::read(
             args.secret_file.as_deref(),
             args.secret_interactive,
-            args.args_file == "-",
+            args.stdin_claims() > 0,
             ctx,
         )?)
     } else {
         None
     };
-    let mut input = Input::open(&args.args_file)?;
-    let raw = bounded::read(input.source(), ARGUMENT_BYTES, ctx)?;
-    let text = std::str::from_utf8(raw.as_bytes())
-        .map_err(|_| ProcessingError::InvalidInput("plugin arguments are not UTF-8"))?;
+    let free = match &args.args_file {
+        Some(path) => {
+            let mut input = Input::open(path)?;
+            Some(bounded::read(input.source(), ARGUMENT_BYTES, ctx)?)
+        }
+        None => None,
+    };
+    let text = match (&built, &free) {
+        (Some(request), _) => request.as_str(),
+        (None, Some(raw)) => std::str::from_utf8(raw.as_bytes())
+            .map_err(|_| ProcessingError::InvalidInput("plugin arguments are not UTF-8"))?,
+        (None, None) => return Err(OperationError::InvalidContext),
+    };
     let caller = caller(args);
     let bindings = match (selector, &secret) {
         (Some(selector), Some(secret)) => {
@@ -495,6 +751,106 @@ mod tests {
         param.uses = vec![(KeyKind::Raw, None)];
         assert_eq!(
             param.check(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH)),
+            Err(R::Options)
+        );
+    }
+
+    const XML_DECLARED: &str = r#"id = "test.cli"
+name.ru = "x"
+name.kk = "x"
+name.en = "x"
+version = "1.0.0"
+min_core = "0.1.0-alpha.7"
+modules = ["test.cli.module"]
+[capabilities]
+keys = true
+[[operations]]
+name = "sign"
+module = "test.cli.module"
+server = true
+request = '{"module":"test.cli.module","method":"m","args":["{file:base64}","{xp}"]}'
+label = { ru = "а", kk = "ә", en = "a" }
+[[operations.params]]
+name = "file"
+kind = "document"
+max_bytes = 4096
+[[operations.params]]
+name = "xp"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["keys_sign_xml"]
+network = "none"
+[[operations.uses.key]]
+kind = "xml"
+content = "param:file"
+[operations.uses.key.profile]
+element = "param:xp"
+"#;
+
+    fn checked(extra: &[&str]) -> Checked {
+        use clap::Parser;
+        let mut argv = vec![
+            "oncl",
+            "plugin",
+            "call",
+            "--manifest",
+            "m",
+            "--module",
+            "w",
+            "--operation",
+            "sign",
+            "--caller",
+            "op",
+            "--output",
+            "-",
+            "--key",
+            "k",
+            "--authorize",
+            "--plugin-bytes",
+        ];
+        argv.extend(extra);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let crate::args::Command::Plugin { command } = &cli.command else {
+            panic!("a plugin command")
+        };
+        command.preflight().unwrap();
+        let manifest = oncl_plugin::Manifest::from_toml(XML_DECLARED).unwrap();
+        check_declaration(&manifest, command.call_args().unwrap(), true).unwrap()
+    }
+    /// The options hash the ticket of a use of the profile with this element carries.
+    fn options_of(element: &str) -> [u8; 32] {
+        let manifest = oncl_plugin::Manifest::from_toml(XML_DECLARED).unwrap();
+        let use_ = &manifest.operations()[0].uses().keys()[0];
+        use_.options_sha256(&|name| (name == "xp").then(|| element.to_owned()))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_profile_parameter_is_granted_with_the_value_the_operator_gave() {
+        // Typed: the grant covers exactly the profile with that element, and no other.
+        let granted = checked(&["--param", "xp=/root/a", "--param-file", "file=f"])
+            .bytes
+            .unwrap();
+        granted
+            .check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a")))
+            .unwrap();
+        assert_eq!(
+            granted.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/b"))),
+            Err(R::Options)
+        );
+        // A text that is no XPath cannot be matched by anything.
+        let invalid = checked(&["--param", "xp=root", "--param-file", "file=f"])
+            .bytes
+            .unwrap();
+        assert_eq!(
+            invalid.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root"))),
+            Err(R::Options)
+        );
+        // Free arguments carry no value for it: refused, as before.
+        let free = checked(&["--args-file", "a.json"]).bytes.unwrap();
+        assert_eq!(
+            free.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a"))),
             Err(R::Options)
         );
     }
