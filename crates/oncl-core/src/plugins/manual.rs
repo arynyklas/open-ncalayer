@@ -158,7 +158,7 @@ pub fn loose_package_hash(manifest_toml: &[u8], wasm: &[u8]) -> PackageHash {
 impl Installed {
     /// The operation, if the manual window may offer it: declared, runnable (not derived),
     /// manual, and not `network = [urls]`.
-    fn manual_operation(&self, name: &str) -> Result<&Operation, PluginRequestError> {
+    pub(super) fn manual_operation(&self, name: &str) -> Result<&Operation, PluginRequestError> {
         let op = self
             .manifest
             .operations()

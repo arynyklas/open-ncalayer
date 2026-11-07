@@ -20,11 +20,17 @@ use oncl_plugin::headless::{CapabilityBackend, HeadlessBindings, HeadlessError};
 use oncl_plugin::{Compiled, InstanceLimits, Manifest};
 use std::cell::RefCell;
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
+mod approval;
 mod capabilities;
 mod cms;
 mod manual;
 mod ticket;
 mod xml;
+pub use approval::{
+    APPROVAL_TTL, ApprovalIssueError, ApprovedCall, ConsentContent, ConsentKey, ConsentNetwork,
+    ConsentSummary, ManualCall, ManualHost, PluginPrepareError, PluginPrepared, PrehashedDigest,
+    UserConfirmation,
+};
 pub use manual::{
     PackageHash, PluginIdentity, PluginParam, PluginRequestError, loose_package_hash,
 };
@@ -32,6 +38,14 @@ pub use ticket::{
     ApprovalRejected, ApprovedUse, ContentBinding, PluginApproval, PluginConsentGuard, PluginUse,
     REFUSAL_LOG, TicketRefusal,
 };
+
+/// SHA-256 of the DER of `cert`; all zeros (never an approved value) if it cannot be encoded.
+pub(crate) fn certificate_sha256(cert: &oncl_pki::cert::Certificate) -> [u8; 32] {
+    use sha2::Digest;
+    der::Encode::to_der(cert)
+        .map(|der| sha2::Sha256::digest(der).into())
+        .unwrap_or([0; 32])
+}
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
 #[derive(Clone, Debug)]
@@ -581,6 +595,18 @@ impl Engine {
         bindings: &PluginBindings<'_>,
         ctx: &mut OperationContext,
     ) -> Result<PluginResult, OperationError> {
+        self.call_plugin(call, bindings, ctx, None)
+    }
+
+    /// [`Engine::plugin_call`], in the manual window when `manual` is given: key choices
+    /// are answered for the one bound key ([`oncl_plugin::Compiled::call_manual`]).
+    pub(crate) fn call_plugin(
+        &self,
+        call: &PluginCall<'_>,
+        bindings: &PluginBindings<'_>,
+        ctx: &mut OperationContext,
+        manual: Option<&dyn oncl_plugin::manual::PluginInteraction>,
+    ) -> Result<PluginResult, OperationError> {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
         }
@@ -695,14 +721,20 @@ impl Engine {
                     operation,
                 }),
         };
-        let result = installed.compiled.call_headless(
-            &mut backend,
-            HeadlessBindings {
-                caller: bindings.caller,
-                imports: &imports,
-            },
-            call.args,
-        );
+        let headless = HeadlessBindings {
+            caller: bindings.caller,
+            imports: &imports,
+        };
+        let result = match manual {
+            None => installed
+                .compiled
+                .call_headless(&mut backend, headless, call.args),
+            Some(interaction) => {
+                installed
+                    .compiled
+                    .call_manual(&mut backend, headless, interaction, call.args)
+            }
+        };
         let applied = backend.state.applied;
         if let Some(error) = backend.state.failure.take() {
             return Err(after_use(error, applied));

@@ -4592,6 +4592,7 @@ dependencies = [
  "oncl-flows",
  "oncl-pdf",
  "oncl-pki",
+ "oncl-plugin",
  "oncl-testkit",
  "oncl-tls",
  "oncl-token",

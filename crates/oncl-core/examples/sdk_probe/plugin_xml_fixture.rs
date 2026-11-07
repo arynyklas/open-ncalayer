@@ -126,6 +126,17 @@ pub(crate) fn args(level: abi::XadesLevel, xml: &[u8]) -> abi::XadesArgs {
 pub(crate) fn matching_issuer(
     name: &str,
 ) -> (oncl_core::keys::KeySelector, oncl_core::ValidationServices) {
+    let (key, validation, _) = matching_issuer_with_certificate(name);
+    (key, validation)
+}
+/// [`matching_issuer`] and the certificate the key's container holds.
+pub(crate) fn matching_issuer_with_certificate(
+    name: &str,
+) -> (
+    oncl_core::keys::KeySelector,
+    oncl_core::ValidationServices,
+    oncl_pki::cert::Certificate,
+) {
     use der::Encode;
     use oncl_pki::{
         crl::MockCrl,
@@ -161,7 +172,7 @@ pub(crate) fn matching_issuer(
     let certificate = issue_cert(&root, leaf_spec);
     let container = pkcs12::write(
         &[pkcs12::WriteEntry {
-            alias: leaf.alias,
+            alias: leaf.alias.clone(),
             pkcs8_der: leaf.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(certificate.to_der().unwrap()),
         }],
@@ -189,5 +200,6 @@ pub(crate) fn matching_issuer(
     (
         oncl_core::keys::KeySelector::inline(container, None),
         validation,
+        certificate,
     )
 }

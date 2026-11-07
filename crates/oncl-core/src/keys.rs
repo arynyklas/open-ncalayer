@@ -403,6 +403,11 @@ impl fmt::Debug for KeyLease {
     }
 }
 impl KeyLease {
+    /// The certificate this lease holds for its key.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn certificate(&self) -> &Certificate {
+        &self.entry.cert
+    }
     pub fn new(id: KeyId, entry: KeyEntry, ctx: &OperationContext) -> Result<Self, OperationError> {
         authority(ctx.grant(), &id)?;
         let public = oncl_pki::key::PublicKey::from_spki(
@@ -469,6 +474,27 @@ impl KeyUseEvent {
     pub fn plugin(&self) -> Option<&crate::plugins::PluginUse> {
         self.plugin.as_ref()
     }
+    /// Whether the event carries a plugin ticket ([`KeyUseEvent::plugin`]). Available without
+    /// the `plugins` feature (then always `false`: no ticket can exist), so a document guard
+    /// of a host that does not link plugins can still refuse it: **a document guard MUST
+    /// refuse every event for which this is `true`**.
+    pub fn is_plugin(&self) -> bool {
+        #[cfg(feature = "plugins")]
+        {
+            self.plugin.is_some()
+        }
+        #[cfg(not(feature = "plugins"))]
+        {
+            false
+        }
+    }
+    /// An event carrying `ticket`, for tests of guards. Not part of any release: only with
+    /// the `testing` feature.
+    #[cfg(all(feature = "plugins", feature = "testing"))]
+    pub fn with_plugin_ticket_for_tests(mut self, ticket: crate::plugins::PluginUse) -> Self {
+        self.plugin = Some(ticket);
+        self
+    }
 }
 /// Non-cloneable successful host receipt, returned to the same guard after use.
 pub struct KeyUseReceipt {
@@ -533,17 +559,28 @@ fn algorithm_mode(
     ctx: &OperationContext,
     strict: bool,
 ) -> Result<SigAlg, OperationError> {
-    let alg = if !strict && ctx.policy().validation == ValidationPolicy::NcalayerCompatibility {
-        oncl_pki::info::cert_info(&entry.cert)
+    signature_algorithm(&entry.cert, entry.key.alg(), ctx.policy(), strict)
+}
+/// The signature algorithm a key of type `key_alg` with certificate `cert` signs with under
+/// `policy`: the one place that decides it, so what a host computes before the key is open
+/// (the digest algorithm of a prehashed approval) is what the signer later uses.
+pub(crate) fn signature_algorithm(
+    cert: &Certificate,
+    key_alg: oncl_pki::key::KeyAlg,
+    policy: &crate::OperationPolicy,
+    strict: bool,
+) -> Result<SigAlg, OperationError> {
+    let alg = if !strict && policy.validation == ValidationPolicy::NcalayerCompatibility {
+        oncl_pki::info::cert_info(cert)
             .signing_alg()
             .map_err(|_| OperationError::Key(KeyError::UnsupportedAlgorithm))?
     } else {
-        leaf_signature_algorithm(entry.key.alg())
+        leaf_signature_algorithm(key_alg)
     };
-    if alg == SigAlg::RsaSha1 || alg.key_alg() != entry.key.alg() {
+    if alg == SigAlg::RsaSha1 || alg.key_alg() != key_alg {
         return Err(OperationError::Key(KeyError::UnsupportedAlgorithm));
     }
-    if !ctx.policy().allowed_signature_algorithms.contains(&alg) {
+    if !policy.allowed_signature_algorithms.contains(&alg) {
         return Err(OperationError::PermissionDenied);
     }
     Ok(alg)
@@ -654,12 +691,16 @@ impl AuthorizedSigner<'_> {
         // One ticket, one use: a second `sign_digest` of the same plugin call finds none.
         #[cfg(feature = "plugins")]
         {
+            // The certificate of the key that is actually about to sign, from its lease.
+            let signer =
+                crate::plugins::certificate_sha256(&self.ctx.leases[self.index].entry.cert);
             event.plugin = self
                 .ctx
                 .plugin_ticket
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+                .take()
+                .map(|ticket| ticket.with_signer_certificate(signer));
         }
         let receipt = self.guard.before_use(&event).inspect_err(|_| {
             self.ctx

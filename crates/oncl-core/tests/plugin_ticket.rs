@@ -157,6 +157,7 @@ struct Rig {
     guard: Arc<Watch>,
     provider: Arc<crypto::Provider>,
     key: KeySelector,
+    cert: oncl_pki::cert::Certificate,
     _dir: tempfile::TempDir,
 }
 
@@ -169,7 +170,7 @@ fn rig(
     consent: bool,
     with_operations: bool,
 ) -> Rig {
-    let (key, validation) = xades_fixture::matching_issuer("user-rsa-sign");
+    let (key, validation, cert) = xades_fixture::matching_issuer_with_certificate("user-rsa-sign");
     let exact: Vec<PluginPermission> = exact
         .iter()
         .map(|(op, imports)| {
@@ -220,6 +221,7 @@ fn rig(
         guard,
         provider,
         key,
+        cert,
         _dir: dir,
     }
 }
@@ -267,7 +269,7 @@ fn nonce() -> [u8; 16] {
 }
 /// The approval of the (single) use the declared operation describes.
 fn approval(rig: &Rig, id: OperationId, op: &str, uses: Vec<ApprovedUse>) -> PluginApproval {
-    PluginApproval::new(
+    PluginApproval::for_tests(
         rig.engine.plugin_identity(ID).unwrap().clone(),
         op,
         caller(),
@@ -287,12 +289,17 @@ fn declared_options(rig: &Rig, op: &str, text: &str) -> [u8; 32] {
         .options_sha256(&|_| Some(text.to_owned()))
         .unwrap()
 }
+fn fingerprint(cert: &oncl_pki::cert::Certificate) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(der::Encode::to_der(cert).unwrap()).into()
+}
 fn used(rig: &Rig, op: &str, kind: KeyKind, content: ContentBinding) -> ApprovedUse {
-    ApprovedUse {
+    ApprovedUse::for_tests(
         kind,
         content,
-        options_sha256: declared_options(rig, op, "/r"),
-    }
+        declared_options(rig, op, "/r"),
+        fingerprint(&rig.cert),
+    )
 }
 fn raw_call(handle: u32, data: &[u8]) -> (Import, Vec<u8>) {
     (
@@ -857,8 +864,15 @@ fn options_mismatch_refused() {
     // The approval of other options than the declared ones does not cover the declared call.
     let case = cases().remove(2);
     let r = declared_rig(&case, true);
-    let mut wrong = used(&r, case.op, case.kind, case.content);
-    wrong.options_sha256[0] ^= 1;
+    let right = used(&r, case.op, case.kind, case.content);
+    let mut options = *right.options_sha256();
+    options[0] ^= 1;
+    let wrong = ApprovedUse::for_tests(
+        case.kind,
+        case.content,
+        options,
+        *right.certificate_sha256(),
+    );
     assert!(denied(go(&r, &case, vec![wrong]).unwrap_err()));
     assert_eq!(last(&r), Some(TicketRefusal::Options));
 }
@@ -1098,7 +1112,7 @@ fn approval_binds_operation_plugin_key_and_time() {
         f(&mut p);
         r.guard
             .consent()
-            .grant(PluginApproval::new(
+            .grant(PluginApproval::for_tests(
                 p.identity,
                 p.op,
                 p.caller,
@@ -1190,7 +1204,7 @@ fn approval_binds_operation_plugin_key_and_time() {
     // A nonce is granted once; an approval needs exactly one use.
     let guard = PluginConsentGuard::new();
     let mk = |n: [u8; 16], uses: usize| {
-        PluginApproval::new(
+        PluginApproval::for_tests(
             r.engine.plugin_identity(ID).unwrap().clone(),
             case.op,
             caller(),

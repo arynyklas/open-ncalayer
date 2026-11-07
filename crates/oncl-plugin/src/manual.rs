@@ -7,7 +7,9 @@
 
 use crate::caps::{filter_more, key_filter};
 use oncl_flows::FilterMore as BasicsMore;
-use oncl_flows::{Availability, KeyFilter, OcspCache, availabilities};
+/// Remembered OCSP answers of a key choice: what [`BoundInteraction`] shares between calls.
+pub use oncl_flows::OcspCache;
+use oncl_flows::{Availability, KeyFilter, availabilities};
 use oncl_pdk::abi::{
     Bytes, ChooseArgs, Chosen, ErrorCode, FlowArgs, FlowChecks, FlowKey, FlowOpened, FlowOutcome,
     HostError, HostResult, Import, MAX_FLOWS, PickArgs, SelectArgs, TerminalsArgs, TokenScan,

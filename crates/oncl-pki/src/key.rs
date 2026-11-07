@@ -710,6 +710,14 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
+    /// The key type of this public key.
+    pub fn alg(&self) -> KeyAlg {
+        match self {
+            PublicKey::Gost(key) => curve_alg(key.curve()),
+            PublicKey::Rsa(_) => KeyAlg::Rsa,
+        }
+    }
+
     /// `SubjectPublicKeyInfo` of this key, as NCA certificates carry it: for GOST the key OID
     /// with `SEQUENCE { curve OID, digest parameter OID }` and the OCTET STRING `X_LE ‖ Y_LE`
     /// in the BIT STRING; for RSA `rsaEncryption` with NULL parameters and the
