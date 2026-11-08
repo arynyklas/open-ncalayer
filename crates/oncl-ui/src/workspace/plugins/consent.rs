@@ -750,6 +750,17 @@ element = "param:path"
             v.inputs.iter().any(|i| i.contains(&long)),
             "the whole text is shown"
         );
+        // The line that says which value is signed names it by its number: the plugin's name
+        // for the field ("path") is its own word and is not on any line of the host's.
+        assert_eq!(
+            v.file_lines[0],
+            Texts::of(Locale::En).c_text_signed.replace("{0}", "1")
+        );
+        assert!(
+            v.file_lines.iter().all(|line| !line.contains("path")),
+            "{:?}",
+            v.file_lines
+        );
         // Another text than the one Core froze: refused.
         let mut other = s.clone();
         other.content.sha256[0] ^= 1;

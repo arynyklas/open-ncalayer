@@ -633,8 +633,15 @@ mod tests {
             !shown.contains("secret") && !shown.contains("12345"),
             "{shown}"
         );
-        assert!(shown.contains(&format!("Document({} bytes)", secret.len())));
-        assert!(shown.contains(&format!("Text({} bytes)", secret.len())));
+        // The whole output, exactly: bytes printed as numbers (which no substring check of
+        // the text would catch) or anything appended to a kind and length fails here.
+        let n = secret.len();
+        assert_eq!(
+            shown,
+            format!("Document({n} bytes) Text({n} bytes) Choice({n} bytes)")
+        );
+        assert_eq!(format!("{:?}", PluginParam::Flag(true)), "Flag(true)");
+        assert_eq!(format!("{:?}", PluginParam::Locale("kk")), "Locale(kk)");
     }
 
     #[test]
