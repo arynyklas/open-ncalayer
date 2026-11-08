@@ -22,6 +22,7 @@
 //! **Outputs.** A manual call has no file output: the result is shown, not saved
 //! ([`report`]).
 
+mod confirm;
 mod consent;
 mod controller;
 mod form;
@@ -63,20 +64,6 @@ use crate::signing::runner::{OpenError, open_key_store};
 use crate::ui::{
     PluginFormField, PluginGroupRow, PluginHiddenRow, PluginOperationRow, PluginsState,
 };
-
-/// The press of the confirm button, as a value: [`consent::user_confirmed`] needs one, and the
-/// only place that makes one is [`press`], called by the button's handler alone (a test scans
-/// for that). A second use of the user's confirmation cannot be written without one.
-pub(super) struct PressToken(());
-
-fn press() -> PressToken {
-    PressToken(())
-}
-
-#[cfg(test)]
-pub(super) fn press_for_tests() -> PressToken {
-    PressToken(())
-}
 
 /// The page's place in the window's sidebar.
 pub(super) const SECTION: i32 = 8;
@@ -197,7 +184,7 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_unlock(|| with_open(unlock));
     s.on_cert_clicked(|i| with_open(|open| cert_clicked(open, i)));
     s.on_cert_chosen(|i| with_open(|open| cert_chosen(open, i)));
-    s.on_confirm(|| with_open(confirm));
+    s.on_confirm(|| with_open(confirm::confirm));
     s.on_cancel(|| with_open(cancel));
     s.on_back(|| with_open(back));
     s.on_again(|| with_open(again));
@@ -873,38 +860,6 @@ fn tick(open: &Rc<Workspace>) {
     } else if armed_now {
         render(open);
     }
-}
-
-/// The button that names the action: the only way to the key. The controller lets the press
-/// through only for a prepared, shown and armed confirmation; the confirmation is then made for
-/// exactly the summary the page shows and sent to the worker that waits for it.
-fn confirm(open: &Rc<Workspace>) {
-    let t = texts(open);
-    let mut st = state(open);
-    if st.controller.dispatch(Event::Confirm) != Effect::Confirmed {
-        return;
-    }
-    let confirmation = st
-        .shown
-        .as_ref()
-        .map(|shown| consent::user_confirmed(&shown.summary, press()));
-    let sent = match (confirmation, st.decision.take()) {
-        (Some(confirmation), Some(tx)) => tx.send(Decision::Proceed(confirmation)).is_ok(),
-        _ => false,
-    };
-    // Nothing of the confirmation stays on the page.
-    st.shown = None;
-    st.shown_at = None;
-    st.tick.stop();
-    if !sent {
-        // The worker is gone: there is nobody to confirm to, and the key was never used.
-        st.controller.dispatch(Event::Finished);
-        let facts = facts_of(&st);
-        st.result = Some(report::render_cancelled(&facts.as_facts(), locale(open)));
-    }
-    drop(st);
-    open.ui.set_status_text(t.s_running.into());
-    render(open);
 }
 
 // ---- leaving ----
