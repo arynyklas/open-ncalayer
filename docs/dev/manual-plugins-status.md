@@ -69,3 +69,7 @@
 - Манифесты и число операций: `cargo xtask plugin-ops-check` (линтер) и `grep -c '^\[\[operations\]\]' plugins/*/plugin.toml`.
 - Порты настоящими модулями: `cargo xtask plugin-ports-manual` ([docs/dev/plugins-manual-tests.md](plugins-manual-tests.md)).
 - Таблица подкодов страницы: `crates/oncl-core/src/plugins/refusal.rs` (`PluginRefusalCode::ALL`; тест `PINNED` фиксирует список).
+
+## 6. Решения пользователя
+
+- **2026-11-09, «всё принять»:** отступление по самообновлению первого выпуска WinGet принято пользователем (это отступление, а не пройденная проверка). Раунд 3 MP5a принят пользователем без итогового вердикта рецензента: независимое повторное ревью ещё шло.
