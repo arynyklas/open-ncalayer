@@ -113,8 +113,9 @@ a part as unclassified wire of at most `input_bytes + container_bytes` without c
 document allowance, and the engine then reads it as it reads any file given to the SDK or the
 CLI: it classifies the signature bytes, charges `input_bytes` for the document part and the
 container allowance for the rest, so a signed result of a document that was exactly at
-`input_bytes` is accepted again by the service that produced it, and a document part one byte
-past `input_bytes` is still `InputLimit`, signed or not. The wire ceiling of a request with such
+`input_bytes` is accepted again by the service that produced it, and a parsable document part one byte
+past `input_bytes` is still `InputLimit`, signed or not (unparsable garbage in that role is
+`InvalidRequest`/400, because the engine cannot classify it). The wire ceiling of a request with such
 an input is `input_bytes + container_bytes + framing_bytes + 64 KiB` (the metadata part); the
 ceiling of every other multipart request is `input_bytes + framing_bytes + 64 KiB`, and `/v1/hash` takes a raw body of at most `input_bytes`.
 Every other document part (a detached payload, an inspected container, JOSE input) stays within
@@ -123,6 +124,20 @@ documents: each is bounded at 1 MiB and the engine's evidence limits, and none i
 document allowance, exactly as the CLI reads evidence files. The oversize refusal of a signed
 input is found by the engine after the response status is chosen, so a streamed request reports
 it as a failed final record with `InputLimit` and `NotApplied`, never as a dropped stream.
+
+Scratch and sizing. Lowering `input_bytes` requires lowering `container_bytes` too. At the
+defaults one `input` part of a verify, extend, extract or sign item is spooled up to
+`input_bytes + container_bytes` (2 GiB) before the engine refuses an unsupported document, and
+the engine then copies about `input_bytes`, so a hostile upload can write up to about 3 GiB to
+the scratch before it is refused; this is bounded by `temp_per_operation`, `total_temp` and
+`max_in_flight`. Measured peaks: signing a document at the limit holds about 3x `input_bytes`
+of scratch, and verifying a signed result about 2x. Rule of thumb:
+`temp_per_operation >= 3 * (input_bytes + container_bytes)`. The configuration does not check
+this. A request declaring a length past the ceiling is refused at once with `InputLimit`; an
+upload without a declared length is counted and refused with `FramingLimit` when the wire passes
+the ceiling. A sign or extend item takes at most 64 evidence references (more is
+`InvalidRequest`, before any part is read). `container_bytes` must be positive and
+`input_bytes + container_bytes + framing_bytes + 64 KiB` must fit in 64 bits.
 
 The implementation uses pinned `multer` 3.1.0 for multipart parsing. Its feeder
 admits at most 8,192 new bytes while parsing unknown-role headers/preamble, in

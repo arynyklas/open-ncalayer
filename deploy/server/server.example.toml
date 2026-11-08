@@ -64,8 +64,9 @@ input_bytes = 1073741824
 # `input_bytes`. Only the `input` of a verify, extend, extract or sign item (a document that
 # may already be signed) may exceed `input_bytes`, by container bytes only; one byte more, or
 # a document part past `input_bytes`, is `InputLimit`. Such an upload is spooled up to
-# `input_bytes + container_bytes` before the engine classifies it, so lower this on a service
-# that signs small documents. It must cover what the service itself adds (a PAdES-LTA result
+# `input_bytes + container_bytes` before the engine classifies it (and the engine then copies about
+# `input_bytes`: a hostile upload can write about 3 GiB at the defaults). Lower this together with
+# `input_bytes`, and keep `temp_per_operation >= 3 * (input_bytes + container_bytes)` (not checked). It must cover what the service itself adds (a PAdES-LTA result
 # carries its evidence). See docs/user/http-api.md.
 container_bytes = 1073741824
 memory_per_operation = 268435456
