@@ -17,7 +17,10 @@ impl OperationControl for Control {
     }
 }
 fn scope() -> ResourceScope {
-    let limits = ResourceLimits::default();
+    scope_with(ResourceLimits::default())
+}
+/// A virtual document above 4 GiB is beyond the 1 GiB guarantee: its limits are explicit.
+fn scope_with(limits: ResourceLimits) -> ResourceScope {
     Arc::new(SharedBudget::new(limits.clone()).unwrap())
         .begin(limits, Arc::new(Control))
         .unwrap()
@@ -62,7 +65,8 @@ fn overlapping_or_out_of_bounds_ranges() {
 }
 #[test]
 fn xref_offset_above_4gib() {
-    // Arithmetic-only virtual boundary, not a large-document/RSS proof.
+    // Arithmetic-only virtual boundary above the 1 GiB guarantee (explicit limits), not a
+    // large-document/RSS proof.
     let offset = (1u64 << 32) + 137;
     let ranges = ByteRange::new([0, 64, offset, 12], offset + 12).unwrap();
     struct Virtual {
@@ -113,7 +117,10 @@ fn xref_offset_above_4gib() {
             (offset, table),
         ],
     };
-    let mut scope = scope();
+    let mut scope = scope_with(ResourceLimits {
+        input_bytes: 8 * 1_073_741_824,
+        ..ResourceLimits::default()
+    });
     let doc = PdfDocument::open(
         Source::seekable(&mut virtual_source, None),
         &PdfLimits::default(),

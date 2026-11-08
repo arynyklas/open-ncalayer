@@ -37,12 +37,12 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_in_flight: 1,
-            input_bytes: 10_737_418_240,
+            input_bytes: 1_073_741_824,
             container_bytes: 1_073_741_824,
             framing_bytes: 67_108_864,
-            output_bytes: 11_878_268_928,
+            output_bytes: 2_214_592_512,
             memory_bytes: 1_073_741_824,
-            temp_bytes: 68_719_476_736,
+            temp_bytes: 8_589_934_592,
             metadata_bytes: 67_108_864,
             operation_timeout: Duration::from_secs(300),
         }
@@ -976,5 +976,57 @@ mod guard_tests {
         );
         drop(lease);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod default_limit_tests {
+    use super::*;
+
+    struct Open;
+    impl OperationControl for Open {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+
+    fn scope() -> ResourceScope {
+        let limits = ResourceLimits::default();
+        Arc::new(SharedBudget::new(limits.clone()).unwrap())
+            .begin(limits, Arc::new(Open))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_default_guarantees_one_gibibyte_and_refuses_one_byte_more() {
+        const GIB: u64 = 1_073_741_824;
+        let scope = scope();
+        scope.account_input(GIB).unwrap();
+        assert!(matches!(
+            scope.account_input(1),
+            Err(ProcessingError::InputLimit)
+        ));
+        let scope = self::scope();
+        assert!(matches!(
+            scope.account_input(GIB + 1),
+            Err(ProcessingError::InputLimit)
+        ));
+    }
+
+    #[test]
+    fn the_default_output_ceiling_covers_input_container_and_framing() {
+        let limits = ResourceLimits::default();
+        assert_eq!(
+            limits.output_bytes,
+            limits.input_bytes + limits.container_bytes + limits.framing_bytes
+        );
+        let scope = scope();
+        scope.check_output_capacity(limits.output_bytes).unwrap();
+        assert!(matches!(
+            scope.check_output_capacity(limits.output_bytes + 1),
+            Err(ProcessingError::OutputLimit)
+        ));
+        assert!(limits.input_bytes <= 1_073_741_824);
+        assert_eq!(limits.temp_bytes, 8_589_934_592);
     }
 }
