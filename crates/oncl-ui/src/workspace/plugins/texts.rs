@@ -205,7 +205,6 @@ texts! {
     /// `{0}` why.
     save_failed,
     save_exists,
-    save_no_links,
     again,
     finish,
     // Why a key use was refused (what Core says; one for each of its variants).
@@ -381,7 +380,6 @@ static EN: Texts = Texts {
     save_too_large: "The reply is {0}, more than the {1} this window saves. It was not saved.",
     save_failed: "The reply was not saved: {0}",
     save_exists: "A file with this name already exists there and was not replaced. Save again and choose another name or folder.",
-    save_no_links: "That folder cannot publish the file safely (it needs hard links, which FAT, exFAT and some network shares lack). Save again and choose another folder or drive.",
     again: "Prepare again",
     finish: "Back to the list",
     f_no_ticket: "the key use did not come from a declared operation",
@@ -544,7 +542,6 @@ static RU: Texts = Texts {
     save_too_large: "Ответ занимает {0}, что больше {1}, которые это окно сохраняет. Он не сохранён.",
     save_failed: "Ответ не сохранён: {0}",
     save_exists: "Файл с таким именем там уже есть, он не заменён. Сохраните ещё раз и выберите другое имя или папку.",
-    save_no_links: "В эту папку нельзя надёжно записать файл (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Сохраните ещё раз и выберите другую папку или диск.",
     again: "Подготовить заново",
     finish: "К списку",
     f_no_ticket: "применение ключа не относилось к объявленной операции",
@@ -707,7 +704,6 @@ static KK: Texts = Texts {
     save_too_large: "Жауап көлемі {0}, бұл терезе сақтайтын {1} шамасынан көп. Сақталмады.",
     save_failed: "Жауап сақталмады: {0}",
     save_exists: "Бұл атты файл онда бұрыннан бар, ол ауыстырылмады. Қайта сақтап, басқа атау немесе қалта таңдаңыз.",
-    save_no_links: "Бұл қалтаға файлды сенімді жазу мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Қайта сақтап, басқа қалта немесе диск таңдаңыз.",
     again: "Қайта дайындау",
     finish: "Тізімге",
     f_no_ticket: "кілтті қолдану жарияланған әрекетке жатпады",
