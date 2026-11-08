@@ -9,9 +9,9 @@
 //! [`PluginModules`](oncl_plugin::PluginModules), which this does not touch.
 //!
 //! Nothing here signs, builds a request or asks the user: the call path is the manual
-//! window's. Operations the manual window cannot run (`derived`, `network = [urls]`, and
-//! the ports the inventory marks unsupported, `docs/design/manual-plugins-inventory.md`)
-//! are not listed; the inventory, not this code, says which are which.
+//! window's. Operations the manual window cannot run (`derived`, `network = [urls]`) are not
+//! listed; a plugin left with none is listed with the reason computed from its manifest and
+//! the registry (`oncl_ui::WithoutReason`), never from a hardcoded list of ports.
 
 use oncl_core::plugins::{CallerContext, ManualLimits, PackageHash, PluginRegistry};
 use oncl_pki::http::HttpMethod;
@@ -63,8 +63,7 @@ pub struct ManualOperation {
 }
 
 /// An installed plugin (on, not withdrawn, its package readable) that offers no operation to the
-/// manual window. Why is not known here: its manifest declares none for this window (no
-/// `[[operations]]`, none `manual`, or only ones the window cannot run).
+/// manual window, with the reason the host computed from the manifest and the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithoutOperations {
     /// The plugin's id.
@@ -73,6 +72,8 @@ pub struct WithoutOperations {
     pub plugin_version: Version,
     /// The plugin's name (untrusted text).
     pub plugin_name: Localized,
+    /// Why nothing is offered.
+    pub reason: oncl_ui::WithoutReason,
 }
 
 /// An installed plugin that was not registered because its package could not be read.
@@ -134,12 +135,21 @@ impl ManualPlugins {
     fn add(&mut self, package: oncl_plugin::Package) {
         let manifest = &package.manifest;
         // `network = [urls]` is not runnable in the window: the registry refuses it too.
-        let ops: Vec<&Operation> = manifest
-            .manual_operations()
+        let manual: Vec<&Operation> = manifest.manual_operations().collect();
+        let ops: Vec<&Operation> = manual
+            .iter()
+            .copied()
             .filter(|o| !matches!(o.uses().network(), Network::Urls(_)))
             .collect();
         if ops.is_empty() {
-            self.without_operations.push(without(&package));
+            let reason = if manifest.operations().is_empty() {
+                oncl_ui::WithoutReason::NoOperations
+            } else if manual.is_empty() {
+                oncl_ui::WithoutReason::NoManualOperations
+            } else {
+                oncl_ui::WithoutReason::UnsupportedNetwork
+            };
+            self.without_operations.push(without(&package, reason));
             return;
         }
         // The digest comes from the same `Package` as the manifest and the module.
@@ -174,8 +184,9 @@ impl ManualPlugins {
             }
         }
         if self.operations.len() == before {
-            // Registered, but nothing of it is offered: the window says so, one honest line.
-            self.without_operations.push(without(&package));
+            // Registered, but the registry offered none of it: the window says so.
+            self.without_operations
+                .push(without(&package, oncl_ui::WithoutReason::NotRegistered));
         }
     }
 }
@@ -190,11 +201,12 @@ fn endpoints_of(op: &Operation) -> &'static [(HttpMethod, &'static str)] {
     }
 }
 
-fn without(package: &oncl_plugin::Package) -> WithoutOperations {
+fn without(package: &oncl_plugin::Package, reason: oncl_ui::WithoutReason) -> WithoutOperations {
     WithoutOperations {
         plugin_id: package.manifest.id.clone(),
         plugin_version: package.manifest.version.clone(),
         plugin_name: package.manifest.name.clone(),
+        reason,
     }
 }
 
@@ -240,6 +252,7 @@ pub fn listing(manual: &ManualPlugins) -> oncl_ui::ManualListing {
                 plugin_id: p.plugin_id.clone(),
                 plugin_version: p.plugin_version.to_string(),
                 plugin_name: p.plugin_name.clone(),
+                reason: p.reason,
             })
             .collect(),
         unusable: manual
@@ -451,6 +464,10 @@ mod tests {
             "0.1.0"
         );
         assert!(!none.without_operations[0].plugin_name.en.is_empty());
+        assert_eq!(
+            none.without_operations[0].reason,
+            oncl_ui::WithoutReason::NoOperations
+        );
         // One with operations is not in that list, and one that is off or withdrawn is in
         // neither (it is not installed for this purpose).
         install(&store, &other(&[operation("sign", "Sign", true, false)]));
@@ -470,7 +487,20 @@ mod tests {
             "[operations.uses]\nnetwork = [\"https://example.invalid/\"]\n",
         );
         let (_dir, store) = store_with(&example_ops("0.1.0", &[urls]));
-        assert_eq!(ManualPlugins::build(&store).without_operations.len(), 1);
+        let built = ManualPlugins::build(&store);
+        assert_eq!(built.without_operations.len(), 1);
+        assert_eq!(
+            built.without_operations[0].reason,
+            oncl_ui::WithoutReason::UnsupportedNetwork
+        );
+        // Operations declared for other callers only, and none at all, each say so.
+        let not_manual =
+            operation("sign", "Sign", false, false).replace("manual = true", "server = true");
+        let (_dir, store) = store_with(&example_ops("0.1.0", &[not_manual]));
+        assert_eq!(
+            ManualPlugins::build(&store).without_operations[0].reason,
+            oncl_ui::WithoutReason::NoManualOperations
+        );
     }
 
     #[test]

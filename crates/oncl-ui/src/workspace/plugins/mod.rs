@@ -19,8 +19,9 @@
 //! controller until the certificate is chosen (at most [`KEY_IDLE`]), then moved into the run's
 //! worker, which drops (zeroizes) it when the run ends whichever way ([`run`]). It is never logged.
 //!
-//! **Outputs.** A manual call has no file output: the result is shown, not saved
-//! ([`report`]).
+//! **Outputs.** A manual call has no file output of its own. The reply of a call that was
+//! verified applied can be saved, whole and as received, to a `.json` file the user places in
+//! the host's dialog ([`save`], [`report`]); nothing else is written.
 
 mod confirm;
 mod consent;
@@ -29,6 +30,7 @@ mod form;
 mod offer;
 mod report;
 mod run;
+mod save;
 #[cfg(test)]
 mod tests;
 mod texts;
@@ -51,10 +53,11 @@ use self::controller::{Effect, Event, PluginController, Refusal, Step};
 use self::form::{FieldKind, FieldValue, FormError, FormField, FreezeError};
 pub use self::offer::{
     ManualListing, ManualPluginSource, NoManualPlugins, OfferError, OfferedOperation,
-    PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, plugin_offer,
+    PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, WithoutReason, plugin_offer,
 };
 use self::report::{ResultView, RunFacts, TicketWords};
 use self::run::{Decision, NotPrepared, Prepared, RunOutcome, RunSpec};
+use self::save::SaveError;
 use self::texts::Texts;
 use super::controller::{Job, JobError};
 use super::{Output, Workspace, start, with_open};
@@ -64,6 +67,7 @@ use crate::signing::runner::{OpenError, open_key_store};
 use crate::ui::{
     PluginFormField, PluginGroupRow, PluginHiddenRow, PluginOperationRow, PluginsState,
 };
+use oncl_core::plugins::ManualLimits;
 
 /// The page's place in the window's sidebar.
 pub(super) const SECTION: i32 = 8;
@@ -120,6 +124,8 @@ pub(super) struct State {
     /// from (not the list's, which may be older).
     running_op: Option<OfferedOperation>,
     result: Option<ResultView>,
+    /// How saving the reply went (a message under the result), until the page is left.
+    save_note: String,
     /// A message for the step the page is on (an idle close, a refused operation).
     notice: String,
     /// The message is an error of a field or a step (red), not a note.
@@ -150,6 +156,7 @@ impl State {
             shown: None,
             running_op: None,
             result: None,
+            save_note: String::new(),
             notice: String::new(),
             since: Instant::now(),
             shown_at: None,
@@ -188,6 +195,7 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_cancel(|| with_open(cancel));
     s.on_back(|| with_open(back));
     s.on_again(|| with_open(again));
+    s.on_save_reply(|| with_open(save_reply));
     s.on_finish(|| with_open(finish));
 }
 
@@ -961,6 +969,7 @@ fn clear_session(open: &Rc<Workspace>) {
         st.shown_at = None;
         st.running_op = None;
         st.result = None;
+        st.save_note.clear();
         st.fields.clear();
         st.values.clear();
         st.tick.stop();
@@ -999,6 +1008,7 @@ fn again(open: &Rc<Workspace>) {
         }
         st.result = None;
         st.notice.clear();
+        st.save_note.clear();
         // The values the user entered stay; the password and the confirmation do not.
         st.pending_op = None;
     }
@@ -1010,6 +1020,82 @@ fn finish(open: &Rc<Workspace>) {
     state(open).controller.dispatch(Event::Done);
     clear_session(open);
     state(open).notice.clear();
+    render(open);
+}
+
+/// The user asked to save the reply: the host's own dialog asks where, with the name the host
+/// built. Nothing is written until the dialog returns a place.
+fn save_reply(open: &Rc<Workspace>) {
+    if busy(open) {
+        return;
+    }
+    let name = {
+        let st = open.plugins.borrow();
+        match (
+            st.controller.step(),
+            st.result.as_ref().and_then(|r| r.save.as_ref()),
+        ) {
+            (Step::Result, Some(offer)) => offer.name.clone(),
+            _ => return,
+        }
+    };
+    let dialog = rfd::AsyncFileDialog::new()
+        .set_title(texts(open).save_dialog_title)
+        .set_file_name(&name)
+        .add_filter("JSON", &["json"])
+        .set_parent(&open.ui.window().window_handle());
+    let picked = slint::spawn_local(async move {
+        let Some(file) = dialog.save_file().await else {
+            return;
+        };
+        let path = file.path().to_owned();
+        with_open(|open| write_reply(open, path));
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the file dialog");
+    }
+}
+
+/// Writes the reply to `path` (always as a `.json` file) and says in the page how it went.
+fn write_reply(open: &Rc<Workspace>, path: PathBuf) {
+    let path = if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        path
+    } else {
+        let mut os = path.into_os_string();
+        os.push(".json");
+        PathBuf::from(os)
+    };
+    let t = texts(open);
+    let cap = ManualLimits::desktop().instance.max_transfer;
+    let saved = {
+        let st = open.plugins.borrow();
+        let Some(offer) = st
+            .result
+            .as_ref()
+            .filter(|_| st.controller.step() == Step::Result)
+            .and_then(|r| r.save.as_ref())
+        else {
+            return;
+        };
+        save::save_reply(&path, offer.reply.bytes(), cap)
+    };
+    let note = match saved {
+        Ok(()) => t.saved_to.replace("{0}", &path.display().to_string()),
+        Err(SaveError::TooLarge { len, cap }) => t
+            .save_too_large
+            .replace("{0}", &size_text(open, len as u64))
+            .replace("{1}", &size_text(open, cap as u64)),
+        Err(SaveError::Job(JobError::DestinationExists)) => t.save_exists.to_owned(),
+        Err(SaveError::Job(JobError::NoLinks)) => t.save_no_links.to_owned(),
+        Err(SaveError::Job(e)) => t.save_failed.replace(
+            "{0}",
+            super::error_text(super::Texts::of(locale(open)), &e, 0),
+        ),
+    };
+    state(open).save_note = note;
     render(open);
 }
 
@@ -1245,7 +1331,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
     render_form(open, &st, &ui, t, l, operation.as_ref());
     render_key(&st, &ui, t);
     render_consent(&st, &ui, t);
-    render_result(&st, &ui);
+    render_result(&st, &ui, t);
     ui.set_running(t.running.into());
 }
 
@@ -1310,11 +1396,19 @@ fn render_list(open: &Rc<Workspace>, st: &State, ui: &PluginsState<'_>, t: &Text
         }
         for plugin in &offer.listing.without_operations {
             hidden.push(PluginHiddenRow {
-                line: t
-                    .without_ops
-                    .replace("{0}", &plugin.plugin_id)
-                    .replace("{1}", &plugin.plugin_version)
-                    .into(),
+                line: format!(
+                    "{} {}",
+                    t.without_ops
+                        .replace("{0}", &plugin.plugin_id)
+                        .replace("{1}", &plugin.plugin_version),
+                    match plugin.reason {
+                        WithoutReason::NoOperations => t.why_no_operations,
+                        WithoutReason::NoManualOperations => t.why_no_manual,
+                        WithoutReason::UnsupportedNetwork => t.why_network,
+                        WithoutReason::NotRegistered => t.why_not_registered,
+                    }
+                )
+                .into(),
                 name_caption: t.frame_name.into(),
                 name: untrusted_label(plugin.plugin_name.get(l)).into(),
             });
@@ -1340,14 +1434,6 @@ fn render_list(open: &Rc<Workspace>, st: &State, ui: &PluginsState<'_>, t: &Text
             ""
         } else {
             t.hidden_heading
-        }
-        .into(),
-    );
-    ui.set_hidden_why(
-        if hidden.is_empty() {
-            ""
-        } else {
-            t.without_ops_why
         }
         .into(),
     );
@@ -1536,7 +1622,7 @@ fn render_consent(st: &State, ui: &PluginsState<'_>, t: &Texts) {
     );
 }
 
-fn render_result(st: &State, ui: &PluginsState<'_>) {
+fn render_result(st: &State, ui: &PluginsState<'_>, t: &Texts) {
     let Some(view) = st
         .result
         .as_ref()
@@ -1547,8 +1633,9 @@ fn render_result(st: &State, ui: &PluginsState<'_>) {
         ui.set_report_rows(ModelRc::default());
         ui.set_reply("".into());
         ui.set_reply_caption("".into());
-        ui.set_reply_cut("".into());
         ui.set_result_note("".into());
+        ui.set_save_offered(false);
+        ui.set_save_note("".into());
         return;
     };
     ui.set_report_headline(view.headline.as_str().into());
@@ -1567,4 +1654,7 @@ fn render_result(st: &State, ui: &PluginsState<'_>) {
         }
     }
     ui.set_result_note(view.note.as_str().into());
+    ui.set_save_offered(view.save.is_some());
+    ui.set_save_reply_label(t.save_reply.into());
+    ui.set_save_note(st.save_note.as_str().into());
 }
