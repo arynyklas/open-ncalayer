@@ -259,7 +259,8 @@ Things an operator should know:
   `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`,
   `certificate-changed`, `approval-replayed`, `busy`; `manual=false` is `not-manual`; new are
   `not-granted`, `no-consent-guard`, `audit-fact-too-long`, `unknown-plugin`, `derived-unsupported`
-  and the request/prepare ids. `PlanUnavailable`, `PreviewTooLarge` and `ImportNotDeclared` are not
+  and the request/prepare ids (the prepare ids include `resource-budget` and `no-temporary-store`, raised by the
+  manual window's budget check before any key is opened; 49 ids in all). `PlanUnavailable`, `PreviewTooLarge` and `ImportNotDeclared` are not
   implemented (no code path yet).
 
 Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global

@@ -180,7 +180,7 @@ Engine::plugin_operations / plugin_request / plugin_call_approved / (MP3b) plugi
 Сеть: ocsp.pki.gov.kz, tsp.pki.gov.kz. Плагин может передать данные только по этим адресам; документ может быть отправлен на разрешённые хосты.
 [Отмена]  [Подписать]
 ```
-Страница доступна с клавиатуры (порядок фокуса, Enter не подтверждает подпись до фокуса на «Подписать», масштаб/DPI, экранные читатели), как документное согласие. Результат (`response` плагина) показывается как plain text в рамке «от плагина»; место и имя сохранения выбирает хост (`PluginOutputBinding`), не плагин.
+Страница доступна с клавиатуры (порядок фокуса, Enter не подтверждает подпись до фокуса на «Подписать», масштаб/DPI, экранные читатели), как документное согласие. Результат (`response` плагина) показывается как plain text в рамке «от плагина». Сохраняется только ответ подтверждённо применённого вызова и только целиком, как получен, в `.json`: файлового вывода у ручного вызова нет (`PluginOutputBinding` относится к выводу через `page_file_write`, которого порты не используют), поэтому подпись из ответа хост не извлекает. Имя предлагает хост (операция и id плагина, никогда текст плагина), место выбирает пользователь в диалоге хоста, запись атомарна и ничего не заменяет.
 
 ### 4.6 Совместимость с 34 портами и миграция
 - ABI и wasm не меняются. Меняются `plugins/*/plugin.toml` (+`min_core`), хеши в `plugins/workspace/registry.toml`, и **выпуск 34 новых версий пакетов через подписанный индекс обновлений** (MP11), а не «правка файла».
@@ -212,7 +212,7 @@ Engine::plugin_operations / plugin_request / plugin_call_approved / (MP3b) plugi
 | Origin нужен | ответ плагина | — | не применялся |
 | Ошибка **после** применения (TSA, сеть) | как сейчас (`AfterKeyUse`) | — | `Applied`/`Unknown` честно |
 
-Реализованные id подкодов (MP3a-3, `PluginRefusalCode`) — kebab-case и мельче таблицы: `NotDeclared`→`not-declared`, `PackageChanged`→`package-changed`, `OptionsMismatch`→`options-mismatch`, `ApprovalExpired`→`approval-expired`; `KeyUseNotApproved` разбит на `approval-missing`, `ticket-missing`, `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`, `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`, `certificate-changed`, `approval-replayed`, `busy`; `manual=false` — `not-manual`; добавлены `not-granted`, `no-consent-guard`, `audit-fact-too-long`; `ImportNotDeclared`, `PlanUnavailable`, `PreviewTooLarge` не реализованы (нет путей кода; MP3b/MP8).
+Реализованные id подкодов (MP3a-3, `PluginRefusalCode`) — kebab-case и мельче таблицы: `NotDeclared`→`not-declared`, `PackageChanged`→`package-changed`, `OptionsMismatch`→`options-mismatch`, `ApprovalExpired`→`approval-expired`; `KeyUseNotApproved` разбит на `approval-missing`, `ticket-missing`, `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`, `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`, `certificate-changed`, `approval-replayed`, `busy`; `manual=false` — `not-manual`; добавлены `not-granted`, `no-consent-guard`, `audit-fact-too-long`; `ImportNotDeclared`, `PlanUnavailable`, `PreviewTooLarge` не реализованы (нет путей кода; MP3b/MP8). Позже добавлены `content-binding-unavailable` (MP9) и `resource-budget`, `no-temporary-store` (MP7b: бюджеты и временное хранилище не держат вызов, проверка до ключа и до согласия); всего 49 подкодов (`PluginRefusalCode::ALL`, добавление только в конец).
 
 Утверждение «отказ всегда до ключа» верно потому, что применений ровно одно (`max_uses = 1`): все проверки предшествуют первому и единственному применению; поэтому не бывает состояния «первая подпись применена, вторая отклонена».
 
@@ -238,7 +238,7 @@ BEGIN на применение ключа: `plugin_id`, `package_sha256`, `vers
 | Отправка документа плагином по сети | в согласии: сеть и адреса, явная фраза «документ может быть отправлен на разрешённые хосты»; адреса — точный список или PKI-хосты; в плане сеть запрещена | Разрешённый хост (`*.gov.kz`) получает данные — решает пользователь, читая согласие |
 | UI-инъекция (`label`, `response`, превью) | plain text, длины ограничены, bidi/управляющие экранированы; `response` в рамке | — |
 | Исчерпание ресурсов (двойной запуск, превью огромное) | один план; 2× fuel под дедлайном; план и вызов не держат резерв одновременно; превью ≤ 64 КиБ или отказ; `request ≤ max_transfer` | Ограниченный CPU |
-| Результат: плагин навязывает путь сохранения | место и имя выбирает хост (`PluginOutputBinding`) | — |
+| Результат: плагин навязывает путь или имя сохранения | имя строит хост (операция и id плагина), место выбирает пользователь в диалоге хоста, запись без замены существующего | Сохранённый ответ — текст плагина, не проверен хостом |
 | Серверный клиент подсовывает опции/метод в свободный `args` | профиль принуждается Core; импорты/ключи по гранту; для ключа нужен `plugin_bytes`; метод в `args` оператор доверяет | Оператор принял «содержимое выбирает клиент» |
 | Серверный grant шире объявления | валидация при загрузке; недоговорный grant пропускается | — |
 

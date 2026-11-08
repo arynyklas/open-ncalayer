@@ -243,6 +243,25 @@ kind = "cms_ex"
 content = "param:file"
 [operations.uses.key.profile]
 cosign = "never"
+
+[[operations]]
+name = "sign-text"
+module = "test.cms.module"
+manual = true
+request = '{{"module":"test.cms.module","method":"t","args":["{{note}}"]}}'
+label = {{ ru = "EVIL-LABEL ru", kk = "EVIL-LABEL kk", en = "EVIL-LABEL en" }}
+[[operations.params]]
+name = "note"
+kind = "text"
+max_chars = 64
+[operations.uses]
+imports = ["keys_sign_cms_ex", {KEY_IMPORTS}]
+network = "pki"
+[[operations.uses.key]]
+kind = "cms_ex"
+content = "param:note"
+[operations.uses.key.profile]
+cosign = "never"
 "#,
         header("test.cms", "0.9.0")
     ))
@@ -324,6 +343,7 @@ fn registry_and_listing(origin: &str) -> (PluginRegistry, ManualListing) {
         plugin_id: plain.id.clone(),
         plugin_version: plain.version.to_string(),
         plugin_name: plain.name.clone(),
+        reason: super::offer::WithoutReason::NoManualOperations,
     });
     listing.unusable.push(UnusablePlugin {
         plugin_id: "test.broken".to_owned(),
@@ -626,16 +646,20 @@ fn the_list_groups_operations_by_plugin_and_keeps_the_plugins_words_in_their_fra
         assert_eq!(hidden.len(), 2);
         assert_eq!(
             hidden[0].line,
-            t.without_ops
-                .replace("{0}", "test.plain")
-                .replace("{1}", "1.0.0")
+            format!(
+                "{} {}",
+                t.without_ops
+                    .replace("{0}", "test.plain")
+                    .replace("{1}", "1.0.0"),
+                t.why_no_manual
+            )
         );
         assert!(
             hidden[0].name.contains("EVIL-NAME"),
             "the name is in its frame"
         );
         assert_eq!(hidden[1].line, t.unusable.replace("{0}", "test.broken"));
-        assert_eq!(ui.get_hidden_why(), t.without_ops_why);
+        assert!(ui.get_hidden().iter().all(|r| !r.line.is_empty()));
         assert_eq!(ui.get_list_note(), "");
     }
 }
@@ -960,7 +984,26 @@ fn confirming_through_the_named_button_applies_the_key_once_and_says_so() {
     // The reply is the plugin's, in its frame, and the result says it is not saved.
     let reply = ui.get_reply().to_string();
     assert!(!reply.is_empty());
-    assert_eq!(ui.get_result_note(), t.no_save);
+    assert_eq!(ui.get_result_note(), t.save_note_offered);
+    // It can be saved, whole and as received, under the host's name; an existing file stays.
+    assert!(ui.get_save_offered());
+    assert_eq!(ui.get_save_reply_label(), t.save_reply);
+    let dir = rig.file("saved-here.txt", b"").parent().unwrap().to_owned();
+    let target = dir.join("kept.json");
+    std::fs::write(&target, b"mine").unwrap();
+    super::write_reply(&rig.ws, target.clone());
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert_eq!(rig.ui().get_save_note(), t.save_exists);
+    let fresh = dir.join("reply.json");
+    super::write_reply(&rig.ws, fresh.clone());
+    assert_eq!(std::fs::read(&fresh).unwrap(), reply.as_bytes());
+    assert!(rig.ui().get_save_note().contains("reply.json"));
+    // Other than `.json` gets `.json`.
+    super::write_reply(&rig.ws, dir.join("reply2.txt"));
+    assert_eq!(
+        std::fs::read(dir.join("reply2.txt.json")).unwrap(),
+        reply.as_bytes()
+    );
     for row in &rows {
         assert!(!row.contains(&reply), "the reply is in the host's rows");
     }
@@ -1363,11 +1406,71 @@ fn the_scanner_finds_the_evasions_and_ignores_comments_and_strings() {
     assert_eq!(count(&quiet, needle), 0);
 }
 
+/// Which files of the plugins page (and the whole workspace) use `ident`, and how often.
+fn users_of<'a>(all: &'a [(String, String)], ident: &str) -> Vec<(&'a str, usize)> {
+    all.iter()
+        .filter(|(rel, _)| !rel.ends_with("plugins/tests.rs"))
+        .map(|(rel, text)| (rel.as_str(), count(text, ident)))
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+const CONSENT: &str = "crates/oncl-ui/src/workspace/plugins/consent.rs";
+const CONFIRM: &str = "crates/oncl-ui/src/workspace/plugins/confirm.rs";
+
+/// The rules that keep the user's confirmation in one place. `all` is every source of the
+/// workspace outside Core; the function returns what breaks them.
+fn confirmation_breaches(all: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let uses = |ident: &str| users_of(all, ident);
+    // The call of Core's constructor: once, in the consent module.
+    if uses(concat!("after_user", "_confirmed")) != [(CONSENT, 1)] {
+        out.push("after_user_confirmed is used outside its one place".to_owned());
+    }
+    // The token's maker (the handler's own) appears in the handler's module only.
+    if uses("of_the_button") != [(CONFIRM, 2)] {
+        out.push("a press token is made outside the confirm handler".to_owned());
+    }
+    // The token's type is named by the consent module and the handler's module only.
+    let named: Vec<&str> = uses("PressToken").into_iter().map(|(f, _)| f).collect();
+    if named != [CONFIRM, CONSENT] && named != [CONSENT, CONFIRM] {
+        out.push(format!("PressToken is named in {named:?}"));
+    }
+    // The wrapper is called by the handler (once); its other use is its definition and the
+    // consent module's own test.
+    let wrapper: Vec<(&str, usize)> = uses("user_confirmed");
+    if !wrapper.contains(&(CONFIRM, 1))
+        || wrapper.iter().any(|(f, _)| *f != CONFIRM && *f != CONSENT)
+    {
+        out.push(format!("user_confirmed is used in {wrapper:?}"));
+    }
+    // The test-only maker is reachable from nothing else.
+    let tests_only: Vec<&str> = uses("press_for_tests")
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
+    if tests_only.iter().any(|f| *f != CONFIRM && *f != CONSENT) {
+        out.push(format!("press_for_tests is used in {tests_only:?}"));
+    }
+    out
+}
+
+fn fixture(base: &[(String, String)], extra: (&str, String)) -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = base.to_vec();
+    match all.iter_mut().find(|(rel, _)| rel == extra.0) {
+        Some((_, text)) => text.push_str(&format!("\n{}", extra.1)),
+        None => all.push((extra.0.to_owned(), extra.1)),
+    }
+    all
+}
+
 /// `UserConfirmation::after_user_confirmed` is the host's duty: the one who calls it says the
-/// user confirmed. In the whole workspace outside Core (which defines it) it appears ONCE:
-/// in `consent::user_confirmed`, which needs a `PressToken`; the token is made by `press()`,
-/// which only the confirm button's handler calls. A second use anywhere fails this test, and so
-/// does a use that clippy's `disallowed-methods` (clippy.toml) would flag.
+/// user confirmed. In the whole workspace outside Core (which defines it) it appears ONCE, in
+/// `consent::user_confirmed`, which needs a `PressToken` whose constructor is private to a
+/// module only the confirm handler's module can see (a compile-time guarantee), and clippy's
+/// `disallowed-methods` (clippy.toml) refuses any other call. This scan is the third fence: it
+/// parses, so it sees a use as a path value, one after an inline test module or inside a macro;
+/// the reviewer's evasions below must trip it.
 #[test]
 fn the_users_confirmation_is_made_in_one_place_only() {
     let root = oncl_testkit::workspace_root();
@@ -1379,43 +1482,59 @@ fn the_users_confirmation_is_made_in_one_place_only() {
         }
     }
     assert!(all.len() > 100, "the scan found {} sources", all.len());
-    let needle = concat!("after_user", "_confirmed");
-    let uses: Vec<(&str, usize)> = all
-        .iter()
-        .filter(|(rel, _)| !rel.ends_with("plugins/tests.rs"))
-        .map(|(rel, text)| (rel.as_str(), count(text, needle)))
-        .filter(|(_, n)| *n > 0)
-        .collect();
-    assert_eq!(
-        uses,
-        [("crates/oncl-ui/src/workspace/plugins/consent.rs", 1)]
+    assert_eq!(confirmation_breaches(&all), Vec::<String>::new());
+
+    let run = "crates/oncl-ui/src/workspace/plugins/run.rs";
+    // Evasion 1: a second user_confirmed in run.rs (the worker confirming for the user).
+    let evil = fixture(
+        &all,
+        (
+            run,
+            "fn auto(s: &ConsentSummary) { let _ = consent::user_confirmed(s, tok); }".into(),
+        ),
     );
-    // The wrapper's calls outside the test modules' helper, and the token's makers.
-    let page = &all
+    assert!(!confirmation_breaches(&evil).is_empty());
+    // Evasion 2: a `consent::auto` building the token.
+    let evil = fixture(
+        &all,
+        (
+            CONSENT,
+            "pub(super) fn auto() -> super::confirm::PressToken { super::confirm::press::of_the_button(w) }".into(),
+        ),
+    );
+    assert!(!confirmation_breaches(&evil).is_empty());
+    // A use as a path value, and a call after an inline test module.
+    let evil = fixture(
+        &all,
+        (
+            run,
+            format!(
+                "let f = UserConfirmation::{};",
+                concat!("after_user", "_confirmed")
+            ),
+        ),
+    );
+    assert!(!confirmation_breaches(&evil).is_empty());
+    let evil = fixture(
+        &all,
+        (
+            "crates/oncl-ui/src/lib.rs",
+            format!(
+                "#[cfg(test)]\nmod t {{}}\nfn late() {{ UserConfirmation::{}(s); }}",
+                concat!("after_user", "_confirmed")
+            ),
+        ),
+    );
+    assert!(!confirmation_breaches(&evil).is_empty());
+    // The handler asks the controller first.
+    let handler = all
         .iter()
-        .find(|(rel, _)| rel == "crates/oncl-ui/src/workspace/plugins/mod.rs")
+        .find(|(rel, _)| rel == CONFIRM)
         .unwrap()
-        .1;
-    assert_eq!(count(page, "user_confirmed"), 1, "one call of the wrapper");
-    assert_eq!(
-        count(page, "press"),
-        2,
-        "the maker and the button's handler only"
-    );
-    let handler = page.split("fn confirm(open").nth(1).unwrap();
-    let handler = &handler[..handler.find("\n}\n").unwrap()];
-    assert_eq!(count(handler, "press"), 1);
-    assert_eq!(count(handler, "user_confirmed"), 1);
+        .1
+        .as_str();
+    let handler = handler.split("pub(super) fn confirm(").nth(1).unwrap();
     assert!(handler.find("Event::Confirm").unwrap() < handler.find("user_confirmed").unwrap());
-    for (rel, text) in &all {
-        if rel.contains("/workspace/plugins/") {
-            assert_eq!(
-                count(text, "PressToken") > 0,
-                rel.ends_with("/mod.rs") || rel.ends_with("consent.rs"),
-                "{rel}"
-            );
-        }
-    }
 }
 
 /// Every control of the page says what it is to a screen reader, and no focus scope is a silent
@@ -1654,7 +1773,7 @@ fn direct_run(
     let control = Arc::new(crate::workspace::JobControl::default());
     match run(spec, &control, &rx, |prepared| {
         let confirmation =
-            super::consent::user_confirmed(&prepared.summary, super::press_for_tests());
+            super::consent::user_confirmed(&prepared.summary, super::confirm::press_for_tests());
         tx.send(Decision::Proceed(confirmation)).unwrap();
     }) {
         RunOutcome::Done(report) => report,
@@ -1834,4 +1953,84 @@ fn a_text_with_a_direction_mark_is_refused_by_the_form_with_a_clear_message() {
         rig.ui().get_error(),
         Texts::of(Locale::En).e_text_bad.replace("{0}", "note")
     );
+}
+
+#[test]
+fn the_signed_text_and_the_key_come_before_the_plugins_frame_and_the_body_scrolls_by_keyboard() {
+    let path = StdPath::new(env!("CARGO_MANIFEST_DIR")).join("ui/manual_plugins.slint");
+    let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    let frame = at("caption: PluginsState.c-frame-name-caption");
+    for before in [
+        "for line in PluginsState.c-trusted",
+        "PluginsState.c-inputs.length",
+        "text: PluginsState.c-key-heading",
+        "text: PluginsState.c-fingerprint-caption",
+    ] {
+        assert!(at(before) < frame, "{before} is after the plugin's frame");
+    }
+    assert!(at("PluginsState.c-inputs.length") < at("PluginsState.c-file-lines"));
+
+    let rig = rig();
+    show(&rig);
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_consent_raw(&doc);
+    assert_eq!(rig.ui().get_c_scroll_y(), 0.0);
+    // Tab to the body's strip and read to the end: the body (with the plugin's frame) moves.
+    let mut moved = false;
+    for _ in 0..12 {
+        press(&rig.ws, Key::Tab);
+        press(&rig.ws, Key::End);
+        if rig.ui().get_c_scroll_y() < -1.0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(
+        moved,
+        "the consent body cannot be read to its end by keyboard"
+    );
+}
+
+/// A CRLF typed in the form reaches Core as LF: the same text is on the consent page, in the
+/// summary's digest and in the call's parameter (Core refuses a carriage return, so a CR that
+/// got through would fail the preparation after the password was entered).
+#[test]
+fn a_crlf_text_is_normalised_once_and_the_same_text_reaches_page_digest_and_core() {
+    let rig = rig();
+    rig.open("test.cms", "sign-text");
+    rig.ui().invoke_field_text(0, "a\r\nb\rc".into());
+    rig.ui()
+        .set_store_path(rig.w.store.display().to_string().into());
+    rig.ui().invoke_form_continue();
+    assert_eq!(rig.step(), Step::Key, "{}", rig.ui().get_error());
+    rig.unlocked();
+    rig.ui().invoke_cert_chosen(0);
+    until("the confirmation is shown", || {
+        rig.ws.plugins.borrow().shown.is_some()
+    });
+    assert_eq!(rig.step(), Step::Consent, "{}", rig.ui().get_error());
+    // The page: the normalised text, line breaks spelled out.
+    let inputs = model_strings(rig.ui().get_c_inputs());
+    assert_eq!(inputs, ["note = \"a\\nb\\nc\""]);
+    // The digest of the summary is the SHA-256 of exactly these bytes.
+    use sha2::{Digest, Sha256};
+    let expected: [u8; 32] = Sha256::digest(b"a\nb\nc").into();
+    let st = rig.ws.plugins.borrow();
+    let summary = &st.shown.as_ref().unwrap().summary;
+    assert_eq!(summary.content.sha256, expected);
+    assert_eq!(summary.content.len, 5);
+    // The value Core builds its request from is the same text.
+    let request = st
+        .offer
+        .as_ref()
+        .unwrap()
+        .engine
+        .plugin_request(
+            "test.cms",
+            "sign-text",
+            &[("note", oncl_core::plugins::PluginParam::Text("a\nb\nc"))],
+        )
+        .unwrap();
+    assert!(request.contains("a\\nb\\nc"), "{request}");
 }

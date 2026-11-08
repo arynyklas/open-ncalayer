@@ -8,7 +8,12 @@ const PORT: &str = "dogovor24";
 const DOC: &[u8] = b"Dogovor24: the contract the user approved";
 
 fn run_operation(operation: &str, options: &RunOptions) -> PortRun {
-    run_port_operation(PORT, operation, &[("file", PluginParam::Document(DOC))], options)
+    run_port_operation(
+        PORT,
+        operation,
+        &[("file", PluginParam::Document(DOC))],
+        options,
+    )
 }
 
 #[test]
@@ -47,5 +52,5 @@ fn a_wrong_profile_field_is_refused_before_the_key() {
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn every_declared_import_is_needed() {
-    assert_every_import_needed(PORT, &["sign-cms".to_owned()], &run_operation);
+    assert_every_import_needed(PORT, &["sign-cms".to_owned()], &[], &run_operation);
 }

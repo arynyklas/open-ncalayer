@@ -26,7 +26,7 @@ name = "sign-text-attached-timestamp"
 module = "EFactoringSign"
 manual = true
 request = '{"module":"EFactoringSign","type":"text","data":"{text}","attach":true,"has_timestamp":true}'
-label = { ru = "Подписать текст (CMS): с меткой времени (данные внутри)", kk = "Мәтінге қол қою (CMS): уақыт белгісі бар (деректер ішінде)", en = "Sign a text (CMS): time-stamped (attached)" }
+label = { ru = "Подписать текст (CMS): с меткой времени (данные внутри) (без окна повтора)", kk = "Мәтінге қол қою (CMS): уақыт белгісі бар (деректер ішінде) (қайталаусыз)", en = "Sign a text (CMS): time-stamped (attached) (no retry window)" }
 
 [[operations.params]]
 name = "text"
@@ -50,7 +50,7 @@ name = "sign-text-attached"
 module = "EFactoringSign"
 manual = true
 request = '{"module":"EFactoringSign","type":"text","data":"{text}","attach":true,"has_timestamp":false}'
-label = { ru = "Подписать текст (CMS): данные внутри", kk = "Мәтінге қол қою (CMS): деректер ішінде", en = "Sign a text (CMS): attached" }
+label = { ru = "Подписать текст (CMS): данные внутри (без окна повтора)", kk = "Мәтінге қол қою (CMS): деректер ішінде (қайталаусыз)", en = "Sign a text (CMS): attached (no retry window)" }
 
 [[operations.params]]
 name = "text"
@@ -73,7 +73,7 @@ name = "sign-text-detached-timestamp"
 module = "EFactoringSign"
 manual = true
 request = '{"module":"EFactoringSign","type":"text","data":"{text}","attach":false,"has_timestamp":true}'
-label = { ru = "Подписать текст (CMS): с меткой времени (отсоединённая)", kk = "Мәтінге қол қою (CMS): уақыт белгісі бар (бөлек)", en = "Sign a text (CMS): time-stamped (detached)" }
+label = { ru = "Подписать текст (CMS): с меткой времени (отсоединённая) (без окна повтора)", kk = "Мәтінге қол қою (CMS): уақыт белгісі бар (бөлек) (қайталаусыз)", en = "Sign a text (CMS): time-stamped (detached) (no retry window)" }
 
 [[operations.params]]
 name = "text"
@@ -96,7 +96,7 @@ name = "sign-text-detached"
 module = "EFactoringSign"
 manual = true
 request = '{"module":"EFactoringSign","type":"text","data":"{text}","attach":false,"has_timestamp":false}'
-label = { ru = "Подписать текст (CMS): отсоединённая подпись", kk = "Мәтінге қол қою (CMS): бөлек қолтаңба", en = "Sign a text (CMS): detached" }
+label = { ru = "Подписать текст (CMS): отсоединённая подпись (без окна повтора)", kk = "Мәтінге қол қою (CMS): бөлек қолтаңба (қайталаусыз)", en = "Sign a text (CMS): detached (no retry window)" }
 
 [[operations.params]]
 name = "text"
@@ -116,7 +116,7 @@ name = "sign-xml"
 module = "EFactoringSign"
 manual = true
 request = '{"module":"EFactoringSign","type":"xml","data":"{xml}"}'
-label = { ru = "Подписать XML-документ целиком", kk = "XML құжатына тұтас қол қою", en = "Sign a whole XML document" }
+label = { ru = "Подписать XML-документ целиком (без окна повтора)", kk = "XML құжатына тұтас қол қою (қайталаусыз)", en = "Sign a whole XML document (no retry window)" }
 
 [[operations.params]]
 name = "xml"

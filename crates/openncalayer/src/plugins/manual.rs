@@ -9,14 +9,14 @@
 //! [`PluginModules`](oncl_plugin::PluginModules), which this does not touch.
 //!
 //! Nothing here signs, builds a request or asks the user: the call path is the manual
-//! window's. Operations the manual window cannot run (`derived`, `network = [urls]`, and
-//! the ports the inventory marks unsupported, `docs/design/manual-plugins-inventory.md`)
-//! are not listed; the inventory, not this code, says which are which.
+//! window's. Operations the manual window cannot run (`derived`, `network = [urls]`) are not
+//! listed; a plugin left with none is listed with the reason computed from its manifest and
+//! the registry (`oncl_ui::WithoutReason`), never from a hardcoded list of ports.
 
-use oncl_core::plugins::{CallerContext, PackageHash, PluginRegistry};
+use oncl_core::plugins::{CallerContext, ManualLimits, PackageHash, PluginRegistry};
 use oncl_pki::http::HttpMethod;
 use oncl_plugin::operations::{Network, Operation, Param};
-use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA, InstanceLimits, Localized, NCA_PKI_HOSTS, Store};
+use oncl_plugin::{Localized, NCA_PKI_HOSTS, Store};
 use tracing::warn;
 
 use super::Version;
@@ -30,19 +30,13 @@ pub fn manual_caller() -> CallerContext {
 }
 
 /// The exact PKI endpoints an operation with `network = "pki"` may use: the NCA's own
-/// time-stamp and OCSP services (what `PkiUrl::Default` names), each by the methods the core
-/// uses: the core validates the signer's certificate online before the key is applied, and its
-/// OCSP request to the responder named by the certificate is a `GET` under the responder's
-/// address (a plugin's own request, a `POST`). A method that is not listed is denied, and a
-/// denied PKI request fails the whole call, so a key use would be refused for want of the
-/// `GET`. CRLs are fetched under the provenance of the certificate, not from this list.
-const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = [
-    (HttpMethod::Get, DEFAULT_TSA),
-    (HttpMethod::Post, DEFAULT_TSA),
-    (HttpMethod::Get, DEFAULT_OCSP),
-    (HttpMethod::Post, DEFAULT_OCSP),
-];
-
+/// time-stamp and OCSP services (what `PkiUrl::Default` names), each by GET and POST: the core
+/// validates the signer's certificate online before the key is applied (a `GET` to the
+/// responder the certificate names) and Kalkan's TSA profile asks by `GET`; a plugin's own
+/// request is a `POST`. A method not listed is denied and a denied PKI request fails the call.
+/// One definition, shared with the port harness. CRLs are fetched under the provenance of the
+/// certificate, not from this list.
+const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = oncl_plugin::NCA_PKI_ENDPOINTS;
 /// One operation of an installed plugin that the manual window may offer.
 ///
 /// `plugin_name` and `label` are the plugin's own text: untrusted, to be shown as such and
@@ -69,8 +63,7 @@ pub struct ManualOperation {
 }
 
 /// An installed plugin (on, not withdrawn, its package readable) that offers no operation to the
-/// manual window. Why is not known here: its manifest declares none for this window (no
-/// `[[operations]]`, none `manual`, or only ones the window cannot run).
+/// manual window, with the reason the host computed from the manifest and the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithoutOperations {
     /// The plugin's id.
@@ -79,6 +72,8 @@ pub struct WithoutOperations {
     pub plugin_version: Version,
     /// The plugin's name (untrusted text).
     pub plugin_name: Localized,
+    /// Why nothing is offered.
+    pub reason: oncl_ui::WithoutReason,
 }
 
 /// An installed plugin that was not registered because its package could not be read.
@@ -140,12 +135,21 @@ impl ManualPlugins {
     fn add(&mut self, package: oncl_plugin::Package) {
         let manifest = &package.manifest;
         // `network = [urls]` is not runnable in the window: the registry refuses it too.
-        let ops: Vec<&Operation> = manifest
-            .manual_operations()
+        let manual: Vec<&Operation> = manifest.manual_operations().collect();
+        let ops: Vec<&Operation> = manual
+            .iter()
+            .copied()
             .filter(|o| !matches!(o.uses().network(), Network::Urls(_)))
             .collect();
         if ops.is_empty() {
-            self.without_operations.push(without(&package));
+            let reason = if manifest.operations().is_empty() {
+                oncl_ui::WithoutReason::NoOperations
+            } else if manual.is_empty() {
+                oncl_ui::WithoutReason::NoManualOperations
+            } else {
+                oncl_ui::WithoutReason::UnsupportedNetwork
+            };
+            self.without_operations.push(without(&package, reason));
             return;
         }
         // The digest comes from the same `Package` as the manifest and the module.
@@ -153,7 +157,7 @@ impl ManualPlugins {
             manifest.clone(),
             PackageHash::File(package.sha256),
             &package.wasm,
-            InstanceLimits::default(),
+            ManualLimits::desktop().instance,
             Vec::new(),
         ) {
             warn!(plugin = %manifest.id, error = %e, "the manual window cannot register the plugin");
@@ -180,8 +184,9 @@ impl ManualPlugins {
             }
         }
         if self.operations.len() == before {
-            // Registered, but nothing of it is offered: the window says so, one honest line.
-            self.without_operations.push(without(&package));
+            // Registered, but the registry offered none of it: the window says so.
+            self.without_operations
+                .push(without(&package, oncl_ui::WithoutReason::NotRegistered));
         }
     }
 }
@@ -196,11 +201,12 @@ fn endpoints_of(op: &Operation) -> &'static [(HttpMethod, &'static str)] {
     }
 }
 
-fn without(package: &oncl_plugin::Package) -> WithoutOperations {
+fn without(package: &oncl_plugin::Package, reason: oncl_ui::WithoutReason) -> WithoutOperations {
     WithoutOperations {
         plugin_id: package.manifest.id.clone(),
         plugin_version: package.manifest.version.clone(),
         plugin_name: package.manifest.name.clone(),
+        reason,
     }
 }
 
@@ -246,6 +252,7 @@ pub fn listing(manual: &ManualPlugins) -> oncl_ui::ManualListing {
                 plugin_id: p.plugin_id.clone(),
                 plugin_version: p.plugin_version.to_string(),
                 plugin_name: p.plugin_name.clone(),
+                reason: p.reason,
             })
             .collect(),
         unusable: manual
@@ -290,7 +297,6 @@ mod tests {
     use crate::plugins::tests::{ID, example, example_ops, operation};
     use oncl_core::plugins::PluginIdentity;
     use oncl_core::{Engine, EngineServices};
-    use oncl_pki::resource::ResourceLimits;
     use oncl_plugin::{Package, Source};
 
     fn store() -> (tempfile::TempDir, Store) {
@@ -313,7 +319,8 @@ mod tests {
 
     fn engine(plugins: ManualPlugins) -> Engine {
         Engine::new(
-            EngineServices::hash_only(ResourceLimits::default()).with_plugins(plugins.registry),
+            EngineServices::hash_only(ManualLimits::desktop().resources)
+                .with_plugins(plugins.registry),
         )
         .unwrap()
     }
@@ -335,8 +342,23 @@ mod tests {
     }
 
     #[test]
-    fn the_pki_endpoints_are_within_the_nca_hosts() {
-        for (_, url) in PKI_ENDPOINTS {
+    fn the_pki_endpoints_are_get_and_post_of_the_ocsp_and_the_tsa_within_the_nca_hosts() {
+        use oncl_pki::http::HttpMethod::{Get, Post};
+        use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA};
+        let mut granted: Vec<_> = oncl_plugin::NCA_PKI_ENDPOINTS.to_vec();
+        granted.sort_by_key(|(method, url)| (*url, *method == Post));
+        // The signer's validation GETs the OCSP responder of its certificate and Kalkan's TSA
+        // profile GETs the TSA: a grant of POST alone refused both (MP6 wave 1).
+        assert_eq!(
+            granted,
+            [
+                (Get, DEFAULT_OCSP),
+                (Post, DEFAULT_OCSP),
+                (Get, DEFAULT_TSA),
+                (Post, DEFAULT_TSA)
+            ]
+        );
+        for (_, url) in oncl_plugin::NCA_PKI_ENDPOINTS {
             let host = url.trim_start_matches("http://");
             assert!(
                 NCA_PKI_HOSTS
@@ -345,6 +367,22 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    /// What the real ports need, measured (`oncl_core::plugins::ManualLimits`): the default
+    /// instance limits cannot run beside the default memory budget, and a registry built
+    /// here installs every plugin with the desktop's.
+    #[test]
+    fn every_plugin_is_registered_with_the_desktop_limits_and_not_the_sdk_defaults() {
+        let (_dir, store) = store();
+        install(
+            &store,
+            &example_ops("0.1.0", &[operation("sign", "Sign", true, false)]),
+        );
+        let plugins = ManualPlugins::build(&store);
+        let limits = plugins.registry.instance_limits(ID);
+        assert_eq!(limits, Some(ManualLimits::desktop().instance));
+        assert_ne!(limits, Some(oncl_plugin::InstanceLimits::default()));
     }
 
     #[test]
@@ -426,6 +464,10 @@ mod tests {
             "0.1.0"
         );
         assert!(!none.without_operations[0].plugin_name.en.is_empty());
+        assert_eq!(
+            none.without_operations[0].reason,
+            oncl_ui::WithoutReason::NoOperations
+        );
         // One with operations is not in that list, and one that is off or withdrawn is in
         // neither (it is not installed for this purpose).
         install(&store, &other(&[operation("sign", "Sign", true, false)]));
@@ -445,7 +487,20 @@ mod tests {
             "[operations.uses]\nnetwork = [\"https://example.invalid/\"]\n",
         );
         let (_dir, store) = store_with(&example_ops("0.1.0", &[urls]));
-        assert_eq!(ManualPlugins::build(&store).without_operations.len(), 1);
+        let built = ManualPlugins::build(&store);
+        assert_eq!(built.without_operations.len(), 1);
+        assert_eq!(
+            built.without_operations[0].reason,
+            oncl_ui::WithoutReason::UnsupportedNetwork
+        );
+        // Operations declared for other callers only, and none at all, each say so.
+        let not_manual =
+            operation("sign", "Sign", false, false).replace("manual = true", "server = true");
+        let (_dir, store) = store_with(&example_ops("0.1.0", &[not_manual]));
+        assert_eq!(
+            ManualPlugins::build(&store).without_operations[0].reason,
+            oncl_ui::WithoutReason::NoManualOperations
+        );
     }
 
     #[test]
@@ -477,7 +532,7 @@ mod tests {
         assert_eq!(sign.pki_endpoints, granted);
         assert!(
             sign.pki_endpoints
-                .contains(&(HttpMethod::Get, DEFAULT_OCSP.to_owned()))
+                .contains(&(HttpMethod::Get, oncl_plugin::DEFAULT_OCSP.to_owned()))
         );
         assert!(listing.operations[1].pki_endpoints.is_empty());
         assert!(sign.uses_key);

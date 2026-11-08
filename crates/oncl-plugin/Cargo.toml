@@ -48,6 +48,8 @@ tracing.workspace = true
 # `HttpPrefix`: the URLs a plugin may reach.
 url.workspace = true
 wasmi.workspace = true
+# `LimiterError`: the signature of the memory limiter's hooks.
+wasmi_core.workspace = true
 zip = { workspace = true, optional = true }
 # The passwords of `dialog_password`, wiped when dropped.
 zeroize.workspace = true

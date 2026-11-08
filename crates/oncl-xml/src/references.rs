@@ -1347,6 +1347,43 @@ struct PendingSigner {
     archive_references: Option<oncl_pki::io::StagedArtifact>,
     _metadata: ResourceReservation,
 }
+/// The metadata the check of a signed document keeps for the signers and references it
+/// found, bounded by what `profile` allows of them.
+fn retained_reservation(profile: &XmlVerifyProfile) -> u64 {
+    (profile.max_signers as u64)
+        * (3 * (profile.xml.max_namespace_bytes as u64 + profile.xml.max_namespaces as u64 * 96)
+            + 4096)
+        + (profile.max_references as u64) * 256
+        + profile.xml.max_depth as u64 * (profile.xml.max_name_bytes as u64 + 128)
+}
+/// The metadata the check of a signed document works in while it reads the signers.
+fn scratch_reservation(profile: &XmlVerifyProfile) -> u64 {
+    (profile.max_metadata_bytes as u64) * 10 + profile.xml.max_namespace_bytes as u64 * 4
+}
+/// The most metadata that checking a signed document against `profile` admits at once,
+/// whatever the document: its index, the framing read while the signatures are located, and
+/// what the check keeps and works in for the signers and references. It is what the
+/// metadata budget must hold, besides everything else the operation reserves, for the check
+/// to run: the signing paths that verify their own output ([`crate::xades`], the legacy XML
+/// signature) do it after the key was used, so a host sizes the budget by this before it
+/// lets a key be used. A sum of the bounds, a little above what one document reaches.
+///
+/// # Errors
+///
+/// `InvalidLimits` for XML limits the check would refuse, `MetadataLimit` on overflow.
+pub fn verification_metadata_bound(
+    profile: &XmlVerifyProfile,
+) -> std::result::Result<u64, ProcessingError> {
+    [
+        profile.xml.reservation()?,
+        intake::framing_reservation(profile)?,
+        retained_reservation(profile),
+        scratch_reservation(profile),
+    ]
+    .into_iter()
+    .try_fold(0u64, |sum, part| sum.checked_add(part))
+    .ok_or(ProcessingError::MetadataLimit)
+}
 pub(crate) fn verify_document(
     document: &mut XmlDocument,
     profile: &XmlVerifyProfile,
@@ -1379,16 +1416,9 @@ pub(crate) fn verify_document_timed(
     {
         return Err(ProcessingError::InvalidLimits.into());
     }
-    let retained = (profile.max_signers as u64)
-        * (3 * (profile.xml.max_namespace_bytes as u64 + profile.xml.max_namespaces as u64 * 96)
-            + 4096)
-        + (profile.max_references as u64) * 256
-        + profile.xml.max_depth as u64 * (profile.xml.max_name_bytes as u64 + 128);
-    let metadata_guard = scope.reserve_metadata(retained)?;
+    let metadata_guard = scope.reserve_metadata(retained_reservation(profile))?;
     let signatures = scan(document, profile, scope)?;
-    let scratch =
-        (profile.max_metadata_bytes as u64) * 10 + profile.xml.max_namespace_bytes as u64 * 4;
-    let _scratch_metadata = scope.reserve_metadata(scratch)?;
+    let _scratch_metadata = scope.reserve_metadata(scratch_reservation(profile))?;
     let mut work = profile.max_work;
     let mut count = 0usize;
     let mut pending = Vec::with_capacity(signatures.len());

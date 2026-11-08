@@ -101,11 +101,17 @@ pub enum PluginRefusalCode {
     /// The CLI cannot compute the expected content of a digest-form bound key use before the
     /// key is opened, so it refuses to grant it.
     ContentBindingUnavailable,
+    /// The engine's memory and metadata budgets cannot hold the call over this document
+    /// (`manual_call_budget`), so it is refused before the user is asked and before a key is
+    /// opened.
+    ResourceBudget,
+    /// The operation signs XML and the engine has no temporary store to spool it through.
+    NoTemporaryStore,
 }
 
 impl PluginRefusalCode {
     /// Every subcode, in a fixed order. New subcodes are appended, never inserted.
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 49] = [
         Self::TicketMissing,
         Self::ApprovalMissing,
         Self::TicketUses,
@@ -153,6 +159,8 @@ impl PluginRefusalCode {
         Self::ApprovalRandomUnavailable,
         Self::AuditFactTooLong,
         Self::ContentBindingUnavailable,
+        Self::ResourceBudget,
+        Self::NoTemporaryStore,
     ];
 }
 
@@ -207,6 +215,8 @@ impl PluginRefusalCode {
             Self::ApprovalRandomUnavailable => "approval-random-unavailable",
             Self::AuditFactTooLong => "audit-fact-too-long",
             Self::ContentBindingUnavailable => "content-binding-unavailable",
+            Self::ResourceBudget => "resource-budget",
+            Self::NoTemporaryStore => "no-temporary-store",
         }
     }
     /// The subcode of an id, if it is one.
@@ -231,6 +241,8 @@ impl PluginRefusalCode {
             Self::UnsupportedKey => ErrorCode::UnsupportedAlgorithm,
             Self::KeyUnavailable => ErrorCode::MissingKeyProvider,
             Self::ApprovalRandomUnavailable => ErrorCode::Io,
+            Self::ResourceBudget => ErrorCode::MemoryLimit,
+            Self::NoTemporaryStore => ErrorCode::MissingTemporaryStore,
             Self::TicketMissing
             | Self::ApprovalMissing
             | Self::TicketUses
@@ -331,6 +343,10 @@ impl From<&PluginPrepareError> for PluginRefusalCode {
             PluginPrepareError::Options => Self::OptionsInvalid,
             PluginPrepareError::KeyUnavailable => Self::KeyUnavailable,
             PluginPrepareError::CertificateMismatch => Self::CertificateMismatch,
+            PluginPrepareError::ResourceBudget | PluginPrepareError::DocumentTooLarge => {
+                Self::ResourceBudget
+            }
+            PluginPrepareError::NoTemporaryStore => Self::NoTemporaryStore,
         }
     }
 }
@@ -380,7 +396,7 @@ mod tests {
 
     /// The whole list of ids. Adding a subcode means appending here on purpose; an id is
     /// never edited, removed or reordered (clients and journals keep the strings).
-    const PINNED: [&str; 47] = [
+    const PINNED: [&str; 49] = [
         "ticket-missing",
         "approval-missing",
         "ticket-uses",
@@ -428,6 +444,8 @@ mod tests {
         "approval-random-unavailable",
         "audit-fact-too-long",
         "content-binding-unavailable",
+        "resource-budget",
+        "no-temporary-store",
     ];
 
     #[test]
@@ -487,6 +505,9 @@ mod tests {
             PluginPrepareError::Options,
             PluginPrepareError::KeyUnavailable,
             PluginPrepareError::CertificateMismatch,
+            PluginPrepareError::ResourceBudget,
+            PluginPrepareError::DocumentTooLarge,
+            PluginPrepareError::NoTemporaryStore,
         ]);
         all
     }
@@ -551,6 +572,13 @@ mod tests {
             );
         }
         for e in prepares() {
+            if e == PluginPrepareError::DocumentTooLarge {
+                // The one subcode `resource-budget` is `MemoryLimit` for an engine whose
+                // budgets are too small for the module, `InputLimit` for a too large document.
+                assert_eq!(e.subcode(), PluginRefusalCode::ResourceBudget);
+                assert_eq!(OperationError::from(e).code(), ErrorCode::InputLimit);
+                continue;
+            }
             assert_eq!(
                 e.subcode().error_code(),
                 OperationError::from(e.clone()).code(),

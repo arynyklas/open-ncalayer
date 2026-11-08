@@ -34,7 +34,7 @@ pub(crate) use self::operations::{
 };
 pub use self::plugins::{
     ManualListing, ManualPluginSource, NoManualPlugins, OfferError, OfferedOperation,
-    PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, plugin_offer,
+    PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, WithoutReason, plugin_offer,
 };
 
 use std::cell::{Cell, RefCell};

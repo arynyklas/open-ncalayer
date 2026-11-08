@@ -5,6 +5,7 @@
 //! dialogs, so the plugin's retry window is not available (recorded in the labels). The key
 //! chooser is Core's own; the harness key is the module's PKCS12 storage.
 use crate::ports::*;
+use crate::wave3_kit::base64_of;
 use oncl_core::plugins::{PluginParam, TicketRefusal};
 use oncl_plugin::operations::{KeyKind, Profile};
 
@@ -74,11 +75,6 @@ fn sign_text_is_a_detached_time_stamped_cms_of_the_data() {
         "{:?}",
         run.http_log
     );
-}
-
-fn base64_of(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[test]

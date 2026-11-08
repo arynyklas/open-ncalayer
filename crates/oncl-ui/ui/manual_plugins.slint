@@ -75,7 +75,6 @@ export global PluginsState {
     in property <string> list-note;
     in property <[PluginGroupRow]> groups;
     in property <string> hidden-heading;
-    in property <string> hidden-why;
     in property <[PluginHiddenRow]> hidden;
 
     // The form.
@@ -97,6 +96,8 @@ export global PluginsState {
     in-out property <int> cert-index: -1;
 
     // The confirmation.
+    // How far the confirmation's body is scrolled (zero or negative), for the tests.
+    in-out property <length> c-scroll-y;
     in property <string> c-title;
     in property <string> c-lead;
     in property <[string]> c-trusted;
@@ -135,6 +136,9 @@ export global PluginsState {
     in property <string> reply;
     in property <string> reply-cut;
     in property <string> result-note;
+    in property <bool> save-offered;
+    in property <string> save-reply-label;
+    in property <string> save-note;
 
     callback refresh();
     // Group index, operation index.
@@ -154,6 +158,8 @@ export global PluginsState {
     callback back();
     callback again();
     callback finish();
+    // Save the reply of a verified call, as received.
+    callback save-reply();
 }
 
 // The confirmation: its first focus is on «Cancel»; Enter there cancels.
@@ -170,8 +176,20 @@ component ConsentStep inherits VerticalLayout {
 
     DialogScroll {
         max-height: root.room;
+        content-y <=> PluginsState.c-scroll-y;
         for line in PluginsState.c-trusted: NameText {
             text: line;
+        }
+        if PluginsState.c-inputs.length > 0: VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: PluginsState.c-inputs-caption;
+                wrap: word-wrap;
+            }
+
+            for line in PluginsState.c-inputs: NameText {
+                text: line;
+            }
         }
         Subheading {
             text: PluginsState.c-key-heading;
@@ -213,17 +231,6 @@ component ConsentStep inherits VerticalLayout {
                 read-only: true;
                 text: PluginsState.c-prehash;
                 accessible-label: PluginsState.c-prehash-caption;
-            }
-        }
-        if PluginsState.c-inputs.length > 0: VerticalLayout {
-            spacing: 2px;
-            Text {
-                text: PluginsState.c-inputs-caption;
-                wrap: word-wrap;
-            }
-
-            for line in PluginsState.c-inputs: NameText {
-                text: line;
             }
         }
         FieldLabel {
@@ -473,9 +480,6 @@ export component PluginsPage inherits EscapeScope {
                         label: row.name;
                     }
                 }
-                Hint {
-                    text: PluginsState.hidden-why;
-                }
             }
             if PluginsState.error != "": ErrorText {
                 text: PluginsState.error;
@@ -686,6 +690,23 @@ export component PluginsPage inherits EscapeScope {
             }
             Hint {
                 text: PluginsState.result-note;
+            }
+
+            // Saving the reply as received: after the reply, before «Back to the list»; never
+            // the primary button, so Enter does not press it.
+            if PluginsState.save-offered: HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: PluginsState.save-reply-label;
+                    accessible-label: PluginsState.save-reply-label;
+                    enabled: !PluginsState.busy;
+                    clicked => {
+                        PluginsState.save-reply();
+                    }
+                }
+            }
+            if PluginsState.save-note != "": Hint {
+                text: PluginsState.save-note;
             }
 
             HorizontalLayout {

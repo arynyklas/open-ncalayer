@@ -250,6 +250,19 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
     if !typed_sources_agree(declared_use.profile(), &summary.profile, entered) {
         return Err(ConsentError::Mismatch);
     }
+    // The text that is signed is shown exactly: what the page lists for the content parameter
+    // must hash to what Core froze. A different text means the page and Core disagree: nothing
+    // is shown to confirm.
+    let text_content = entered.iter().find_map(|(n, v)| match v {
+        Frozen::Text(text) if *n == summary.content.param => Some(text.as_str()),
+        _ => None,
+    });
+    if let Some(text) = text_content
+        && (crate::signing::runner::sha256_of(text.as_bytes()) != summary.content.sha256
+            || text.len() as u64 != summary.content.len)
+    {
+        return Err(ConsentError::Mismatch);
+    }
     let lines = declared.consent(None).lines;
 
     let mut trusted = vec![
@@ -344,10 +357,17 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
         trusted,
         package_caption: package_caption.to_owned(),
         package_sha: hex(&package_digest),
-        file_lines: vec![
-            t.c_file.replace("{0}", &plain(file_name)),
-            t.c_size.replace("{0}", &size),
-        ],
+        file_lines: if text_content.is_some() {
+            vec![
+                t.c_text_signed.replace("{0}", &summary.content.param),
+                t.c_size.replace("{0}", &size),
+            ]
+        } else {
+            vec![
+                t.c_file.replace("{0}", &plain(file_name)),
+                t.c_size.replace("{0}", &size),
+            ]
+        },
         file_sha_caption: t.c_sha.to_owned(),
         file_sha: hex(&summary.content.sha256),
         prehash_caption,
@@ -393,7 +413,7 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
 )]
 pub(super) fn user_confirmed(
     shown: &ConsentSummary,
-    _pressed: super::PressToken,
+    _pressed: super::confirm::PressToken,
 ) -> UserConfirmation {
     UserConfirmation::after_user_confirmed(shown)
 }
@@ -632,6 +652,68 @@ element = "param:path"
     }
 
     #[test]
+    fn the_signed_text_is_shown_exactly_and_checked_against_the_summary() {
+        fn unquote(q: &str) -> String {
+            let inner = &q[1..q.len() - 1];
+            let (mut out, mut it) = (String::new(), inner.chars());
+            while let Some(c) = it.next() {
+                if c != '\\' {
+                    out.push(c);
+                    continue;
+                }
+                out.push(match it.next() {
+                    Some('n') => '\n',
+                    Some('r') => '\r',
+                    Some('t') => '\t',
+                    Some(o) => o,
+                    None => '\\',
+                });
+            }
+            out
+        }
+        // Lossless, and never a raw line break on the page.
+        for text in [
+            "a\nb",
+            "tab\there",
+            "q\"uote\\",
+            &"x".repeat(300),
+            "кириллица\nи ещё",
+        ] {
+            let q = quoted(text);
+            assert_eq!(unquote(&q), text);
+            assert!(!q.contains('\n') && !q.contains('\t'));
+        }
+        // The page of a text-content operation: the exact text (uncut, 300 characters), and
+        // its hash must be the summary's.
+        let m = manifest();
+        let long = "x".repeat(300);
+        let mut s = summary();
+        s.content.param = "path".to_owned();
+        s.content.len = long.len() as u64;
+        s.content.sha256 = crate::signing::runner::sha256_of(long.as_bytes());
+        s.profile = Profile::Xml(XmlProfile {
+            element: Some(Source::Fixed(long.clone())),
+            parent: None,
+        });
+        let entered = vec![
+            ("path".to_owned(), Frozen::Text(long.clone())),
+            ("mode".to_owned(), Frozen::Choice("slow".to_owned())),
+        ];
+        let v = view_with(&m, &s, &entered, Locale::En).unwrap();
+        assert!(
+            v.inputs.iter().any(|i| i.contains(&long)),
+            "the whole text is shown"
+        );
+        // Another text than the one Core froze: refused.
+        let mut other = s.clone();
+        other.content.sha256[0] ^= 1;
+        assert_eq!(
+            view_with(&m, &other, &entered, Locale::En).unwrap_err(),
+            ConsentError::Mismatch
+        );
+    }
+
+    #[test]
     fn a_digest_the_key_signs_is_shown_with_its_algorithm() {
         let mut s = summary();
         s.content.prehashed = Some(PrehashedDigest {
@@ -746,6 +828,7 @@ element = "param:path"
         let mut b = summary();
         b.content.sha256[0] ^= 1;
         assert_ne!(a.digest(), b.digest());
-        let _confirmation = user_confirmed(&a, super::super::press_for_tests());
+        let _confirmation =
+            user_confirmed(&a, crate::workspace::plugins::confirm::press_for_tests());
     }
 }
