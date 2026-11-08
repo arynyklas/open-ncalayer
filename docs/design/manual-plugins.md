@@ -1,6 +1,6 @@
 # Плагины в окне ручных инструментов: модель разрешений
 
-**Статус:** проект, ревизия 2 (после ревью `review1.md`; решения пользователя и родителя учтены, открытых вопросов нет). Кода нет. База: ветка платформы, tip `08891678`.
+**Статус:** проект, ревизия 2 (после ревью `review1.md`; решения пользователя и родителя учтены, открытых вопросов нет). Текст ревизии 2 написан до кода: на 2026-11-08 влиты стадии MP0–MP10 (кроме MP3b) и MP6, не влиты MP7b и MP11 (статусы — в §9.3, незавершённое — в [`docs/dev/manual-plugins-status.md`](../dev/manual-plugins-status.md)); номера строк кода ниже относятся к базе — ветке платформы, tip `08891678`.
 **Связано:** [плагины](plugins.md), [платформа §8.3](platform.md), план `docs/superpowers/plans/2026-11-02-platform.md` (Task 21, Task 30), отчёты U03 `platform-ui-task-30/{report,rereview2}.md`.
 
 **Решение.** Вариант A пользователя (плагины остаются в ручном окне) реализуется гибридом C:
@@ -124,7 +124,7 @@ output      = "der"
 - `max_uses = 1`; многоподписные операции в ручном окне не поддерживаются (unsupported с причиной «несколько подписей»).
 - **`CmsContent::Digest`:** запрещён для `derived`; для `bound` Core сам считает дайджест замороженного документа алгоритмом ключа (ГОСТ 34.311/Стрибог/SHA-2 по сертификату, как `cms_spec` и проверка `digest.algorithm() == alg.hash_alg()`, `keys.rs:~615`) и требует побайтового равенства с `args` — показывается имя документа и этот дайджест (не SHA-256). Это возможно только при `allow_prehashed` политики контекста; ручное окно включает его для плагинного контекста.
 
-**Ревизия MP1b:** (контракт текста: Core отвергает в `text`-содержимом `InvalidValue` любой символ, кроме `\n` и `\t`, если он управляющий, bidi или невидимый; UI нормализует CRLF в LF при снимке формы и передаёт тот же `&str` и рендереру, и `PluginParam::Text`;) шаблон — любой JSON-объект (массив `args`, объект `args` или ключи прямо в корне, как у реальных портов), плейсхолдеры только значения целиком, `module`/`method` фиксированы; `text` — содержимое любого вида (UTF-8-байты); ключевая операция обязана объявить `network = "pki"`; см. `docs/design/plugins.md`.
+**Ревизия MP1b:** (контракт текста: Core отвергает в `text`-содержимом `InvalidValue` любой символ, кроме `\n` и `\t`, если он управляющий, bidi или невидимый; UI должен нормализовать CRLF в LF при снимке формы и передать тот же `&str` и рендереру, и `PluginParam::Text` — **на tip `c5799246` страница этого не делает**: форма оставляет `\r\n` как есть (тест `a_text_is_refused_if_it_cannot_be_shown_as_typed_and_is_kept_byte_for_byte_otherwise`), а Core отклоняет `\r`, так что текст с переводами строк Windows отклоняется с `param-invalid-value`; исправление ждёт повторного ревью MP5a;) шаблон — любой JSON-объект (массив `args`, объект `args` или ключи прямо в корне, как у реальных портов), плейсхолдеры только значения целиком, `module`/`method` фиксированы; `text` — содержимое любого вида (UTF-8-байты); ключевая операция обязана объявить `network = "pki"`; см. `docs/design/plugins.md`.
 
 Проверки при разборе: `request` — JSON-объект со строгими пределами, плейсхолдеры (целые строки-значения) только объявленных параметров, максимум ≤ `max_transfer` (иначе операция недоступна, честный `InputLimit`); `uses.imports ⊆ Compiled::imports()` проверяет установка (WASM известен); любой ключевой импорт требует строки `[[uses.key]]` соответствующего вида и `Capabilities.keys = true`; `content = "param:x"` — `x` типа `document` или `text` (для любого вида; подписываются UTF-8-байты текста, в котором нет управляющих символов кроме `
 `/`	` и невидимых/bidi); `raw` с `derived` запрещён линтером; число `[[uses.key]]` ≤ 8; `network = "pki"` — только PKI-хосты ядра.
@@ -289,28 +289,31 @@ UI: консент-текст строится из объявления/про�
 Порты: на каждый supported порт один тест через `plugin_call_approved` (реальная операция) + независимый верификатор; для unsupported — тест, что причина отображается.
 
 ### 9.3 Стадии (независимо ревьюируемые)
-| Задача | Содержание | Владелец (outline брифа) | Зависит |
-|---|---|---|---|
-| **MP0** | Инвентаризация: `Compiled::imports()` 34 wasm; по каждому методу — интерактив, ключевые виды, опции, число подписей, Origin под `LocalOperator`, состояние; таблица supported/unsupported с причинами в `docs/design/manual-plugins-inventory.md`; решение о запуске MP3b | read-only + прогон | — |
-| **MP1** | Схема `[[operations]]`, профиль, проверки разбора, `added_over`, `min_core` | `oncl-plugin` manifest/package | — |
-| **MP2** | `install` с `package_sha256`, `KeyScope::Declared`, `from_operation`, `plugin_request`, deny-by-default | `oncl-core` plugins | MP1 |
-| **MP3a-1** | `ctx.plugin_ticket`, `KeyUseEvent.plugin`, `PluginConsentGuard`, серверный гард; отказ документного гарда на билет | `oncl-core` keys/context | MP2 |
-| **MP3a-2** | `PluginApproval`, принуждение профиля, `cosign=never`, `bound` и `Digest`-bound, TTL, `max_uses=1` | `oncl-core` approval | MP3a-1 |
-| **MP3a-3** | Подкоды (`oncl-core` ошибки + контракт DTO), аудит BEGIN/FINAL | `oncl-core` + `oncl-server` audit | MP3a-2 |
-| **MP3b** | `plugin_plan`, allow-list, детерминизм, полное превью ≤ 64 КиБ; **отдельный выпуск**, старт после MP0 | `oncl-core` + `oncl-plugin` | MP3a-3, MP0 |
-| **MP4** | `PluginInteraction` (ключевой выбор по привязанному ключу, `terminals`, запрет диалогов) | `oncl-plugin/headless.rs` | MP2 (параллельно MP1–MP2 допустимо) |
-| **MP5a** | Страница «Плагины»: список операций (+unsupported с причиной), параметры, раннер, отчёт | `oncl-ui` | MP3a-2, MP4, MP7 |
-| **MP5b** | Страница согласия (доверенные поля, профиль, сеть) и доступность (фокус/Enter/DPI/screen reader) | `oncl-ui` + slint | MP5a |
-| **MP5c** (сделано) | `install_plugin.rs`: показ операций; повторное согласие при смене `[[operations]]` | `oncl-ui` | MP1 |
-| **MP6** | Объявления портов волнами ≤ 6, по MP0; тесты портов | по агенту на волну | MP0, MP1, MP2, MP3a-3, MP4 (+MP3b для derived-операций) |
-| **MP7** | Desktop: `openncalayer/src/plugins.rs` (реестр из `Store`, хеш, обновление), feature `oncl-core/plugins` для `oncl-ui/openncalayer`, размер бинаря | `openncalayer` | MP2 |
-| **MP8** | `oncl-api` DTO/OpenAPI/клиент: подкоды, `plugin_bytes`; сервер/CLI-валидация против объявления; `docs/user` | `oncl-api/server/cli` | MP3a-3 |
-| **MP8b** (позже, не блокирует) | Типизированные параметры и document parts для серверной операции плагина | отдельный план | MP8 |
-| **MP9** | CLI `oncl plugin`: валидация, `--plugin-bytes`, тесты | `oncl-cli` | MP8 |
-| **MP10** | `cargo xtask plugin-ops-check` (линтер объявлений: imports ⊆ compiled, `max_uses=1`, raw/derived, плейсхолдеры) | `xtask` | MP1 |
-| **MP11** | Выпуск 34 новых версий пакетов: `registry.toml`, хеши, подписанный индекс (`update-index.md`) | релизный агент | MP6 |
-| **MP12** | Документация (`plugins.md`, `platform.md §8.3`, user-доки), нативный smoke | один агент | MP5b, MP11 |
-| **MP13** (отдельно) | ABI v2 `oncl_prepare/oncl_finish` (модель B) для derived-raw | отдельный план | — |
+Столбец «Статус» — на 2026-11-08, tip интеграции `c5799246`, по ledger. Метки: **влито** (принято ревью, замечания закрыты), **влито, ревью идёт** (влито, независимое ревью или повторное ревью не завершено), **на ревью** (ветка есть, не влита), **не начато**. Незавершённое — в [`docs/dev/manual-plugins-status.md`](../dev/manual-plugins-status.md).
+
+| Задача | Содержание | Владелец (outline брифа) | Зависит | Статус |
+|---|---|---|---|---|
+| **MP0** | Инвентаризация: `Compiled::imports()` 34 wasm; по каждому методу — интерактив, ключевые виды, опции, число подписей, Origin под `LocalOperator`, состояние; таблица supported/unsupported с причинами в `docs/design/manual-plugins-inventory.md`; решение о запуске MP3b | read-only + прогон | — | влито (MP3b не запускать: R16) |
+| **MP1** | Схема `[[operations]]`, профиль, проверки разбора, `added_over`, `min_core` | `oncl-plugin` manifest/package | — | влито (MP1b: обобщённый шаблон запроса, текст как содержимое — влито) |
+| **MP2** | `install` с `package_sha256`, `KeyScope::Declared`, `from_operation`, `plugin_request`, deny-by-default | `oncl-core` plugins | MP1 | влито |
+| **MP3a-1** | `ctx.plugin_ticket`, `KeyUseEvent.plugin`, `PluginConsentGuard`, серверный гард; отказ документного гарда на билет | `oncl-core` keys/context | MP2 | влито |
+| **MP3a-2** | `PluginApproval`, принуждение профиля, `cosign=never`, `bound` и `Digest`-bound, TTL, `max_uses=1` | `oncl-core` approval | MP3a-1 | влито |
+| **MP3a-3** | Подкоды (`oncl-core` ошибки + контракт DTO), аудит BEGIN/FINAL | `oncl-core` + `oncl-server` audit | MP3a-2 | влито |
+| **MP3b** | `plugin_plan`, allow-list, детерминизм, полное превью ≤ 64 КиБ; **отдельный выпуск**, старт после MP0 | `oncl-core` + `oncl-plugin` | MP3a-3, MP0 | не начато (по R16 не планируется) |
+| **MP4** | `PluginInteraction` (ключевой выбор по привязанному ключу, `terminals`, запрет диалогов) | `oncl-plugin/headless.rs` | MP2 (параллельно MP1–MP2 допустимо) | влито |
+| **MP5a** | Страница «Плагины»: список операций (+unsupported с причиной), параметры, раннер, отчёт | `oncl-ui` | MP3a-2, MP4, MP7 | влито, ревью идёт (повторное ревью раунда 2 без вердикта; неподдерживаемые порты показаны без причины: «OpenNCALayer не знает почему»; результат не сохраняется в файл и показан до 2 000 знаков) |
+| **MP5b** | Страница согласия (доверенные поля, профиль, сеть) и доступность (фокус/Enter/DPI/screen reader) | `oncl-ui` + slint | MP5a | влито, ревью идёт (нативный smoke: фокус на «Отмена» при 100 %; 200 % и экранный диктор не проверены) |
+| **MP5c** (сделано) | `install_plugin.rs`: показ операций; повторное согласие при смене `[[operations]]` | `oncl-ui` | MP1 | влито |
+| **MP6** | Объявления портов волнами ≤ 6, по MP0; тесты портов | по агенту на волну | MP0, MP1, MP2, MP3a-3, MP4 (+MP3b для derived-операций) | влито, ревью идёт: волны 1–3 в интеграционной ветке (27 операций в 8 портах), независимое ревью волн 2–3 не завершено |
+| **MP7** | Desktop: `openncalayer/src/plugins.rs` (реестр из `Store`, хеш, обновление), feature `oncl-core/plugins` для `oncl-ui/openncalayer`, размер бинаря | `openncalayer` | MP2 | влито |
+| **MP7b** (добавлено) | Пределы рабочего стола `ManualLimits`: документ ≤ 4 МиБ (32 бит: 512 КиБ), отказ до ключа (`resource-budget`, `no-temporary-store`) | `oncl-core` + `openncalayer` + `oncl-ui` | MP7, MP5a | на ревью (ветка `feat/mp7b-limits`, не влита) |
+| **MP8** | `oncl-api` DTO/OpenAPI/клиент: подкоды, `plugin_bytes`; сервер/CLI-валидация против объявления; `docs/user` | `oncl-api/server/cli` | MP3a-3 | влито |
+| **MP8b** (позже, не блокирует) | Типизированные параметры и document parts для серверной операции плагина | отдельный план | MP8 | не начато |
+| **MP9** | CLI `oncl plugin`: валидация, `--plugin-bytes`, тесты | `oncl-cli` | MP8 | влито |
+| **MP10** | `cargo xtask plugin-ops-check` (линтер объявлений: imports ⊆ compiled, `max_uses=1`, raw/derived, плейсхолдеры) | `xtask` | MP1 | влито |
+| **MP11** | Выпуск 34 новых версий пакетов: `registry.toml`, хеши, подписанный индекс (`update-index.md`) | релизный агент | MP6 | не начато (нужен ключ подписи обновлений: действие пользователя; по MP0 пакетов 8, не 34) |
+| **MP12** | Документация (`plugins.md`, `platform.md §8.3`, user-доки), нативный smoke | один агент | MP5b, MP11 | документация: `docs/user/manual-plugins.md`, правки `server.md`, `cli.md`, `http-api.md`, README и план — готовы в `docs/mp12`; нативный smoke с настоящей подписью — не выполнен |
+| **MP13** (отдельно) | ABI v2 `oncl_prepare/oncl_finish` (модель B) для derived-raw | отдельный план | — | не начато |
 
 Каждая задача: RED-тест → GREEN → фокусные `cargo test -p …`; общий CI один раз в конце, как в плане.
 

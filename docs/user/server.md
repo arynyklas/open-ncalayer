@@ -234,8 +234,9 @@ Things an operator should know:
   fourth refusal of one operation, or when the facts cannot be encoded. It never blocks or
   changes the answer. A use whose facts cannot be journaled (a plugin version or grant id over
   255 bytes) is refused as `audit-fact-too-long` with the key not applied, before the journal is
-  touched, and does not affect audit health. Manifest versions are limited to 64 characters and
-  grant names (token, plugin id, operation) to 64 characters each.
+  touched, and does not affect audit health. Manifest versions are limited to 64 characters;
+  a plugin id, a grant's token and its operation to 64 bytes each (so on the server the
+  `audit-fact-too-long` check is in practice a defensive one).
 * **The content digest is new in the journal.** Earlier journals held only opaque labels; a
   plugin record holds the SHA-256 of the signed content and its length (the design requires it).
   It identifies a document to anyone who can read the journal and guess it; protect the audit
@@ -249,7 +250,8 @@ Things an operator should know:
 * **Format rule for future readers.** Frame kinds `0x80` and above are reserved for records a
   reader that does not know them may skip (the sequence number still counts). Kinds `0x00..0x7f`
   must be understood or the journal is damaged, as today. Nothing uses `0x80` yet, and
-  `ONCLAU02` is not bumped; this does not help binaries that are already shipped.
+  `ONCLAU02` is not bumped; this does not help binaries that are already shipped, and the
+  current reader implements no skipping: it treats every kind it does not know as damage.
 * **Subcode ids differ from design 4.8** by design: `NotDeclared`, `PackageChanged`,
   `OptionsMismatch`, `ApprovalExpired` are `not-declared`, `package-changed`, `options-mismatch`,
   `approval-expired`; `KeyUseNotApproved` is split into `approval-missing`, `ticket-missing`,
@@ -310,6 +312,39 @@ plugin_bytes = true                # the plugin / its client chooses what the ke
   above under "Plugin records in the audit journal"; the `grant` is
   `<token>:<plugin>:<operation>`. Refusals reach the client as the `subcode` of the error
   answer ([error subcodes](http-api.md)).
+
+### Operator guidance for plugin grants
+
+* **Today there is nothing to grant.** The shipped plugins declare 27 operations in total, all
+  `manual = true` and none `server = true` (see [the manual-window guide](manual-plugins.md)); a
+  server grant for them is skipped with an `oncl-server: error:` line. Grants apply to
+  third-party plugins that declare `server = true`, and to plugins without declarations.
+* **What `plugin_bytes = true` means.** You accept that the client (and the plugin) chooses the
+  bytes that the named key signs: the server cannot bind the content to a document. The
+  declared profile is still forced (kind, options, one use per request), the caller must be the
+  granted token, the key one of the grant's `keys`, and the package the one installed. Give
+  `plugin_bytes` only to a token whose client you trust with that key.
+* **Read the start-up log.** A skipped grant (`oncl-server: error: ... grant skipped: ...`), a
+  grant with keys but no `plugin_bytes` (every key use will be refused) and a grant of a plugin
+  without declarations (`warning: grant without declaration ...`: options are not enforced)
+  each print one line. A skipped grant does not stop the server; check the log after every
+  configuration or plugin change.
+* **Audit fields of a key use.** Per plugin key use the journal holds: plugin id, package hash
+  (kind `1` package file or `2` loose manifest+module, and SHA-256), version, operation, the
+  ticket digest, the SHA-256 of the approval nonce (absent for an operator grant), the content
+  SHA-256 and length, whether the content was a prehashed digest, the options SHA-256, the caller
+  kind, `declared`, and the grant (`<token>:<plugin>:<operation>`); then the usual `BEGIN` and
+  `FINAL`. No `FINAL` means `Unknown`: treat the key as possibly used. A refusal holds the same
+  facts plus the subcode and no `BEGIN` (best effort, at most four per operation).
+  `DurableAuditGuard::plugin_records()` reads them back.
+* **The desktop manual window is not in this journal.** The window writes no `ONCLAU02` file; the
+  key uses and refusals of the manual window go to the `tracing` target `oncl::plugin_audit`.
+* **Rolling back the server.** Before running an older server again, move the whole audit
+  directory away (see "Rolling back" above): a journal that holds plugin frames makes the older
+  server stop with `fatal_corruption`.
+* **Limits of the configuration** (at most 16 plugins, 256 grants per plugin, 8 keys and 16 PKI
+  endpoints per grant, ids of 64 bytes; defaults `max_memory` 1 MiB and `max_transfer` 256 KiB)
+  are listed in [the HTTP contract](http-api.md).
 
 ## Revocation and bounds
 

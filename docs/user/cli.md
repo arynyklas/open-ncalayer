@@ -157,7 +157,7 @@ JSON (`code` is `Completed`, or `InvalidInput` when `--wasm` does not fit; `appl
 | `--manifest`, `--module` | The manifest (≤ 64 KiB) and module (≤ 16 MiB) of the one plugin installed for this process |
 | `--operation OP` | The operation: a declared one with `server = true`, or, for a plugin without declarations, the label the operator grants |
 | `--caller LABEL` | The operator label recorded as the caller (never an origin, never taken from the plugin) |
-| `--allow-import NAME` | Exact host imports granted (repeatable, known names only). For a declared operation they must be among its declared imports; none given means all declared. For a plugin without declarations none given means none |
+| `--allow-import NAME` | Exact host imports granted (repeatable, known names only, at most 80). For a declared operation they must be among its declared imports; none given means all declared. For a plugin without declarations none given means none |
 | `--output PATH\|-` | Where the response is written (never overwrites; `-` is stdout, which cannot be combined with `--json` on stdout) |
 | `--args-file PATH\|-` | A **free** JSON request (≤ 256 KiB): what a plugin without declarations takes, and what a declared operation still accepts (the operator trusts the request, as before) |
 | `--param NAME=VALUE` | A typed `text`, `choice` or `locale` parameter of a declared operation (repeatable) |
@@ -177,13 +177,15 @@ Global flags (`--json`, `--report`, trust and `--timeout-seconds`) behave as for
 For a declared operation without `--args-file`, Core builds the request from the manifest's template exactly as the manual window does (`Engine::plugin_server_request`; `module` and `method` come from the manifest alone, each whole-string placeholder is replaced by the typed value, a document as standard base64, keys sorted, compact). Everything is checked before any secret is read or key opened, and an operation with no parameters needs no flag at all:
 
 * every declared parameter must be given once (a flag may be left out: false); an undeclared name is `unknown-param`, a repeated one `duplicate-param`, a missing one `missing-param`;
-* a document comes only from `--param-file` and a text, choice or locale only from `--param` (`param-wrong-kind` otherwise); a choice must be one of the declared `choices`, a locale `ru`, `kk` or `en`, a text at most `max_chars` characters (and a valid absolute XPath when a profile reads it) (`param-invalid-value` / `param-too-large`);
+* a document comes only from `--param-file` and a text, choice or locale only from `--param` (`param-wrong-kind` otherwise); a choice must be one of the declared `choices`, a locale `ru`, `kk` or `en`, a text at most `max_chars` characters (a valid absolute XPath when a profile reads it; and, when it is the signed content, free of control characters other than `\n` and `\t` and of bidirectional or invisible ones, so `\r` is refused too) (`param-invalid-value` / `param-too-large`);
 * a document file is read only for a declared document and never past its declared `max_bytes` (nor the 256 KiB request limit): a larger file is `InputLimit`, `subcode=param-too-large`, and an empty one `param-invalid-value`;
 * the whole request must fit 256 KiB (`request-too-large`).
 
 A text parameter that a key profile reads (`element = "param:xpath"`) is also what the `--plugin-bytes` grant is matched with: the grant covers exactly the profile with that value, so a plugin that signs with another element is `options-mismatch`.
 
 A plugin **without** `[[operations]]` is unchanged: it takes only `--args-file`, and `--param*` or a missing `--args-file` is refused (`PermissionDenied`, `subcode=not-declared`) because there is nothing to check them against. `--plugin-bytes` has no effect on it (a warning says so).
+
+`plugin call` runs only an operation with `server = true`. The plugins shipped in `plugins/` declare 27 operations, all `manual = true` for the desktop's manual window ([guide](manual-plugins.md)) and none `server = true`, so `oncl plugin call` refuses every one of them with `subcode=not-declared`; `plugin operations` still lists them.
 
 ### Consent and audit
 
@@ -213,7 +215,7 @@ A failure prints `oncl: <code>; subcode=<id>; applied=<NotApplied|Applied|Unknow
 | `PermissionDenied` | `not-declared` | The operation is not declared, not `server = true` or derived; an import beyond the declaration; typed parameters (or no `--args-file`) for a plugin without declarations; a name the plugin calls that is not declared |
 | `PermissionDenied` | `no-key-use` | `--key` for an operation that declares no key use |
 | `PermissionDenied` | `network-not-declared` | `--plugin-pki-endpoint` without `network = "pki"` |
-| `PermissionDenied` | `not-granted` | A key use without `--plugin-bytes` (or not the granted plugin, operation or key) |
+| `PermissionDenied` | `not-granted` | A key use without `--plugin-bytes` (or not the granted plugin or operation; another key is a plain `PermissionDenied` without a subcode) |
 | `PermissionDenied` | `content-mismatch`, `content-binding-unavailable` | Typed parameters: the plugin signs other bytes than the ones passed, or the bound use is digest-form |
 | `PermissionDenied` | `options-mismatch`, `kind-mismatch`, `key-use-spent`, … | The key use differs from the declaration (see [the design](../design/manual-plugins.md) §4.8 for the whole list); the key was not applied except for `key-use-spent` (the first use stays `Applied`) |
 | `InvalidInput` | `unknown-param`, `duplicate-param`, `missing-param`, `param-wrong-kind`, `param-invalid-value`, `invalid-template` | A typed parameter is wrong (above) |
