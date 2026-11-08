@@ -321,6 +321,10 @@ The ports of 34 third-party plugins of the original (the ecc.kz family, the comm
 
 Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian), section «Порты».
 
+#### Plugins in the tools window
+
+The «Plugins» section of the «Tools…» window runs, **on your own action**, the operations of installed plugins that declare them in their manifest for this window: 27 operations in 8 ports (`rating1c`, `dogovor24`, `efactoring`, `energy`, `eproc`, `esf-osdkz`, `fhs`, `market`). You choose a file or type a text and name a PKCS#12/JKS key; the confirmation page shows exactly what will be signed (SHA-256 and size, the key, the form of the signature, the network), the key is used once and only after you press the button, the confirmation is not remembered and is valid for 120 s. The other ports do not work in this window (the guide lists the reasons); `qiwi.signXml`, `efactoring` with an element, `esf-osdkz.auth` and `fhs.signFile` have no operation. There is no encryption/decryption (encrypt/decrypt) and no WinGet package — both unchanged. **This is a new feature: signing through this window with a real key and the national PKI services has not been verified yet, the program does not verify the signature in the plugin's reply, and the reply is shown only in part (2,000 characters); the whole reply is saved with the button «Save the plugin reply (not verified by this program)».** See the [guide](docs/user/manual-plugins.md) (Russian) and the [list of unfinished work](docs/dev/manual-plugins-status.md) (Russian).
+
 ### Tokens (experimental)
 
 OpenNCALayer reads keys and signs on the tokens of the six families Kalkan knows: Kaztoken, the Kazakhstan ID card, eToken PRO 72K, eToken 5110, JaCarta and AKey. The support is experimental: every driver has been checked only against a software emulator of its token, not on real tokens yet. That is why it is **off by default**.

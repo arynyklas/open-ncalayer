@@ -252,7 +252,7 @@ refusal has a precise reason**, `"subcode": "<id>"`:
   is dropped by the client (the typed `code` survives).
 * Today only plugin refusals carry one. A refusal is **always `NotApplied`** except
   `key-use-spent` (a second key use in one request (one `OperationId`; two plugin items of one request count together): the first use is real and stays
-  reported `Applied`). The ids a server answer can carry for a plugin operation:
+  reported `Applied`). The ids a server answer carries in practice for a plugin operation:
 
 | `subcode` | `code` | Meaning |
 |---|---|---|
@@ -261,13 +261,14 @@ refusal has a precise reason**, `"subcode": "<id>"`:
 | `package-changed` | `PermissionDenied` | The plugin package is not the installed one |
 | `key-mismatch` | `PermissionDenied` | The key is not one the grant names |
 | `kind-mismatch` | `PermissionDenied` | The signature kind is not a declared key use |
-| `caller-mismatch` | `PermissionDenied` | The ticket's caller is not the granted token |
+| `caller-mismatch` | `PermissionDenied` | The ticket's caller is not a service-client token (not reachable through HTTP: a token without a matching grant is `not-granted`) |
 | `ticket-uses` | `PermissionDenied` | The ticket allows other than exactly one use |
 | `key-use-spent` | `PermissionDenied` | One request tried to use a key twice (`applied` is `Applied`) |
 | `not-declared` | `PermissionDenied` | The operation is not declared by the plugin (a server grant for it is skipped at start-up, so a request normally gets a plain 403 without a subcode; the `oncl plugin` CLI reports this id) |
 
-Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`) belong to the
-desktop manual window and are listed in the SDK guide.
+Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`, 47 ids, each with its
+meaning) belong mostly to the desktop manual window; the complete table is in
+[the manual-window guide](manual-plugins.md#отказы-как-читать-код-на-странице) and the SDK guide.
 
 The Rust client (`oncl_api::client::ClientError`) exposes it as `server_subcode`
 (`Option<String>`, already validated, safe to print); its `describe()` becomes
@@ -387,8 +388,8 @@ window is the execution itself, which the audit BEGIN/FINAL records.
 id = "vendor.example"            # must equal the manifest id
 manifest = "/private/plugins/vendor.example.toml"   # <= 64 KiB
 wasm = "/private/plugins/vendor.example.wasm"       # <= 16 MiB
-max_memory = 1048576             # <= oncl-plugin MAX_MEMORY
-max_transfer = 262144            # <= oncl-plugin MAX_TRANSFER
+max_memory = 1048576             # <= oncl-plugin MAX_MEMORY; default 1 MiB
+max_transfer = 262144            # <= oncl-plugin MAX_TRANSFER; default 256 KiB
 
 [[plugins.permissions]]          # one per (token, operation); duplicates are refused
 token = "accounting-service"     # the caller identity: a configured token id
@@ -410,17 +411,23 @@ must match the declaration exactly: the ticket's plugin, package hash, operation
 token as caller, a named key of the grant, the declared kind and the declared options
 (`options-mismatch` otherwise) and it must be the request's only key use (a second plugin item or a second signature in the same request is `key-use-spent`).
 
-**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. No shipped manifest declares operations yet.
+**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. The shipped plugins under `plugins/` declare 27 operations, but none declares `server = true`: no shipped operation can be granted on the server (or run by `oncl plugin call`); the server skips such a grant with an error in the log and the CLI refuses it with `not-declared`.
 
 At start-up a grant of a declared plugin is checked against the manifest and **skipped with
 an error in the log** (the other grants and the server keep running) when it is wider than the
 declaration: an operation the plugin does not declare (the error lists the declared ones) or
-declares without `server = true`; an import outside `uses.imports` (an empty `imports` list
+declares without `server = true` or whose content is `derived` (not runnable); an import outside `uses.imports` (an empty `imports` list
 means all declared imports); `keys` or `plugin_bytes` for an operation with no key use;
 `pki_endpoints` without `network = "pki"`. A grant naming an import that does not exist, an
 unknown token or a duplicate (token, operation) still fails the configuration. A grant of a
 plugin without declarations is kept as before with a start-up warning that its signature
 options are not enforced.
+
+Configuration bounds (a violation fails the configuration): at most 16 `[[plugins]]` and 256
+permissions per plugin; a plugin `id`, a grant's `token` and `operation` at most 64 bytes (the
+plugin `id` must equal the manifest's, a duplicate plugin id is refused); `imports` at most 72,
+`keys` at most 8, `pki_endpoints` at most 16 of at most 2048 bytes each. On the server the
+`pki_endpoints` are GET only (the CLI also takes `POST=`).
 
 Plugin outputs (`take_output` staged files) and bound input files are **not exposed** by
 HTTP: the SDK supports them through the original context, but no request-to-file
