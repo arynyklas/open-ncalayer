@@ -832,7 +832,7 @@ kind = "text"
 max_chars = 64
 [operations.uses]
 imports = ["keys_sign_xml"]
-network = "none"
+network = "pki"
 [[operations.uses.key]]
 kind = "xml"
 content = "param:file"
