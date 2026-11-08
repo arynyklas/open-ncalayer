@@ -1,8 +1,8 @@
-# Platform acceptance: 10 GiB / 1 GiB proof (`cargo xtask platform-proof`)
+# Platform acceptance: 1 GiB / 1 GiB proof (`cargo xtask platform-proof`)
 
 ```text
-cargo xtask platform-proof --document-bytes 10737418240 --max-rss-bytes 1073741824 \
-  --scratch-bytes 68719476736 --out <dir> [--scratch-dir <dir>] [--surface sdk|cli|http|all] \
+cargo xtask platform-proof --document-bytes 1073741824 --max-rss-bytes 1073741824 \
+  --scratch-bytes 17179869184 --out <dir> [--scratch-dir <dir>] [--surface sdk|cli|http|all] \
   [--jobs N] [--only <id>…] [--resume] [--reuse-data] [--skip-build]
 ```
 
@@ -30,9 +30,9 @@ A big run that was not done is **not** a pass.
    generator's canonical digests and the RSA SignatureValue), hashlib + asn1crypto + cryptography +
    pyHanko (PDF ByteRange arithmetic, digest of the covered bytes, signature, untouched original prefix).
    GOST has no independent oracle on this machine; those cases are SDK-verified with a tamper contrast.
-6. Matrix per surface: hash (known and unknown length, 2/4 GiB boundaries, limit+1), CMS detached and
-   attached (output above 10 GiB read back by extract/verify/openssl), GOST CMS, XMLDSig far reference,
-   whole document, GOST, WSSE Body after 4 GiB, unknown-length XML, cancellation, temp quota, PDF
+6. Matrix per surface: hash (known and unknown length, the document-size boundary, limit+1; the 2/4 GiB boundaries are run only when `--document-bytes` is raised above the 1 GiB guarantee), CMS detached and
+   attached (output above the document size read back by extract/verify/openssl), GOST CMS, XMLDSig far reference,
+   whole document, GOST, WSSE Body in the second half of the document, unknown-length XML, cancellation, temp quota, PDF
    (dense many-object and compact), PAdES-B, CAdES/PAdES/XAdES T→LT→LTA, output limit, key-application
    counts (SDK guard, server audit journal), scratch cleanup.
 7. `overload-profile` (real `oncl-server`, small shared budgets, OTLP gauges collected by the harness) and
@@ -49,20 +49,16 @@ A big run that was not done is **not** a pass.
 * The report (`report.json`) holds environment, program hashes, artifact digests, per-case checks,
   per-process peaks, durations and temp peaks.
 
-## Status (2026-11-07, tree `0.1.0-alpha.7`): the gate is NOT passed
+## Status (2026-11-11): the 1 GiB gate has NOT been run
 
-These are the ledger facts; no claim is made beyond them.
+The guaranteed document size is **1 GiB** (user scope change of 2026-11-11, superseding 10 GiB). The
+control-process memory budget stays 1 GiB. These are the ledger facts; no claim is made beyond them.
 
-* **Verdict: FAIL / no PASS.** The only 10 GiB run (build `0c0cb19`, before the fixes below) was resumed after an outage; its durable report had stopped at about 39,900 s with 37 completed cases. It exposed four production defects (labelled D1–D4 here; this numbering is separate from the D1–D6 of `platform-interop.md`), none of which is accepted as a pass:
+* **The 10 GiB gate was never passed and is withdrawn by the scope change.** It is history, not a result of the current contract. Its only run (build `0c0cb19`, 2026-11, resumed after an outage; durable report stopped at about 39,900 s with 37 completed cases) exposed production defects, now fixed (the numbering D1-D4 is separate from the D1-D6 of `platform-interop.md`):
   * **D1** (PDF/CMS output): own-output `InputLimit` of a signed PDF readback. Fixed by the container surcharge (`6d3ba57e`, f4359257).
-  * **D2** (XAdES-T): `InvalidInput` after key use at about 21,000 s. Root cause: the host clock was sampled before the carried-proof passes, so the online OCSP answer left its 300 s window; fixed by sampling after (`2736f787`, `66eb1e36`). The throughput cost is **not** fixed: XAdES-T at 10 GiB took about 21,000 s against about 900 s for PDF, because every carried proof re-reads the whole source.
-  * **D3** (HTTP signing): `ResponseLost`. Root cause confirmed on a diagnostic run: unthrottled progress frames (about 1.48 MB/s) consumed the operation output allowance (aborted after exactly 11,878,268,140 response bytes, BEGIN=0). Fixed by the progress throttle (`cba9f224`, merged `31854c17`).
-  * **D4** (dense PDF): the cross-reference budget. Fixed by `a07d2832` (documented in `docs/dev/sdk.md`, "Dense PDFs").
-* A later defect, **D7** (server: a stalled or crawling upload held an admission slot), was found by `overload-profile` and fixed (`902ed9f1`: `upload_idle_timeout_ms`, `upload_min_bytes_per_second`).
-* **2 GiB rerun on `efc785ed`** passes: PDF compact and dense, PAdES-B and its levels, CAdES levels, XML far-reference / whole-document / WSSE. `cms-attached` at 2 GiB has its independent OpenSSL oracle replaced above `INT_MAX` by a decomposition (OpenSSL stops with `asn1_d2i_read_bio: too long`). Peak working set and private bytes stayed at or below about 20 MiB in every measured process.
-* **OPEN (not done):**
-  * the **10 GiB re-confirmation** after the fixes (D2, D3 and the LT/LTA levels on the current tip); no full 10 GiB gate has been run on the tip;
-  * the **`overload-profile` re-measure**: it failed with D7, which is fixed but was not re-measured;
-  * XAdES-T throughput at 10 GiB (see D2 above);
-  * encrypt/decrypt (G01/G02) has no case: it is externally blocked.
-
+  * **D2** (XAdES-T): `InvalidInput` after key use. Root cause: the host clock was sampled before the carried-proof passes; fixed by sampling after (`2736f787`, `66eb1e36`). The throughput cost (every carried proof re-reads the whole source; about 21,000 s at 10 GiB) was not fixed.
+  * **D3** (HTTP signing): `ResponseLost`, unthrottled progress frames consumed the output allowance; fixed by the progress throttle (`cba9f224`, merged `31854c17`).
+  * **D4** (dense PDF): the cross-reference budget; fixed by `a07d2832` (see "Dense PDFs" in `docs/dev/sdk.md`).
+  * **D7** (server): a stalled or crawling upload held an admission slot; fixed (`902ed9f1`: `upload_idle_timeout_ms`, `upload_min_bytes_per_second`).
+* The 2 GiB rerun on `efc785ed` (history, before the scope change) passed PDF compact and dense, PAdES-B and levels, CAdES levels and XML far-reference / whole-document / WSSE; `cms-attached` had its OpenSSL oracle replaced above `INT_MAX` by a decomposition. Peak working set and private bytes were at or below about 20 MiB.
+* **The 1 GiB gate (`cargo xtask platform-proof` with the defaults above) has NOT been run.** No PASS is claimed. Not done at all: the `overload-profile` re-measure after D7, and encrypt/decrypt (G01/G02), which is externally blocked and has no case.

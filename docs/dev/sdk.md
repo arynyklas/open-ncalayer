@@ -151,16 +151,16 @@ examples do).
 | limit | default |
 |---|---|
 | operations in flight | 1 |
-| document input | 10_737_418_240 bytes (10 GiB) |
+| document input | 1_073_741_824 bytes (1 GiB) |
 | container (CMS/XML/PDF structure) | 1_073_741_824 |
 | framing | 67_108_864 |
-| output | 11_878_268_928 |
+| output | 2_214_592_512 (input + container + framing) |
 | live accounted memory | 1_073_741_824 (1 GiB) |
-| scratch (temporary storage) | 68_719_476_736 |
+| scratch (temporary storage) | 8_589_934_592 |
 | metadata | 67_108_864 |
 | operation deadline | 300 s from admission, never restarted |
 
-These are accounting limits, not measurements of process RSS. Format-specific limits (batch
+A document above 1 GiB is refused with the typed `InputLimit` error; hosts may raise `input_bytes`, but only 1 GiB is guaranteed. These are accounting limits, not measurements of process RSS. Format-specific limits (batch
 size 1024 items, 8 signatures per JOSE token, inspection KDF iterations 10_000, ...) are
 documented on the corresponding modules. Legacy NCALayer plugin interfaces keep their own
 contractual string/Base64 limits; these SDK limits do not extend to them implicitly.
@@ -450,8 +450,8 @@ What is **not** verified and not claimed:
 - Registry availability and ownership of the crate names are unchecked.
 - `cargo publish --dry-run` against the real registry, the upload and the post-upload checks
   stay with the separately authorised publication.
-- The consumer smoke runs on the host platform only; the Linux/macOS/Win7 matrix and the 10 GiB
-  / 1 GiB acceptance runs are separate gates.
+- The consumer smoke runs on the host platform only; the Linux/macOS/Win7 matrix and the 1 GiB
+  / 1 GiB acceptance run are separate gates.
 
 Commands: `cargo xtask sdk closure`, `cargo xtask sdk smoke [--keep]`,
 `cargo xtask sdk licenses [--check]`.

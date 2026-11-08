@@ -119,7 +119,7 @@ Rust SDK добавляет отдельные CAdES B/T/LT/LTA: `SignRequest::c
 `cargo run -p oncl-core --example sdk_probe -- --case C03 --out target/c03-public`.
 Она выпускает только публичные синтетические RSA-артефакты всех четырёх
 уровней, attached/detached, несколько подписантов и изменённые архивы для
-независимого оракула; не заменяет полный стенд 10 ГиБ/RSS и desktop-матрицу.
+независимого оракула; не заменяет полный стенд 1 ГиБ/RSS и desktop-матрицу.
 
 `oncl-server` — самостоятельный сервис и библиотека. Бинарь `oncl-server` имеет
 подкоманды `serve`, `token-create` и `install-file`; HTTP API **выключен по
@@ -294,7 +294,7 @@ Raw/CMS/XML/XAdES-подписи используют исходный `Operatio
 с отдельной feature `oncl-plugin/distribution`, которую выбирает desktop; settings
 остаются в runtime. Проверка с настоящим WASM и независимым OpenSSL:
 `cargo run -p oncl-core --features plugins,tokens --example sdk_probe -- --case L01 --out target/l01-smoke`.
-Это ограниченный ABI smoke, не приёмка 10 ГиБ/RSS, токенов НУЦ или desktop-матрицы.
+Это ограниченный ABI smoke, не приёмка 1 ГиБ/RSS, токенов НУЦ или desktop-матрицы.
 PKI-права задают HTTP-метод и точный base URL, включая внутреннюю проверку
 сертификата перед подписью. Производный GET разрешён только по provenance
 штатного PKI-энкодера от этого base URL; origin/prefix wildcard и redirect
@@ -625,7 +625,7 @@ live-резервы scratch и памяти; Drop копии освобожда�
 Smoke использует настоящий RSA-PDF, подписанный внешним pyHanko; изменения внутри
 подписанной ревизии и отдельное последующее обновление — отрицательные контроли.
 Виртуальный тест xref выше 4 ГиБ проверяет только арифметику/seek, а не готовность
-содержательных 10-ГиБ PDF или предел RSS 1 ГиБ: эти измерения остаются гейтом V01.
+содержательных 1-ГиБ PDF или предел RSS 1 ГиБ: эти измерения остаются гейтом V01.
 P02 сохраняет весь исходный байтовый префикс, страницы, поля формы и цепочку
 `/Prev`; новые xref streams используют 8-байтовые offsets, в том числе за пределом
 десяти десятичных цифр. Перед Add проверяются все предыдущие подписи и покрытие
@@ -655,7 +655,7 @@ deadline/control и admission lease, а не новая квота для дру
 Smoke публикует только source/once/twice-signed PDF, публичные сертификаты и отчёт:
 четыре внешне созданные страницы, содержательный RGB XObject больше 3 МиБ, два
 разных RSA-ключа, проверка обеих подписей и отрицательный контроль covered mutation.
-Независимые pyHanko/OpenSSL/poppler и полный 10-ГиБ/RSS/платформенный стенд —
+Независимые pyHanko/OpenSSL/poppler и полный 1-ГиБ/RSS/платформенный стенд —
 разные гейты; этот smoke не подменяет последние.
 
 P03: `SignRequest::pades(key, profile, level, material, evidence_limits)`,
@@ -711,7 +711,7 @@ OUTPUT renewal — только append в новом transaction epoch, без �
 в окружении с pyHanko 0.38+:
 `python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
 Это не квалифицированная/NCA-сертификация, независимая ГОСТ-матрица или замена
-содержательным 2/4/10-ГиБ PDF, RSS и платформенным гейтам V01.
+содержательным 1-ГиБ PDF (границы 2/4 ГиБ — арифметические пробы выше гарантии), RSS и платформенным гейтам V01.
 
 
 
@@ -786,7 +786,7 @@ Probe создаёт содержательный XML с двумя настоя
 записывает отдельные per-signer артефакты. Независимый bounded oracle:
 `python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
 (lxml/libxml2 и cryptography; exact C14N/digests и RSA math, не ГОСТ и не trust).
-Это не гейт содержательных 10 ГиБ/пикового RSS 1 ГиБ — он остаётся в V01.
+Это не гейт содержательных 1 ГиБ/пикового RSS 1 ГиБ — он остаётся в V01.
 
 X04 выполняет настоящие sign/Add/LTA над содержательной ссылкой более 64 МиБ,
 проверяет content/evidence mutation и число private uses, а bounded matrix
@@ -797,7 +797,7 @@ X04 выполняет настоящие sign/Add/LTA над содержате
 сравнивает точные canonical/archive bytes, RSA XML/CMS math, RFC3161 nonce,
 issuer-bound synthetic RSA status, порядок/покрытие и отрицательные контроли.
 Это bounded direct-root профиль, не универсальный PKIX/XAdES validator и не
-независимое доказательство ГОСТ, 10 ГиБ или RSS.
+независимое доказательство ГОСТ, 1 ГиБ или RSS.
 
 X05 добавляет `oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile}` и Core
 `SignRequest::wsse` / `VerifyRequest::wsse`, включая approved batch Create/Add.
@@ -847,7 +847,7 @@ Probe покрывает содержательный SOAP Body более 64 М
 math внешнего pinned fixture и нового RSA fixture. GOST canonical decomposition
 не является независимой проверкой GOST math, просроченный внешний fixture —
 только math, не trusted Valid. Нет Java/Kalkan runtime, production-сертификации,
-измеренного RSS либо приёмки 4/10 ГиБ: эти платформенные гейты остаются в V01.
+измеренного RSS либо приёмки 1 ГиБ: эти платформенные гейты остаются в V01.
 
 
 

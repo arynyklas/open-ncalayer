@@ -43,11 +43,11 @@ upload_idle_timeout_ms = 30000
 upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
-input_bytes = 10737418240
+input_bytes = 1073741824
 memory_per_operation = 268435456
 total_memory = 536870912
-temp_per_operation = 34359738368
-total_temp = 68719476736
+temp_per_operation = 8589934592
+total_temp = 17179869184
 framing_bytes = 67108864
 metadata_bytes = 67108864   # default 64 MiB; raise for batches of XML/PDF signatures
 # Optional, required for multipart public-document snapshots:
@@ -404,7 +404,7 @@ queueing, so a slow server is never charged to a client.
 Either rule ends the request with the existing `504 DeadlineExceeded`/`NotApplied`: it
 happens during intake, before any private key is used, so no audit `BEGIN` is written, the
 spool is deleted and the slot is free immediately. No new error code exists. Neither rule
-replaces the operation deadline, which still bounds a healthy transfer: a 10 GiB upload
+replaces the operation deadline, which still bounds a healthy transfer: a 1 GiB upload
 over a slow link needs `operation_timeout_ms` raised to cover it, not these two values. A
 client that keeps delivering at least the minimum rate, without a silence longer than the
 idle timeout, is never stopped by them.
@@ -423,7 +423,7 @@ working-memory accounting; resource counters are not a claim about total RSS.
 The server stack is optional/server-only: minimal SDK crates and desktop/Win7
 build closures do not depend on Axum/Hyper, and static CRT/toolchain policy is
 unchanged. This Windows-host acceptance is not a Linux/macOS/Win7 runtime result
-or the later 10-GiB XML/PDF resource-harness gate.
+or the later 1-GiB XML/PDF resource-harness gate.
 
 ## Explicit PKI roots and endpoint pins
 

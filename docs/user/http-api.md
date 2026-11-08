@@ -112,7 +112,7 @@ exact permitted names and total part count. The actual standalone Hyper read
 buffer is capped at 32,768 bytes; per-connection HTTP/TLS transport overhead is
 separate from the SDK working-buffer reservations. Per-request parser, decoded
 metadata and retained ingress allocations are admitted before allocation. This
-is not a claim of the 10-GiB XML/PDF resource acceptance gate.
+is not a claim of the 1-GiB XML/PDF resource acceptance gate.
 
 ## Result and errors
 
@@ -533,7 +533,7 @@ operations use strict validation: they need configured anchors and reachable
 revocation evidence, otherwise they fail before the key is applied.
 
 Encryption additionally requires the real external GOST backend contract. No
-10-GiB/RSS or platform-matrix claim is made by this document.
+1-GiB/RSS or platform-matrix claim is made by this document.
 
 ## Reference client
 

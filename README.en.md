@@ -120,7 +120,7 @@ Existing WSS/CLI contracts are unchanged. Run the local exercise with
 `cargo run -p oncl-core --example sdk_probe -- --case C03 --out target/c03-public`.
 It emits only public synthetic RSA artifacts for all four levels, attached and
 detached content, multiple signers and altered archives for an independent
-oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
+oracle; it does not replace full 1-GiB/RSS or desktop-matrix acceptance.
 
 `oncl-server` is a standalone service and library. The `oncl-server` binary has
 the subcommands `serve`, `token-create` and `install-file`; the HTTP API is **off
@@ -292,7 +292,7 @@ returns `InteractionRequired` without taking a dialog lock. Package/catalog/upda
 code requires `oncl-plugin/distribution`, explicitly selected by desktop consumers;
 settings remain available in the runtime. Actual WASM and independent OpenSSL smoke:
 `cargo run -p oncl-core --features plugins,tokens --example sdk_probe -- --case L01 --out target/l01-smoke`.
-This bounded ABI exercise is not 10-GiB/RSS, NCA-token or desktop-matrix acceptance.
+This bounded ABI exercise is not 1-GiB/RSS, NCA-token or desktop-matrix acceptance.
 PKI grants bind an HTTP method and exact base URL, including mandatory certificate
 validation before signing. Derived GET targets require provenance from the shared
 PKI encoder for that exact base; origin/prefix wildcards and redirects never widen
@@ -615,7 +615,7 @@ Run `cargo test -p oncl-pdf --test verify`, or the real runtime probe:
 `cargo run -p oncl-core --features pdf --example sdk_probe -- --case P01 --out target/p01-smoke`.
 The probe uses an externally pyHanko-signed RSA PDF, an inside-revision mutation,
 and a separate later incremental update. The virtual xref-above-4-GiB test proves
-only arithmetic/seek handling, not meaningful 10-GiB PDF processing or a 1-GiB RSS
+only arithmetic/seek handling, not meaningful 1-GiB PDF processing or a 1-GiB RSS
 ceiling: those remain V01 acceptance gates.
 
 The optional `oncl-core/xml` feature provides UTF-8 Source sign/Add/verify and
@@ -690,7 +690,7 @@ reference larger than 64 MiB, a far mutation, an uncovered positive control and
 separate per-signer artifacts. Run the bounded independent oracle with
 `python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
 (lxml/libxml2 and cryptography: exact C14N/digests and RSA math, not GOST or trust).
-Meaningful 10-GiB processing and the 1-GiB peak-RSS gate remain V01 work.
+Meaningful 1-GiB processing and the 1-GiB peak-RSS gate remain V01 work.
 
 X05 adds `oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile}` and Core
 `SignRequest::wsse` / `VerifyRequest::wsse`, including approved batch Create/Add.
@@ -741,7 +741,7 @@ copy `target/fixtures/ncanode/wsse-ncanode.xml` (after `cargo xtask fetch-fixtur
 SHA-256 and RSA signature math against the external pinned fixture and generated
 RSA fixture. GOST canonical decomposition is not independent GOST signature
 verification; the expired external fixture is math-only, not trusted Valid.
-No Java/Kalkan runtime, production certification, measured RSS, 4-GiB or 10-GiB
+No Java/Kalkan runtime, production certification, measured RSS, 1-GiB or larger
 acceptance is implied; those large-platform gates remain V01.
 
 
@@ -791,7 +791,7 @@ For independent fresh RSA-PDF verification, including archival validation and
 negative controls, use pyHanko 0.38+:
 `python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
 These synthetic-root checks are not qualified/NCA certification, an independent
-GOST matrix, or the meaningful 2/4/10-GiB PDF, RSS and platform V01 gates.
+GOST matrix, or the meaningful 1-GiB PDF (2/4 GiB offsets are arithmetic probes beyond the guarantee), RSS and platform V01 gates.
 
 X04 performs actual sign/Add/LTA over a substantive protected reference larger
 than 64 MiB, content/evidence mutations and private-use counts; its bounded Core
@@ -802,7 +802,7 @@ Run the independent oracle:
 It compares exact canonical/archive bytes, RSA XML/CMS math, RFC3161 nonce,
 issuer-bound synthetic RSA status, normative order/coverage and negative controls.
 This is a bounded direct-root profile, not a general PKIX/XAdES validator or an
-independent GOST, 10-GiB or peak-RSS proof.
+independent GOST, 1-GiB or peak-RSS proof.
 
 
 
