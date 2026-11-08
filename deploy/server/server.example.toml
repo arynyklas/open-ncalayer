@@ -60,6 +60,14 @@ upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
 input_bytes = 1073741824
+# Signature, revision or envelope bytes a signed result may add to a document that is at
+# `input_bytes`. Only the `input` of a verify, extend, extract or sign item (a document that
+# may already be signed) may exceed `input_bytes`, by container bytes only; one byte more, or
+# a document part past `input_bytes`, is `InputLimit`. Such an upload is spooled up to
+# `input_bytes + container_bytes` before the engine classifies it, so lower this on a service
+# that signs small documents. It must cover what the service itself adds (a PAdES-LTA result
+# carries its evidence). See docs/user/http-api.md.
+container_bytes = 1073741824
 memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 8589934592

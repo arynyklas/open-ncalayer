@@ -44,6 +44,7 @@ upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
 input_bytes = 1073741824
+container_bytes = 1073741824   # signature/envelope surcharge of a signed `input`, see http-api.md
 memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 8589934592

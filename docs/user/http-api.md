@@ -103,6 +103,27 @@ shared immutably through parser, field-reader, worker and terminal-status
 selection, including when worker delivery is delayed past the original deadline.
 It is never inferred from error text or replaced by a later cancellation.
 
+**Document allowance and signed results.** `input_bytes` bounds a document, and a document one
+byte past it is `InputLimit`/413. The `input` part of a `verify`, `extend`, `extract` or `sign`
+item may already be a signed result (a document plus the signature, revision or envelope bytes
+that this service or another signer added), so it may exceed `input_bytes` by those container
+bytes only, and never past `container_bytes` (default 1 GiB, the SDK default) or the bound the
+format itself has (for example about 188 MiB of appended PDF revisions). The server spools such
+a part as unclassified wire of at most `input_bytes + container_bytes` without charging the
+document allowance, and the engine then reads it as it reads any file given to the SDK or the
+CLI: it classifies the signature bytes, charges `input_bytes` for the document part and the
+container allowance for the rest, so a signed result of a document that was exactly at
+`input_bytes` is accepted again by the service that produced it, and a document part one byte
+past `input_bytes` is still `InputLimit`, signed or not. The wire ceiling of a request with such
+an input is `input_bytes + container_bytes + framing_bytes + 64 KiB` (the metadata part); the
+ceiling of every other multipart request is `input_bytes + framing_bytes + 64 KiB`, and `/v1/hash` takes a raw body of at most `input_bytes`.
+Every other document part (a detached payload, an inspected container, JOSE input) stays within
+`input_bytes` at once. Evidence parts (`certificate`, `ocsp`, `crl`) are validation material, not
+documents: each is bounded at 1 MiB and the engine's evidence limits, and none is charged to the
+document allowance, exactly as the CLI reads evidence files. The oversize refusal of a signed
+input is found by the engine after the response status is chosen, so a streamed request reports
+it as a failed final record with `InputLimit` and `NotApplied`, never as a dropped stream.
+
 The implementation uses pinned `multer` 3.1.0 for multipart parsing. Its feeder
 admits at most 8,192 new bytes while parsing unknown-role headers/preamble, in
 addition to at most one previous 4,096-byte data chunk and boundary suffix. It
