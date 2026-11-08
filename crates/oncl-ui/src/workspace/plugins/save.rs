@@ -6,8 +6,11 @@
 //! around it: the file is offered only for a call Core reported as applied and finished without
 //! error ([`super::report`]), its name is built from the operation's identifier and the plugin's
 //! id (never from the reply), the user picks the place in a dialog the host owns, and the file is
-//! published as an exclusive hard link of a synced temporary file in the same folder, so that an
-//! existing file is never replaced and a failure leaves nothing behind.
+//! published as an exclusive hard link of a synced temporary file in the same folder. Where the
+//! folder cannot make hard links (FAT and exFAT sticks, some network shares) the file is made by
+//! an exclusive create (`create_new`) instead, written and synced, and removed again if anything
+//! fails after it was created. Neither path replaces an existing file, and a failure leaves
+//! nothing behind.
 
 use std::fmt;
 use std::io::Write;
@@ -111,15 +114,26 @@ impl From<std::io::Error> for SaveError {
 /// Writes `reply` to `target`: refused above `cap` bytes, refused if the file exists or the
 /// folder cannot publish one without replacing anything, otherwise published atomically.
 pub(super) fn save_reply(target: &Path, reply: &[u8], cap: usize) -> Result<(), SaveError> {
-    save_with(target, reply, cap, |from, to| std::fs::hard_link(from, to))
+    save_with(
+        target,
+        reply,
+        cap,
+        |from, to| std::fs::hard_link(from, to),
+        |file, bytes| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        },
+    )
 }
 
-/// [`save_reply`] with the publishing step given (the tests break it).
+/// [`save_reply` with the two publishing steps given (the tests break them): `link` publishes
+/// the temporary file, `fill` writes the file the fallback created.
 fn save_with(
     target: &Path,
     reply: &[u8],
     cap: usize,
     link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    fill: impl Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), SaveError> {
     if reply.len() > cap {
         return Err(SaveError::TooLarge {
@@ -134,7 +148,12 @@ fn save_with(
     if !std::fs::metadata(&parent)?.is_dir() {
         return Err(SaveError::Job(JobError::Io(std::io::ErrorKind::NotFound)));
     }
-    preflight_destination(target, &parent).map_err(SaveError::Job)?;
+    // The probe of the preflight needs hard links; a folder without them is what the fallback
+    // below is for, so only an existing file or another failure stops here.
+    match preflight_destination(target, &parent) {
+        Ok(()) | Err(JobError::NoLinks) => {}
+        Err(e) => return Err(SaveError::Job(e)),
+    }
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let temporary = parent.join(format!(
         ".oncl-reply-{}-{}.tmp",
@@ -150,16 +169,45 @@ fn save_with(
         file.sync_all()
     })();
     let published = written.map_err(SaveError::from).and_then(|()| {
-        link(&temporary, target).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                SaveError::Job(JobError::DestinationExists)
-            } else {
-                SaveError::Job(JobError::NoLinks)
+        match link(&temporary, target) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(SaveError::Job(JobError::DestinationExists))
             }
-        })
+            // Links are not available here (or not allowed): make the file by an exclusive
+            // create. Its own error is the one told: after this nothing else can be claimed
+            // about the folder than what the create said.
+            Err(_) => exclusive_create(target, reply, &fill),
+        }
     });
     let _ = std::fs::remove_file(&temporary);
     published
+}
+
+/// Makes `target` with `create_new` (never replaces anything), fills it and syncs it. The file
+/// is ours once the create succeeded, so any failure after that removes it.
+fn exclusive_create(
+    target: &Path,
+    reply: &[u8],
+    fill: &impl Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), SaveError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                SaveError::Job(JobError::DestinationExists)
+            } else {
+                SaveError::from(e)
+            }
+        })?;
+    if let Err(e) = fill(&mut file, reply) {
+        drop(file);
+        let _ = std::fs::remove_file(target);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -220,10 +268,16 @@ mod tests {
         assert_eq!(leftovers(dir.path()), ["out.json"]);
         // Also when it appears after the check, at the publishing step itself.
         let late = dir.path().join("late.json");
-        let e = save_with(&late, b"theirs", 1 << 20, |from, to| {
-            std::fs::write(to, b"mine")?;
-            std::fs::hard_link(from, to)
-        })
+        let e = save_with(
+            &late,
+            b"theirs",
+            1 << 20,
+            |from, to| {
+                std::fs::write(to, b"mine")?;
+                std::fs::hard_link(from, to)
+            },
+            real_fill,
+        )
         .unwrap_err();
         assert!(
             matches!(e, SaveError::Job(JobError::DestinationExists)),
@@ -232,15 +286,78 @@ mod tests {
         assert_eq!(std::fs::read(&late).unwrap(), b"mine");
     }
 
+    fn real_fill(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
     #[test]
-    fn a_failed_write_leaves_no_temporary_file_and_a_folder_without_links_says_so() {
+    fn a_folder_without_links_gets_the_file_by_an_exclusive_create() {
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("out.json");
+            save_with(
+                &target,
+                b"exact bytes",
+                1 << 20,
+                |_, _| Err(kind.into()),
+                real_fill,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"exact bytes");
+            assert_eq!(leftovers(dir.path()), ["out.json"], "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_fallback_never_replaces_a_file_that_appears_in_between() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("out.json");
-        let e = save_with(&target, b"x", 1 << 20, |_, _| {
-            Err(std::io::ErrorKind::Unsupported.into())
-        })
+        let e = save_with(
+            &target,
+            b"theirs",
+            1 << 20,
+            |_, to| {
+                std::fs::write(to, b"mine")?;
+                Err(std::io::ErrorKind::Unsupported.into())
+            },
+            real_fill,
+        )
         .unwrap_err();
-        assert!(matches!(e, SaveError::Job(JobError::NoLinks)), "{e:?}");
+        assert!(
+            matches!(e, SaveError::Job(JobError::DestinationExists)),
+            "{e:?}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+        assert_eq!(leftovers(dir.path()), ["out.json"]);
+    }
+
+    #[test]
+    fn a_failed_fallback_write_removes_the_partial_file_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out.json");
+        let e = save_with(
+            &target,
+            b"x",
+            1 << 20,
+            |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            |file, _| {
+                file.write_all(b"par")?;
+                Err(std::io::ErrorKind::StorageFull.into())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                e,
+                SaveError::Job(JobError::Io(std::io::ErrorKind::StorageFull))
+            ),
+            "{e:?}"
+        );
         assert!(
             leftovers(dir.path()).is_empty(),
             "{:?}",

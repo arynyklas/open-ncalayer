@@ -1089,7 +1089,6 @@ fn write_reply(open: &Rc<Workspace>, path: PathBuf) {
             .replace("{0}", &size_text(open, len as u64))
             .replace("{1}", &size_text(open, cap as u64)),
         Err(SaveError::Job(JobError::DestinationExists)) => t.save_exists.to_owned(),
-        Err(SaveError::Job(JobError::NoLinks)) => t.save_no_links.to_owned(),
         Err(SaveError::Job(e)) => t.save_failed.replace(
             "{0}",
             super::error_text(super::Texts::of(locale(open)), &e, 0),
