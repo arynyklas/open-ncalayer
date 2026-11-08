@@ -17,12 +17,18 @@ pub struct FrozenInput {
     /// Captured as a signed result whose container surcharge may exceed the
     /// document allowance once classified; see [`Self::capture_signed`].
     pub(super) surcharge: bool,
+    /// Spooled by [`Self::capture_wire`]: no document, container or input accounting
+    /// has been charged yet; the engine charges and classifies it when it reads the
+    /// bytes through [`Self::wire_reader`], exactly as for any external source.
+    wire: bool,
 }
 pub struct FrozenReader<'a> {
     input: &'a mut FrozenInput,
     regions: Vec<Region>,
     position: u64,
     length: u64,
+    /// Hand out the bytes as an external seekable source, not as an admitted replay.
+    external: bool,
     error: Option<ProcessingError>,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
@@ -74,6 +80,125 @@ impl FrozenInput {
     ) -> Result<Self, ProcessingError> {
         let overhead = scope.limits().container_bytes.min(maximum_surcharge);
         Self::capture_limited(source, store, scope, None, Some(overhead), true)
+    }
+    /// Spool a document role that may be a signed result of this SDK (a document plus
+    /// signature, revision or envelope bytes) without charging any document or container
+    /// accounting. A host that must complete the whole upload before it starts work uses
+    /// this for the input of an operation whose engine classifies signed wire itself, and
+    /// then gives the engine [`Self::wire_reader`]: the engine reads those bytes as an
+    /// external source, charging `input_bytes` for the document part and the format's
+    /// container allowance for the rest, so the accounting is the one of the SDK and CLI.
+    ///
+    /// The spool holds at most the remaining document allowance plus the remaining
+    /// `container_bytes`, narrowed by `maximum` when given (never widened); one byte more
+    /// fails with `InputLimit` while it is read, before it is stored. Only temporary storage
+    /// and the chunk buffer are charged here. `maximum` also serves a role the engine does not
+    /// charge as a document at all (validation evidence, which has its own bounds). The
+    /// bytes are not an admitted snapshot: nothing but [`Self::wire_reader`] hands them
+    /// to the engine, and [`Self::reader`] refuses them.
+    pub fn capture_wire(
+        mut source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum: Option<u64>,
+    ) -> Result<Self, ProcessingError> {
+        if source.is_snapshot_for(scope)? || source.is_output_projection_for(scope)? {
+            return Err(ProcessingError::InvalidInput(
+                "wire intake takes an external source",
+            ));
+        }
+        scope.checkpoint()?;
+        scope.check_input()?;
+        let ceiling = scope
+            .input_remaining()
+            .saturating_add(scope.container_remaining());
+        let ceiling = maximum.map_or(ceiling, |m| m.min(ceiling));
+        if source.known_len().is_some_and(|n| n > ceiling) {
+            return Err(ProcessingError::InputLimit);
+        }
+        let _memory = scope.reserve_memory(IO_CHUNK_BYTES as u64)?;
+        let mut buffer = vec![0; IO_CHUNK_BYTES];
+        let mut stage = store.stage_source(scope)?;
+        loop {
+            scope.checkpoint()?;
+            let offered = ceiling
+                .saturating_sub(stage.len())
+                .saturating_add(1)
+                .min(buffer.len() as u64) as usize;
+            let count = match source.read(&mut buffer[..offered]) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    scope.checkpoint()?;
+                    return Err(e.into());
+                }
+                Ok(count) => count,
+            };
+            if count > offered {
+                return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
+            }
+            if stage
+                .len()
+                .checked_add(count as u64)
+                .is_none_or(|n| n > ceiling)
+            {
+                scope.terminate_input_limit();
+                return Err(ProcessingError::InputLimit);
+            }
+            scope.checkpoint()?;
+            if count == 0 {
+                break;
+            }
+            stage.write_chunk(&buffer[..count])?;
+        }
+        source.finish_snapshot()?;
+        Ok(Self {
+            stage,
+            identity: Arc::new(()),
+            output_derived: false,
+            pending_format: false,
+            pending_accounting: false,
+            classification: None,
+            wire_digest: None,
+            surcharge: false,
+            wire: true,
+        })
+    }
+    /// Whether this is unclassified wire from [`Self::capture_wire`].
+    pub fn is_wire(&self) -> bool {
+        self.wire
+    }
+    /// The whole wire as an external seekable source of known length, for the engine to
+    /// charge and classify. Only wire from [`Self::capture_wire`] has one.
+    pub fn wire_reader<'a>(
+        &'a mut self,
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
+        if !self.wire {
+            return Err(ProcessingError::InvalidInput("not unclassified wire"));
+        }
+        let region = Region {
+            offset: 0,
+            len: self.len(),
+        };
+        let mut reader = self.reader_replay(&[region], scope)?;
+        reader.external = true;
+        Ok(reader)
+    }
+    /// Read-only same-operation replay of unclassified wire for a host's own checks
+    /// before the engine reads it (never given to the engine: it is an admitted
+    /// snapshot whose bytes were not charged). Refused for anything but wire.
+    pub fn wire_inspection_reader<'a>(
+        &'a mut self,
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
+        if !self.wire {
+            return Err(ProcessingError::InvalidInput("not unclassified wire"));
+        }
+        let region = Region {
+            offset: 0,
+            len: self.len(),
+        };
+        self.reader_replay(&[region], scope)
     }
     /// Whether wire accounting is still awaiting [`Self::settle_container_tail`].
     pub fn is_pending_container(&self) -> bool {
@@ -327,6 +452,7 @@ impl FrozenInput {
                     .or_else(|| hash.map(crate::digest::HashState::finish)),
                 classification: prior.clone(),
                 surcharge,
+                wire: false,
             })
         })();
         if result.is_ok()
@@ -383,6 +509,18 @@ impl FrozenInput {
         regions: &[Region],
         scope: &ResourceScope,
     ) -> Result<FrozenReader<'a>, ProcessingError> {
+        if self.wire {
+            return Err(ProcessingError::InvalidInput(
+                "unclassified wire is read through wire_reader",
+            ));
+        }
+        self.reader_replay(regions, scope)
+    }
+    fn reader_replay<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
         if !self.stage.scope.same_operation(scope) {
             return Err(ProcessingError::InvalidInput(
                 "snapshot belongs to another operation",
@@ -424,7 +562,11 @@ impl FrozenInput {
         }
         let extent_limit = if self.output_derived {
             scope.limits().output_bytes
-        } else if self.pending_format || self.classification.is_some() || self.surcharge {
+        } else if self.pending_format
+            || self.classification.is_some()
+            || self.surcharge
+            || self.wire
+        {
             self.len()
         } else {
             scope.limits().input_bytes
@@ -443,6 +585,7 @@ impl FrozenInput {
             regions: regions.to_vec(),
             position: 0,
             length,
+            external: false,
             error: None,
             _memory: memory,
             _metadata: metadata,
@@ -629,6 +772,9 @@ impl DerivedInput {
 impl FrozenReader<'_> {
     pub fn source(&mut self) -> Source<'_> {
         let length = self.length.saturating_sub(self.position);
+        if self.external {
+            return Source::seekable(self, Some(length));
+        }
         let admitted = self.input.stage.scope.retain();
         let output_derived = self.input.output_derived;
         let output_failure = self.input.stage.output_failure.clone();
