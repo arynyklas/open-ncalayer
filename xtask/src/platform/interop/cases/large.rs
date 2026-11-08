@@ -3,7 +3,7 @@
 //! many pages: never one padded or sparse object), signed by `oncl` and judged by an
 //! independent decomposition: a streamed digest of exactly the signed bytes plus an
 //! external check of signedAttrs / SignedInfo / the CMS signature. `oncl`'s own parser is
-//! never the oracle. No 4 GiB or 10 GiB claim is made.
+//! never the oracle. No claim above the artifact size is made; the guaranteed document size is 1 GiB.
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

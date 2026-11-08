@@ -197,7 +197,7 @@ fn shared_dir(env: &Env) -> anyhow::Result<PathBuf> {
 
 static MUTATED: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A copy of the blob with one byte changed 1 MiB before its end (after 4 GiB at full size).
+/// A copy of the blob with one byte changed 1 MiB before its end (in the last MiB at full size).
 fn mutated_blob(env: &Env) -> anyhow::Result<(PathBuf, u64)> {
     let _once = MUTATED.lock().unwrap();
     let blob = env.doc("blob")?;
@@ -224,7 +224,7 @@ pub fn hash_basic(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         env,
         target,
         "hash-sha256-blob",
-        "SHA-256 of the framed 10 GiB byte stream (known length)",
+        "SHA-256 of the framed full-size byte stream (known length)",
     )?;
     Ok(guarded(case, |c| {
         let blob = env.doc("blob")?;
@@ -300,29 +300,39 @@ pub fn hash_gost(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
 }
 
 /// The SDK, CLI and server default limit on one document (docs/dev/sdk.md section 5).
-const INPUT_LIMIT: u64 = 10_737_418_240;
+fn input_limit() -> u64 {
+    oncl_pki::resource::ResourceLimits::default().input_bytes
+}
 
 pub fn hash_boundaries(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
     let case = Case::new(
         env,
         target,
         "hash-u64-boundaries",
-        "Digests across the 2 GiB and 4 GiB boundaries (unknown-length streams)",
+        "Digests at the 32-bit offset boundaries that fit the document size, and at the size itself (unknown-length streams)",
     )?;
     Ok(guarded(case, |c| {
         let cap = d(env);
-        for n in [
+        // The 2 GiB and 4 GiB boundaries are beyond the 1 GiB guarantee: they are hashed only
+        // when --document-bytes is raised above them; otherwise the size itself and its
+        // neighbour are the boundaries, and the rest are reported as skipped.
+        let mut sizes = vec![
             (1u64 << 31) - 1,
             1 << 31,
             (1 << 31) + 1,
             (1 << 32) - 1,
             1 << 32,
             (1 << 32) + 1,
-        ] {
+            cap.saturating_sub(1),
+            cap,
+        ];
+        sizes.sort_unstable();
+        sizes.dedup();
+        for n in sizes {
             if n > cap {
                 c.note(
                     &format!("skipped_{n}"),
-                    json!("larger than --document-bytes"),
+                    json!("larger than --document-bytes (beyond the guaranteed document size when above 1 GiB)"),
                 );
                 continue;
             }
@@ -338,14 +348,11 @@ pub fn hash_boundaries(env: &Env, target: Target) -> anyhow::Result<CaseResult> 
             );
         }
         c.check(
-            "at least one boundary fits --document-bytes",
+            "the document size itself is hashed correctly",
             c.checks
                 .iter()
-                .any(|k| k.name.ends_with("hashed correctly")),
-            format!(
-                "--document-bytes is {cap}; the boundaries start at {}",
-                (1u64 << 31) - 1
-            ),
+                .any(|k| k.name == format!("{cap} bytes hashed correctly") && k.ok),
+            format!("--document-bytes is {cap}"),
         );
         Ok(())
     }))
@@ -363,7 +370,7 @@ pub fn hash_limit(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
             Op::Hash("sha256"),
             Input::Pattern {
                 byte: 0x3C,
-                len: INPUT_LIMIT + 1,
+                len: input_limit() + 1,
             },
         ))?;
         let proc = c.procs.last().cloned();
@@ -396,7 +403,7 @@ pub fn cms_detached(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         env,
         target,
         "cms-detached",
-        "CMS detached signature of the 10 GiB stream: sign, verify, OpenSSL, tampered copy",
+        "CMS detached signature of the full-size stream: sign, verify, OpenSSL, tampered copy",
     )?;
     Ok(guarded(case, |c| {
         let blob = env.doc("blob")?;
@@ -422,7 +429,7 @@ pub fn cms_detached(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let nul = c.work.join("oracle.out");
         let ok = openssl_cms_signature(&sig, Some(&blob.path), &nul)?;
         c.check(
-            "OpenSSL verifies the signature over the 10 GiB content (independent)",
+            "OpenSSL verifies the signature over the full-size content (independent)",
             ok,
             "openssl cms -verify -noverify -binary",
         );
@@ -570,7 +577,7 @@ pub fn cms_limit(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
             Op::Sign(Profile::Cms),
             Input::Pattern {
                 byte: 0x3C,
-                len: INPUT_LIMIT + 1,
+                len: input_limit() + 1,
             },
         )
         .output(&sig))?;
@@ -741,7 +748,7 @@ fn xml_signed_case(
                     format!("{:?} vs source span {} (canonical {})", v.reference_lens, e.end - e.start, e.canonical_len),
                 );
                 c.check(
-                    "the referenced element starts after 4 GiB (or the scaled equivalent)",
+                    "the referenced element starts in the second half of the document (after 4 GiB only when --document-bytes is above 8 GiB)",
                     e.start >= d(env) / 2,
                     format!("start {}", e.start),
                 );
@@ -803,7 +810,7 @@ pub fn xml_far(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         target,
         XmlScenario {
             id: "xml-far-reference",
-            title: "XMLDSig over an Id'd element that starts after the first half of a 10 GiB XML",
+            title: "XMLDSig over an Id'd element that starts after the first half of the full-size XML",
             set_name: "xml-archive",
             profile: Profile::Xml,
             target_id: Some("section-2"),
@@ -819,7 +826,7 @@ pub fn xml_whole(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         target,
         XmlScenario {
             id: "xml-whole-document",
-            title: "enveloped XMLDSig over the whole 10 GiB document",
+            title: "enveloped XMLDSig over the whole full-size document",
             set_name: "xml-archive",
             profile: Profile::Xml,
             target_id: None,
@@ -851,7 +858,7 @@ pub fn wsse(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         target,
         XmlScenario {
             id: "wsse-body",
-            title: "WS-Security signature of a SOAP Body that starts after 4 GiB",
+            title: "WS-Security signature of a SOAP Body that starts in the second half of the document",
             set_name: "xml-soap",
             profile: Profile::Wsse,
             target_id: None,
@@ -1158,7 +1165,7 @@ pub fn cades_levels(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         env,
         target,
         "cades-levels",
-        "CAdES-T signature of the 10 GiB stream, keyless extension to LT and LTA, every level verified",
+        "CAdES-T signature of the full-size stream, keyless extension to LT and LTA, every level verified",
     )?;
     Ok(guarded(case, |c| {
         let blob = env.doc("blob")?;
@@ -1178,7 +1185,7 @@ pub fn cades_levels(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         let last = outputs.last().context("outputs")?;
         let nul = c.work.join("oracle.out");
         c.check(
-            "OpenSSL verifies the signature of the LTA container over the 10 GiB content (independent)",
+            "OpenSSL verifies the signature of the LTA container over the full-size content (independent)",
             openssl_cms_signature(last, Some(&blob.path), &nul)?,
             "openssl cms -verify -noverify",
         );
@@ -1203,7 +1210,7 @@ pub fn pades_levels(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         env,
         target,
         "pades-levels",
-        "PAdES-T signature of the large-page 10 GiB PDF, keyless extension to LT and LTA, every level verified",
+        "PAdES-T signature of the large-page full-size PDF, keyless extension to LT and LTA, every level verified",
     )?;
     // docs/user/http-api.md: PAdES LT/LTA need about 380-600 MiB of per-operation memory
     case.server_settings.memory_per_operation = 640 << 20;
@@ -1236,7 +1243,7 @@ pub fn xades_levels(env: &Env, target: Target) -> anyhow::Result<CaseResult> {
         env,
         target,
         "xades-levels",
-        "XAdES-T over the far element of the 10 GiB XML, keyless extension to LT and LTA, every level verified",
+        "XAdES-T over the far element of the full-size XML, keyless extension to LT and LTA, every level verified",
     )?;
     Ok(guarded(case, |c| {
         let (set, _) = xml_set(env, "xml-archive")?;

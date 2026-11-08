@@ -231,7 +231,7 @@ enum Command {
         #[command(subcommand)]
         command: BuiltinsCommand,
     },
-    /// The acceptance gate of the 10 GiB / 1 GiB profile (docs/dev/platform-acceptance.md):
+    /// The acceptance gate of the 1 GiB / 1 GiB profile (docs/dev/platform-acceptance.md):
     /// generates meaningful XML/WSSE/PDF/byte-stream documents with an independent reference
     /// generator, runs the real SDK probe, `oncl` and `oncl-server` as separate processes on
     /// them and measures each process's OS peak memory. Takes hours at the full size.

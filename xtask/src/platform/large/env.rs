@@ -212,7 +212,7 @@ impl ServerSettings {
             total_memory: 536_870_912,
             temp_per_operation: env_args.scratch_bytes,
             total_temp: env_args.scratch_bytes,
-            input_bytes: 10_737_418_240,
+            input_bytes: 1_073_741_824,
             tsa: true,
             max_connections: 32,
             telemetry_endpoint: None,

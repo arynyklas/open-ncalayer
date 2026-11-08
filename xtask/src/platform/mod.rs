@@ -1,4 +1,4 @@
-//! `cargo xtask platform-proof`: the acceptance gate of the 10 GiB / 1 GiB profile
+//! `cargo xtask platform-proof`: the acceptance gate of the 1 GiB / 1 GiB profile
 //! (docs/design/platform.md section 5, docs/dev/platform-acceptance.md).
 //!
 //! The command generates meaningful XML, WSSE and PDF documents plus a framed byte stream
@@ -34,14 +34,14 @@ impl Surface {
 #[derive(Args, Clone, Debug)]
 pub struct ProofArgs {
     /// Size of each generated source document, in bytes.
-    #[arg(long, default_value_t = 10_737_418_240)]
+    #[arg(long, default_value_t = 1_073_741_824)]
     pub document_bytes: u64,
     /// The criterion: the stricter of peak working set and peak private bytes of every
     /// measured process.
     #[arg(long, default_value_t = 1_073_741_824)]
     pub max_rss_bytes: u64,
     /// The scratch quota the stand must offer (checked against the free space of the drive).
-    #[arg(long, default_value_t = 68_719_476_736)]
+    #[arg(long, default_value_t = 17_179_869_184)]
     pub scratch_bytes: u64,
     /// Output directory: report, logs, generated data and per-case work. Must be on a fixed
     /// local drive with room for the data (not drive C: of a nearly full machine).

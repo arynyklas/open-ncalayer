@@ -284,7 +284,7 @@ fn plan() -> Vec<Case> {
                     "pdf-dense",
                     Profile::Pdf,
                     "pdf-dense-sign",
-                    "PDF signature of a many-object, three-revision 10 GiB document",
+                    "PDF signature of a many-object, three-revision full-size document",
                 )
             },
         },
@@ -298,7 +298,7 @@ fn plan() -> Vec<Case> {
                     "pdf-compact",
                     Profile::Pdf,
                     "pdf-compact-sign",
-                    "PDF signature of a large-page, three-revision 10 GiB document",
+                    "PDF signature of a large-page, three-revision full-size document",
                 )
             },
         },
@@ -312,7 +312,7 @@ fn plan() -> Vec<Case> {
                     "pdf-compact",
                     Profile::Pades(exec::Level::B),
                     "pades-b-compact",
-                    "PAdES-B signature of the large-page 10 GiB document",
+                    "PAdES-B signature of the large-page full-size document",
                 )
             },
         },

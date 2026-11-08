@@ -1,5 +1,5 @@
 //! Small deterministic cases of `cargo xtask platform-proof`: the reference generator, the
-//! operating-system measurement and the result parsing. They never run the 10 GiB matrix:
+//! operating-system measurement and the result parsing. They never run the full-size matrix:
 //! that is the separate acceptance gate (docs/dev/platform-acceptance.md). The oracle test
 //! needs lxml, pyHanko and friends (`ONCL_PYHANKO_PYTHON`) and fails, never skips, without them.
 

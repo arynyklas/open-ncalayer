@@ -135,7 +135,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
         total_memory: 536_870_912,
         temp_per_operation: 2 * GIB,
         total_temp: 3 * GIB,
-        input_bytes: 10_737_418_240,
+        input_bytes: 1_073_741_824,
         tsa: false,
         max_connections: 64,
         telemetry_endpoint: Some(collector.url.clone()),
@@ -621,7 +621,7 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         total_memory: 1 << 30,
         temp_per_operation: GIB,
         total_temp: 4 * GIB,
-        input_bytes: 10_737_418_240,
+        input_bytes: 1_073_741_824,
         tsa: false,
         max_connections: 64,
         telemetry_endpoint: None,
@@ -829,7 +829,7 @@ fn progress_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         .filter(|w| *w == marker)
         .count();
     let seconds = reply.elapsed.as_secs_f64();
-    let limit = 11_878_268_928f64;
+    let limit = oncl_pki::resource::ResourceLimits::default().output_bytes as f64;
     let per_second = reply.body_len as f64 / seconds.max(1e-9);
     case.note(
         "progress_traffic",
@@ -895,7 +895,7 @@ fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         total_memory: 536_870_912,
         temp_per_operation: GIB,
         total_temp: 4 * GIB,
-        input_bytes: 10_737_418_240,
+        input_bytes: 1_073_741_824,
         tsa: false,
         max_connections: 64,
         telemetry_endpoint: None,
