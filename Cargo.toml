@@ -187,6 +187,8 @@ windows-sys = "0.61.2"
 # in unoptimized builds nor on Windows x64 (whose calling convention passes the handlers'
 # arguments on the stack), and a long guest loop then overflows the native stack.
 wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch"] }
+# The `LimiterError` of wasmi's `ResourceLimiter`, which `wasmi` does not re-export: `oncl-plugin`'s memory limiter implements the trait.
+wasmi_core = { version = "2.0.0", default-features = false }
 # Only in the `oncl-plugin` tests: guests written as WebAssembly text.
 wat = "1.262.0"
 x509-cert = "0.3.0"

@@ -38,12 +38,12 @@ use oncl_pki::{
     ocsp::MockOcsp,
     pkcs12,
     pkix::CaSet,
-    resource::{OperationControl, ProcessingError, Progress, ResourceLimits},
+    resource::{OperationControl, ProcessingError, Progress},
     testing::{TestCertSpec, issue_cert},
     tsp::MockTsa,
     validation::NetworkPolicy,
 };
-use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA, InstanceLimits, Manifest, NCA_PKI_HOSTS};
+use oncl_plugin::{DEFAULT_OCSP, DEFAULT_TSA, Manifest, NCA_PKI_HOSTS};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -56,44 +56,11 @@ pub const GOST2015: &str = "user-gost2015-sign";
 /// The fixed time of every run (the fixtures' `NOW`).
 pub const NOW: time::OffsetDateTime = crypto::NOW;
 
-/// The PKI endpoints this harness grants a `network = "pki"` operation: the default OCSP
-/// responder and the default (Kalkan) TSA, GET and POST each. This is what the runs showed is
-/// needed (signer OCSP and Kalkan TSA are GETs); it is NOT a claim about the desktop wiring
-/// (`crates/openncalayer/src/plugins/manual.rs` on the integration tip grants POST only and
-/// uses `InstanceLimits::default()`): when feat/mp7b-limits exposes one shared definition of
-/// limits and endpoints, switch `PKI_ENDPOINTS`/`instance_limits()`/`resource_limits()` below
-/// to it (the single place to change). The synthetic leaf names the same OCSP responder.
-pub const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = [
-    (HttpMethod::Get, DEFAULT_OCSP),
-    (HttpMethod::Post, DEFAULT_OCSP),
-    (HttpMethod::Get, DEFAULT_TSA),
-    (HttpMethod::Post, DEFAULT_TSA),
-];
-
-/// The instance limits a manual window can run the ports with under `ResourceLimits::default()`:
-/// a call reserves `8 * max_transfer + max_memory` of the operation's memory budget (1 GiB by
-/// default), so `InstanceLimits::default()` (1 GiB of linear memory, 256 MiB transfers) can
-/// never run there (`Processing(MemoryLimit)`, observed). The transfer size holds a 16 MiB
-/// document as base64 plus the request around it.
-pub fn instance_limits() -> InstanceLimits {
-    InstanceLimits {
-        max_memory: 128 << 20,
-        max_transfer: 16 << 20,
-        ..InstanceLimits::default()
-    }
-}
-
-/// The resource limits of a manual window that can sign XML: a Kalkan XML signature reserves
-/// about 61 MiB of the operation's METADATA budget (observed), plus `max_transfer` for the
-/// call itself, and the default budget is 64 MiB, so with `ResourceLimits::default()` an XML
-/// signature fails after the key use (`AfterKeyUse(MetadataLimit)`, key applied) for any
-/// transfer size above about 1 MiB.
-pub fn resource_limits() -> ResourceLimits {
-    ResourceLimits {
-        metadata_bytes: 256 << 20,
-        ..ResourceLimits::default()
-    }
-}
+/// The PKI endpoints the production host grants a `network = "pki"` operation: the default
+/// OCSP responder and the default (Kalkan) TSA, GET and POST each. The synthetic leaf names
+/// the same OCSP responder in its AIA, so that the signer's online validation reaches
+/// exactly these. The host's own constant, shared with `crates/openncalayer`.
+pub const PKI_ENDPOINTS: [(HttpMethod, &str); 4] = oncl_plugin::NCA_PKI_ENDPOINTS;
 
 /// The local operator of the manual window.
 pub fn manual() -> CallerContext {
@@ -282,6 +249,10 @@ pub struct RunOptions {
     pub tamper: Option<Tamper>,
     /// The key fixture; `RSA` by default.
     pub key: Option<&'static str>,
+    /// The limits of the manual window; [`ManualLimits::desktop`] by default.
+    pub limits: Option<ManualLimits>,
+    /// The engine has no temporary store.
+    pub no_temporary_store: bool,
 }
 
 impl RunOptions {
@@ -302,7 +273,7 @@ impl RunOptions {
                         .unwrap_or_else(|| panic!("{operation} has no {from:?}"));
                 format!("{}{}{}", &text[..at], to, &text[at + from.len()..])
             })),
-            key: None,
+            ..RunOptions::default()
         }
     }
 }
@@ -354,9 +325,10 @@ pub fn try_run_port_operation(
         .find(|o| o.name() == operation)
         .is_some_and(|o| matches!(o.uses().network(), oncl_plugin::operations::Network::Pki));
     let endpoints: &[(HttpMethod, &str)] = if pki { &PKI_ENDPOINTS } else { &[] };
+    let limits = options.limits.clone().unwrap_or_else(ManualLimits::desktop);
     let mut plugins = PluginRegistry::new();
     plugins
-        .install(manifest, hash, &wasm, instance_limits(), Vec::new())
+        .install(manifest, hash, &wasm, limits.instance, Vec::new())
         .unwrap_or_else(|e| panic!("{port}: installing: {e:?}"));
     plugins
         .allow_declared_with_pki(
@@ -368,13 +340,16 @@ pub fn try_run_port_operation(
         )
         .unwrap_or_else(|e| panic!("{port}.{operation}: not offered: {e:?}"));
     let guard = Arc::new(PluginConsentGuard::new());
-    // XML signing spools through the temporary store: the host must provide one.
-    let spool = tempfile::tempdir().unwrap();
-    let services = EngineServices::hash_only(resource_limits())
-        .with_temporary_store(oncl_pki::io::TemporaryStore::new(spool.path()).unwrap())
+    let mut services = EngineServices::hash_only(limits.resources.clone())
         .with_validation(world.validation.clone())
         .with_plugins(plugins)
         .with_plugin_keys(Arc::new(KeySources::new()), guard.clone());
+    // XML signing spools through the temporary store: the host must provide one.
+    let spool = tempfile::tempdir().unwrap();
+    if !options.no_temporary_store {
+        services =
+            services.with_temporary_store(oncl_pki::io::TemporaryStore::new(spool.path()).unwrap());
+    }
     let engine = Engine::new(services).unwrap();
     let operations = engine
         .plugin_operations(&id)

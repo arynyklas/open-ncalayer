@@ -174,6 +174,19 @@ pub const DEFAULT_TSA: &str = "http://tsp.pki.gov.kz";
 /// The OCSP responder of `PkiUrl::Default`.
 pub const DEFAULT_OCSP: &str = "http://ocsp.pki.gov.kz";
 
+/// The exact PKI endpoints a host grants an operation with `network = "pki"`: the default OCSP
+/// responder and the default (Kalkan) TSA, each by GET and POST. A key use is validated
+/// online first, by a GET to the OCSP responder its certificate names, and Kalkan's default
+/// TSA profile asks the TSA by GET; a grant of POST alone refuses both
+/// (`docs/dev/plugins-manual-tests.md`). CRLs are fetched under the provenance of the
+/// certificate, not from this list.
+pub const NCA_PKI_ENDPOINTS: [(oncl_pki::http::HttpMethod, &str); 4] = [
+    (oncl_pki::http::HttpMethod::Get, DEFAULT_OCSP),
+    (oncl_pki::http::HttpMethod::Post, DEFAULT_OCSP),
+    (oncl_pki::http::HttpMethod::Get, DEFAULT_TSA),
+    (oncl_pki::http::HttpMethod::Post, DEFAULT_TSA),
+];
+
 /// A URL of a PKI service, if the core may ask it: `http(s)://` to one of the PKI hosts
 /// or a subdomain of one; any for a built-in module.
 fn check_pki_url(state: &dyn CryptoHost, url: &str) -> HostResult<()> {

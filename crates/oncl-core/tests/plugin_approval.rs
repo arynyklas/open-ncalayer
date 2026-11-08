@@ -316,6 +316,25 @@ fn rigged(calls: &[(Import, Vec<u8>)], tail: &str) -> Rig {
     rig_with(calls, tail, true, "user-rsa-sign")
 }
 fn rig_with(calls: &[(Import, Vec<u8>)], tail: &str, plugin_guard: bool, key: &str) -> Rig {
+    // The budgets of a desktop's manual window: the default ones cannot hold an XML signature.
+    rig_budgeted(
+        calls,
+        tail,
+        plugin_guard,
+        key,
+        ManualLimits::desktop().resources,
+        true,
+    )
+}
+/// [`rig_with`] on an engine with `resources` and, or not, a temporary store.
+fn rig_budgeted(
+    calls: &[(Import, Vec<u8>)],
+    tail: &str,
+    plugin_guard: bool,
+    key: &str,
+    resources: ResourceLimits,
+    temporary_store: bool,
+) -> Rig {
     let (selector, validation, cert) = xades_fixture::matching_issuer_with_certificate(key);
     let manifest = manifest();
     let extras = declared_imports(&manifest);
@@ -348,11 +367,15 @@ fn rig_with(calls: &[(Import, Vec<u8>)], tail: &str, plugin_guard: bool, key: &s
     let services = EngineServices::hash_only(ResourceLimits {
         // A test holds several invocations at once (a refused one, the one that follows).
         max_in_flight: 4,
-        ..ResourceLimits::default()
+        ..resources
     })
-    .with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
     .with_validation(validation)
     .with_plugins(plugins);
+    let services = if temporary_store {
+        services.with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
+    } else {
+        services
+    };
     let services = if plugin_guard {
         services.with_plugin_keys(provider.clone(), guard.clone())
     } else {
@@ -2060,4 +2083,208 @@ fn a_signed_text_holds_nothing_a_window_could_hide() {
         )
         .unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
     }
+}
+
+// ---- the engine's budgets (MP7b) --------------------------------------------------------------
+
+/// The instance limits `rig_budgeted` registers the module with.
+fn rig_instance() -> InstanceLimits {
+    InstanceLimits {
+        max_memory: 1 << 20,
+        max_transfer: 1 << 16,
+        ..InstanceLimits::default()
+    }
+}
+fn sign_xml_params() -> Vec<(&'static str, PluginParam<'static>)> {
+    vec![
+        ("file", PluginParam::Document(XML)),
+        ("path", PluginParam::Text("//p:data")),
+    ]
+}
+fn budgets(metadata_bytes: u64, memory_bytes: u64) -> ResourceLimits {
+    ResourceLimits {
+        metadata_bytes,
+        memory_bytes,
+        ..ResourceLimits::default()
+    }
+}
+fn xml_rig(resources: ResourceLimits, temporary_store: bool) -> Rig {
+    rig_budgeted(
+        &[xml_call(Some("//p:data"))],
+        "",
+        true,
+        "user-rsa-sign",
+        resources,
+        temporary_store,
+    )
+}
+
+/// The worst failure mode, gone: with the SDK's default metadata budget (64 MiB) the check of a
+/// signed document takes what the budget has, and the legacy XML signature used to fail AFTER
+/// the key was applied. Now the call is refused before the user is asked, before the key is
+/// opened, with a typed subcode.
+#[test]
+fn an_xml_signature_the_budgets_cannot_hold_is_refused_before_the_key_is_opened() {
+    let rig = xml_rig(ResourceLimits::default(), true);
+    let mut c = ctx(&rig, "sign-xml");
+    let error = try_prepare(
+        &rig,
+        "sign-xml",
+        &sign_xml_params(),
+        &bound(&rig),
+        &manual(),
+        &mut c,
+    )
+    .unwrap_err();
+    // The budgets cannot hold even an XML signature of an empty document: the engine is wrong.
+    assert_eq!(error, PluginPrepareError::ResourceBudget);
+    assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
+    assert_eq!(error.subcode().id(), "resource-budget");
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert_eq!(OperationError::from(error).code(), ErrorCode::MemoryLimit);
+    assert_eq!(
+        rig.provider.opens.load(Ordering::SeqCst),
+        0,
+        "the key is not even opened"
+    );
+    assert_eq!(rig.guard.applications(), 0);
+}
+
+/// The estimate is a sufficient budget: at exactly the estimate every kind of operation signs;
+/// one byte less of the metadata or of the memory budget is refused before the key.
+#[test]
+fn the_estimate_is_enough_and_one_byte_less_is_refused_before_the_key() {
+    for (op, kind, calls) in [
+        ("sign-xml", KeyKind::Xml, vec![xml_call(Some("//p:data"))]),
+        (
+            "sign-cms-ex",
+            KeyKind::CmsEx,
+            vec![cms_call(cms_ex_args(data(DOC)))],
+        ),
+        ("sign-raw", KeyKind::Raw, vec![raw_call(DOC)]),
+    ] {
+        let params = if op == "sign-xml" {
+            sign_xml_params()
+        } else {
+            doc(DOC)
+        };
+        let len = if op == "sign-xml" {
+            XML.len()
+        } else {
+            DOC.len()
+        };
+        let need = manual_call_budget(&rig_instance(), kind, len as u64).unwrap();
+        let rig = rig_budgeted(
+            &calls,
+            "",
+            true,
+            "user-rsa-sign",
+            budgets(need.metadata, need.memory),
+            true,
+        );
+        let (_c, result) = flow(&rig, op, &params);
+        assert_eq!(result.applied(), AppliedState::Applied, "{op}: {result:?}");
+        assert_eq!(rig.guard.applications(), 1);
+        for (metadata, memory) in [
+            (need.metadata - 1, need.memory),
+            (need.metadata, need.memory - 1),
+        ] {
+            let rig = rig_budgeted(
+                &calls,
+                "",
+                true,
+                "user-rsa-sign",
+                budgets(metadata, memory),
+                true,
+            );
+            let mut c = ctx(&rig, op);
+            let error =
+                try_prepare(&rig, op, &params, &bound(&rig), &manual(), &mut c).unwrap_err();
+            assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget, "{op}");
+            assert!(
+                matches!(
+                    error,
+                    PluginPrepareError::ResourceBudget | PluginPrepareError::DocumentTooLarge
+                ),
+                "{op}"
+            );
+            assert_eq!(rig.guard.applications(), 0, "{op}");
+        }
+    }
+}
+
+/// The preflight is the call's too: a budget that has shrunk since the preparation (another
+/// holder of the operation's budget) is refused by `plugin_call_approved` before the module
+/// runs, not after the key was used.
+#[test]
+fn a_budget_that_shrank_since_the_preparation_is_refused_by_the_call_before_the_key() {
+    let rig = xml_rig(ManualLimits::desktop().resources, true);
+    let params = sign_xml_params();
+    let mut c = ctx(&rig, "sign-xml");
+    let approval = confirm(prepare(&rig, "sign-xml", &params, &mut c));
+    let hog = c
+        .resources()
+        .reserve_metadata(ManualLimits::desktop().resources.metadata_bytes - (1 << 20))
+        .unwrap();
+    let result = call(&rig, "sign-xml", &params, approval, &mut c);
+    drop(hog);
+    assert_eq!(result.applied(), AppliedState::NotApplied, "{result:?}");
+    assert_eq!(result.subcode(), Some(PluginRefusalCode::ResourceBudget));
+    assert!(result.response().is_none());
+    assert_eq!(rig.guard.applications(), 0);
+    assert_eq!(rig.provider.opens.load(Ordering::SeqCst), 0);
+}
+
+/// An XML signature spools through the engine's temporary store: without one it is refused
+/// before the user is asked. A CMS needs none.
+#[test]
+fn an_engine_without_a_temporary_store_refuses_xml_but_not_a_cms_before_the_key() {
+    let rig = xml_rig(ManualLimits::desktop().resources, false);
+    let mut c = ctx(&rig, "sign-xml");
+    let error = try_prepare(
+        &rig,
+        "sign-xml",
+        &sign_xml_params(),
+        &bound(&rig),
+        &manual(),
+        &mut c,
+    )
+    .unwrap_err();
+    assert_eq!(error, PluginPrepareError::NoTemporaryStore);
+    assert_eq!(error.subcode().id(), "no-temporary-store");
+    assert_eq!(
+        OperationError::from(error).code(),
+        ErrorCode::MissingTemporaryStore
+    );
+    assert_eq!(rig.provider.opens.load(Ordering::SeqCst), 0);
+    let rig = rig_budgeted(
+        &[cms_call(cms_ex_args(data(DOC)))],
+        "",
+        true,
+        "user-rsa-sign",
+        ManualLimits::desktop().resources,
+        false,
+    );
+    let (_c, result) = flow(&rig, "sign-cms-ex", &doc(DOC));
+    assert_eq!(result.applied(), AppliedState::Applied, "{result:?}");
+}
+
+/// A budget that holds the module but not this document is a too large DOCUMENT (`InputLimit`,
+/// design 4.8), with the same subcode; a host whose `max_transfer` is large and whose document
+/// is small is held by the reply term of the sum, not slipped past it.
+#[test]
+fn a_document_over_the_budgets_is_input_limit_and_a_wrong_engine_is_memory_limit() {
+    let need_empty = manual_call_budget(&rig_instance(), KeyKind::Raw, 0).unwrap();
+    let limits = budgets(
+        need_empty.metadata + (1 << 10),
+        need_empty.memory + (1 << 10),
+    );
+    let rig = rig_budgeted(&[raw_call(DOC)], "", true, "user-rsa-sign", limits, true);
+    let mut c = ctx(&rig, "sign-raw");
+    let error =
+        try_prepare(&rig, "sign-raw", &doc(DOC), &bound(&rig), &manual(), &mut c).unwrap_err();
+    assert_eq!(error, PluginPrepareError::DocumentTooLarge);
+    assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
+    assert_eq!(OperationError::from(error).code(), ErrorCode::InputLimit);
+    assert_eq!(rig.guard.applications(), 0);
 }

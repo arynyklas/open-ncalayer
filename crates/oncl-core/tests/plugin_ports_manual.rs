@@ -21,6 +21,9 @@ mod esf_osdkz;
 mod fhs;
 #[path = "plugin_ports_manual/rating1c.rs"]
 mod rating1c;
+// The limits of the desktop's manual window (MP7b).
+#[path = "plugin_ports_manual/limits.rs"]
+mod limits;
 // The rule for key operations without a network.
 #[path = "plugin_ports_manual/network.rs"]
 mod network;

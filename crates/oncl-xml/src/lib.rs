@@ -95,7 +95,7 @@ pub use reader::{XmlAttribute, XmlAttributeSpan, XmlEvent, XmlEventKind, XmlEven
 pub use references::intake::{SignedXmlInput, SignedXmlReader, capture_signed_input};
 pub use references::{
     XmlReferenceResult, XmlSignerResult, XmlSourceError, XmlVerification, XmlVerificationFacts,
-    XmlVerifyProfile, verify_source, verify_source_with_clock,
+    XmlVerifyProfile, verification_metadata_bound, verify_source, verify_source_with_clock,
 };
 use sign::{BoundedSigner, ObjectTemplate, Template};
 pub use sign::{

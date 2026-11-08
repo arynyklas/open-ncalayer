@@ -33,6 +33,7 @@ pub fn tampered(operation: &str, from: &str, to: &str) -> RunOptions {
             format!("{}{}{}", &text[..at], to, &text[at + from.len()..])
         })),
         key: None,
+        ..RunOptions::default()
     }
 }
 
@@ -174,6 +175,7 @@ pub fn probe(
             format!("{}\n{section}", with_min_core(text, "0.1.0-alpha.7"))
         })),
         key: None,
+        ..RunOptions::default()
     };
     run_port_operation(port, operation, params, &options)
 }

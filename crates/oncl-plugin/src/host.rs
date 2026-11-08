@@ -6,6 +6,7 @@
 use crate::caps::{self, CallData, Consents, Flows, KeyFiles, KeyTable, RequestBudget, Secrets};
 use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
+use crate::runtime::GuestLimits;
 use crate::runtime::SessionContext;
 use oncl_flows::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
 use oncl_pdk::abi::{
@@ -21,7 +22,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
-use wasmi::{Caller, Linker, Memory, StoreLimits, TypedFunc};
+use wasmi::{Caller, Linker, Memory, TypedFunc};
 
 /// Longest `log` line kept, in bytes; the rest is cut.
 const MAX_LOG_LINE: usize = 4096;
@@ -122,7 +123,7 @@ pub(crate) struct CallContext {
 
 /// An instance's store data.
 pub(crate) struct HostState {
-    pub(crate) limits: StoreLimits,
+    pub(crate) limits: GuestLimits,
     pub(crate) services: HostServices,
     pub(crate) session: SessionContext,
     pub(crate) capabilities: Arc<Capabilities>,
@@ -145,7 +146,7 @@ pub(crate) struct HostState {
 
 impl HostState {
     pub(crate) fn new(
-        limits: StoreLimits,
+        limits: GuestLimits,
         services: HostServices,
         session: SessionContext,
         capabilities: Arc<Capabilities>,
@@ -254,7 +255,7 @@ pub(crate) fn write_guest(data: &mut [u8], ptr: i32, bytes: &[u8]) -> Result<(),
 
 /// State contract shared by interactive and invocation-scoped capability hosts.
 pub(crate) trait AbiState {
-    fn limits(&mut self) -> &mut StoreLimits;
+    fn limits(&mut self) -> &mut GuestLimits;
     fn phase(&self) -> Phase;
     fn set_phase(&mut self, phase: Phase);
     fn guest(&self) -> Option<(Memory, TypedFunc<i32, i32>)>;
@@ -276,7 +277,7 @@ pub(crate) struct FuelBank {
 }
 
 impl AbiState for HostState {
-    fn limits(&mut self) -> &mut StoreLimits {
+    fn limits(&mut self) -> &mut GuestLimits {
         &mut self.limits
     }
     fn phase(&self) -> Phase {
@@ -737,7 +738,7 @@ mod tests {
             trust: Trust::Builtin,
         };
         HostState::new(
-            wasmi::StoreLimitsBuilder::new().build(),
+            GuestLimits::new(wasmi::StoreLimitsBuilder::new().build()),
             services,
             session,
             Arc::new(capabilities),
