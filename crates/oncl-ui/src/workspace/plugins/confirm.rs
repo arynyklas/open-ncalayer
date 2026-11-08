@@ -36,7 +36,15 @@ pub(super) use press::for_tests as press_for_tests;
 /// The button that names the action: the only way to the key. The controller lets the press
 /// through only for a prepared, shown and armed confirmation; the confirmation is then made for
 /// exactly the summary the page shows and sent to the worker that waits for it.
-pub(super) fn confirm(open: &Rc<Workspace>) {
+/// Registers the button's callback: the ONLY holder of the call of [`confirm`], which is private
+/// to this module, so nothing else (a timer's tick, a key handler) can confirm for the user.
+pub(super) fn wire(ui: &crate::ui::WorkspaceWindow) {
+    use slint::ComponentHandle as _;
+    ui.global::<crate::ui::PluginsState>()
+        .on_confirm(|| super::super::with_open(confirm));
+}
+
+fn confirm(open: &Rc<Workspace>) {
     let t = texts(open);
     let mut st = state(open);
     if st.controller.dispatch(Event::Confirm) != Effect::Confirmed {

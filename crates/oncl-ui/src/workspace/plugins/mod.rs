@@ -191,7 +191,7 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_unlock(|| with_open(unlock));
     s.on_cert_clicked(|i| with_open(|open| cert_clicked(open, i)));
     s.on_cert_chosen(|i| with_open(|open| cert_chosen(open, i)));
-    s.on_confirm(|| with_open(confirm::confirm));
+    confirm::wire(ui);
     s.on_cancel(|| with_open(cancel));
     s.on_back(|| with_open(back));
     s.on_again(|| with_open(again));
