@@ -101,6 +101,9 @@ pub(super) fn suggested_name(operation: &str, plugin_id: &str) -> String {
 pub(super) enum SaveError {
     /// The reply is larger than the window saves.
     TooLarge { len: usize, cap: usize },
+    /// A path segment Windows maps to a device (`CON`, `NUL`, `COM1`, `LPT1`..., with or
+    /// without an extension) or silently rewrites (a trailing dot or space).
+    BadName,
     /// The destination or the write failed; the words are the tools window's.
     Job(JobError),
 }
@@ -140,6 +143,9 @@ fn save_with(
             len: reply.len(),
             cap,
         });
+    }
+    if has_windows_unsafe_segment(target) {
+        return Err(SaveError::BadName);
     }
     let parent = match target.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_owned(),
@@ -182,6 +188,43 @@ fn save_with(
     });
     let _ = std::fs::remove_file(&temporary);
     published
+}
+
+/// Whether a segment of `path` is a DOS device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+/// `LPT1`-`LPT9`, in any case, with any extension: `CON.json` is the console) or ends in a dot
+/// or a space (Windows drops them, so the file would not be the one named). Checked on every
+/// platform: a name that cannot be opened as written on Windows is not offered anywhere.
+fn has_windows_unsafe_segment(path: &Path) -> bool {
+    path.components().any(|c| {
+        let std::path::Component::Normal(segment) = c else {
+            return false;
+        };
+        let segment = segment.to_string_lossy();
+        if segment.ends_with(['.', ' ']) {
+            return true;
+        }
+        let stem = segment.split('.').next().unwrap_or_default().trim_end();
+        let upper = stem.to_ascii_uppercase();
+        matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ["COM", "LPT"].iter().any(|prefix| {
+                upper.strip_prefix(prefix).is_some_and(|n| {
+                    matches!(
+                        n,
+                        "1" | "2"
+                            | "3"
+                            | "4"
+                            | "5"
+                            | "6"
+                            | "7"
+                            | "8"
+                            | "9"
+                            | "\u{b9}"
+                            | "\u{b2}"
+                            | "\u{b3}"
+                    )
+                })
+            })
+    })
 }
 
 /// Makes `target` with `create_new` (never replaces anything), fills it and syncs it. The file
@@ -252,6 +295,43 @@ mod tests {
         save_reply(&target, reply.as_bytes(), 1 << 20).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), reply.as_bytes());
         assert_eq!(leftovers(dir.path()), ["out.json"]);
+    }
+
+    #[test]
+    fn device_names_and_trailing_dots_or_spaces_are_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "CON.json",
+            "con.json",
+            "NUL.json",
+            "Aux.json",
+            "PRN.json",
+            "COM1.json",
+            "com9.json",
+            "LPT1.json",
+            "lpt9.tar.json",
+            "CON .json",
+            "reply.json.",
+            "reply.json ",
+            "COM\u{b9}.json",
+        ] {
+            let e = save_reply(&dir.path().join(name), b"x", 10).unwrap_err();
+            assert!(matches!(e, SaveError::BadName), "{name}: {e:?}");
+        }
+        // A device name as a folder is the same device.
+        let e = save_reply(&dir.path().join("nul").join("a.json"), b"x", 10).unwrap_err();
+        assert!(matches!(e, SaveError::BadName), "{e:?}");
+        assert!(leftovers(dir.path()).is_empty());
+        // Ordinary names that merely resemble them are saved.
+        for name in [
+            "console.json",
+            "COM10.json",
+            "COM.json",
+            "lpt.json",
+            "a.b.json",
+        ] {
+            save_reply(&dir.path().join(name), b"x", 10).unwrap();
+        }
     }
 
     #[test]

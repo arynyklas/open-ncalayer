@@ -206,6 +206,11 @@ fn quoted(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // Any other control or invisible character is spelled out, never drawn: even a
+            // text that reached here another way than through the form shows no hidden mark.
+            c if c.is_control() || crate::view::is_invisible(c) => {
+                out.push_str(&format!("\\u{{{:X}}}", u32::from(c)));
+            }
             c => out.push(c),
         }
     }
@@ -322,32 +327,45 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
 
     // What the user entered besides the file: the plugin gets it as it is, and none of it is
     // part of what Core approves.
+    //
+    // The parameters' NAMES are the plugin's own words, so they are never in the host's
+    // lines: a value is listed there by its number, and the frame says which field of the
+    // plugin each number is.
     let mut inputs: Vec<String> = Vec::new();
     // A choice is the plugin's own string: it is in the plugin's frame, quoted.
     let mut choices: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut signed_number = String::new();
     for (name, value) in entered.iter() {
-        match value {
-            Frozen::Document { .. } => {}
+        let shown = match value {
+            Frozen::Document { .. } => continue,
+            Frozen::Choice(choice) => {
+                choices.push(
+                    t.c_choice_line
+                        .replace("{0}", name)
+                        .replace("{1}", &quoted(&plain(choice))),
+                );
+                continue;
+            }
             // The exact text that is signed or passed: quoted, with line breaks and tab
             // spelled out, nothing cut or cleaned.
-            Frozen::Text(text) => inputs.push(
-                t.c_input_line
-                    .replace("{0}", name)
-                    .replace("{1}", &quoted(text)),
-            ),
-            Frozen::Choice(choice) => choices.push(
-                t.c_choice_line
-                    .replace("{0}", name)
-                    .replace("{1}", &quoted(&plain(choice))),
-            ),
-            Frozen::Flag(on) => inputs.push(
-                t.c_input_line
-                    .replace("{0}", name)
-                    .replace("{1}", if *on { t.c_flag_yes } else { t.c_flag_no }),
-            ),
-            Frozen::Locale(code) => {
-                inputs.push(t.c_input_line.replace("{0}", name).replace("{1}", code))
-            }
+            Frozen::Text(text) => quoted(text),
+            Frozen::Flag(on) => (if *on { t.c_flag_yes } else { t.c_flag_no }).to_owned(),
+            Frozen::Locale(code) => (*code).to_owned(),
+        };
+        let number = (inputs.len() + 1).to_string();
+        inputs.push(
+            t.c_input_line
+                .replace("{0}", &number)
+                .replace("{1}", &shown),
+        );
+        names.push(
+            t.c_input_name
+                .replace("{0}", &number)
+                .replace("{1}", &quoted(&plain(name))),
+        );
+        if *name == summary.content.param {
+            signed_number = number;
         }
     }
 
@@ -359,7 +377,7 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
         package_sha: hex(&package_digest),
         file_lines: if text_content.is_some() {
             vec![
-                t.c_text_signed.replace("{0}", &summary.content.param),
+                t.c_text_signed.replace("{0}", &signed_number),
                 t.c_size.replace("{0}", &size),
             ]
         } else {
@@ -393,8 +411,9 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
             name_caption: t.frame_name.to_owned(),
             name: untrusted_label(offered.plugin_name.get(l)),
             label: untrusted_label(offered.label.get(l)),
-            lines: choices
+            lines: names
                 .into_iter()
+                .chain(choices)
                 .chain(declared.consent(None).xpaths.iter().map(|x| {
                     frame_xpath(l).replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH))
                 }))
@@ -431,6 +450,16 @@ mod tests {
     use std::path::Path;
 
     const ALL: [Locale; 3] = [Locale::Ru, Locale::Kk, Locale::En];
+
+    #[test]
+    fn quoted_spells_out_every_control_and_invisible_character() {
+        assert_eq!(
+            quoted("a\u{202E}b\u{7}c\u{115F}d\u{85}\"\\\n"),
+            "\"a\\u{202E}b\\u{7}c\\u{115F}d\\u{85}\\\"\\\\\\n\""
+        );
+        assert_eq!(quoted("договор №1 \u{4e16}"), "\"договор №1 \u{4e16}\"");
+    }
+
     /// Marks of the plugin author's own text: none may reach the host's lines.
     const EVIL: [&str; 3] = ["EVIL-NAME", "EVIL-LABEL", "EVIL-DESCRIPTION"];
 
@@ -626,10 +655,23 @@ element = "param:path"
                 "{l:?}"
             );
             // What the user typed is listed as entered, not as approved.
+            assert!(v.inputs.iter().any(|i| i.contains("\"/r/data\"")));
+            // ... by its number: the plugin's name for the field is its own word, so it is in
+            // the frame only (mutation: the name in a host line fails here).
             assert!(
                 v.inputs
                     .iter()
-                    .any(|i| i.contains("path") && i.contains("\"/r/data\""))
+                    .chain(&v.trusted)
+                    .chain(&v.file_lines)
+                    .all(|line| !line.contains("path") && !line.contains("mode")),
+                "{l:?}: a plugin's parameter name outside its frame"
+            );
+            assert!(
+                v.frame
+                    .lines
+                    .iter()
+                    .any(|i| i.contains("\"path\"") && i.contains('1')),
+                "{l:?}"
             );
             // A choice is the plugin's own string: in its frame, quoted, not among the inputs.
             assert!(

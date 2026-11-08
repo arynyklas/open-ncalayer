@@ -2799,6 +2799,11 @@ fn signed_text_refuses_what_a_window_could_hide() {
         "a\u{00ad}b",
         "a\u{2066}b",
         "a\u{e0041}b",
+        // Hangul fillers are drawn as blanks.
+        "a\u{115f}b",
+        "a\u{1160}b",
+        "a\u{3164}b",
+        "a\u{ffa0}b",
     ] {
         assert!(signed_text_problem(bad).is_some(), "{bad:?}");
     }

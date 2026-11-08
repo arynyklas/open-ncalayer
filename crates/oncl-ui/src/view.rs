@@ -16,15 +16,13 @@ pub const MAX_PAGE_TEXT: usize = 128;
 
 /// Whether `c` is drawn as nothing or changes how text around it reads: controls, line and
 /// paragraph separators, bidirectional marks, embeddings, overrides and isolates (LRM, RLM,
-/// ALM among them), zero-width and other invisible format characters, the BOM, tag characters.
+/// ALM among them), zero-width and other invisible format characters, the Hangul fillers, the
+/// BOM, tag characters.
 pub(crate) fn is_invisible(c: char) -> bool {
+    // Core's set (Hangul fillers and the rest of category Cf included): one source.
     c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}'
-                | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}'
-        )
+        || oncl_plugin::operations::is_invisible(c)
+        || ('\u{E0000}'..='\u{E007F}').contains(&c)
 }
 
 /// `text` from a page (its origin, a name it sends) as a notification or a window shows it:

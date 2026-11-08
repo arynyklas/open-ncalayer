@@ -376,7 +376,12 @@ the same target with the `subcode`. The durable form is in `docs/user/server.md`
 `PluginApproval::new`, `ApprovedUse::new` and the other constructors are not public. With the
 `testing` feature of `oncl-core` (never part of a release) `PluginApproval::for_tests`,
 `ApprovedUse::for_tests`, `PluginUse::for_tests` and `KeyUseEvent::with_plugin_ticket_for_tests`
-forge what Core never would, for tests of guards.
+forge what Core never would, for tests of guards. A release build never enables `testing`: the
+release programs are built with `-p`, but `cargo build --workspace --all-targets` and
+`cargo test` unify the dev-dependencies' `testing` into the same binaries, so CI runs
+`cargo xtask check-release-features`. It reads `cargo tree -p <openncalayer|oncl-cli|oncl-server|oncl-ui>
+-e normal -f "{p} [{f}]"` (the features resolved for the normal tree, without dev-dependencies)
+and fails if any crate shows `testing`.
 
 ## 6. Semver, versions and migration
 

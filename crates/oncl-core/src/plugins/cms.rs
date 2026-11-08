@@ -64,11 +64,17 @@ impl Backend<'_, '_> {
         bytes: &[u8],
     ) -> Result<Vec<u8>, OperationError> {
         let mut args = if import == Import::KeysSignCms {
-            let args: abi::SignCmsArgs = decode(bytes)?;
+            // Exhaustive: a new field of the legacy args must be mapped (or refused) here.
+            let abi::SignCmsArgs {
+                handle,
+                data,
+                attached,
+                timestamp,
+            } = decode(bytes)?;
             abi::SignCmsExArgs {
-                handle: args.handle,
-                content: abi::CmsContent::Data(args.data),
-                encapsulate: args.attached,
+                handle,
+                content: abi::CmsContent::Data(data),
+                encapsulate: attached,
                 cosign: abi::CoSign::Auto,
                 econtent_type: None,
                 digest: None,
@@ -83,7 +89,7 @@ impl Backend<'_, '_> {
                     extra: Vec::new(),
                 },
                 certificates: abi::CmsCerts::Signer,
-                timestamp: args.timestamp.then_some(abi::TsaChoice::Basics),
+                timestamp: timestamp.then_some(abi::TsaChoice::Basics),
                 output: abi::CmsOutput::Der,
             }
         } else {

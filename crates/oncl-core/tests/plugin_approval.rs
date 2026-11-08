@@ -2173,7 +2173,12 @@ fn the_estimate_is_enough_and_one_byte_less_is_refused_before_the_key() {
         } else {
             DOC.len()
         };
-        let need = manual_call_budget(&rig_instance(), kind, len as u64).unwrap();
+        let text = if op == "sign-xml" {
+            "//p:data".len()
+        } else {
+            0
+        };
+        let need = manual_call_budget(&rig_instance(), kind, len as u64, text as u64).unwrap();
         let rig = rig_budgeted(
             &calls,
             "",
@@ -2211,6 +2216,58 @@ fn the_estimate_is_enough_and_one_byte_less_is_refused_before_the_key() {
             assert_eq!(rig.guard.applications(), 0, "{op}");
         }
     }
+}
+
+/// The budget estimate counts the text parameters the options are filled from: a long XPath
+/// that the estimate for the same document without it would not hold is refused at
+/// `plugin_prepare`, before the user is asked, not by the call after consent.
+#[test]
+fn a_long_xpath_parameter_is_part_of_the_budget_and_refused_before_consent() {
+    let short = sign_xml_params();
+    let need = manual_call_budget(
+        &rig_instance(),
+        KeyKind::Xml,
+        XML.len() as u64,
+        "//p:data".len() as u64,
+    )
+    .unwrap();
+    let rig = rig_budgeted(
+        &[xml_call(Some("//p:data"))],
+        "",
+        true,
+        "user-rsa-sign",
+        budgets(need.metadata, need.memory),
+        true,
+    );
+    let (_c, result) = flow(&rig, "sign-xml", &short);
+    assert_eq!(result.applied(), AppliedState::Applied, "{result:?}");
+    // The same budgets, a 2 KiB XPath (within the parameter's own limit): short by its size.
+    let long = format!("//p:data{}", "[1]".repeat(700));
+    let long_params = vec![
+        ("file", PluginParam::Document(XML)),
+        ("path", PluginParam::Text(&long)),
+    ];
+    let rig = rig_budgeted(
+        &[xml_call(Some("//p:data"))],
+        "",
+        true,
+        "user-rsa-sign",
+        budgets(need.metadata, need.memory),
+        true,
+    );
+    let mut c = ctx(&rig, "sign-xml");
+    let error = try_prepare(
+        &rig,
+        "sign-xml",
+        &long_params,
+        &bound(&rig),
+        &manual(),
+        &mut c,
+    )
+    .unwrap_err();
+    assert_eq!(error.subcode(), PluginRefusalCode::ResourceBudget);
+    assert_eq!(rig.guard.applications(), 0);
+    assert_eq!(rig.provider.opens.load(Ordering::SeqCst), 0);
 }
 
 /// The preflight is the call's too: a budget that has shrunk since the preparation (another
@@ -2274,7 +2331,7 @@ fn an_engine_without_a_temporary_store_refuses_xml_but_not_a_cms_before_the_key(
 /// is small is held by the reply term of the sum, not slipped past it.
 #[test]
 fn a_document_over_the_budgets_is_input_limit_and_a_wrong_engine_is_memory_limit() {
-    let need_empty = manual_call_budget(&rig_instance(), KeyKind::Raw, 0).unwrap();
+    let need_empty = manual_call_budget(&rig_instance(), KeyKind::Raw, 0, 0).unwrap();
     let limits = budgets(
         need_empty.metadata + (1 << 10),
         need_empty.memory + (1 << 10),

@@ -126,7 +126,7 @@ texts! {
     c_network_pki,
     /// `{0}` the file's name.
     c_file,
-    /// `{0}` the parameter's name.
+    /// `{0}` the number of the value that is signed.
     c_text_signed,
     r_applied_no_reply,
     /// `{0}` the size.
@@ -147,8 +147,11 @@ texts! {
     c_valid,
     c_fingerprint,
     c_inputs,
-    /// `{0}` the parameter's name, `{1}` its value.
+    /// `{0}` the value's number, `{1}` its value.
     c_input_line,
+    /// `{0}` the value's number, `{1}` the plugin's name for that field (quoted; in the
+    /// plugin's frame, never among the host's lines).
+    c_input_name,
     /// `{0}` the parameter's name, `{1}` the choice (quoted).
     c_choice_line,
     no_reason,
@@ -206,6 +209,7 @@ texts! {
     /// `{0}` why.
     save_failed,
     save_exists,
+    save_bad_name,
     again,
     finish,
     // Why a key use was refused (what Core says; one for each of its variants).
@@ -327,7 +331,7 @@ static EN: Texts = Texts {
     c_network_none: "Network: none. The plugin cannot send anything anywhere.",
     c_network_pki: "Network: only these servers of the national PKI: {0}. The plugin may send the document or data made from it to them.",
     c_file: "File chosen by you: {0}",
-    c_text_signed: "What is signed is the text you typed for {0}, exactly as listed below.",
+    c_text_signed: "What is signed is the text you typed as value {0}, exactly as listed below.",
     r_applied_no_reply: "Your key WAS applied, but the plugin gave no reply and reported no error: whether the signature was made is not known to this window.",
     c_size: "Size: {0}",
     c_sha: "SHA-256 of the file:",
@@ -341,7 +345,8 @@ static EN: Texts = Texts {
     c_valid: "Valid until: {0}",
     c_fingerprint: "SHA-256 of the certificate:",
     c_inputs: "Values you entered, passed to the plugin as they are (not part of what is approved):",
-    c_input_line: "{0} = {1}",
+    c_input_line: "Value {0} = {1}",
+    c_input_name: "Value {0} is the plugin's field {1}",
     c_choice_line: "Choice {0}, one of those the plugin offers: {1}",
     no_reason: "no reason was reported",
     row_code: "Code: {0}",
@@ -358,7 +363,7 @@ static EN: Texts = Texts {
     key_idle: "The key page was left open too long and was closed, and the password was forgotten. Nothing was signed and your key was not used.",
     consent_invalid: "This confirmation cannot be shown safely: the operation's description and the prepared key use do not agree. Nothing was signed.",
     running: "The plugin runs under your confirmation. Your key may be used now. Cancel asks it to stop; the result says honestly whether the key was used.",
-    r_ok: "The plugin returned a reply and your key was applied once. OpenNCALayer did not check the signature in the reply.",
+    r_ok: "Key applied; signature not checked. The plugin returned a reply and your key was applied once. OpenNCALayer did not check the signature in the reply.",
     r_applied_failed: "Your key WAS applied, but the plugin did not finish properly: {0}",
     r_unknown: "It is not known whether your key was applied: the key use did not report. Treat the key as possibly used.",
     r_not_applied: "Nothing was signed: your key was not used. {0}",
@@ -382,6 +387,7 @@ static EN: Texts = Texts {
     save_too_large: "The reply is {0}, more than the {1} this window saves. It was not saved.",
     save_failed: "The reply was not saved: {0}",
     save_exists: "A file with this name already exists there and was not replaced. Save again and choose another name or folder.",
+    save_bad_name: "Windows cannot use this name (a device name such as CON, NUL, COM1 or LPT1, or a name ending in a dot or a space). Save again and choose another name.",
     again: "Prepare again",
     finish: "Back to the list",
     f_no_ticket: "the key use did not come from a declared operation",
@@ -490,7 +496,7 @@ static RU: Texts = Texts {
     c_network_none: "Сеть: нет. Плагин ничего никуда отправить не может.",
     c_network_pki: "Сеть: только эти серверы национальной PKI: {0}. Плагин может отправить им документ или данные, полученные из него.",
     c_file: "Файл, выбранный вами: {0}",
-    c_text_signed: "Подписывается текст, который вы ввели в {0}, ровно в том виде, как он перечислен ниже.",
+    c_text_signed: "Подписывается текст, который вы ввели как значение {0}, ровно в том виде, как он перечислен ниже.",
     r_applied_no_reply: "Ваш ключ БЫЛ применён, но плагин не дал ответа и не сообщил об ошибке: создана ли подпись, это окно не знает.",
     c_size: "Размер: {0}",
     c_sha: "SHA-256 файла:",
@@ -504,7 +510,8 @@ static RU: Texts = Texts {
     c_valid: "Действителен до: {0}",
     c_fingerprint: "SHA-256 сертификата:",
     c_inputs: "Введённые вами значения, передаются плагину как есть (в то, что разрешается, не входят):",
-    c_input_line: "{0} = {1}",
+    c_input_line: "Значение {0} = {1}",
+    c_input_name: "Значение {0} — поле плагина {1}",
     c_choice_line: "Выбор {0}, один из предложенных плагином: {1}",
     no_reason: "причина не сообщена",
     row_code: "Код: {0}",
@@ -521,7 +528,7 @@ static RU: Texts = Texts {
     key_idle: "Страница ключа простояла слишком долго и закрыта, пароль забыт. Ничего не подписано, ключ не применялся.",
     consent_invalid: "Это подтверждение нельзя показать безопасно: описание операции и подготовленное применение ключа не совпадают. Ничего не подписано.",
     running: "Плагин работает по вашему подтверждению. Ключ может применяться прямо сейчас. Отмена просит его остановиться; результат честно скажет, применялся ли ключ.",
-    r_ok: "Плагин вернул ответ, ваш ключ применён один раз. OpenNCALayer не проверял подпись в ответе.",
+    r_ok: "Ключ применён; подпись не проверена. Плагин вернул ответ, ваш ключ применён один раз. OpenNCALayer не проверял подпись в ответе.",
     r_applied_failed: "Ваш ключ БЫЛ применён, но плагин завершился некорректно: {0}",
     r_unknown: "Неизвестно, применялся ли ваш ключ: применение не сообщило о себе. Считайте, что ключ мог быть применён.",
     r_not_applied: "Ничего не подписано: ваш ключ не применялся. {0}",
@@ -545,6 +552,7 @@ static RU: Texts = Texts {
     save_too_large: "Ответ занимает {0}, что больше {1}, которые это окно сохраняет. Он не сохранён.",
     save_failed: "Ответ не сохранён: {0}",
     save_exists: "Файл с таким именем там уже есть, он не заменён. Сохраните ещё раз и выберите другое имя или папку.",
+    save_bad_name: "Windows не может использовать это имя (имя устройства вроде CON, NUL, COM1 или LPT1 либо имя, оканчивающееся точкой или пробелом). Сохраните ещё раз и выберите другое имя.",
     again: "Подготовить заново",
     finish: "К списку",
     f_no_ticket: "применение ключа не относилось к объявленной операции",
@@ -653,7 +661,7 @@ static KK: Texts = Texts {
     c_network_none: "Желі: жоқ. Плагин ештеңені ешқайда жібере алмайды.",
     c_network_pki: "Желі: ұлттық PKI-дің тек мына серверлері: {0}. Плагин оларға құжатты немесе содан алынған деректерді жібере алады.",
     c_file: "Сіз таңдаған файл: {0}",
-    c_text_signed: "Қол қойылатыны — сіз {0} үшін енгізген мәтін, дәл төменде көрсетілгендей.",
+    c_text_signed: "Қол қойылатыны — сіз {0}-мән ретінде енгізген мәтін, дәл төменде көрсетілгендей.",
     r_applied_no_reply: "Кілтіңіз қолданылды, бірақ плагин жауап қайтармады және қате туралы хабар бермеді: қолтаңбаның жасалғаны осы терезеге белгісіз.",
     c_size: "Көлемі: {0}",
     c_sha: "Файлдың SHA-256:",
@@ -667,7 +675,8 @@ static KK: Texts = Texts {
     c_valid: "Жарамды: {0} дейін",
     c_fingerprint: "Сертификаттың SHA-256:",
     c_inputs: "Сіз енгізген мәндер, плагинге сол күйінде беріледі (рұқсат етілетін нәрсеге кірмейді):",
-    c_input_line: "{0} = {1}",
+    c_input_line: "{0}-мән = {1}",
+    c_input_name: "{0}-мән — плагиннің {1} өрісі",
     c_choice_line: "{0} таңдауы, плагин ұсынғандардың бірі: {1}",
     no_reason: "себебі хабарланбады",
     row_code: "Коды: {0}",
@@ -684,7 +693,7 @@ static KK: Texts = Texts {
     key_idle: "Кілт беті тым ұзақ ашық тұрып, жабылды, құпиясөз ұмытылды. Ештеңеге қол қойылмады, кілтіңіз қолданылмады.",
     consent_invalid: "Бұл растауды қауіпсіз көрсету мүмкін емес: әрекеттің сипаттамасы мен дайындалған кілт қолданылуы сәйкес келмейді. Ештеңеге қол қойылмады.",
     running: "Плагин сіздің растауыңызбен жұмыс істеп тұр. Кілт дәл қазір қолданылуы мүмкін. Бас тарту оны тоқтауды сұрайды; нәтиже кілттің қолданылғанын адал айтады.",
-    r_ok: "Плагин жауап қайтарды, кілтіңіз бір рет қолданылды. OpenNCALayer жауаптағы қолтаңбаны тексермеді.",
+    r_ok: "Кілт қолданылды; қолтаңба тексерілмеді. Плагин жауап қайтарды, кілтіңіз бір рет қолданылды. OpenNCALayer жауаптағы қолтаңбаны тексермеді.",
     r_applied_failed: "Кілтіңіз қолданылды, бірақ плагин дұрыс аяқталмады: {0}",
     r_unknown: "Кілтіңіздің қолданылғаны белгісіз: қолдану өзі туралы хабарлаған жоқ. Кілт қолданылған болуы мүмкін деп есептеңіз.",
     r_not_applied: "Ештеңеге қол қойылмады: кілтіңіз қолданылмады. {0}",
@@ -708,6 +717,7 @@ static KK: Texts = Texts {
     save_too_large: "Жауап көлемі {0}, бұл терезе сақтайтын {1} шамасынан көп. Сақталмады.",
     save_failed: "Жауап сақталмады: {0}",
     save_exists: "Бұл атты файл онда бұрыннан бар, ол ауыстырылмады. Қайта сақтап, басқа атау немесе қалта таңдаңыз.",
+    save_bad_name: "Windows бұл атауды қолдана алмайды (CON, NUL, COM1 немесе LPT1 сияқты құрылғы атауы не нүктемен немесе бос орынмен аяқталатын атау). Қайта сақтап, басқа атау таңдаңыз.",
     again: "Қайта дайындау",
     finish: "Тізімге",
     f_no_ticket: "кілтті қолдану жарияланған әрекетке жатпады",
@@ -753,7 +763,7 @@ mod tests {
 
     const ALL: [Locale; 3] = [Locale::Ru, Locale::Kk, Locale::En];
     /// Texts that are only placeholders: the same in every language.
-    const NEUTRAL: [&str; 2] = ["c_input_line", "cert_row"];
+    const NEUTRAL: [&str; 1] = ["cert_row"];
 
     fn placeholders(text: &str) -> Vec<String> {
         let mut found: Vec<String> = Vec::new();

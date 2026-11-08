@@ -370,7 +370,9 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
         } else {
             t.plugin
         }
-        .replace("{name}", request.name.get(l))
+        // The plugin's own name: cleaned, quoted and said to be the plugin's words, like the
+        // label and the XPaths (the parse-time check is not the only defence).
+        .replace("{name}", &quoted_name(request.name.get(l)))
         .replace("{version}", &request.version),
         replacing: request
             .replacing
@@ -415,6 +417,14 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
             String::new()
         },
     }
+}
+
+/// The plugin's own name for a line of the host's: cleaned like every plugin text, in double
+/// quotes, with the quote and the backslash spelled out so that the name cannot close its own
+/// quotes and pose as the host's words after them.
+fn quoted_name(name: &str) -> String {
+    let cleaned = untrusted_label(name);
+    format!("\"{}\"", cleaned.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// The caption of the frame that holds a plugin's own label, in `l`: whose words they are.
@@ -467,8 +477,8 @@ impl Texts {
         match l {
             Locale::Kk => &Texts {
                 asker: "{0} сайты плагинді орнатуды сұрайды",
-                plugin: "{name}, {version} нұсқасы",
-                plugin_update: "{name}, {version} нұсқасына жаңарту",
+                plugin: "{name} (плагиннің өз атауы), {version} нұсқасы",
+                plugin_update: "{name} (плагиннің өз атауы), {version} нұсқасына жаңарту",
                 title_install: "Плагинді орнату",
                 title_update: "Плагинді жаңарту",
                 confirm_install: "Орнату",
@@ -489,8 +499,8 @@ impl Texts {
             },
             Locale::Ru => &Texts {
                 asker: "Сайт {0} просит установить плагин",
-                plugin: "{name}, версия {version}",
-                plugin_update: "{name}, обновление до версии {version}",
+                plugin: "{name} (название от самого плагина), версия {version}",
+                plugin_update: "{name} (название от самого плагина), обновление до версии {version}",
                 title_install: "Установка плагина",
                 title_update: "Обновление плагина",
                 confirm_install: "Установить",
@@ -511,8 +521,8 @@ impl Texts {
             },
             Locale::En => &Texts {
                 asker: "The site {0} asks to install a plugin",
-                plugin: "{name}, version {version}",
-                plugin_update: "{name}, update to version {version}",
+                plugin: "{name} (the plugin's own name), version {version}",
+                plugin_update: "{name} (the plugin's own name), update to version {version}",
                 title_install: "Plugin installation",
                 title_update: "Plugin update",
                 confirm_install: "Install",
@@ -649,7 +659,10 @@ mod tests {
             ui.get_asker(),
             "Сайт https://shop.kz просит установить плагин"
         );
-        assert_eq!(ui.get_plugin(), "Пример плагина, версия 0.1.0");
+        assert_eq!(
+            ui.get_plugin(),
+            "\"Пример плагина\" (название от самого плагина), версия 0.1.0"
+        );
         assert_eq!(
             ui.get_replaces(),
             "Заменяет kz.example.echo 1.0.0 оригинального NCALayer"
@@ -721,7 +734,10 @@ mod tests {
             let ours = texts(&request, l);
             let ru = texts(&request, Locale::Ru);
             assert!(ours.asker.contains("https://shop.kz"), "{l:?}");
-            assert!(ours.plugin.contains(request.name.get(l)), "{l:?}");
+            assert!(
+                ours.plugin.contains(&quoted_name(request.name.get(l))),
+                "{l:?}"
+            );
             assert_ne!(ours.may, ru.may, "{l:?}");
             assert_ne!(ours.warning, ru.warning, "{l:?}");
             assert_eq!(ours.capabilities.len(), 4);
@@ -909,7 +925,10 @@ mod tests {
         let en = texts(&request, Locale::En);
         assert_eq!(en.title, "Plugin update");
         assert_eq!(en.confirm, "Update");
-        assert_eq!(en.plugin, "Example plugin, update to version 0.1.0");
+        assert_eq!(
+            en.plugin,
+            "\"Example plugin\" (the plugin's own name), update to version 0.1.0"
+        );
     }
 
     #[test]
@@ -942,6 +961,35 @@ mod tests {
                 block.label
             );
             assert_ne!(block.calls, "");
+        }
+    }
+
+    /// The plugin's name is on a line of the host's: it is quoted, cleaned, and said to be the
+    /// plugin's own, so it cannot pass for the host's words (mutation: the raw name fails).
+    #[test]
+    fn the_plugins_name_in_the_host_line_is_quoted_cleaned_and_marked() {
+        let (mut request, _rx) = request(true, None);
+        let crafted = "Core\u{202E} verified\n\" Allow everything \\";
+        request.name = LocalizedText {
+            ru: crafted.to_owned(),
+            kk: crafted.to_owned(),
+            en: crafted.to_owned(),
+        };
+        for l in ALL {
+            let line = texts(&request, l).plugin;
+            assert!(
+                !line.contains('\u{202E}') && !line.contains('\n'),
+                "{line:?}"
+            );
+            // The quote inside the name is escaped: the name cannot end its own quotes.
+            assert!(line.contains("\\\" Allow everything"), "{l:?}: {line}");
+            assert!(line.starts_with('"'), "{l:?}: {line}");
+            assert!(
+                line.contains("(the plugin's own name)")
+                    || line.contains("(название от самого плагина)")
+                    || line.contains("(плагиннің өз атауы)"),
+                "{l:?}: {line}"
+            );
         }
     }
 

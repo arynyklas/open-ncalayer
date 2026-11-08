@@ -48,13 +48,24 @@ pub(super) enum FieldKind {
 pub(super) const LOCALES: [&str; 3] = ["ru", "kk", "en"];
 
 /// What the page holds for one field.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum FieldValue {
     /// The path of a document, or typed text.
     Text(String),
     /// The index of a choice or of a language.
     Index(Option<usize>),
     Flag(bool),
+}
+
+/// Prints the length of a typed text, never the text (it may be what is about to be signed).
+impl std::fmt::Debug for FieldValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(text) => write!(f, "Text({} chars)", text.chars().count()),
+            Self::Index(index) => f.debug_tuple("Index").field(index).finish(),
+            Self::Flag(on) => f.debug_tuple("Flag").field(on).finish(),
+        }
+    }
 }
 
 /// The fields of `params`, in the manifest's order.
@@ -189,7 +200,7 @@ pub(super) fn read(
 }
 
 /// A value frozen for the call: the document's bytes as they were read once.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum Frozen {
     /// The file's name as the user's path gives it (never checked, shown as given), and its
     /// bytes.
@@ -201,6 +212,23 @@ pub(super) enum Frozen {
     Choice(String),
     Flag(bool),
     Locale(&'static str),
+}
+
+/// Prints sizes, never the document's bytes or the typed text.
+impl std::fmt::Debug for Frozen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Document { file_name, bytes } => f
+                .debug_struct("Document")
+                .field("file_name", file_name)
+                .field("bytes", &format_args!("{} bytes", bytes.len()))
+                .finish(),
+            Self::Text(text) => write!(f, "Text({} bytes)", text.len()),
+            Self::Choice(choice) => f.debug_tuple("Choice").field(choice).finish(),
+            Self::Flag(on) => f.debug_tuple("Flag").field(on).finish(),
+            Self::Locale(code) => f.debug_tuple("Locale").field(code).finish(),
+        }
+    }
 }
 
 /// Why a document was not frozen.
@@ -492,6 +520,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn debug_of_the_values_prints_sizes_not_content() {
+        let secret = "SECRET-TEXT-12345";
+        let shown = format!(
+            "{:?} {:?} {:?}",
+            Frozen::Document {
+                file_name: "a.bin".into(),
+                bytes: secret.as_bytes().to_vec(),
+            },
+            Frozen::Text(secret.into()),
+            FieldValue::Text(secret.into()),
+        );
+        assert!(
+            !shown.contains("SECRET") && !shown.contains("12345"),
+            "{shown}"
+        );
+        assert!(!shown.contains("83, 69"), "no byte list: {shown}");
+        assert!(
+            shown.contains(&format!("{} bytes", secret.len())),
+            "{shown}"
+        );
+    }
+
     /// The form's decision and Core's agree on every code point (the form has no copy of the set).
     #[test]
     fn the_forms_text_rule_is_cores_rule_for_every_code_point() {
@@ -512,7 +563,8 @@ mod tests {
             assert_eq!(refused, expected, "U+{cp:04X}");
         }
         for cp in [
-            0x0D, 0x600, 0x6DD, 0x70F, 0x8E2, 0x2065, 0x206A, 0x110BD, 0x1D173, 0xE0000, 0xE0002,
+            0x0D, 0x600, 0x6DD, 0x70F, 0x8E2, 0x115F, 0x1160, 0x2065, 0x206A, 0x3164, 0xFFA0,
+            0x110BD, 0x1D173, 0xE0000, 0xE0002,
         ] {
             let c = char::from_u32(cp).unwrap().to_string();
             let core = oncl_plugin::operations::signed_text_problem(&c).is_some();

@@ -21,7 +21,7 @@ use oncl_plugin::operations::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
@@ -440,7 +440,10 @@ struct Armed {
 #[derive(Default)]
 struct GuardState {
     armed: Option<Armed>,
-    nonces: HashSet<[u8; 16]>,
+    /// Nonces of approvals whose deadline may still matter, with that deadline. An expired
+    /// approval is refused at use whatever the set says, so its nonce is dropped at the next
+    /// grant: the set holds at most the approvals granted within one TTL.
+    nonces: HashMap<[u8; 16], Instant>,
     /// Newest last; at most [`REFUSAL_LOG`] entries, the oldest dropped first.
     refusals: VecDeque<(OperationId, TicketRefusal)>,
 }
@@ -479,9 +482,12 @@ impl PluginConsentGuard {
         if approval.uses.len() != usize::from(MAX_USES) {
             return Err(ApprovalRejected::Uses);
         }
-        if !state.nonces.insert(approval.nonce) {
+        let now = Instant::now();
+        state.nonces.retain(|_, deadline| *deadline > now);
+        if state.nonces.contains_key(&approval.nonce) {
             return Err(ApprovalRejected::Replayed);
         }
+        state.nonces.insert(approval.nonce, approval.ttl_deadline);
         let spent = vec![false; approval.uses.len()];
         state.armed = Some(Armed { approval, spent });
         Ok(())
@@ -892,9 +898,9 @@ pub(super) fn xml_ex_profile(args: &abi::SignXmlExArgs) -> Option<Profile> {
         placement: *placement,
         namespaces: namespaces
             .iter()
-            .map(|n| Namespace {
-                prefix: n.prefix.clone(),
-                uri: n.uri.clone(),
+            .map(|abi::NsBinding { prefix, uri }| Namespace {
+                prefix: prefix.clone(),
+                uri: uri.clone(),
             })
             .collect(),
         other_prefix_uri: other_prefix_uri.clone(),
@@ -1540,6 +1546,126 @@ mod tests {
         assert_eq!(*guard.0.lock().unwrap(), [true, false]);
     }
 
+    /// A guard that allows everything and records what it saw: the legacy CLI/server shape.
+    fn permissive_declared_fixture(
+        declared: bool,
+    ) -> (
+        crate::Engine,
+        crate::keys::KeySelector,
+        oncl_testkit::SyntheticKey,
+        crate::OperationContext,
+        Arc<Mutex<Vec<bool>>>,
+    ) {
+        use crate::keys::{KeySelector, KeySources};
+        use crate::{Engine, EngineServices, ExecutionGrant, OperationPolicy};
+        use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceLimits};
+        struct Control;
+        impl OperationControl for Control {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                Ok(())
+            }
+        }
+        struct Permissive(Arc<Mutex<Vec<bool>>>);
+        impl KeyUseGuard for Permissive {
+            fn before_use(&self, event: &KeyUseEvent) -> Result<KeyUseReceipt, OperationError> {
+                self.0.lock().unwrap().push(event.plugin().is_some());
+                Ok(KeyUseReceipt::new(event.clone()))
+            }
+            fn finish(&self, _: KeyUseReceipt, _: KeyUseOutcome) -> Result<(), OperationError> {
+                Ok(())
+            }
+        }
+        let fixture = oncl_testkit::synthetic("user-rsa-sign");
+        let selector = KeySelector::inline(oncl_testkit::read(fixture.path.clone()), None);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default()).with_keys(
+                Arc::new(KeySources::new()),
+                Arc::new(Permissive(seen.clone())),
+            ),
+        )
+        .unwrap();
+        let mut policy = OperationPolicy::ncalayer_compatibility();
+        policy.allow_prehashed = true;
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign, Action::SignDigest])
+                    .with_keys([selector.key_id()]),
+                policy,
+                Arc::new(Control),
+            )
+            .unwrap();
+        ctx.plugin_declared = declared;
+        (engine, selector, fixture, ctx, seen)
+    }
+    fn raw_ticket(selector: &crate::keys::KeySelector) -> PluginUse {
+        PluginUse {
+            identity: PluginIdentity {
+                id: "t".into(),
+                package: PackageHash::File([0; 32]),
+                version: "1".into(),
+            },
+            operation: "op".into(),
+            caller: CallerContext::LocalOperator("o".into()),
+            kind: KeyKind::Raw,
+            handle: 1,
+            key: selector.key_id(),
+            content: ContentBinding::bytes(b"x"),
+            options_sha256: [0; 32],
+            certificate_sha256: [0; 32],
+            max_uses: MAX_USES,
+        }
+    }
+    fn digest_of(signer: &crate::keys::AuthorizedSigner<'_>) -> oncl_pki::digest::DigestValue {
+        let mut hash = oncl_pki::digest::HashState::new(signer.algorithm().hash_alg());
+        hash.update(b"x");
+        hash.finish()
+    }
+
+    #[test]
+    fn declared_call_without_ticket_is_refused_before_a_permissive_guard() {
+        use crate::keys::KeyRequest;
+        let (engine, selector, fixture, mut ctx, seen) = permissive_declared_fixture(true);
+        let request = KeyRequest::new(&selector, Some(&fixture.password));
+        let mut signer = engine.signer(&request, &mut ctx).unwrap();
+        let digest = digest_of(&signer);
+        assert!(matches!(
+            signer.sign_digest(&digest),
+            Err(OperationError::PermissionDenied)
+        ));
+        drop(signer);
+        assert!(seen.lock().unwrap().is_empty(), "the guard never ran");
+        assert_eq!(ctx.plugin_refusal(), Some(TicketRefusal::NoTicket));
+    }
+
+    #[test]
+    fn legacy_call_without_ticket_still_passes_a_permissive_guard() {
+        use crate::keys::KeyRequest;
+        let (engine, selector, fixture, mut ctx, seen) = permissive_declared_fixture(false);
+        let request = KeyRequest::new(&selector, Some(&fixture.password));
+        let mut signer = engine.signer(&request, &mut ctx).unwrap();
+        let digest = digest_of(&signer);
+        signer.sign_digest(&digest).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [false]);
+    }
+
+    #[test]
+    fn second_key_use_in_one_declared_import_is_refused() {
+        use crate::keys::KeyRequest;
+        let (engine, selector, fixture, mut ctx, seen) = permissive_declared_fixture(true);
+        *ctx.plugin_ticket.lock().unwrap() = Some(raw_ticket(&selector));
+        let request = KeyRequest::new(&selector, Some(&fixture.password));
+        let mut signer = engine.signer(&request, &mut ctx).unwrap();
+        let digest = digest_of(&signer);
+        signer.sign_digest(&digest).unwrap();
+        assert!(matches!(
+            signer.sign_digest(&digest),
+            Err(OperationError::PermissionDenied)
+        ));
+        drop(signer);
+        assert_eq!(*seen.lock().unwrap(), [true]);
+    }
+
     #[test]
     fn guard_refuses_an_action_that_does_not_fit_the_content() {
         use crate::keys::{KeyRequest, KeySelector, KeySources};
@@ -1615,6 +1741,51 @@ mod tests {
         hash.update(b"x");
         assert!(signer.sign_digest(&hash.finish()).is_err());
         assert_eq!(guard.refusals(id), [TicketRefusal::Action]);
+    }
+
+    #[test]
+    fn replay_nonces_of_expired_approvals_are_evicted() {
+        let guard = PluginConsentGuard::new();
+        let approval = |nonce: u8, ttl: std::time::Duration| {
+            PluginApproval::for_tests(
+                PluginIdentity {
+                    id: "t".into(),
+                    package: PackageHash::File([0; 32]),
+                    version: "1".into(),
+                },
+                "op",
+                CallerContext::LocalOperator("o".into()),
+                OperationId(1),
+                crate::keys::KeySelector::inline(Vec::new(), None).key_id(),
+                1,
+                vec![ApprovedUse {
+                    kind: KeyKind::Raw,
+                    content: ContentBinding::bytes(b"x"),
+                    options_sha256: [0; 32],
+                    certificate_sha256: [0; 32],
+                }],
+                Instant::now() + ttl,
+                [nonce; 16],
+            )
+        };
+        let short = std::time::Duration::from_millis(20);
+        for n in 0..50 {
+            guard.grant(approval(n, short)).unwrap();
+        }
+        // A live approval's nonce is still a replay while its TTL runs.
+        assert_eq!(
+            guard.grant(approval(49, short)),
+            Err(ApprovalRejected::Replayed)
+        );
+        std::thread::sleep(short * 3);
+        guard
+            .grant(approval(200, std::time::Duration::from_secs(120)))
+            .unwrap();
+        assert_eq!(guard.state.lock().unwrap().nonces.len(), 1);
+        assert_eq!(
+            guard.grant(approval(200, std::time::Duration::from_secs(120))),
+            Err(ApprovalRejected::Replayed)
+        );
     }
 
     #[test]
