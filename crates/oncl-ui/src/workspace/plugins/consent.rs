@@ -368,7 +368,11 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
                 t.c_size.replace("{0}", &size),
             ]
         },
-        file_sha_caption: t.c_sha.to_owned(),
+        file_sha_caption: if text_content.is_some() {
+            t.c_sha_text.to_owned()
+        } else {
+            t.c_sha.to_owned()
+        },
         file_sha: hex(&summary.content.sha256),
         prehash_caption,
         prehash,
@@ -709,6 +713,35 @@ element = "param:path"
         other.content.sha256[0] ^= 1;
         assert_eq!(
             view_with(&m, &other, &entered, Locale::En).unwrap_err(),
+            ConsentError::Mismatch
+        );
+    }
+
+    #[test]
+    fn the_hash_and_the_length_of_the_signed_text_are_both_checked() {
+        let m = manifest();
+        let mut s = summary();
+        let text = "abc";
+        s.content.param = "path".to_owned();
+        s.content.len = 3;
+        s.content.sha256 = crate::signing::runner::sha256_of(text.as_bytes());
+        s.profile = Profile::Xml(XmlProfile {
+            element: Some(Source::Fixed(text.to_owned())),
+            parent: None,
+        });
+        let entered = vec![("path".to_owned(), Frozen::Text(text.to_owned()))];
+        let v = view_with(&m, &s, &entered, Locale::En).unwrap();
+        assert_eq!(v.file_sha_caption, Texts::of(Locale::En).c_sha_text);
+        let mut wrong_len = s.clone();
+        wrong_len.content.len = 4;
+        assert_eq!(
+            view_with(&m, &wrong_len, &entered, Locale::En).unwrap_err(),
+            ConsentError::Mismatch
+        );
+        let mut wrong_hash = s.clone();
+        wrong_hash.content.sha256[0] ^= 1;
+        assert_eq!(
+            view_with(&m, &wrong_hash, &entered, Locale::En).unwrap_err(),
             ConsentError::Mismatch
         );
     }

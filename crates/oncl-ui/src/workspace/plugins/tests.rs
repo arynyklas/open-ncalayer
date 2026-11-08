@@ -1452,6 +1452,30 @@ fn confirmation_breaches(all: &[(String, String)]) -> Vec<String> {
     if tests_only.iter().any(|f| *f != CONFIRM && *f != CONSENT) {
         out.push(format!("press_for_tests is used in {tests_only:?}"));
     }
+    for (rel, text) in all {
+        if rel.ends_with("plugins/tests.rs") {
+            continue;
+        }
+        if idents(text)
+            .windows(2)
+            .any(|w| w[0] == "confirm" && w[1] == "confirm")
+        {
+            out.push(format!("{rel} names the confirm handler"));
+        }
+    }
+    let wired: Vec<&str> = all
+        .iter()
+        .filter(|(rel, text)| {
+            !rel.ends_with("plugins/tests.rs")
+                && idents(text)
+                    .windows(2)
+                    .any(|w| w[0] == "confirm" && w[1] == "wire")
+        })
+        .map(|(rel, _)| rel.as_str())
+        .collect();
+    if wired != ["crates/oncl-ui/src/workspace/plugins/mod.rs"] {
+        out.push(format!("confirm::wire is called from {wired:?}"));
+    }
     out
 }
 
@@ -1526,6 +1550,15 @@ fn the_users_confirmation_is_made_in_one_place_only() {
         ),
     );
     assert!(!confirmation_breaches(&evil).is_empty());
+    // The reviewer's evasion: a tick that confirms by itself once armed.
+    let evil = fixture(
+        &all,
+        (
+            "crates/oncl-ui/src/workspace/plugins/mod.rs",
+            "fn tick2(open: &Rc<Workspace>) { if state(open).controller.armed() { confirm::confirm(open); return; } }".into(),
+        ),
+    );
+    assert!(!confirmation_breaches(&evil).is_empty());
     // The handler asks the controller first.
     let handler = all
         .iter()
@@ -1533,7 +1566,7 @@ fn the_users_confirmation_is_made_in_one_place_only() {
         .unwrap()
         .1
         .as_str();
-    let handler = handler.split("pub(super) fn confirm(").nth(1).unwrap();
+    let handler = handler.split("\nfn confirm(").nth(1).unwrap();
     assert!(handler.find("Event::Confirm").unwrap() < handler.find("user_confirmed").unwrap());
 }
 
