@@ -954,6 +954,28 @@ fn escape_cancels_the_form_and_the_key_page_too() {
     assert!(!rig.ws.plugins.borrow().controller.holds_secret());
 }
 
+/// A language switch while the confirmation is open: the page text is composed again in the
+/// new language (not only the window's chrome), from the same summary, and the confirmation
+/// still names the same operation.
+#[test]
+fn a_language_switch_with_a_confirmation_open_recomposes_the_page() {
+    let rig = rig();
+    let doc = rig.file("doc.bin", DOC);
+    rig.to_consent_raw(&doc);
+    let lines = |rig: &Rig| model_strings(rig.ui().get_c_key_lines());
+    locale_rig(&rig, Locale::En);
+    let en = (lines(&rig), rig.ui().get_c_lead().to_string());
+    locale_rig(&rig, Locale::Ru);
+    let ru = (lines(&rig), rig.ui().get_c_lead().to_string());
+    assert_ne!(en.0, ru.0, "the key lines follow the language");
+    assert_ne!(en.1, ru.1, "the lead follows the language");
+    assert_eq!(ru.1, Texts::of(Locale::Ru).consent_lead);
+    // Still the same confirmation: one summary, and it can be confirmed once armed.
+    assert_eq!(rig.step(), Step::Consent);
+    rig.arm();
+    assert!(rig.ui().get_confirm_enabled());
+}
+
 #[test]
 fn confirming_through_the_named_button_applies_the_key_once_and_says_so() {
     let rig = rig();
@@ -971,8 +993,8 @@ fn confirming_through_the_named_button_applies_the_key_once_and_says_so() {
     assert_eq!(ui.get_report_headline(), t.r_ok);
     assert_eq!(
         ui.get_report_tone(),
-        0,
-        "a verified applied call is success"
+        1,
+        "an applied call whose signature is not checked is a caution, never success"
     );
     let rows: Vec<String> = ui
         .get_report_rows()
@@ -1712,12 +1734,31 @@ fn a_cms_operation_with_every_kind_of_parameter_signs_the_approved_file() {
     );
     // What the user entered is listed as entered, each value as it will be given.
     let inputs = model_strings(ui.get_c_inputs());
-    assert_eq!(inputs, ["note = \"note-1\"", "loud = yes", "lang = kk"]);
-    assert!(
-        model_strings(ui.get_c_frame_lines())
-            .iter()
-            .any(|l| l.contains("\"slow\""))
+    assert_eq!(
+        inputs,
+        ["Value 1 = \"note-1\"", "Value 2 = yes", "Value 3 = kk"]
     );
+    // The plugin's names of those fields are its own words: only in its frame, never among
+    // the host's lines (a persuasive name cannot sit outside the frame).
+    let frame = model_strings(ui.get_c_frame_lines());
+    for name in ["note", "loud", "lang"] {
+        assert!(
+            frame.iter().any(|l| l.contains(&format!("\"{name}\""))),
+            "{name} in the frame: {frame:?}"
+        );
+        let host = format!(
+            "{}\n{}\n{}\n{}",
+            model_strings(ui.get_c_trusted()).join("\n"),
+            inputs.join("\n"),
+            model_strings(ui.get_c_file_lines()).join("\n"),
+            model_strings(ui.get_c_key_lines()).join("\n"),
+        );
+        assert!(
+            !host.contains(&format!("\"{name}\"")) && !host.contains(&format!("{name} =")),
+            "{name} outside the frame: {host}"
+        );
+    }
+    assert!(frame.iter().any(|l| l.contains("\"slow\"")));
     rig.arm();
     rig.ui().invoke_confirm();
     until("the run ends", || rig.step() == Step::Result);
@@ -2045,7 +2086,7 @@ fn a_crlf_text_is_normalised_once_and_the_same_text_reaches_page_digest_and_core
     assert_eq!(rig.step(), Step::Consent, "{}", rig.ui().get_error());
     // The page: the normalised text, line breaks spelled out.
     let inputs = model_strings(rig.ui().get_c_inputs());
-    assert_eq!(inputs, ["note = \"a\\nb\\nc\""]);
+    assert_eq!(inputs, ["Value 1 = \"a\\nb\\nc\""]);
     // The digest of the summary is the SHA-256 of exactly these bytes.
     use sha2::{Digest, Sha256};
     let expected: [u8; 32] = Sha256::digest(b"a\nb\nc").into();

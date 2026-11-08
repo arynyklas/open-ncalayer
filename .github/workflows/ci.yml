@@ -153,6 +153,15 @@ jobs:
       # Offline and read-only (about 3 s): the SDK's dependency closure against the forbidden
       # crates. `cargo xtask sdk smoke` (packs and builds the chain, about 75 s warm) stays a
       # manual gate: its offline consumer resolve was not tried against a cold CI cache.
+      # Offline and read-only: `cargo tree -p <program> -e normal -f "{p} [{f}]"` of the four
+      # release programs (openncalayer, oncl-cli, oncl-server, oncl-ui) must show the `testing`
+      # feature on no crate. Releases build with `-p`, but `cargo build --workspace
+      # --all-targets` and `cargo test` unify the dev-dependencies' `testing` into the same
+      # binaries; this fails if it ever reaches the normal tree (`for_tests` constructors forge
+      # key-use approvals).
+      - name: No testing feature in release programs
+        if: runner.os == 'Linux'
+        run: cargo xtask check-release-features
       - name: SDK dependency closure
         if: runner.os == 'Linux'
         run: cargo xtask sdk closure

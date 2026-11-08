@@ -658,6 +658,28 @@ impl AuthorizedSigner<'_> {
         {
             return Err(OperationError::PermissionDenied);
         }
+        // A key use of a declared plugin call without a ticket is refused here, before any
+        // guard: the CLI and server guards cannot tell it from a legacy use.
+        #[cfg(feature = "plugins")]
+        if self.ctx.plugin_declared
+            && self
+                .ctx
+                .plugin_ticket
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            *self
+                .ctx
+                .plugin_refusal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(crate::plugins::TicketRefusal::NoTicket);
+            self.ctx
+                .private_use_stopped
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(OperationError::PermissionDenied);
+        }
         let lease = &self.ctx.leases[self.index];
         authority(self.ctx.grant(), &lease.id)?;
         if !self.ctx.grant().allows(self.action) {

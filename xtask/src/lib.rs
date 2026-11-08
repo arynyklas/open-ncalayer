@@ -20,6 +20,7 @@ pub mod plugin_ops;
 pub mod plugin_ports;
 pub mod privacy;
 pub mod registry;
+pub mod release_features;
 pub mod sdk_delivery;
 pub mod sign;
 pub mod token_emu;

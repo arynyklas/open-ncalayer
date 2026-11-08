@@ -39,7 +39,13 @@ pub struct OperationContext {
     #[cfg(feature = "plugins")]
     pub(crate) plugin_xml_output_limit: Option<u64>,
     #[cfg(feature = "plugins")]
-    pub(crate) plugin_refusal: Option<crate::plugins::TicketRefusal>,
+    pub(crate) plugin_refusal: std::sync::Mutex<Option<crate::plugins::TicketRefusal>>,
+    /// Set by `call_plugin` while a call of a *declared* operation runs: every key use in
+    /// it MUST carry a ticket, and `AuthorizedSigner::sign_digest` refuses one without,
+    /// before any guard sees it (a permissive CLI/server guard cannot tell it from a legacy
+    /// use otherwise).
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_declared: bool,
     /// The ticket of the plugin key use in flight (see [`crate::plugins::PluginUse`]). Only
     /// the plugin backend of this crate sets it, and `AuthorizedSigner::sign_digest` takes
     /// it into the [`crate::keys::KeyUseEvent`]: one ticket, one use.
@@ -71,12 +77,15 @@ impl OperationContext {
     /// label the plugin does not declare), for audit. The caller sees `PermissionDenied`.
     #[cfg(feature = "plugins")]
     pub fn plugin_refusal(&self) -> Option<crate::plugins::TicketRefusal> {
-        self.plugin_refusal
+        *self
+            .plugin_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// [`Self::plugin_refusal`] as its stable subcode.
     #[cfg(feature = "plugins")]
     pub fn plugin_refusal_code(&self) -> Option<crate::plugins::PluginRefusalCode> {
-        self.plugin_refusal.map(Into::into)
+        self.plugin_refusal().map(Into::into)
     }
     pub fn id(&self) -> OperationId {
         self.id

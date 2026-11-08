@@ -1,18 +1,18 @@
 //! The result of a plugin run, said honestly: what [`oncl_core::plugins::ApprovedCall`] reported,
 //! turned into words without deciding it again.
 //!
-//! * Only a call that Core reports as `Applied`, with no refusal and no error, is styled as
-//!   success (and even then the page says that the signature in the plugin's reply was not
-//!   checked here). A key applied and a failure after it, a key use that did not report
-//!   (`Unknown`), a refusal, a cancel: none is "done".
+//! * No result is styled as success: the signature in the plugin's reply is never checked
+//!   here. A call that Core reports as `Applied`, with no refusal and no error, is a caution
+//!   worded "key applied; signature not checked". A key applied and a failure after it, a
+//!   key use that did not report (`Unknown`), a refusal, a cancel: none is "done".
 //! * The plugin's reply is the plugin's own text: it appears only in [`ReplyView`], which the
 //!   page draws in the plugin's frame, cleaned of control and bidirectional characters and cut
 //!   at [`MAX_REPLY_CHARS`]. It is never in the headline or the rows.
 //! * Why Core refused a key use is said through [`RefusalWords`], a seam: the local mapping
 //!   [`TicketWords`] words each `TicketRefusal` of Core; when Core's refusal subcodes land the
 //!   page swaps this one implementation and nothing else.
-//! * The host saves nothing by itself. The reply of a verified-applied call (the success
-//!   condition above) can be saved, whole and as received, to a `.json` file the user places
+//! * The host saves nothing by itself. The reply of an applied call (the caution condition
+//!   above) can be saved, whole and as received, to a `.json` file the user places
 //!   (`save.rs`): the manifest declares no file output for the manual window and Core's call
 //!   has no output binding, so the reply is the only thing there is to save, and the host
 //!   never extracts a signature from it.
@@ -182,7 +182,7 @@ pub(super) struct ResultView {
     pub(super) reply: Option<ReplyView>,
     pub(super) note: String,
     /// The whole reply and the name the host suggests, only for a call that was verified
-    /// applied (the same condition as the success tone).
+    /// applied (the same condition as the "key applied; signature not checked" caution).
     pub(super) save: Option<SaveOffer>,
 }
 
@@ -284,12 +284,14 @@ pub(super) fn render(
     };
     let reason_known =
         !report.refusals.is_empty() || report.subcode.is_some() || report.error.is_some();
-    let verified = report.applied == AppliedState::Applied
+    // The key was applied and a reply came back; the reply's signature is NOT checked here,
+    // so this is never styled as success (the green of a verified signature).
+    let applied_ok = report.applied == AppliedState::Applied
         && report.refusals.is_empty()
         && report.error.is_none()
         && report.response.is_some();
     let (tone, headline) = match (report.applied, &report.error) {
-        _ if verified => (Tone::Success, t.r_ok.to_owned()),
+        _ if applied_ok => (Tone::Caution, t.r_ok.to_owned()),
         (AppliedState::Applied, None) if !reason_known => {
             (Tone::Failure, t.r_applied_no_reply.to_owned())
         }
@@ -307,7 +309,7 @@ pub(super) fn render(
             (Tone::Failure, t.r_not_applied.replace("{0}", &reason))
         }
     };
-    if verified {
+    if applied_ok {
         rows.push(Row {
             depth: 0,
             tone: Tone::Caution,
@@ -323,7 +325,7 @@ pub(super) fn render(
             detail: String::new(),
         });
     }
-    if reason_known && !verified {
+    if reason_known && !applied_ok {
         rows.push(Row {
             depth: 0,
             tone: Tone::Neutral,
@@ -346,7 +348,7 @@ pub(super) fn render(
     let save = report
         .response
         .as_deref()
-        .filter(|raw| verified && !raw.is_empty())
+        .filter(|raw| applied_ok && !raw.is_empty())
         .map(|raw| SaveOffer::new(raw, facts.operation, facts.plugin_id));
     ResultView {
         tone,
@@ -456,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_verified_applied_call_is_success() {
+    fn no_plugin_result_is_styled_success_and_an_applied_reply_is_a_caution() {
         use AppliedState::*;
         let states = [Applied, NotApplied, Unknown];
         let refusal_sets = [Vec::new(), vec![TicketRefusal::Content]];
@@ -476,12 +478,16 @@ mod tests {
                             && refusals.is_empty()
                             && error.is_none()
                             && reply.is_some();
-                        assert_eq!(
-                            v.tone == Tone::Success,
-                            success,
+                        // The reply's signature is never checked here: nothing is green.
+                        assert_ne!(
+                            v.tone,
+                            Tone::Success,
                             "{applied:?} {refusals:?} {reply:?} {error:?} was styled {:?}",
                             v.tone
                         );
+                        if success {
+                            assert_eq!(v.tone, Tone::Caution);
+                        }
                     }
                 }
             }
@@ -658,6 +664,9 @@ mod tests {
             crate::view::display_text("x\u{200E}y\u{200D}z\u{202E}"),
             "xyz"
         );
+        // Hangul fillers are drawn as blanks: Core's set, one source.
+        let (text, _) = clean_reply("a\u{115F}b\u{1160}c\u{3164}d\u{FFA0}e");
+        assert_eq!(text, "abcde");
     }
 
     #[test]

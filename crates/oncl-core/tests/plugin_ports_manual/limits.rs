@@ -53,9 +53,13 @@ fn response_object(run: &PortRun) -> serde_json::Value {
 fn the_attached_cms_of_the_largest_document_signs() {
     let limits = limits();
     let doc = document(limits.max_document as usize);
-    let need =
-        oncl_core::plugins::manual_call_budget(&limits.instance, KeyKind::CmsEx, doc.len() as u64)
-            .unwrap();
+    let need = oncl_core::plugins::manual_call_budget(
+        &limits.instance,
+        KeyKind::CmsEx,
+        doc.len() as u64,
+        0,
+    )
+    .unwrap();
     // For the trade-off table of docs/dev/plugins-manual-tests.md.
     println!("LIMITS {limits:?}\nMODEL {need:?}");
     let params = [("file", PluginParam::Document(&doc))];
@@ -148,7 +152,7 @@ fn the_estimate_signs_and_one_byte_less_is_refused_before_the_key() {
         };
         let len = if xml { XML.len() } else { doc.len() };
         let need =
-            oncl_core::plugins::manual_call_budget(&desktop.instance, kind, len as u64).unwrap();
+            oncl_core::plugins::manual_call_budget(&desktop.instance, kind, len as u64, 0).unwrap();
         let with = |metadata_bytes: u64, memory_bytes: u64| RunOptions {
             limits: Some(ManualLimits {
                 resources: ResourceLimits {

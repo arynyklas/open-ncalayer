@@ -460,17 +460,18 @@ impl Backend<'_, '_> {
                 ))))
             }
             Import::KeysSignRaw => {
-                let args: abi::SignRawArgs = decode(args)?;
-                if self.state.released.contains(&args.handle) {
+                // Exhaustive: a new field of the args must be bound into the ticket here.
+                let abi::SignRawArgs { handle, data } = decode(args)?;
+                if self.state.released.contains(&handle) {
                     return Err(OperationError::PermissionDenied);
                 }
-                let key = self.bound_key(args.handle)?;
+                let key = self.bound_key(handle)?;
                 let id = key.key.selector().key_id();
                 self.authorize(import, Some(&id))?;
                 self.arm_ticket(
                     key,
                     oncl_plugin::operations::KeyKind::Raw,
-                    ContentBinding::bytes(args.data.as_ref()),
+                    ContentBinding::bytes(data.as_ref()),
                     Some(oncl_plugin::operations::Profile::Raw),
                 )?;
                 let request = KeyRequest::new(key.key.selector(), key.key.secret());
@@ -478,10 +479,7 @@ impl Backend<'_, '_> {
                 // Source-bound Sign, not signer()/SignDigest and not a new context or policy.
                 let signed = self.engine.sign(
                     crate::SignRequest::raw_message(request),
-                    Source::sequential(
-                        &mut Cursor::new(args.data.as_ref()),
-                        Some(args.data.len() as u64),
-                    ),
+                    Source::sequential(&mut Cursor::new(data.as_ref()), Some(data.len() as u64)),
                     &mut output,
                     self.ctx,
                 );
@@ -652,19 +650,23 @@ impl Engine {
         // A plugin that declares operations runs only under a declared operation name,
         // whoever chose the label (manual window, server grant, CLI flag): its key uses are
         // ticketed and its options forced to the profile. One that declares none is unchanged.
-        let declared = installed
+        let declared_operation = installed
             .manifest
             .operations()
             .iter()
-            .any(|o| o.name() == call.operation);
+            .find(|o| o.name() == call.operation);
+        let declared = declared_operation.is_some();
         if !installed.manifest.operations().is_empty() && !declared {
-            ctx.plugin_refusal = Some(TicketRefusal::UndeclaredOperation);
+            *ctx.plugin_refusal
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(TicketRefusal::UndeclaredOperation);
             return Err(OperationError::PermissionDenied);
         }
         if declared && bindings.keys.len() > 1 {
             return Err(OperationError::PermissionDenied);
         }
-        let invocation = InvocationScope::new(ctx);
+        let invocation = InvocationScope::new(ctx, declared);
         let ctx = &mut *invocation.ctx;
         let limits = installed.compiled.limits();
         if call.args.len() > limits.max_transfer {
@@ -681,6 +683,9 @@ impl Engine {
             .imports()
             .iter()
             .copied()
+            // A declared call may use only the imports its operation declares, whatever the
+            // grant and the registry policy say.
+            .filter(|import| declared_operation.is_none_or(|o| o.uses().imports().contains(import)))
             .filter(|import| {
                 ctx.grant
                     .plugin_permissions()
@@ -807,19 +812,26 @@ impl InvocationHttpBudget {
 struct InvocationScope<'a> {
     ctx: &'a mut OperationContext,
     previous: Option<InvocationHttpBudget>,
+    previous_declared: bool,
 }
 impl<'a> InvocationScope<'a> {
-    fn new(ctx: &'a mut OperationContext) -> Self {
+    fn new(ctx: &'a mut OperationContext, declared: bool) -> Self {
+        let previous_declared = std::mem::replace(&mut ctx.plugin_declared, declared);
         let previous = ctx.plugin_network.take();
         let budget = ctx
             .plugin_network_budget
             .get_or_insert_with(|| previous.clone().unwrap_or_default());
         ctx.plugin_network = Some(previous.clone().unwrap_or_else(|| budget.clone()));
-        Self { ctx, previous }
+        Self {
+            ctx,
+            previous,
+            previous_declared,
+        }
     }
 }
 impl Drop for InvocationScope<'_> {
     fn drop(&mut self) {
         self.ctx.plugin_network = self.previous.take();
+        self.ctx.plugin_declared = self.previous_declared;
     }
 }

@@ -80,13 +80,19 @@ pub(super) fn checks_own_output(kind: KeyKind) -> bool {
 /// # Errors
 ///
 /// `MemoryLimit` if the sum overflows; `InvalidLimits` for XML limits the check would refuse.
+///
+/// `param_text_len` is the total size of the text parameters the call's options may take
+/// their `param:` values (XPaths) from: they are part of the key import's arguments, on top
+/// of [`ARGS_SLACK`] for the rest.
 pub fn manual_call_budget(
     limits: &InstanceLimits,
     kind: KeyKind,
     content_len: u64,
+    param_text_len: u64,
 ) -> Result<CallBudget, ProcessingError> {
     let args = content_len
-        .checked_add(ARGS_SLACK)
+        .checked_add(param_text_len)
+        .and_then(|n| n.checked_add(ARGS_SLACK))
         .ok_or(ProcessingError::MemoryLimit)?;
     let mut metadata = (limits.max_transfer as u64)
         .checked_add(host_call_metadata(args)?)
@@ -198,7 +204,7 @@ impl ManualLimits {
             ..InstanceLimits::default()
         };
         let need =
-            manual_call_budget(&instance, KeyKind::XmlEx, max_document).unwrap_or(CallBudget {
+            manual_call_budget(&instance, KeyKind::XmlEx, max_document, 0).unwrap_or(CallBudget {
                 memory: u64::MAX / 2,
                 metadata: u64::MAX / 2,
             });
@@ -233,7 +239,8 @@ mod tests {
     fn the_desktop_limits_admit_the_largest_document_of_every_kind() {
         for limits in [ManualLimits::wide(), ManualLimits::narrow()] {
             for kind in KINDS {
-                let need = manual_call_budget(&limits.instance, kind, limits.max_document).unwrap();
+                let need =
+                    manual_call_budget(&limits.instance, kind, limits.max_document, 0).unwrap();
                 assert!(
                     need.metadata <= limits.resources.metadata_bytes,
                     "{kind:?}: {need:?} vs {:?}",
@@ -273,8 +280,8 @@ mod tests {
             max_transfer: 64 << 20,
             ..small
         };
-        let a = manual_call_budget(&small, KeyKind::CmsEx, 10).unwrap();
-        let b = manual_call_budget(&large, KeyKind::CmsEx, 10).unwrap();
+        let a = manual_call_budget(&small, KeyKind::CmsEx, 10, 0).unwrap();
+        let b = manual_call_budget(&large, KeyKind::CmsEx, 10, 0).unwrap();
         let dt = (64u64 << 20) - (1 << 16);
         // 8 transfers of scratch, one of metadata and one of reply memory (metadata is memory).
         assert_eq!(b.memory - a.memory, 10 * dt);
@@ -319,7 +326,7 @@ mod tests {
             max_transfer: 1 << 16,
             ..InstanceLimits::default()
         };
-        let cms = manual_call_budget(&limits, KeyKind::CmsEx, 1000).unwrap();
+        let cms = manual_call_budget(&limits, KeyKind::CmsEx, 1000, 0).unwrap();
         assert_eq!(
             cms.metadata,
             (1 << 16) + host_call_metadata(1000 + ARGS_SLACK).unwrap() + SIGN_WORK
@@ -328,7 +335,7 @@ mod tests {
             cms.memory,
             call_scratch(&limits).unwrap() + MEMORY_SLACK + (1 << 16) + cms.metadata
         );
-        let xml = manual_call_budget(&limits, KeyKind::XmlEx, 1000).unwrap();
+        let xml = manual_call_budget(&limits, KeyKind::XmlEx, 1000, 0).unwrap();
         let bound =
             oncl_xml::verification_metadata_bound(&oncl_xml::XmlVerifyProfile::default()).unwrap();
         assert_eq!(xml.metadata, cms.metadata - SIGN_WORK + bound);

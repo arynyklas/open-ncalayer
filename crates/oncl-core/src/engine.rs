@@ -286,7 +286,9 @@ impl Engine {
             #[cfg(feature = "plugins")]
             plugin_xml_output_limit: None,
             #[cfg(feature = "plugins")]
-            plugin_refusal: None,
+            plugin_refusal: std::sync::Mutex::new(None),
+            #[cfg(feature = "plugins")]
+            plugin_declared: false,
             #[cfg(feature = "plugins")]
             plugin_ticket: std::sync::Mutex::new(None),
         }

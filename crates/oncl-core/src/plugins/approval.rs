@@ -621,13 +621,14 @@ impl Engine {
         installed: &Installed,
         kind: KeyKind,
         content_len: u64,
+        param_text_len: u64,
         ctx: &OperationContext,
     ) -> Result<(), PluginPrepareError> {
         if budget::checks_own_output(kind) && self.temporary.is_none() {
             return Err(PluginPrepareError::NoTemporaryStore);
         }
         let limits = installed.compiled.limits();
-        let need = manual_call_budget(&limits, kind, content_len)
+        let need = manual_call_budget(&limits, kind, content_len, param_text_len)
             .map_err(|_| PluginPrepareError::DocumentTooLarge)?;
         // A budget that is short is what is refused; a cancelled or expired operation is
         // reported by the call's own first checkpoint.
@@ -646,7 +647,7 @@ impl Engine {
             // The budgets cannot hold even this module with an empty document: the
             // engine is sized wrong (`MemoryLimit`); else the document is too large for them
             // (`InputLimit`). One subcode, `resource-budget`, for both.
-            let empty = manual_call_budget(&limits, kind, 0)
+            let empty = manual_call_budget(&limits, kind, 0, 0)
                 .map_err(|_| PluginPrepareError::ResourceBudget)?;
             return Err(if fits(empty) {
                 PluginPrepareError::DocumentTooLarge
@@ -691,7 +692,22 @@ impl Engine {
             return Err(PluginRequestError::DerivedUnsupported.into());
         };
         let bytes = bound_bytes(param, params)?;
-        self.plugin_preflight(installed, declared.kind(), bytes.len() as u64, ctx)?;
+        // The text parameters are what a `param:` option (an XPath) is filled from; their
+        // size is part of the key import's arguments, so it is part of the budget.
+        let param_text_len: u64 = params
+            .iter()
+            .map(|(_, p)| match p {
+                PluginParam::Text(text) => text.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        self.plugin_preflight(
+            installed,
+            declared.kind(),
+            bytes.len() as u64,
+            param_text_len,
+            ctx,
+        )?;
         let metadata = key
             .metadata
             .as_ref()

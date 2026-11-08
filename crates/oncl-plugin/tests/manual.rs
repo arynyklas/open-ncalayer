@@ -598,3 +598,72 @@ fn flows_respect_types_the_limit_and_unmatched_picks() {
         ErrorCode::Invalid
     );
 }
+
+/// Counts the checkpoints and fails the one numbered `cancel_at`.
+struct Counting {
+    checks: usize,
+    cancel_at: Option<usize>,
+}
+impl CapabilityBackend for Counting {
+    fn checkpoint(&mut self) -> Result<(), HeadlessError> {
+        self.checks += 1;
+        if self.cancel_at == Some(self.checks) {
+            return Err(HeadlessError::Backend);
+        }
+        Ok(())
+    }
+    fn invoke(&mut self, _: Import, _: &[u8]) -> Result<Vec<u8>, HeadlessError> {
+        Err(HeadlessError::Backend)
+    }
+}
+
+fn counted(
+    me: &BoundInteraction,
+    calls: &[(Import, Vec<u8>)],
+    cancel_at: Option<usize>,
+) -> (Result<String, HeadlessError>, usize) {
+    let compiled = all_imports(calls);
+    let imports: Vec<Import> = calls.iter().map(|(i, _)| *i).collect();
+    let mut backend = Counting {
+        checks: 0,
+        cancel_at,
+    };
+    let caller = caller();
+    let result = compiled.call_manual(
+        &mut backend,
+        HeadlessBindings {
+            caller: &caller,
+            imports: &imports,
+        },
+        me,
+        "{}",
+    );
+    (result, backend.checks)
+}
+
+#[test]
+fn every_filter_evaluation_is_bracketed_by_checkpoints() {
+    // Each key choice evaluates one filter (an OCSP wait may follow): the call checks
+    // for cancellation before it and after it, so a cancel or deadline is seen between two
+    // evaluations, never only after all of them.
+    let me = bound("user-gost2015-sign");
+    let calls: Vec<_> = (0..4)
+        .map(|i| {
+            let filter = Filter {
+                serial_number: format!("{i:02x}"),
+                ..permissive()
+            };
+            (Import::KeysSelect, filter_args(filter))
+        })
+        .collect();
+    let (reply, total) = counted(&me, &calls, None);
+    assert!(reply.is_ok());
+    let (_, one) = counted(&me, &calls[..1], None);
+    assert!(
+        total - one >= 3 * 2,
+        "{total} checkpoints for 4, {one} for 1"
+    );
+    // Cancelled at the checkpoint before the second evaluation: the call ends there.
+    let (reply, _) = counted(&me, &calls, Some(one + 1));
+    assert!(matches!(reply, Err(HeadlessError::Backend)), "{reply:?}");
+}

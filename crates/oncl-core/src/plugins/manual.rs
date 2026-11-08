@@ -55,7 +55,7 @@ pub struct PluginIdentity {
 }
 
 /// A value for one declared parameter, typed like [`ParamKind`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum PluginParam<'a> {
     /// The frozen bytes of the chosen file; never empty.
     Document(&'a [u8]),
@@ -63,6 +63,19 @@ pub enum PluginParam<'a> {
     Choice(&'a str),
     Flag(bool),
     Locale(&'a str),
+}
+
+/// Prints kinds and lengths, never the document bytes or the typed text.
+impl std::fmt::Debug for PluginParam<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Document(bytes) => write!(f, "Document({} bytes)", bytes.len()),
+            Self::Text(text) => write!(f, "Text({} bytes)", text.len()),
+            Self::Choice(text) => write!(f, "Choice({} bytes)", text.len()),
+            Self::Flag(flag) => write!(f, "Flag({flag})"),
+            Self::Locale(text) => write!(f, "Locale({text})"),
+        }
+    }
 }
 
 /// Why a declared operation cannot be offered or its request cannot be built. Every one is
@@ -606,6 +619,23 @@ mod tests {
     use super::*;
     use crate::keys::KeyId;
     use oncl_pdk::abi::Import;
+
+    #[test]
+    fn debug_of_a_param_prints_lengths_not_content() {
+        let secret = "ПАРОЛЬ-12345 secret text";
+        let shown = format!(
+            "{:?} {:?} {:?}",
+            PluginParam::Document(secret.as_bytes()),
+            PluginParam::Text(secret),
+            PluginParam::Choice(secret)
+        );
+        assert!(
+            !shown.contains("secret") && !shown.contains("12345"),
+            "{shown}"
+        );
+        assert!(shown.contains(&format!("Document({} bytes)", secret.len())));
+        assert!(shown.contains(&format!("Text({} bytes)", secret.len())));
+    }
 
     #[test]
     fn declared_permission_never_stands_in_for_the_chosen_key_on_the_grant_side() {

@@ -1521,8 +1521,10 @@ fn is_ident(text: &str, max: usize, extra: u8) -> bool {
 /// Characters that can make a text read other than it is written or show nothing:
 /// bidirectional formatting, the line and paragraph separators and the other format
 /// characters (Unicode category Cf: zero-width, joiners, word joiner, BOM, soft hyphen,
-/// interlinear annotation, language tags, musical formatting).
-fn is_invisible(c: char) -> bool {
+/// interlinear annotation, language tags, musical formatting) and the Hangul fillers (drawn
+/// as blanks). The single source: the manual window's text, reply and label cleaning reuse
+/// it.
+pub fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
@@ -1531,11 +1533,15 @@ fn is_invisible(c: char) -> bool {
             | '\u{06DD}'
             | '\u{070F}'
             | '\u{08E2}'
+            | '\u{115F}'
+            | '\u{1160}'
             | '\u{180E}'
             | '\u{200B}'..='\u{200F}'
             | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
             | '\u{FFF9}'..='\u{FFFB}'
             | '\u{110BD}'
             | '\u{1D173}'..='\u{1D17A}'

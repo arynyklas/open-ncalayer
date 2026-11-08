@@ -50,7 +50,7 @@ use zeroize::Zeroizing;
 
 use self::consent::{ConsentInput, ConsentView, compose};
 use self::controller::{Effect, Event, PluginController, Refusal, Step};
-use self::form::{FieldKind, FieldValue, FormError, FormField, FreezeError};
+use self::form::{FieldKind, FieldValue, FormError, FormField, FreezeError, Frozen};
 pub use self::offer::{
     ManualListing, ManualPluginSource, NoManualPlugins, OfferError, OfferedOperation,
     PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations, WithoutReason, plugin_offer,
@@ -106,6 +106,61 @@ enum Plugins {
 struct Shown {
     summary: oncl_core::plugins::ConsentSummary,
     view: ConsentView,
+    /// What the page was composed from, kept so that a language switch while the confirmation
+    /// is open composes the same page again in the new language.
+    operation: OfferedOperation,
+    file_name: String,
+    entered: Vec<(String, Frozen)>,
+    /// The language of `view`.
+    locale: Locale,
+}
+
+/// The confirmation page for `shown`'s inputs in `l`, as the registry of `st` declares the
+/// operation; `None` if Core's summary and the registry no longer agree.
+fn compose_for(
+    st: &State,
+    summary: &oncl_core::plugins::ConsentSummary,
+    operation: &OfferedOperation,
+    file_name: &str,
+    entered: &[(String, Frozen)],
+    l: Locale,
+) -> Option<ConsentView> {
+    let offer = st.offer.clone()?;
+    let operations = offer.engine.plugin_operations(&operation.plugin_id).ok()?;
+    let declared = operations
+        .into_iter()
+        .find(|d| d.name() == operation.operation)?;
+    compose(&ConsentInput {
+        summary,
+        declared,
+        offered: operation,
+        file_name,
+        entered,
+        ttl: st.approval_ttl,
+        locale: l,
+    })
+    .ok()
+}
+
+/// A language switch while a confirmation is open: its text is composed again in the new
+/// language (from the same summary and values), never left in the old one.
+fn recompose_for_locale(open: &Rc<Workspace>, l: Locale) {
+    let mut st = open.plugins.borrow_mut();
+    let Some(shown) = st.shown.as_ref().filter(|s| s.locale != l) else {
+        return;
+    };
+    let view = compose_for(
+        &st,
+        &shown.summary,
+        &shown.operation,
+        &shown.file_name,
+        &shown.entered,
+        l,
+    );
+    if let (Some(view), Some(shown)) = (view, st.shown.as_mut()) {
+        shown.view = view;
+        shown.locale = l;
+    }
 }
 
 /// The page's state on the event loop.
@@ -773,29 +828,23 @@ fn prepared_arrived(open: &Rc<Workspace>, op: u64, prepared: Prepared) {
     }
     st.offer = Some(Arc::clone(&prepared.offer));
     st.running_op = Some(prepared.operation.clone());
-    let composed = (|| {
-        let offer = st.offer.clone()?;
-        let operation = prepared.operation.clone();
-        let operations = offer.engine.plugin_operations(&operation.plugin_id).ok()?;
-        let declared = operations
-            .into_iter()
-            .find(|d| d.name() == operation.operation)?;
-        compose(&ConsentInput {
-            summary: &prepared.summary,
-            declared,
-            offered: &operation,
-            file_name: &prepared.file_name,
-            entered: &prepared.entered,
-            ttl: st.approval_ttl,
-            locale: l,
-        })
-        .ok()
-    })();
+    let composed = compose_for(
+        &st,
+        &prepared.summary,
+        &prepared.operation,
+        &prepared.file_name,
+        &prepared.entered,
+        l,
+    );
     match composed {
         Some(view) => {
             st.shown = Some(Shown {
                 summary: prepared.summary,
                 view,
+                operation: prepared.operation,
+                file_name: prepared.file_name,
+                entered: prepared.entered,
+                locale: l,
             });
             st.shown_at = Some(Instant::now());
             st.since = Instant::now();
@@ -1057,6 +1106,11 @@ fn save_reply(open: &Rc<Workspace>) {
 }
 
 /// Writes the reply to `path` (always as a `.json` file) and says in the page how it went.
+///
+/// The write runs on the UI thread: the reply is at most the plugin's `max_transfer` and the
+/// page holds the only copy, which is not `Send` (the workspace is a `Rc`), so moving it to
+/// the job thread would need a second copy of the reply and a hand-back of the note; the
+/// user's click waits for one file of that size and nothing else runs meanwhile.
 fn write_reply(open: &Rc<Workspace>, path: PathBuf) {
     let path = if path
         .extension()
@@ -1088,6 +1142,7 @@ fn write_reply(open: &Rc<Workspace>, path: PathBuf) {
             .save_too_large
             .replace("{0}", &size_text(open, len as u64))
             .replace("{1}", &size_text(open, cap as u64)),
+        Err(SaveError::BadName) => t.save_bad_name.to_owned(),
         Err(SaveError::Job(JobError::DestinationExists)) => t.save_exists.to_owned(),
         Err(SaveError::Job(e)) => t.save_failed.replace(
             "{0}",
@@ -1295,6 +1350,7 @@ fn ran(open: &Rc<Workspace>, outcome: RunOutcome) {
 pub(super) fn render(open: &Rc<Workspace>) {
     let l = locale(open);
     let t = Texts::of(l);
+    recompose_for_locale(open, l);
     let st = open.plugins.borrow();
     let ui = ui_state(open);
     let step = st.controller.step();

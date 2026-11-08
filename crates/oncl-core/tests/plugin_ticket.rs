@@ -1540,3 +1540,29 @@ fn refusals_are_kept_per_operation_not_last_writer_wins() {
     );
     assert!(r.guard.consent().refusals(id).is_empty());
 }
+
+#[test]
+fn a_declared_call_may_use_only_the_imports_its_operation_declares() {
+    // The grant and the registry policy both allow `now`, which the operation `sign-raw`
+    // does not declare: the module's call to it is refused (the import is not linked for the
+    // call). The same module under a plugin without declarations is served as before.
+    let allowed = [Import::KeysSignRaw, Import::Now];
+    let r = rig(
+        &[(Import::Now, abi::encode(&()))],
+        &[],
+        &[("sign-raw", &allowed)],
+        false,
+        true,
+    );
+    let mut c = ctx(&r, "sign-raw", &allowed);
+    assert!(run(&r, "sign-raw", &[], &mut c).is_err());
+    let r = rig(
+        &[(Import::Now, abi::encode(&()))],
+        &[],
+        &[("sign-raw", &allowed)],
+        false,
+        false,
+    );
+    let mut c = ctx(&r, "sign-raw", &allowed);
+    run(&r, "sign-raw", &[], &mut c).unwrap();
+}
