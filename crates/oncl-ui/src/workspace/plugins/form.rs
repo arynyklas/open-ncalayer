@@ -120,16 +120,16 @@ pub(super) enum FormError {
         max: u32,
     },
     NoChoice(String),
-    /// A text with a character that cannot be shown as it is typed (see [`bad_text_char`]).
+    /// A text with a character that cannot be shown as it is typed (Core's own rule, `oncl_plugin::operations::signed_text_problem`).
     BadText(String),
 }
 
-/// Whether `c` may not be in a text parameter. A text is SIGNED BYTES: the confirmation shows
-/// the exact text, so a character that is drawn as nothing or reorders the text around it
-/// (controls other than line breaks and tab, bidirectional marks and isolates, zero-width and
-/// other invisible format characters) is refused instead of being hidden on the page.
-pub(super) fn bad_text_char(c: char) -> bool {
-    !matches!(c, '\n' | '\r' | '\t') && crate::view::is_invisible(c)
+/// A text typed in the form as the engine will get it: `\r\n` and a lone `\r` are line breaks
+/// like `\n` (the form's edit box may give either), and Core refuses `\r`; so the text is
+/// normalised ONCE, here, before any check, and the very same `String` goes to the consent page,
+/// to the summary's digest and to `PluginParam::Text`.
+pub(super) fn normalized_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// A path as typed or pasted: Explorer's «Copy as path» wraps it in quotes.
@@ -138,8 +138,7 @@ fn typed_path(text: &str) -> &str {
 }
 
 /// The typed values of the form, each against its field. A text is counted in characters, like
-/// its declared limit; it is not normalised or trimmed (what is signed over it is exactly what
-/// was typed).
+/// its declared limit; line breaks are normalised to `\n` ([`normalized_text`]), nothing else is changed or trimmed.
 ///
 /// # Errors
 ///
@@ -159,7 +158,9 @@ pub(super) fn read(
                 Typed::Document(PathBuf::from(path))
             }
             (FieldKind::Text { max_chars }, FieldValue::Text(text)) => {
-                if text.chars().any(bad_text_char) {
+                let text = normalized_text(text);
+                // The single source of what may not be signed as typed: Core's rule.
+                if oncl_plugin::operations::signed_text_problem(&text).is_some() {
                     return Err(FormError::BadText(field.name.clone()));
                 }
                 if text.chars().count() as u64 > u64::from(*max_chars) {
@@ -168,7 +169,7 @@ pub(super) fn read(
                         max: *max_chars,
                     });
                 }
-                Typed::Text(text.clone())
+                Typed::Text(text)
             }
             (FieldKind::Choice { choices }, FieldValue::Index(Some(i))) if *i < choices.len() => {
                 Typed::Choice(choices[*i].clone())
@@ -478,12 +479,46 @@ mod tests {
                 "{bad:?}"
             );
         }
-        // Line breaks and tab are text: CRLF stays CRLF, LF stays LF, all the way to the
-        // value the engine is given.
-        for good in ["a\r\nb", "a\nb", "a\tb"] {
-            values[1] = FieldValue::Text(good.to_owned());
-            let typed = read(&fields, &values).unwrap();
-            assert_eq!(typed[1].1, Typed::Text(good.to_owned()));
+        // Line breaks are normalised to LF once, before the checks; tab is text.
+        for (typed, expected) in [
+            ("a\r\nb", "a\nb"),
+            ("a\rb", "a\nb"),
+            ("a\nb", "a\nb"),
+            ("a\tb", "a\tb"),
+        ] {
+            values[1] = FieldValue::Text(typed.to_owned());
+            let got = read(&fields, &values).unwrap();
+            assert_eq!(got[1].1, Typed::Text(expected.to_owned()), "{typed:?}");
+        }
+    }
+
+    /// The form's decision and Core's agree on every code point (the form has no copy of the set).
+    #[test]
+    fn the_forms_text_rule_is_cores_rule_for_every_code_point() {
+        let fields = fields_of(&params());
+        let mut values = initial(&fields, Locale::En);
+        values[0] = FieldValue::Text("docs/a.txt".to_owned());
+        values[2] = FieldValue::Index(Some(0));
+        for cp in 0..=0x10FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let text = c.to_string();
+            values[1] = FieldValue::Text(text.clone());
+            let refused = matches!(read(&fields, &values), Err(FormError::BadText(_)));
+            // A carriage return is a line break the form normalises before the check.
+            let expected =
+                oncl_plugin::operations::signed_text_problem(&normalized_text(&text)).is_some();
+            assert_eq!(refused, expected, "U+{cp:04X}");
+        }
+        for cp in [
+            0x0D, 0x600, 0x6DD, 0x70F, 0x8E2, 0x2065, 0x206A, 0x110BD, 0x1D173, 0xE0000, 0xE0002,
+        ] {
+            let c = char::from_u32(cp).unwrap().to_string();
+            let core = oncl_plugin::operations::signed_text_problem(&c).is_some();
+            values[1] = FieldValue::Text(c);
+            let form = matches!(read(&fields, &values), Err(FormError::BadText(_)));
+            assert_eq!(form, if cp == 0x0D { false } else { core }, "U+{cp:04X}");
         }
     }
 

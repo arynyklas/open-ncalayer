@@ -283,6 +283,9 @@ pub(super) fn render(
         && report.response.is_some();
     let (tone, headline) = match (report.applied, &report.error) {
         _ if verified => (Tone::Success, t.r_ok.to_owned()),
+        (AppliedState::Applied, None) if !reason_known => {
+            (Tone::Failure, t.r_applied_no_reply.to_owned())
+        }
         (AppliedState::Applied, _) => (Tone::Failure, t.r_applied_failed.replace("{0}", &reason)),
         (AppliedState::Unknown, _) => (Tone::Caution, t.r_unknown.to_owned()),
         (AppliedState::NotApplied, Some(ErrorCode::Cancelled)) if report.refusals.is_empty() => {
@@ -616,7 +619,7 @@ mod tests {
             let r = report(AppliedState::Applied, vec![], None, None);
             let v = render(&r, &facts(), l, &TicketWords);
             assert!(
-                v.headline.contains(Texts::of(l).no_reason),
+                v.headline == Texts::of(l).r_applied_no_reply,
                 "{}",
                 v.headline
             );
