@@ -62,3 +62,20 @@ fn plugin_bytes_without_a_key_is_refused_by_validation() {
     // The default (false) without keys is the old keyless grant and stays valid.
     parse("").unwrap().validate().unwrap();
 }
+
+#[test]
+fn a_plugin_bytes_grant_needs_a_segment_that_holds_one_plugin_use() {
+    let minimum = oncl_server::audit::PLUGIN_MIN_SEGMENT_BYTES;
+    let mut config = parse("keys = [\"ops\"]\nplugin_bytes = true").unwrap();
+    config.audit_segment_bytes = minimum - 1;
+    assert!(
+        config.validate().is_err(),
+        "a segment below {minimum} bytes"
+    );
+    config.audit_segment_bytes = minimum;
+    config.validate().expect("the minimum is enough");
+    // Without a plugin_bytes grant the smaller (older) sizes stay valid.
+    let mut plain = parse(r#"keys = ["ops"]"#).unwrap();
+    plain.audit_segment_bytes = 1024;
+    plain.validate().expect("no plugin key bytes granted");
+}

@@ -136,6 +136,19 @@ pub(crate) fn judge(plugin: &str, manifest: &Manifest, grant: &PluginGrant) -> i
             "{who}: names keys without plugin_bytes = true: every key use will be refused (not-granted)"
         ));
     }
+    if key_declared && grant.plugin_bytes {
+        let none: &dyn Fn(&str) -> Option<String> = &|_| None;
+        if operation
+            .uses()
+            .keys()
+            .iter()
+            .any(|use_| use_.options_sha256(none).is_none())
+        {
+            warnings.push(format!(
+                "{who}: plugin_bytes = true, but a declared key profile names a `param:` the server cannot match: that key use will always be refused (options-mismatch)"
+            ));
+        }
+    }
     Ok(Verdict::Keep {
         imports,
         declared: true,
@@ -251,8 +264,13 @@ impl ServerPluginPolicy {
         if *options != Some(*ticket.options_sha256()) {
             return Err(TicketRefusal::Options);
         }
-        let mut spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
-        if !spent.insert(operation) {
+        // Only checked here: the use is spent in `accepted`, once the journal took it.
+        if self
+            .spent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&operation)
+        {
             return Err(TicketRefusal::AlreadyUsed);
         }
         Ok(rule)
@@ -260,6 +278,12 @@ impl ServerPluginPolicy {
 }
 
 impl PluginTicketPolicy for ServerPluginPolicy {
+    fn accepted(&self, operation: OperationId, _ticket: &PluginUse) {
+        self.spent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(operation);
+    }
     fn operation_ended(&self, operation: OperationId) {
         self.spent
             .lock()
@@ -540,6 +564,56 @@ modules = ["test.plain.module"]
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
+    const PARAM_PROFILE: &str = r#"id = "test.param"
+name.ru = "s"
+name.kk = "s"
+name.en = "s"
+version = "1.0.0"
+min_core = "0.1.0-alpha.7"
+modules = ["test.param.module"]
+[capabilities]
+keys = true
+[[operations]]
+name = "element"
+module = "test.param.module"
+server = true
+request = '{"module":"test.param.module","method":"m","args":["{xml}","{tbs}"]}'
+label = { ru = "а", kk = "ә", en = "a" }
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 4096
+[[operations.params]]
+name = "tbs"
+kind = "text"
+max_chars = 256
+[operations.uses]
+imports = ["keys_sign_xml"]
+network = "pki"
+[[operations.uses.key]]
+kind = "xml"
+content = "param:xml"
+[operations.uses.key.profile]
+element = "param:tbs"
+"#;
+
+    #[test]
+    fn a_plugin_bytes_grant_of_a_param_profile_is_kept_with_a_warning() {
+        let manifest = Manifest::from_toml(PARAM_PROFILE).unwrap();
+        let Verdict::Keep { warnings, .. } = judge(
+            "test.param",
+            &manifest,
+            &grant("element", &["keys_sign_xml"], &["k"], true),
+        )
+        .unwrap() else {
+            panic!("kept")
+        };
+        assert!(
+            warnings.iter().any(|w| w.contains("options-mismatch")),
+            "{warnings:?}"
+        );
+    }
+
     // --- the ticket policy: every rule killed on its own --------------------------------
 
     use oncl_core::plugins::{ContentBinding, PluginIdentity};
@@ -645,6 +719,10 @@ modules = ["test.plain.module"]
         let facts = policy.check(id, &Ticket::default().build()).unwrap();
         assert_eq!(facts.grant_id, "svc:test.declared:run");
         assert!(facts.declared);
+        // Checking does not spend the use: only the journal's acceptance does, so a refusal
+        // by the journal leaves the plugin's retry a policy decision again.
+        policy.check(id, &Ticket::default().build()).unwrap();
+        policy.accepted(id, &Ticket::default().build());
         assert_eq!(
             policy.check(id, &Ticket::default().build()).unwrap_err(),
             TicketRefusal::AlreadyUsed
@@ -770,10 +848,12 @@ modules = ["test.plain.module"]
         let policy = policy(true);
         let first = operation_id(0);
         policy.check(first, &Ticket::default().build()).unwrap();
+        policy.accepted(first, &Ticket::default().build());
         // 4104 other operations each take their one use while `first` is still running.
         for _ in 1..=4104 {
             let other = operation_id(0);
             policy.check(other, &Ticket::default().build()).unwrap();
+            policy.accepted(other, &Ticket::default().build());
             policy.operation_ended(other);
         }
         assert_eq!(

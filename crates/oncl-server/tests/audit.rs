@@ -2134,7 +2134,9 @@ fn a_segment_too_small_for_a_plugin_use_refuses_before_writing_anything() {
         .before_use(&plugin_event(&ctx, &key, b"doc"))
         .err()
         .expect("refused");
-    assert_eq!(error.code(), ErrorCode::AuditFailed);
+    // A typed refusal before the journal state is touched (not an audit failure), the key
+    // not applied.
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
     assert_eq!(error.applied_state(), AppliedState::NotApplied);
     // Not a frame of the use reached the journal.
     // (A rotation may have added a segment header; nothing else.)
@@ -2366,4 +2368,179 @@ fn the_in_memory_refusal_queue_is_bounded_per_operation() {
         "never evicted by another"
     );
     assert_eq!(guard.plugin_refusals(noisy.id()).len(), 8);
+}
+
+/// Cuts of the journal that the final review found failing in `plugin_records()` after a
+/// recovery (header + chunks of a use + a partial frame), swept densely; the rest at a stride.
+/// What a record says, without its FINAL: recovery adds a FINAL (unknown) to a BEGIN that
+/// never had one, which is not a change of the record.
+fn facts(records: &[oncl_server::audit::PluginJournalRecord]) -> Vec<(u64, Option<String>)> {
+    records
+        .iter()
+        .map(|record| (record.use_id, record.refusal.clone()))
+        .collect()
+}
+const TORN_RANGES: [std::ops::RangeInclusive<usize>; 3] = [480..=639, 1280..=1439, 1920..=2079];
+
+#[test]
+fn plugin_records_survive_a_torn_write_recovery_and_a_later_use_at_every_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = policy_guard(&path, vec![granted(), Err(TicketRefusal::Key), granted()]);
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let first = binding(&guard, &ctx, &key);
+    let ctx2 = context();
+    let second = binding(&guard, &ctx2, &key);
+    let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+    guard.finish(receipt, done()).unwrap();
+    assert!(
+        guard
+            .before_use(&plugin_event(&ctx2, &key, b"doc"))
+            .is_err()
+    );
+    let receipt = guard
+        .before_use(&plugin_event(&ctx2, &key, b"doc2"))
+        .unwrap();
+    guard.finish(receipt, done()).unwrap();
+    drop((first, second, guard));
+    let file = journal(&path);
+    let bytes = std::fs::read(&file).unwrap();
+    let frame = FRAME_BYTES as usize;
+    let mut bad = Vec::new();
+    for cut in frame..=bytes.len() {
+        // Every 8th byte of the failing ranges (and their last byte), every 53rd elsewhere:
+        // each cut costs several synced writes, so the sweep stays near 100 cuts.
+        let in_range = TORN_RANGES.iter().any(|r| r.contains(&cut));
+        let sampled = if in_range {
+            cut % 8 == 0 || TORN_RANGES.iter().any(|r| *r.end() == cut)
+        } else {
+            cut % 53 == 0
+        };
+        if !sampled {
+            continue;
+        }
+        std::fs::write(&file, &bytes[..cut]).unwrap();
+        let guard = match DurableAuditGuard::open(config(&path)) {
+            Ok(guard) => guard,
+            Err(error) => {
+                bad.push(format!("{cut}: open {error}"));
+                continue;
+            }
+        };
+        let torn = match guard.plugin_records() {
+            Ok(records) => facts(&records),
+            Err(error) => {
+                bad.push(format!("{cut}: records {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = guard.recover() {
+            bad.push(format!("{cut}: recover {error}"));
+            continue;
+        }
+        let ctx = context();
+        let _bound = binding(&guard, &ctx, &key);
+        let receipt = match guard.before_use(&event(&ctx, &key)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                bad.push(format!("{cut}: plain use {error:?}"));
+                continue;
+            }
+        };
+        guard.finish(receipt, done()).unwrap();
+        match guard.plugin_records() {
+            Ok(records) if facts(&records) == torn => (),
+            Ok(_) => bad.push(format!("{cut}: records changed by recovery")),
+            Err(error) => bad.push(format!("{cut}: records after recovery {error}")),
+        }
+        drop(_bound);
+        drop(guard);
+        if let Err(error) = DurableAuditGuard::open(config(&path)) {
+            bad.push(format!("{cut}: reopen {error}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} bad cuts: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(12)]
+    );
+}
+
+#[test]
+fn a_plugin_use_that_cannot_fit_a_segment_is_refused_without_touching_audit_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let cfg = AuditConfig::new(path, 1024, 4096, 3, 32).unwrap();
+    let guard = DurableAuditGuard::create(cfg)
+        .unwrap()
+        .with_plugin_policy(Arc::new(Policy(Mutex::new(vec![granted()]))))
+        .unwrap();
+    let ctx = context();
+    let key = KeyId::new("key").unwrap();
+    let _bound = binding(&guard, &ctx, &key);
+    let error = guard
+        .before_use(&plugin_event(&ctx, &key, b"doc"))
+        .err()
+        .expect("refused");
+    // Typed refusal, the key was not applied; nothing of it reaches the plugin.
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(
+        guard.plugin_refusals(ctx.id()),
+        vec![TicketRefusal::AuditFactTooLong]
+    );
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+    // The next plain use of the same service succeeds.
+    let ctx2 = context();
+    let _bound2 = binding(&guard, &ctx2, &key);
+    let receipt = guard.before_use(&event(&ctx2, &key)).unwrap();
+    guard.finish(receipt, done()).unwrap();
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+}
+
+#[test]
+fn a_journal_refusal_does_not_spend_a_once_only_grant() {
+    struct Once(Mutex<bool>);
+    impl PluginTicketPolicy for Once {
+        fn check(
+            &self,
+            _operation_id: oncl_core::OperationId,
+            _ticket: &PluginUse,
+        ) -> Result<PluginGrantFacts, TicketRefusal> {
+            if *self.0.lock().unwrap() {
+                return Err(TicketRefusal::AlreadyUsed);
+            }
+            granted()
+        }
+        fn accepted(&self, _operation_id: oncl_core::OperationId, _ticket: &PluginUse) {
+            *self.0.lock().unwrap() = true;
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let policy = Arc::new(Once(Mutex::new(false)));
+    let guard = DurableAuditGuard::create(config(&temp.path().join("audit")))
+        .unwrap()
+        .with_plugin_policy(policy.clone())
+        .unwrap();
+    let key = KeyId::new("key").unwrap();
+    // A closed binding is a journal-side refusal (no BEGIN, no receipt) after the policy said
+    // yes: the use must not be spent by it.
+    let closed = context();
+    drop(binding(&guard, &closed, &key));
+    assert!(
+        guard
+            .before_use(&plugin_event(&closed, &key, b"doc"))
+            .is_err()
+    );
+    assert!(
+        !*policy.0.lock().unwrap(),
+        "refused by the journal: not spent"
+    );
+    // An accepted use spends it.
+    let ctx = context();
+    let _bound = binding(&guard, &ctx, &key);
+    let receipt = guard.before_use(&plugin_event(&ctx, &key, b"doc")).unwrap();
+    assert!(*policy.0.lock().unwrap(), "accepted by the journal: spent");
+    guard.finish(receipt, done()).unwrap();
 }

@@ -147,6 +147,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fail when a plugin port's `plugin.toml`, `Cargo.toml` or `src/` changed since the last
+    /// `plugins-*` tag but its version did not (docs/dev/plugin-version-check.md). Without
+    /// such a tag in the checkout: a NOTICE, exit 0.
+    PluginVersionCheck,
     /// The plugin ports' real wasm under the manual window's call path: builds the modules,
     /// runs `plugin-ops-check --require-wasm`, then the ignored tests of
     /// `crates/oncl-core/tests/plugin_ports_manual.rs` (docs/dev/plugins-manual-tests.md).
@@ -892,6 +896,14 @@ fn main() -> anyhow::Result<()> {
             } else {
                 print!("{}", report.to_text());
             }
+            if report.exit_code() != 0 {
+                std::process::exit(report.exit_code());
+            }
+            Ok(())
+        }
+        Command::PluginVersionCheck => {
+            let report = xtask::plugin_version::check(&oncl_testkit::workspace_root())?;
+            print!("{}", report.to_text());
             if report.exit_code() != 0 {
                 std::process::exit(report.exit_code());
             }

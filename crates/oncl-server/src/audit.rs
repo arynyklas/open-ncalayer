@@ -29,6 +29,10 @@ const MAX_BATCH_ITEMS: u16 = 1024;
 const CHUNK_BYTES: usize = 72;
 /// Most frames one plugin record may take (a bound on the record, not on the journal).
 const MAX_CHUNKS: usize = 24;
+/// The smallest `audit_segment_bytes` a service with plugin key grants may configure: the
+/// chunks of the longest plugin record, its BEGIN and the reserved FINAL and recovery frames
+/// of one use must fit a segment.
+pub const PLUGIN_MIN_SEGMENT_BYTES: u64 = FRAME_BYTES * (MAX_CHUNKS as u64 + 5);
 /// Plugin refusals one bound operation may write to the journal; later ones are traced only,
 /// so a plugin that keeps asking cannot push earlier records out of the journal.
 const MAX_JOURNALED_REFUSALS: u8 = 4;
@@ -226,16 +230,21 @@ pub struct PluginGrantFacts {
 /// `Err` refuses the use (the plugin sees `PermissionDenied`; the reason is journaled).
 ///
 /// `check` runs while the journal's one lock is held, before the operation's binding and
-/// deadline are looked at: it must not call back into the guard, must be quick, and a grant
-/// it consumes is consumed even if the journal then refuses the use (a failed write, a full
-/// journal). It should keep `grant_id` short; a text over 255 bytes refuses the use as
-/// [`TicketRefusal::AuditFactTooLong`].
+/// deadline are looked at: it must not call back into the guard, must be quick, and must not
+/// consume a grant itself: a once-only grant is consumed in [`Self::accepted`], which the guard
+/// calls only after the journal took the use, so a refusal by the journal (a failed write, a
+/// full journal) leaves the use available. It should keep `grant_id` short; a text over 255
+/// bytes refuses the use as [`TicketRefusal::AuditFactTooLong`].
 pub trait PluginTicketPolicy: Send + Sync {
     fn check(
         &self,
         operation_id: OperationId,
         ticket: &PluginUse,
     ) -> Result<PluginGrantFacts, TicketRefusal>;
+    /// The journal took the use `check` allowed (its BEGIN is written): the policy consumes
+    /// the once-only grant now. Called with the journal lock held, so no other use of the
+    /// operation can slip between `check` and here.
+    fn accepted(&self, _operation_id: OperationId, _ticket: &PluginUse) {}
     /// The operation ended (its binding was dropped): the policy forgets whatever it kept
     /// for it. Called with the journal lock held: quick, no call back into the guard.
     fn operation_ended(&self, _operation: OperationId) {}
@@ -852,7 +861,10 @@ impl DurableAuditGuard {
     /// (`Unknown`). Chunks without a terminal frame (a use that never began) are omitted.
     pub fn plugin_records(&self) -> io::Result<Vec<PluginJournalRecord>> {
         let frames = self.records()?;
-        let mut chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+        // At most one run of chunks is open, as in `replay`: a new run (chunk 0) replaces an
+        // orphan one that never got its terminal frame, and a `Recovery`, a `Final` or any
+        // terminal frame ends it, so an orphan run is never matched to a later use.
+        let mut run: Option<(u64, Vec<u8>)> = None;
         let mut out: Vec<PluginJournalRecord> = Vec::new();
         let mut by_use: HashMap<u64, usize> = HashMap::new();
         for frame in frames {
@@ -860,20 +872,22 @@ impl DurableAuditGuard {
                 RecordKind::PluginDetail => {
                     let chunk = frame.chunk.ok_or_else(damaged)?;
                     if chunk.index == 0 {
-                        chunks.push((frame.use_id, Vec::new()));
+                        run = Some((frame.use_id, Vec::new()));
                     }
-                    chunks
-                        .last_mut()
-                        .ok_or_else(damaged)?
-                        .1
-                        .extend_from_slice(&chunk.bytes);
+                    match &mut run {
+                        Some((id, blob)) if *id == frame.use_id => {
+                            blob.extend_from_slice(&chunk.bytes);
+                        }
+                        _ => return Err(damaged()),
+                    }
                 }
                 RecordKind::Begin | RecordKind::PluginRefusal => {
-                    let Some(position) = chunks.iter().position(|(id, _)| *id == frame.use_id)
-                    else {
+                    let Some((id, blob)) = run.take() else {
                         continue;
                     };
-                    let (_, blob) = chunks.swap_remove(position);
+                    if id != frame.use_id {
+                        continue;
+                    }
                     let (facts, refusal) = plugin_record(&blob).ok_or_else(damaged)?;
                     if refusal.is_none() {
                         by_use.insert(frame.use_id, out.len());
@@ -886,7 +900,9 @@ impl DurableAuditGuard {
                         finished: None,
                     });
                 }
+                RecordKind::Recovery => run = None,
                 RecordKind::Final => {
+                    run = None;
                     if let Some(&at) = by_use.get(&frame.use_id) {
                         out[at].finished = Some((frame.applied, frame.succeeded));
                     }
@@ -1600,6 +1616,30 @@ impl KeyUseGuard for DurableAuditGuard {
                     // journal is touched: it must not poison the service's audit health,
                     // and an unauditable use does not run.
                     match plugin_frames(&record, None) {
+                        // A use whose chunks, BEGIN and reserved FINALs cannot fit one
+                        // segment (or the quota) even in a fresh one is refused the same
+                        // way, before the journal state is touched: it is a per-request
+                        // denial, never a failure of the service's audit.
+                        Ok(chunks)
+                            if {
+                                // A fresh segment starts with a header frame, the identity
+                                // file is one frame of the quota.
+                                let needed =
+                                    (state.pending.len() as u64 + 3 + chunks.len() as u64 + 1)
+                                        * FRAME_BYTES;
+                                needed > self.shared.config.segment_bytes
+                                    || needed + FRAME_BYTES > self.shared.config.quota_bytes
+                            } =>
+                        {
+                            Self::refuse_plugin(
+                                &mut state,
+                                &self.shared.config,
+                                event,
+                                ticket,
+                                TicketRefusal::AuditFactTooLong,
+                            );
+                            return Err(OperationError::PermissionDenied);
+                        }
                         Ok(chunks) => plugin = Some(chunks),
                         Err(_) => {
                             Self::refuse_plugin(
@@ -1731,6 +1771,9 @@ impl KeyUseGuard for DurableAuditGuard {
                     _lease: lease,
                 },
             );
+            if let (Some(policy), Some(ticket)) = (self.shared.policy.as_deref(), event.plugin()) {
+                policy.accepted(event.operation_id, ticket);
+            }
             Ok(KeyUseReceipt::with_correlation(
                 event.clone(),
                 u64::from_le_bytes(state.session[..8].try_into().unwrap()),

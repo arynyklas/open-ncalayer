@@ -27,3 +27,6 @@ ru = "sign с isDigested=true и encapsulate=true (encapsulate по умолча
 
 [[differences]]
 ru = "Сертификаты RSA-SHA1: все такие сертификаты НУЦ просрочены; подпись ими отвечает обычной ошибкой плагина с текстом ядра (окно ошибки повторяется, пока пользователь не отменит)."
+
+[[differences]]
+ru = "Окно ручных инструментов: объявлено операций — 4 (sign-cms-attached-timestamp, sign-cms-attached, sign-cms-detached-timestamp, sign-cms-detached); каждая применяет ключ один раз и запрашивает подтверждение. Методы, не вошедшие в этот список, в окне не предлагаются."
