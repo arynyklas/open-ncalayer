@@ -39,3 +39,21 @@ fn the_container_allowance_defaults_to_the_engine_and_reaches_it() {
     assert_eq!(tight.limits().container_bytes, 5);
     assert_eq!(tight.aggregate_limits().container_bytes, 5);
 }
+
+#[test]
+fn a_nonsensical_container_allowance_is_refused() {
+    for container_bytes in [0, u64::MAX, u64::MAX - 1_073_741_824] {
+        let config = ServerConfig {
+            container_bytes,
+            ..ServerConfig::default()
+        };
+        assert!(config.validate().is_err(), "{container_bytes}");
+    }
+    // The largest sum that still fits u64 (input + container + framing + 64 KiB) is accepted.
+    let defaults = ServerConfig::default();
+    let config = ServerConfig {
+        container_bytes: u64::MAX - defaults.input_bytes - defaults.framing_bytes - 65_536,
+        ..defaults
+    };
+    config.validate().unwrap();
+}

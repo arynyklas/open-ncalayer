@@ -334,9 +334,15 @@ fn a_document_past_the_allowance_is_refused_with_input_limit_even_when_signed() 
 
     // One document byte past the allowance, signed or not, in any role.
     let over = client.file("over.xml", &xml_of(LIMIT + 1));
+    let begins = remote.audit_begins();
     assert_input_limit(
         "sign past the allowance",
         &client.sign("xades-b", &over, &client.path("over.signed.xml")),
+    );
+    assert_eq!(
+        remote.audit_begins(),
+        begins,
+        "no key may be used for an oversize document"
     );
     assert_input_limit("hash past the allowance", &client.hash(&over));
     let hashed = client.hash(&exact);
@@ -431,5 +437,116 @@ fn a_pades_t_result_of_a_limit_sized_pdf_extends_to_lt_over_http() {
     assert!(
         files(&remote.scratch()).is_empty(),
         "scratch must be empty afterwards"
+    );
+}
+
+/// The counted wire of a request with a signed `input` is widened by `container_bytes` once the
+/// metadata names it: a signature surcharge far above `framing_bytes + 64 KiB` is accepted, and a
+/// wire past `input_bytes + container_bytes + framing_bytes + 64 KiB` is not.
+#[test]
+fn the_wire_ceiling_is_widened_by_the_container_allowance_for_a_signed_input() {
+    const FRAMING: u64 = 4096;
+    const WIDE: u64 = 4 << 20;
+    let pki = Pki::start();
+    let remote = Remote::start_with(&pki, |config, _| {
+        config.input_bytes = LIMIT as u64;
+        config.container_bytes = WIDE;
+        config.framing_bytes = FRAMING;
+    });
+    let client = Client::new(&remote);
+    let mut current = client.file("pdf0.pdf", &pdf_of(LIMIT));
+    for round in 1..=4 {
+        let next = client.path(&format!("pdf{round}.pdf"));
+        let output = client.sign("pades-b", &current, &next);
+        assert_eq!(exit(&output), 0, "sign {round}: {}", text(&output.stderr));
+        current = next;
+    }
+    let surcharge = std::fs::metadata(&current).unwrap().len() - LIMIT as u64;
+    assert!(
+        surcharge > FRAMING + 65_536 && surcharge < WIDE,
+        "the surcharge must be past the plain wire ceiling: {surcharge}"
+    );
+    let output = client.verify("pades-b", &current);
+    assert_eq!(exit(&output), 0, "verify: {}", text(&output.stderr));
+    // The negative twin: past input + container + framing + 64 KiB nothing is read.
+    let past = LIMIT + WIDE as usize + FRAMING as usize + 65_536 + 1024;
+    let hostile = client.file("hostile.xml", &xml_of(past));
+    assert_input_limit(
+        "verify past the widened wire ceiling",
+        &client.verify("xades-b", &hostile),
+    );
+    assert!(
+        files(&remote.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+}
+
+/// An evidence part is spooled up to 1 MiB and not a byte further: one byte more is refused
+/// with `InputLimit` while it is read, so the scratch never holds it.
+#[test]
+fn an_evidence_part_past_one_mebibyte_is_refused_before_it_is_spooled() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+    fn largest(root: &Path) -> u64 {
+        std::fs::read_dir(root)
+            .map(|dir| {
+                dir.flatten()
+                    .map(|e| match e.metadata() {
+                        Ok(m) if m.is_dir() => largest(&e.path()),
+                        Ok(m) => m.len(),
+                        Err(_) => 0,
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+    let pki = Pki::start();
+    let remote = small_server(&pki, CONTAINER);
+    let client = Client::new(&remote);
+    let small = client.file("small.xml", &xml_of(2000));
+    let signed = client.path("small.signed.xml");
+    let output = client.sign("xades-t", &small, &signed);
+    assert_eq!(exit(&output), 0, "sign: {}", text(&output.stderr));
+    let evidence = client.file("big.crl", &vec![0x30u8; (1 << 20) + 1]);
+    let peak = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (peak, stop, root) = (peak.clone(), stop.clone(), remote.scratch());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                peak.fetch_max(largest(&root), Ordering::SeqCst);
+            }
+        })
+    };
+    let mut outputs = Vec::new();
+    for _ in 0..8 {
+        outputs.push(client.run(&[
+            "extend",
+            "--profile",
+            "xml",
+            "--level",
+            "lt",
+            "--input",
+            path(&signed),
+            "--output",
+            path(&client.path("lt.xml")),
+            "--evidence-crl",
+            path(&evidence),
+            "--json",
+        ]));
+    }
+    stop.store(true, Ordering::SeqCst);
+    watcher.join().unwrap();
+    for output in &outputs {
+        assert_input_limit("an evidence part of 1 MiB + 1", output);
+    }
+    let peak = peak.load(Ordering::SeqCst);
+    assert!(peak > 0, "the watcher never saw a spool file");
+    assert!(
+        peak <= 1 << 20,
+        "an evidence part must not be spooled past 1 MiB: {peak}"
     );
 }

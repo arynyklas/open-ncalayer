@@ -156,6 +156,24 @@ fn one_byte_past_the_document_and_container_allowance_is_input_limit_and_not_sto
 }
 
 #[test]
+fn a_zero_container_allowance_and_a_raised_document_allowance_bound_the_spool() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let mut s = scope(4, 0);
+    assert!(wire(b"doc!", &store, &mut s, None).is_ok());
+    assert!(matches!(
+        wire(b"doc!!", &store, &mut s, None),
+        Err(ProcessingError::InputLimit)
+    ));
+    // `input_bytes` above the 1 GiB default: the ceiling follows the configured limits.
+    let mut s = scope(2 * 1_073_741_824, 3);
+    assert_eq!(s.input_remaining(), 2 * 1_073_741_824);
+    assert_eq!(s.container_remaining(), 3);
+    assert!(wire(b"abc", &store, &mut s, None).is_ok());
+    assert_eq!(s.input_remaining(), 2 * 1_073_741_824);
+}
+
+#[test]
 fn a_maximum_narrows_the_spool_and_never_widens_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = TemporaryStore::new(dir.path()).unwrap();

@@ -469,6 +469,13 @@ impl ServerConfig {
             || self.upload_idle_timeout_ms < 1000
             || self.upload_idle_timeout_ms > 86_400_000
             || self.upload_min_bytes_per_second > 1_073_741_824
+            || self.container_bytes == 0
+            || self
+                .input_bytes
+                .checked_add(self.container_bytes)
+                .and_then(|n| n.checked_add(self.framing_bytes))
+                .and_then(|n| n.checked_add(65_536))
+                .is_none()
             || self.metadata_bytes < 32_768
             || self.memory_per_operation < 65_536
             || self.total_memory < self.memory_per_operation

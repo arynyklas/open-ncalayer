@@ -74,6 +74,8 @@ pub(super) fn wire_inputs(metadata: &OperationMetadata) -> impl Iterator<Item = 
 }
 /// The most bytes of one evidence document (certificate, OCSP response or CRL).
 pub(super) const EVIDENCE_ITEM_BYTES: u64 = 1 << 20;
+/// The most evidence references of one item (the cap `load_evidence` applies).
+pub(super) const MAX_EVIDENCE_REFS: usize = 64;
 /// The evidence documents of sign and extend items. They are validation material with their
 /// own bounds ([`EVIDENCE_ITEM_BYTES`] each, and the evidence limits of the engine), not
 /// documents: like the SDK and the CLI, which read them from memory and files, the service
@@ -674,7 +676,7 @@ pub(super) fn load_evidence(
     ctx: &mut OperationContext,
 ) -> Result<Evidence, OperationError> {
     use oncl_api::dto::EvidenceKind;
-    if refs.len() > 64 {
+    if refs.len() > MAX_EVIDENCE_REFS {
         return Err(ProcessingError::MetadataLimit.into());
     }
     let mut evidence = Evidence {
@@ -707,6 +709,13 @@ fn soap_version(kind: Option<SoapKind>) -> oncl_xml::wsse::SoapVersion {
 /// Reject unsupported field/profile combinations from metadata alone, before any
 /// key, secret or document is touched.
 pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
+    // `load_evidence` takes at most MAX_EVIDENCE_REFS references; refusing more here bounds the
+    // evidence spool before any part is read.
+    if let Operation::Sign { evidence, .. } | Operation::Extend { evidence, .. } = operation
+        && evidence.len() > MAX_EVIDENCE_REFS
+    {
+        return Err(invalid_request());
+    }
     match operation {
         Operation::Sign {
             profile,
@@ -1704,6 +1713,31 @@ mod tests {
             signature_count_fits(u64::MAX, maximum).unwrap_err().code,
             ErrorCode::InputLimit
         );
+    }
+    #[test]
+    fn more_evidence_references_than_the_engine_loads_are_refused_before_any_part_is_read() {
+        let refs = |n: usize| {
+            (0..n)
+                .map(|i| format!(r#"{{"kind":"crl","input":"e{i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        for (kind, extra) in [
+            ("extend", r#""profile":"cades_lt""#),
+            (
+                "sign",
+                r#""profile":"cades_t","keys":[{"source":"named","name":"k"}]"#,
+            ),
+        ] {
+            for (count, ok) in [(MAX_EVIDENCE_REFS, true), (MAX_EVIDENCE_REFS + 1, false)] {
+                let operation: Operation = serde_json::from_str(&format!(
+                    r#"{{"kind":"{kind}","input":"d",{extra},"evidence":[{}]}}"#,
+                    refs(count)
+                ))
+                .unwrap();
+                assert_eq!(validate_shape(&operation).is_ok(), ok, "{kind} {count}");
+            }
+        }
     }
     #[test]
     fn only_the_input_of_verify_extend_extract_and_sign_may_be_signed_wire() {

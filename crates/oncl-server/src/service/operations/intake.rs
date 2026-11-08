@@ -416,16 +416,13 @@ pub(super) async fn prepare(
     // Everything but the document bytes: multipart framing and the metadata part.
     let ordinary_wire = limits
         .input_bytes
-        .checked_add(limits.framing_bytes)
-        .and_then(|n| n.checked_add(JSON_BYTES))
-        .ok_or_else(invalid_request)?;
+        .saturating_add(limits.framing_bytes)
+        .saturating_add(JSON_BYTES);
     // The input of a verify, extend, extract or sign item may be a signed result: its
     // document may be followed by up to `container_bytes` of signature bytes that the engine
     // classifies. A declared length is checked against this ceiling at once; the counted wire
     // starts at the plain ceiling and is widened when the metadata names such an input.
-    let maximum_wire = ordinary_wire
-        .checked_add(limits.container_bytes)
-        .ok_or_else(invalid_request)?;
+    let maximum_wire = ordinary_wire.saturating_add(limits.container_bytes);
     if metadata.content_length.is_some_and(|n| n > maximum_wire) {
         return Err(ApiError::not_applied(ErrorCode::InputLimit));
     }
