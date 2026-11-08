@@ -21,3 +21,21 @@ fn an_operator_may_raise_the_input_limit_above_the_default() {
     };
     config.validate().unwrap();
 }
+
+#[test]
+fn the_container_allowance_defaults_to_the_engine_and_reaches_it() {
+    let config = ServerConfig::default();
+    assert_eq!(
+        config.container_bytes,
+        ResourceLimits::default().container_bytes
+    );
+    let tight = ServerConfig {
+        input_bytes: 3,
+        container_bytes: 5,
+        ..ServerConfig::default()
+    };
+    tight.validate().unwrap();
+    assert_eq!(tight.limits().input_bytes, 3);
+    assert_eq!(tight.limits().container_bytes, 5);
+    assert_eq!(tight.aggregate_limits().container_bytes, 5);
+}

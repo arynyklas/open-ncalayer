@@ -56,6 +56,39 @@ fn jose_inputs<'a>(
     names.extend(certificate);
     names.into_iter()
 }
+/// The documents that may already be signed results: the `input` of a verify, extend,
+/// extract or sign item. Their engine classifies the signature, revision or envelope bytes
+/// of its wire itself, so such a document may exceed `input_bytes` by container bytes (never
+/// past `container_bytes`); every other document part stays within `input_bytes`.
+pub(super) fn wire_inputs(metadata: &OperationMetadata) -> impl Iterator<Item = &str> {
+    metadata
+        .items
+        .iter()
+        .filter_map(|item| match &item.operation {
+            Operation::Verify { input, .. }
+            | Operation::Extend { input, .. }
+            | Operation::Extract { input }
+            | Operation::Sign { input, .. } => Some(input.as_str()),
+            _ => None,
+        })
+}
+/// The most bytes of one evidence document (certificate, OCSP response or CRL).
+pub(super) const EVIDENCE_ITEM_BYTES: u64 = 1 << 20;
+/// The evidence documents of sign and extend items. They are validation material with their
+/// own bounds ([`EVIDENCE_ITEM_BYTES`] each, and the evidence limits of the engine), not
+/// documents: like the SDK and the CLI, which read them from memory and files, the service
+/// does not charge them to the document allowance.
+pub(super) fn evidence_inputs(metadata: &OperationMetadata) -> impl Iterator<Item = &str> {
+    metadata
+        .items
+        .iter()
+        .flat_map(|item| match &item.operation {
+            Operation::Sign { evidence, .. } | Operation::Extend { evidence, .. } => {
+                evidence.iter().map(|e| e.input.as_str()).collect()
+            }
+            _ => Vec::new(),
+        })
+}
 pub(super) fn inputs(operation: &Operation) -> std::vec::IntoIter<&str> {
     let names = match operation {
         Operation::Hash { input, .. } => [Some(input.as_str()), None],
@@ -516,7 +549,10 @@ fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
 /// Single shared failure policy for streaming and non-streaming execution.
 /// Resource/deadline/cancel failures that never applied a key, with no earlier
 /// applied item, stay a first-fatal abort; everything else is a typed failure
-/// carrying the honest Applied state.
+/// carrying the honest Applied state. A document or container limit is the exception:
+/// the engine classifies the signed wire of a verify, extend, extract or sign input itself
+/// (see [`wire_inputs`]), so the oversize refusal of such a document is only found here, and
+/// it stays the typed, not applied `InputLimit` that any other oversize document gets at intake.
 pub(super) enum Failure {
     Abort(ProcessingError),
     Typed(ApiError),
@@ -533,8 +569,12 @@ pub(super) fn classify(
     let applied = failure.applied != oncl_api::error::AppliedState::NotApplied;
     match error {
         OperationError::Processing(e)
-            if !matches!(intake::first_cause(&e), ProcessingError::InvalidInput(_))
-                && !applied
+            if !matches!(
+                intake::first_cause(&e),
+                ProcessingError::InvalidInput(_)
+                    | ProcessingError::InputLimit
+                    | ProcessingError::ContainerLimit
+            ) && !applied
                 && !applied_any =>
         {
             Failure::Abort(e)
@@ -645,7 +685,7 @@ pub(super) fn load_evidence(
     };
     for reference in refs {
         let mut document = env.documents.take(&reference.input)?;
-        let (bytes, reservation) = read_bytes(&mut document, ctx, 1 << 20)?;
+        let (bytes, reservation) = read_bytes(&mut document, ctx, EVIDENCE_ITEM_BYTES as usize)?;
         evidence._reservations.push(reservation);
         match reference.kind {
             EvidenceKind::Certificate => evidence.certificates.push(
@@ -1664,6 +1704,54 @@ mod tests {
             signature_count_fits(u64::MAX, maximum).unwrap_err().code,
             ErrorCode::InputLimit
         );
+    }
+    #[test]
+    fn only_the_input_of_verify_extend_extract_and_sign_may_be_signed_wire() {
+        let metadata: OperationMetadata = serde_json::from_str(
+            r#"{"items":[
+                {"id":"v","operation":{"kind":"verify","profile":"cms","input":"v-in","detached":"v-data"}},
+                {"id":"e","operation":{"kind":"extend","profile":"cades_lt","input":"e-in","evidence":[{"kind":"ocsp","input":"e-ocsp"},{"kind":"crl","input":"e-crl"}]}},
+                {"id":"x","operation":{"kind":"extract","input":"x-in"}},
+                {"id":"s","operation":{"kind":"sign","profile":"cades_t","input":"s-in","evidence":[{"kind":"certificate","input":"s-cert"}],"keys":[{"source":"named","name":"k"}]}},
+                {"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"h-in"}},
+                {"id":"i","operation":{"kind":"inspect","target":{"type":"cms","input":"i-in"}}}
+            ],"parts":[]}"#,
+        )
+        .unwrap();
+        // Signed wire: exactly the four inputs. A detached payload, a hashed document and an
+        // inspected container are documents within `input_bytes`.
+        assert_eq!(
+            wire_inputs(&metadata).collect::<Vec<_>>(),
+            ["v-in", "e-in", "x-in", "s-in"]
+        );
+        // Evidence is validation material with its own bounds, never a document.
+        assert_eq!(
+            evidence_inputs(&metadata).collect::<Vec<_>>(),
+            ["e-ocsp", "e-crl", "s-cert"]
+        );
+    }
+    #[test]
+    fn a_document_or_container_limit_found_by_the_engine_is_a_typed_refusal_not_an_abort() {
+        for limit in [ProcessingError::InputLimit, ProcessingError::ContainerLimit] {
+            match classify(OperationError::Processing(limit), false, None) {
+                Failure::Typed(api) => {
+                    assert_eq!(api.code, ErrorCode::InputLimit);
+                    assert_eq!(api.applied, oncl_api::error::AppliedState::NotApplied);
+                }
+                Failure::Abort(_) => panic!("a document limit must be typed"),
+            }
+        }
+        // Other resource failures keep the first-fatal abort.
+        for other in [
+            ProcessingError::MemoryLimit,
+            ProcessingError::DeadlineExceeded,
+            ProcessingError::Cancelled,
+        ] {
+            assert!(matches!(
+                classify(OperationError::Processing(other), false, None),
+                Failure::Abort(_)
+            ));
+        }
     }
     /// Control that can be flipped to a latched cancel/deadline stop after `begin`.
     struct Latch(std::sync::atomic::AtomicU8);

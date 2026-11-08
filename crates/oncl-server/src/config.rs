@@ -352,7 +352,17 @@ pub struct ServerConfig {
     pub total_temp: u64,
     pub memory_per_operation: u64,
     pub temp_per_operation: u64,
+    /// Document allowance of one operation: a document one byte past it is refused with
+    /// `InputLimit`.
     pub input_bytes: u64,
+    /// Signature, revision or envelope bytes a signed result of this service may add to
+    /// a document that is at `input_bytes`. Only the `input` of a `verify`, `extend`,
+    /// `extract` or `sign` item (a document that may already carry signatures) may exceed
+    /// `input_bytes`, by container bytes only: the engine classifies the signed bytes and
+    /// refuses a document part past `input_bytes`, or a surcharge past this value or past
+    /// the format's own bound, with `InputLimit`. The upload of such an input is spooled up
+    /// to `input_bytes + container_bytes` before that classification.
+    pub container_bytes: u64,
     pub framing_bytes: u64,
     pub metadata_bytes: u64,
     pub blocking_workers: usize,
@@ -398,6 +408,7 @@ impl Default for ServerConfig {
             memory_per_operation: 268_435_456,
             temp_per_operation: 8_589_934_592,
             input_bytes: 1_073_741_824,
+            container_bytes: 1_073_741_824,
             framing_bytes: 67_108_864,
             metadata_bytes: 67_108_864,
             blocking_workers: 2,
@@ -531,6 +542,7 @@ impl ServerConfig {
         ResourceLimits {
             max_in_flight: self.max_in_flight,
             input_bytes: self.input_bytes,
+            container_bytes: self.container_bytes,
             framing_bytes: self.framing_bytes,
             memory_bytes: self.memory_per_operation,
             temp_bytes: self.temp_per_operation,

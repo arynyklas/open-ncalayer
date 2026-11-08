@@ -64,11 +64,14 @@ impl DocumentMut<'_> {
         match self {
             Self::Text(t) => Ok(DocumentReader::Text(std::io::Cursor::new(t.as_bytes()))),
             Self::Frozen(input) => {
-                let len = input.len();
-                Ok(DocumentReader::Frozen(input.reader(
-                    &[oncl_pki::io::Region { offset: 0, len }],
-                    scope,
-                )?))
+                let reader = if input.is_wire() {
+                    // Host-side checks only: the engine never reads this replay.
+                    input.wire_inspection_reader(scope)?
+                } else {
+                    let len = input.len();
+                    input.reader(&[oncl_pki::io::Region { offset: 0, len }], scope)?
+                };
+                Ok(DocumentReader::Frozen(reader))
             }
         }
     }
@@ -107,11 +110,15 @@ impl Document {
         match self {
             Self::Text(text) => Ok(DocumentReader::Text(std::io::Cursor::new(text.as_bytes()))),
             Self::Frozen(input) => {
-                let len = input.len();
-                Ok(DocumentReader::Frozen(input.reader(
-                    &[oncl_pki::io::Region { offset: 0, len }],
-                    scope,
-                )?))
+                // Unclassified wire is read by the engine as an external source, which
+                // charges and classifies it; any other document is an admitted snapshot.
+                let reader = if input.is_wire() {
+                    input.wire_reader(scope)?
+                } else {
+                    let len = input.len();
+                    input.reader(&[oncl_pki::io::Region { offset: 0, len }], scope)?
+                };
+                Ok(DocumentReader::Frozen(reader))
             }
         }
     }
@@ -248,7 +255,9 @@ pub(super) struct Wire {
     body: Body,
     pace: UploadPace,
     total: u64,
-    limit: u64,
+    /// Shared so that the request can widen it once its metadata is known, without waiting
+    /// for the mutex a pending frame read holds.
+    limit: Arc<std::sync::atomic::AtomicU64>,
     scope: ResourceScope,
     failure: Arc<Failure>,
     tail_ledger: Option<Arc<Ledger>>,
@@ -284,7 +293,7 @@ async fn frame(
             .total
             .checked_add(data.len() as u64)
             .ok_or(ProcessingError::FramingLimit)?;
-        if wire.total > wire.limit {
+        if wire.total > wire.limit.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(ProcessingError::FramingLimit);
         }
         if let Some(ledger) = &wire.tail_ledger {
@@ -342,7 +351,7 @@ pub(super) async fn prepare(
             body,
             pace: UploadPace::new(pace),
             total: 0,
-            limit: JSON_BYTES,
+            limit: Arc::new(std::sync::atomic::AtomicU64::new(JSON_BYTES)),
             scope,
             failure: failure.clone(),
             tail_ledger: None,
@@ -404,19 +413,28 @@ pub(super) async fn prepare(
     }
     let boundary = multer_boundary(content_type)?;
     let limits = scope.limits();
-    let maximum_wire = limits
+    // Everything but the document bytes: multipart framing and the metadata part.
+    let ordinary_wire = limits
         .input_bytes
         .checked_add(limits.framing_bytes)
         .and_then(|n| n.checked_add(JSON_BYTES))
         .ok_or_else(invalid_request)?;
+    // The input of a verify, extend, extract or sign item may be a signed result: its
+    // document may be followed by up to `container_bytes` of signature bytes that the engine
+    // classifies. A declared length is checked against this ceiling at once; the counted wire
+    // starts at the plain ceiling and is widened when the metadata names such an input.
+    let maximum_wire = ordinary_wire
+        .checked_add(limits.container_bytes)
+        .ok_or_else(invalid_request)?;
     if metadata.content_length.is_some_and(|n| n > maximum_wire) {
         return Err(ApiError::not_applied(ErrorCode::InputLimit));
     }
+    let wire_limit = Arc::new(std::sync::atomic::AtomicU64::new(ordinary_wire));
     let wire = Arc::new(tokio::sync::Mutex::new(Wire {
         body,
         pace: UploadPace::new(pace),
         total: 0,
-        limit: maximum_wire,
+        limit: wire_limit.clone(),
         scope: scope.shared_view(),
         failure: failure.clone(),
         tail_ledger: None,
@@ -475,6 +493,13 @@ pub(super) async fn prepare(
     validate_metadata(&request)?;
     // Rights are checked before any secret byte is reserved or read.
     precheck(&request)?;
+    // The ceiling of a request is the one of a plain upload unless it has an input that may
+    // already be signed: only then the metadata widens it by the container allowance.
+    if super::dispatch::wire_inputs(&request).next().is_some() {
+        wire_limit.store(maximum_wire, std::sync::atomic::Ordering::SeqCst);
+    } else if metadata.content_length.is_some_and(|n| n > ordinary_wire) {
+        return Err(ApiError::not_applied(ErrorCode::InputLimit));
+    }
     parser
         .install_fields(
             &request
@@ -665,11 +690,25 @@ impl Payload {
                         failure: failure.clone(),
                         scope: ctx.resources().shared_view(),
                     };
-                    let frozen = FrozenInput::capture(
-                        Source::sequential(&mut reader, None),
-                        store,
-                        ctx.resources(),
-                    )
+                    let source = Source::sequential(&mut reader, None);
+                    // The input of a verify, extend, extract or sign item may be a signed result:
+                    // it is spooled as unclassified wire and the engine, which reads it like
+                    // the SDK and the CLI read a file, charges `input_bytes` for the document
+                    // and the format's container allowance for the signature. Every other part
+                    // is a document and stays within `input_bytes` at once. Evidence is validation
+                    // material, bounded per item and not charged to the document allowance.
+                    let frozen = if super::dispatch::wire_inputs(metadata).any(|n| n == name) {
+                        FrozenInput::capture_wire(source, store, ctx.resources(), None)
+                    } else if super::dispatch::evidence_inputs(metadata).any(|n| n == name) {
+                        FrozenInput::capture_wire(
+                            source,
+                            store,
+                            ctx.resources(),
+                            Some(super::dispatch::EVIDENCE_ITEM_BYTES),
+                        )
+                    } else {
+                        FrozenInput::capture(source, store, ctx.resources())
+                    }
                     .map_err(|error| failure.recover(error))?;
                     payload = payload
                         .checked_add(frozen.len())
