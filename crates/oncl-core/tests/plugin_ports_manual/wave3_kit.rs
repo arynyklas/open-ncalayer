@@ -7,8 +7,6 @@ use base64::Engine as _;
 use oncl_core::plugins::{PluginRefusalCode, TicketRefusal};
 use oncl_plugin::operations::KeyKind;
 
-pub const IGNORE: &str = "needs the built port wasm: see docs/dev/plugins-manual-tests.md";
-
 /// A port's way of running one declared operation with its fixed example parameters.
 pub type Runner<'a> = &'a dyn Fn(&str, &RunOptions) -> PortRun;
 
@@ -34,7 +32,6 @@ pub fn tampered(operation: &str, from: &str, to: &str) -> RunOptions {
                     .unwrap_or_else(|| panic!("{operation} has no {from:?}"));
             format!("{}{}{}", &text[..at], to, &text[at + from.len()..])
         })),
-        key: None,
         ..RunOptions::default()
     }
 }
@@ -84,8 +81,9 @@ pub fn assert_tampers_refused(tampers: &[(String, String, String)], run: Runner)
 }
 
 /// Every import an operation declares is needed: with any one deleted the manifest is refused
-/// or the call does not succeed (`Denied`, even after the key use for `keys_release`).
-pub fn assert_every_import_needed(port: &str, operations: &[String], run: Runner) {
+/// or the call does not succeed (`Denied`, even after the key use for `keys_release`). `skip`
+/// names imports a test proves another way.
+pub fn assert_every_import_needed(port: &str, operations: &[String], skip: &[&str], run: Runner) {
     let manifest = oncl_plugin::Manifest::from_toml(&manifest_text(port)).unwrap();
     for operation in operations {
         let op = manifest
@@ -95,6 +93,9 @@ pub fn assert_every_import_needed(port: &str, operations: &[String], run: Runner
             .unwrap_or_else(|| panic!("no operation {operation}"));
         for import in op.uses().imports() {
             let name = import.name();
+            if skip.contains(&name) {
+                continue;
+            }
             let operation_name = operation.clone();
             let tamper = move |text: &str| {
                 let start = text
@@ -116,9 +117,8 @@ pub fn assert_every_import_needed(port: &str, operations: &[String], run: Runner
                 tamper: Some(Box::new(tamper)),
                 ..RunOptions::default()
             };
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(operation, &options)
-            }));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(operation, &options)));
             if let Ok(run) = outcome {
                 assert!(
                     run.call.error().is_some() || run.call.applied() != AppliedState::Applied,
@@ -162,14 +162,38 @@ pub fn without_signature(signed: &str) -> String {
 /// A declaration the module's real call cannot satisfy: it is added to the manifest by the
 /// tamper (the port declares nothing for it), the call is run, and Core refuses it before the
 /// key is applied. Returns the run for the caller's assertions.
-pub fn probe(port: &str, operation: &str, section: &str, params: &[(&str, oncl_core::plugins::PluginParam<'_>)]) -> PortRun {
+pub fn probe(
+    port: &str,
+    operation: &str,
+    section: &str,
+    params: &[(&str, oncl_core::plugins::PluginParam<'_>)],
+) -> PortRun {
     let section = section.to_owned();
     let options = RunOptions {
         tamper: Some(Box::new(move |text| {
             format!("{}\n{section}", with_min_core(text, "0.1.0-alpha.7"))
         })),
-        key: None,
         ..RunOptions::default()
     };
     run_port_operation(port, operation, params, &options)
+}
+
+/// The probe's refusal: the module's `transforms` cannot be said by any profile, so Core
+/// denies the key use (`PermissionDenied`, no typed ticket refusal) before the key is applied.
+/// The declared whole-document `sign-xml` of the same port (which passes no `transforms`) is
+/// the control: it signs.
+pub fn assert_denied_for_transforms(run: &PortRun) {
+    assert_eq!(
+        run.call.applied(),
+        AppliedState::NotApplied,
+        "{:?}",
+        run.call
+    );
+    assert_eq!(run.applications, 0);
+    assert!(run.call.refusals().is_empty(), "{:?}", run.call.refusals());
+    assert!(
+        matches!(run.call.error(), Some(e) if e.code() == oncl_core::ErrorCode::PermissionDenied),
+        "{:?}",
+        run.call
+    );
 }
