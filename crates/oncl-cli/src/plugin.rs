@@ -338,10 +338,12 @@ impl BytesGrant {
     pub fn content_unavailable(&self, ticket: &oncl_core::plugins::PluginUse) -> bool {
         self.bound.is_some() && ticket.content().prehashed
     }
-    /// Whether `ticket` is the one key use this grant allows.
+    /// Whether `ticket` is the one key use this grant allows, of the one key `key` the command
+    /// opened (as on the server, another key is `key-mismatch`).
     pub fn check(
         &self,
         ticket: &oncl_core::plugins::PluginUse,
+        key: &oncl_core::keys::KeyId,
     ) -> Result<(), oncl_core::plugins::TicketRefusal> {
         use oncl_core::plugins::TicketRefusal as R;
         if !matches!(ticket.caller(), CallerContext::LocalOperator(label) if *label == self.caller)
@@ -353,6 +355,9 @@ impl BytesGrant {
         }
         if ticket.max_uses() != oncl_plugin::operations::MAX_USES {
             return Err(R::Uses);
+        }
+        if ticket.key() != key {
+            return Err(R::Key);
         }
         let Some((_, options)) = self.uses.iter().find(|(kind, _)| *kind == ticket.kind()) else {
             return Err(R::Kind);
@@ -751,6 +756,13 @@ mod tests {
 
     const DECLARED_HASH: [u8; 32] = [3; 32];
 
+    impl BytesGrant {
+        /// `check` for the key `k` that `ticket` names.
+        fn check_k(&self, ticket: &PluginUse) -> Result<(), R> {
+            self.check(ticket, &oncl_core::keys::KeyId::new("k").unwrap())
+        }
+    }
+
     fn grant() -> BytesGrant {
         BytesGrant {
             plugin: "test.cli".into(),
@@ -781,28 +793,36 @@ mod tests {
     #[test]
     fn only_the_declared_use_of_the_named_operator_is_allowed() {
         let g = grant();
-        g.check(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH))
+        g.check_k(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH))
             .unwrap();
         assert_eq!(
-            g.check(&ticket("sign", "other", KeyKind::Raw, DECLARED_HASH)),
+            g.check_k(&ticket("sign", "other", KeyKind::Raw, DECLARED_HASH)),
             Err(R::Caller)
         );
         assert_eq!(
-            g.check(&ticket("legacy", "op", KeyKind::Raw, DECLARED_HASH)),
+            g.check_k(&ticket("legacy", "op", KeyKind::Raw, DECLARED_HASH)),
             Err(R::NotGranted)
         );
         assert_eq!(
-            g.check(&ticket("sign", "op", KeyKind::Cms, DECLARED_HASH)),
+            g.check_k(&ticket("sign", "op", KeyKind::Cms, DECLARED_HASH)),
             Err(R::Kind)
         );
         assert_eq!(
-            g.check(&ticket("sign", "op", KeyKind::Raw, [9; 32])),
+            g.check_k(&ticket("sign", "op", KeyKind::Raw, [9; 32])),
             Err(R::Options)
+        );
+        // Another key than the one the command opened: key-mismatch, as on the server.
+        assert_eq!(
+            g.check(
+                &ticket("sign", "op", KeyKind::Raw, DECLARED_HASH),
+                &oncl_core::keys::KeyId::new("other").unwrap()
+            ),
+            Err(R::Key)
         );
         let mut param = grant();
         param.uses = vec![(KeyKind::Raw, None)];
         assert_eq!(
-            param.check(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH)),
+            param.check_k(&ticket("sign", "op", KeyKind::Raw, DECLARED_HASH)),
             Err(R::Options)
         );
     }
@@ -891,10 +911,10 @@ element = "param:xp"
             .set(ContentBinding::bytes(b"x"))
             .unwrap();
         granted
-            .check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a")))
+            .check_k(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a")))
             .unwrap();
         assert_eq!(
-            granted.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/b"))),
+            granted.check_k(&ticket("sign", "op", KeyKind::Xml, options_of("/root/b"))),
             Err(R::Options)
         );
         // A text that is no XPath cannot be matched by anything.
@@ -902,13 +922,13 @@ element = "param:xp"
             .bytes
             .unwrap();
         assert_eq!(
-            invalid.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root"))),
+            invalid.check_k(&ticket("sign", "op", KeyKind::Xml, options_of("/root"))),
             Err(R::Options)
         );
         // Free arguments carry no value for it: refused, as before.
         let free = checked(&["--args-file", "a.json"]).bytes.unwrap();
         assert_eq!(
-            free.check(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a"))),
+            free.check_k(&ticket("sign", "op", KeyKind::Xml, options_of("/root/a"))),
             Err(R::Options)
         );
     }

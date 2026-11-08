@@ -243,7 +243,7 @@ Things an operator should know:
   directory like the keys' secrets directory. It is logged only at `debug` level.
 * **Torn multi-frame writes.** A use is several frames written at once; on power loss the
   filesystem may persist later frames without earlier ones. That leaves a hole in the journal,
-  which is damage (fail closed, `recover_audit` refuses it), never a misread `BEGIN`.
+  which is damage: `open` itself fails and the server does not start (`recover_audit` is not even reached), never a misread `BEGIN`. A cleanly cut tail (a crash before the last write finished) is not a hole: it is repaired by `recover_audit = true` and `plugin_records()` stays readable afterwards.
 * **Rolling back.** An older server over a journal that holds plugin frames ends in
   `fatal_corruption` and will not start. Before rolling back, archive or rotate the journal (move
   the whole audit directory away; keep it for inspection) so the older server begins a new one.
@@ -301,7 +301,7 @@ plugin_bytes = true                # the plugin / its client chooses what the ke
   bytes to a document, **any key use needs `plugin_bytes = true`** in the grant; without it the
   use is refused before any `BEGIN` and before the key; a refusal record may be written (`PermissionDenied`, subcode
   `not-granted`, `NotApplied`). A grant with keys but without `plugin_bytes` starts with a
-  warning that every key use will be refused. One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
+  warning that every key use will be refused; so does a `plugin_bytes` grant of an operation whose key profile names a `param:`. Every start-up skip and warning line is also a `tracing` event (target `oncl::plugin_grants`), and one summary line says how many grants were skipped. With `plugin_bytes = true` on any grant, `audit_segment_bytes` must be at least 4640 (29 frames of 160 bytes: one plugin use writes its detail chunks, its `BEGIN` and reserves its `FINAL`s in one segment); a smaller value is a configuration error. A single use that still does not fit its segment is refused as `audit-fact-too-long` before the journal is touched (the key is not applied and audit health stays healthy). One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. The use is spent only once the audit journal has accepted it: a use the journal refuses (a closed binding, a full or failed journal) does not spend it, and the plugin's retry is decided again. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
 * **Plugins without declarations** (all packages before their manifests carry declarations, and
   third-party ones): nothing changes. The grant is the operator's labels, the options are **not**
   enforced, the audit says `declared=false`, and each such grant logs
@@ -323,7 +323,7 @@ plugin_bytes = true                # the plugin / its client chooses what the ke
 * **What `plugin_bytes = true` means.** You accept that the client (and the plugin) chooses the
   bytes that the named key signs: the server cannot bind the content to a document. The
   declared profile is still forced (kind, options, one use per request), the caller must be the
-  granted token, the key one of the grant's `keys`, and the package the one installed. Give
+  granted token, the key one of the grant's `keys`, and the package the one installed. The request itself must also pass the token's rights: a `plugin` item that names keys needs the token's `sign` right and every named key in the token's `keys`, in addition to the exact operator grant (otherwise 403, nothing runs). Give
   `plugin_bytes` only to a token whose client you trust with that key.
 * **Read the start-up log.** A skipped grant (`oncl-server: error: ... grant skipped: ...`), a
   grant with keys but no `plugin_bytes` (every key use will be refused) and a grant of a plugin

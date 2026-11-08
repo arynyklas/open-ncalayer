@@ -215,7 +215,8 @@ A failure prints `oncl: <code>; subcode=<id>; applied=<NotApplied|Applied|Unknow
 | `PermissionDenied` | `not-declared` | The operation is not declared, not `server = true` or derived; an import beyond the declaration; typed parameters (or no `--args-file`) for a plugin without declarations; a name the plugin calls that is not declared |
 | `PermissionDenied` | `no-key-use` | `--key` for an operation that declares no key use |
 | `PermissionDenied` | `network-not-declared` | `--plugin-pki-endpoint` without `network = "pki"` |
-| `PermissionDenied` | `not-granted` | A key use without `--plugin-bytes` (or not the granted plugin or operation; another key is a plain `PermissionDenied` without a subcode) |
+| `PermissionDenied` | `not-granted` | A key use without `--plugin-bytes` (or not the granted plugin or operation) |
+| `PermissionDenied` | `key-mismatch` | A key use of another key than the one the command opened (as on the server; the one use is not spent) |
 | `PermissionDenied` | `content-mismatch`, `content-binding-unavailable` | Typed parameters: the plugin signs other bytes than the ones passed, or the bound use is digest-form |
 | `PermissionDenied` | `options-mismatch`, `kind-mismatch`, `key-use-spent`, … | The key use differs from the declaration (see [the design](../design/manual-plugins.md) §4.8 for the whole list); the key was not applied except for `key-use-spent` (the first use stays `Applied`) |
 | `InvalidInput` | `unknown-param`, `duplicate-param`, `missing-param`, `param-wrong-kind`, `param-invalid-value`, `invalid-template` | A typed parameter is wrong (above) |

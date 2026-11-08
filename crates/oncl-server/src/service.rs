@@ -301,6 +301,7 @@ fn install_plugins(
     let mut grants = Vec::new();
     let mut policy = ServerPluginPolicy::default();
     let mut ids = std::collections::HashSet::new();
+    let mut skipped = 0usize;
     for plugin in &config.plugins {
         if !ids.insert(plugin.id.as_str()) {
             return Err(invalid());
@@ -336,6 +337,8 @@ fn install_plugins(
             let (imports, declared) = match judge(&plugin.id, &manifest, grant)? {
                 Verdict::Skip(error) => {
                     eprintln!("oncl-server: error: {error}");
+                    tracing::error!(target: "oncl::plugin_grants", "{error}");
+                    skipped += 1;
                     continue;
                 }
                 Verdict::Keep {
@@ -345,6 +348,7 @@ fn install_plugins(
                 } => {
                     for warning in warnings {
                         eprintln!("oncl-server: warning: {warning}");
+                        tracing::warn!(target: "oncl::plugin_grants", "{warning}");
                     }
                     (imports, declared)
                 }
@@ -399,6 +403,10 @@ fn install_plugins(
                 permissions,
             )
             .map_err(|_| invalid())?;
+    }
+    if skipped > 0 {
+        eprintln!("oncl-server: error: {skipped} plugin grants skipped (see the lines above)");
+        tracing::error!(target: "oncl::plugin_grants", skipped, "plugin grants skipped");
     }
     Ok((registry, grants, Arc::new(policy)))
 }

@@ -67,6 +67,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
@@ -165,6 +167,11 @@ jobs:
       - name: Plugin operations lint
         if: runner.os == 'Linux'
         run: cargo xtask plugin-ops-check --require-wasm --wasm-dir target/plugin-ports/wasm32-unknown-unknown/release
+      # The tags are needed: it compares the ports with the last `plugins-*` tag
+      # (docs/dev/plugin-version-check.md); without one it only prints a NOTICE.
+      - name: Plugin versions bumped
+        if: runner.os == 'Linux'
+        run: cargo xtask plugin-version-check
 
   # The built-in modules' limits in a 32-bit process, where their memory is smallest.
   builtins-x86:

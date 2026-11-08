@@ -30,3 +30,6 @@ ru = "Подпись элемента (sign_element) содержит в Transfo
 
 [[differences]]
 ru = "Запрос binary без upload_url и запрос text, у которого data не строка: оригинал не показывал окон и не отвечал, соединение молчало дальше; порт закрывает соединение, ничего не показав."
+
+[[differences]]
+ru = "Окно ручных инструментов: объявлено операций — 5 (sign-text-attached-timestamp, sign-text-attached, sign-text-detached-timestamp, sign-text-detached, sign-xml); каждая применяет ключ один раз и запрашивает подтверждение. Методы, не вошедшие в этот список, в окне не предлагаются."

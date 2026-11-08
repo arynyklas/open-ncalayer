@@ -195,7 +195,7 @@ serialized by the real DTOs. Each token needs the matching action:
 | `jws_verify`, `jwt_verify` | `verify` | JSON; signature, host trust and claims reported separately |
 | `jwt_decode` | `extract` | JSON; `verified` is always `false` |
 | `inspect` (`certificate`, `cms`, `container`, `named`) | `inspect` (`named` also needs that key right) | JSON |
-| `plugin` | exact operator grant only | JSON |
+| `plugin` | the exact operator grant for (token, plugin, operation); a plugin item that names keys also needs the token's `sign` right and each key in the token's `keys` (and in the grant's `keys`), else 403 | JSON |
 | `stamp` | `stamp` | `multipart/mixed` token artifact |
 | `verify_stamp` | `verify_stamp` | JSON |
 
@@ -266,7 +266,7 @@ refusal has a precise reason**, `"subcode": "<id>"`:
 | `key-use-spent` | `PermissionDenied` | One request tried to use a key twice (`applied` is `Applied`) |
 | `not-declared` | `PermissionDenied` | The operation is not declared by the plugin (a server grant for it is skipped at start-up, so a request normally gets a plain 403 without a subcode; the `oncl plugin` CLI reports this id) |
 
-Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`, 47 ids, each with its
+Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`, 49 ids, each with its
 meaning) belong mostly to the desktop manual window; the complete table is in
 [the manual-window guide](manual-plugins.md#отказы-как-читать-код-на-странице) and the SDK guide.
 

@@ -489,6 +489,11 @@ impl ServerConfig {
                             .any(|o| o.token == g.token && o.operation == g.operation)
                     })
             })
+            || (self.audit_segment_bytes < crate::audit::PLUGIN_MIN_SEGMENT_BYTES
+                && self
+                    .plugins
+                    .iter()
+                    .any(|p| p.permissions.iter().any(|g| g.plugin_bytes)))
             || self.hosts.len() > 32
             || self
                 .hosts

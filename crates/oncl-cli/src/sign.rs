@@ -51,7 +51,7 @@ impl KeyUseGuard for Authority {
                     ));
                     return Err(OperationError::PermissionDenied);
                 }
-                Some(grant) => grant.check(ticket).and_then(|()| {
+                Some(grant) => grant.check(ticket, &self.key).and_then(|()| {
                     if self.plugin_used.swap(true, Ordering::SeqCst) {
                         Err(oncl_core::plugins::TicketRefusal::AlreadyUsed)
                     } else {
