@@ -493,7 +493,12 @@ def cmd_pdf_byterange(args):
             tst = tsd["encap_content_info"]["content"].parsed
             imprint_alg = tst["message_imprint"]["hash_algorithm"]["algorithm"].native
             want = tst["message_imprint"]["hashed_message"].native
-            h = DIGESTS[imprint_alg][0]()
+            if imprint_alg in DIGESTS:
+                h = DIGESTS[imprint_alg][0]()
+            else:
+                import gostcrypto
+
+                h = gostcrypto.gosthash.new("streebog512")
             feed(h, data, a, b)
             feed(h, data, c, d)
             entry["doc_timestamp"] = True
