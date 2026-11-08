@@ -71,7 +71,7 @@
 //! present supported proof is checked. Multiple independent SignatureTimeStamp
 //! proofs, other archive versions and distributed coverage are explicit
 //! unsupported errors, never a lower-level Valid claim.
-//! Actual 10-GiB/1-GiB-RSS platform acceptance is not claimed here.
+//! Actual 1-GiB/1-GiB-RSS platform acceptance is not claimed here.
 
 mod c14n;
 mod canonical_stream;

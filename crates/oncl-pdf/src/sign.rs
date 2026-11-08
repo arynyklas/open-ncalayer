@@ -476,8 +476,10 @@ pub(crate) fn xref_entry(offset: u64, generation: u16) -> [u8; 11] {
 #[cfg(test)]
 mod tests {
     #[test]
+    // Offsets beyond ten decimal digits (about 9.3 GiB) are beyond the 1 GiB document
+    // guarantee; u64 offset arithmetic still has to be correct.
     fn xref_stream_offsets_beyond_ten_decimal_digits_are_u64() {
-        // Arithmetic-only boundary; not a 10-GiB document/RSS claim.
+        // Arithmetic-only boundary; not a 1-GiB document/RSS claim (10_737_418_240 is just an offset above ten decimal digits).
         for offset in [(1u64 << 32) + 17, 10_737_418_240, u64::MAX] {
             let row = super::xref_entry(offset, 65534);
             assert_eq!(row[0], 1);

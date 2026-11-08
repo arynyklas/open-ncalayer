@@ -1671,7 +1671,7 @@ fn common_region_replay_bounds_and_append_position_are_checked() {
 }
 
 #[test]
-#[ignore = "writes 4_294_967_328 real record bytes; controller opts into disk boundary run"]
+#[ignore = "writes 4_294_967_328 real record bytes; controller opts into disk boundary run; beyond the 1 GiB document guarantee, kept as a u64 offset arithmetic probe"]
 fn common_region_replay_crosses_four_gib_without_u32_truncation() {
     let cap = ResourceLimits {
         input_bytes: 4_294_967_328,

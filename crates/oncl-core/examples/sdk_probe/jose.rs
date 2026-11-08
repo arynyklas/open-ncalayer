@@ -400,7 +400,7 @@ pub fn run(out: &Path) -> Result<()> {
             "{name}=OpenSSL signed / SDK verified / altered payload rejected\n"
         ));
     }
-    summary.push_str("oracle=OpenSSL RS256 positive/altered-input/altered-signature controls; GOST uses accepted PKI+legacy wire profile, no new external GOST oracle claim\nlimits=bounded JOSE only; no 10GiB/RSS/platform acceptance claim\n");
+    summary.push_str("oracle=OpenSSL RS256 positive/altered-input/altered-signature controls; GOST uses accepted PKI+legacy wire profile, no new external GOST oracle claim\nlimits=bounded JOSE only; no 1GiB/RSS/platform acceptance claim\n");
     std::fs::write(out.join("oracle-verification.txt"), oracle)?;
     std::fs::write(out.join("summary.txt"), &summary)?;
     println!("{summary}");

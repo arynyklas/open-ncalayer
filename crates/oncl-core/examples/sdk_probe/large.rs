@@ -200,9 +200,9 @@ fn evidence_limits() -> EvidenceLimits {
         max_chain_len: 16,
         max_proofs: 16,
         max_coverage_parts: 65536,
-        // a host's evidence budget covering a whole 10 GiB document (the archive time-stamp
-        // of an LTA level covers every document byte)
-        max_coverage_bytes: 12 * 1024 * 1024 * 1024,
+        // a host's evidence budget covering a whole document of the default ceiling (the
+        // archive time-stamp of an LTA level covers every document byte)
+        max_coverage_bytes: oncl_pki::resource::ResourceLimits::default().output_bytes,
     }
 }
 

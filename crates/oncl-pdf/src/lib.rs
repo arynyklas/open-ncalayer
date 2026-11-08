@@ -272,7 +272,8 @@ impl Default for PdfLimits {
             max_read_work: 1_073_741_824,
             max_decode_work: 268_435_456,
             // A 20-27 MB CRL re-embedded by 3 LT/LTA revisions plus slack; default
-            // surcharge ~188 MiB (<2% of the 10 GiB document cap).
+            // surcharge ~188 MiB; the cap is an absolute
+            // evidence budget, independent of the document size.
             max_evidence_bytes: 128 * 1024 * 1024,
         }
     }

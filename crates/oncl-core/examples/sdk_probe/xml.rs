@@ -374,7 +374,7 @@ pub(super) fn run_streaming(out: &Path) -> Result<(), Box<dyn Error>> {
     }
     drop(document);
     drop(scope);
-    summary.push_str("independent_oracle=run xml_oracle.py on bounded oracle artifacts; no GOST oracle claim\nlarge_dom=not-used\nlarge_signing=not-implemented-or-claimed\n10GiB_RSS_gate=not-run\n");
+    summary.push_str("independent_oracle=run xml_oracle.py on bounded oracle artifacts; no GOST oracle claim\nlarge_dom=not-used\nlarge_signing=not-implemented-or-claimed\n1GiB_RSS_gate=not-run\n");
     fs::write(out.join("X03-report.txt"), &summary)?;
     println!("{summary}");
     Ok(())

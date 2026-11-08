@@ -3,7 +3,7 @@
 ETSI EN 319 132-1 V1.2.1 (2022-02) 5.3 and 5.5.2.2, non-distributed
 ArchiveTimeStamp v1.4.1. No production SDK import or large-document DOM.
 The direct-root synthetic RSA chain/status subset is not general PKIX, GOST,
-national trust, arbitrary XAdES interoperability, or a 10-GiB/RSS certification.
+national trust, arbitrary XAdES interoperability, or a 1-GiB/RSS certification.
 """
 from __future__ import annotations
 import argparse
@@ -437,7 +437,7 @@ def run(out: Path):
             if replies.get(proof[7]) != proof[4]:
                 raise ValueError("actual issued nonce/request association")
             tokens += 1
-    lines += [f"actual_RFC3161_request_nonce_matches={tokens}", "gost_document_math_oracle=not-run (SDK medium GOST backend independently recorded; no external GOST claim)", "oracle_topology=bounded generated ID+Exclusive profile/direct-root RSA; not arbitrary distributed-XAdES or production PKIX certification", "large_DOM=not-used; 10GiB_RSS_gate=not-run", "result=PASS"]
+    lines += [f"actual_RFC3161_request_nonce_matches={tokens}", "gost_document_math_oracle=not-run (SDK medium GOST backend independently recorded; no external GOST claim)", "oracle_topology=bounded generated ID+Exclusive profile/direct-root RSA; not arbitrary distributed-XAdES or production PKIX certification", "large_DOM=not-used; 1GiB_RSS_gate=not-run", "result=PASS"]
     text = "\n".join(lines) + "\n"
     (out / "X04-independent-oracle.txt").write_text(text, encoding="utf-8")
     print(text, end="")

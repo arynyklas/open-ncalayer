@@ -275,7 +275,7 @@ fn algorithm_name(t: &Texts, index: i32) -> &'static str {
     }
 }
 
-/// The limits of the manual tools: what the platform allows a document (10 GiB), and no
+/// The limits of the manual tools: what the platform allows a document (1 GiB), and no
 /// short deadline, because a hash of a large file over a slow disk may take hours and the
 /// user stops it with Cancel. The tools' text says so.
 pub fn desktop_limits() -> oncl_pki::resource::ResourceLimits {

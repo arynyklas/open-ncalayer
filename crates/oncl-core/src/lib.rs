@@ -37,9 +37,9 @@
 //! Each operation also enforces its own input/container/framing/output and live
 //! memory/temp/metadata limits. Hash uses a reserved buffer of at most 256 KiB
 //! and fixed SHA/GOST states; it never reads a document into memory wholesale.
-//! The default control profile admits 10_737_418_240 document bytes, accounts
-//! 1_073_741_824 live buffer bytes, 68_719_476_736 scratch bytes and 67_108_864
-//! metadata bytes. These are accounting limits, not evidence of process RSS.
+//! The default control profile guarantees 1_073_741_824 document bytes (a larger
+//! document is refused with an input-limit error), accounts 1_073_741_824 live
+//! buffer bytes, 8_589_934_592 scratch bytes and 67_108_864 metadata bytes. These are accounting limits, not evidence of process RSS.
 //!
 //! Contexts are owned and Send. Grants come from trusted host code, not wire
 //! deserialization. Move a context into its worker; retain its root lease for a
@@ -154,7 +154,7 @@
 //! `cargo run -p oncl-core --example sdk_probe -- --case C03 --out <directory>`
 //! runs a bounded synthetic loopback TSA/OCSP/CRL exercise and emits only public
 //! RSA B/T/LT/LTA, detached/multisigner, extension/Add and negative artifacts.
-//! This is not a full 10-GiB/RSS or platform-matrix acceptance run.
+//! This is not a full 1-GiB/RSS or platform-matrix acceptance run.
 //!
 //! # Bounded JOSE (`jose` feature)
 //!

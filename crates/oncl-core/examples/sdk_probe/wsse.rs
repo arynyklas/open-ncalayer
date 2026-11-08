@@ -428,7 +428,7 @@ pub fn run(out: &Path) -> Result<()> {
         }
         state.finish()
     };
-    evidence.push_str(&format!("records={records} original_bytes={bytes} protected_body_bytes={} provider_opens={opens} private_uses={uses} loopback_pki_requests={calls} wire_sha256={wire_digest:?}\ncovered_mutation=Invalid uncovered_mutation=Valid wrapping=rejected namespace=rejected\nBounded RSA fixture for independent lxml/cryptography oracle; GOST-2004/2015 actual SDK cryptography+strict direct synthetic-root PKI, no independent GOST signature-math claim. No large DOM, production trust, measured RSS, 4-GiB or 10-GiB claim.\n", body.len));
+    evidence.push_str(&format!("records={records} original_bytes={bytes} protected_body_bytes={} provider_opens={opens} private_uses={uses} loopback_pki_requests={calls} wire_sha256={wire_digest:?}\ncovered_mutation=Invalid uncovered_mutation=Valid wrapping=rejected namespace=rejected\nBounded RSA fixture for independent lxml/cryptography oracle; GOST-2004/2015 actual SDK cryptography+strict direct synthetic-root PKI, no independent GOST signature-math claim. No large DOM, production trust, measured RSS, 1-GiB or larger claim.\n", body.len));
     fs::write(out.join("evidence.txt"), &evidence)?;
     println!(
         "case=X05 original_bytes={bytes} records={records} covered_body_bytes={} provider_opens={opens} private_uses={uses} loopback_pki={calls} mutations=checked wrapping=rejected out={}",

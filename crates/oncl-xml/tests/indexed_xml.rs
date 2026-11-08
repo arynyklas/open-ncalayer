@@ -286,7 +286,7 @@ fn sequential_one_byte_reads_and_stable_source() {
     assert_eq!(&out[..n], b"<p:a Id='x'>\xd2\x9b&amp;</p:a>");
 }
 #[test]
-#[ignore = "actual >4GiB structured release probe: cargo run --release -p oncl-xml --features testing --example indexed_xml_probe -- --out <scratch>"]
+#[ignore = "actual >4GiB structured release probe: cargo run --release -p oncl-xml --features testing --example indexed_xml_probe -- --out <scratch>; beyond the 1 GiB document guarantee, kept as a u64 offset probe"]
 fn offset_over_4gib() {
     probe::run(std::env::temp_dir(), true).unwrap();
 }

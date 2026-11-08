@@ -604,7 +604,7 @@ pub fn evidence_limits() -> oncl_pki::evidence::EvidenceLimits {
     }
 }
 /// Timestamp/proof coverage hashes the signed document and the evidence/container it
-/// carries, so it is bounded by the same ceiling as the operation output (the 10 GiB
+/// carries, so it is bounded by the same ceiling as the operation output (the 1 GiB
 /// document plus the container surcharge), not by a small constant: a 64 MiB cap refused
 /// PAdES LTA of a 64 MiB document. Finite, and never above the output ceiling.
 fn coverage_bytes() -> u64 {

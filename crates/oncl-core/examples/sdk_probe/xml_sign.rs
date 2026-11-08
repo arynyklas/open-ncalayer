@@ -840,7 +840,7 @@ pub(super) fn run(out: &Path) -> Result<()> {
     )?;
     writeln!(
         &mut summary,
-        "record_count={count}\nactual_record_bytes={record_bytes}\nactual_input_bytes={}\nmanual_canonical_sha256={}\nmanual_canonical_gost512={}\ndocument_key_opens={}\ndocument_private_uses={}\nkeyless_extension_provider=absent\nloopback_pki_requests={}\nlarge_document_DOM=not-used\nindependent_oracle=run xml_xades_oracle.py --out DIR\n10GiB_RSS_gate=not-run\n",
+        "record_count={count}\nactual_record_bytes={record_bytes}\nactual_input_bytes={}\nmanual_canonical_sha256={}\nmanual_canonical_gost512={}\ndocument_key_opens={}\ndocument_private_uses={}\nkeyless_extension_provider=absent\nloopback_pki_requests={}\nlarge_document_DOM=not-used\nindependent_oracle=run xml_xades_oracle.py --out DIR\n1GiB_RSS_gate=not-run\n",
         fs::metadata(&input)?.len(),
         STANDARD.encode(rsa_digest),
         STANDARD.encode(gost_digest),

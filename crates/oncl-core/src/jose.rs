@@ -20,7 +20,7 @@
 //! parsed data, certificate facts and output reports retain the original root
 //! admission and memory/metadata reservations; only borrowed views escape.
 //! Caller-owned input/output storage and explicit caller copies are not sandboxed.
-//! No 10-GiB document/RSS claim is made by this bounded token API.
+//! No 1-GiB document/RSS claim is made by this bounded token API.
 use crate::output::ProducerOutput;
 use crate::{Action, Engine, OperationContext, OperationError, keys::KeyRequest};
 use base64::{

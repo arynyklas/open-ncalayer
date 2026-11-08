@@ -75,8 +75,8 @@ guide.
   `Unknown`); the SDK never promises rollback or exactly-once.
 - Reports separate signature integrity, anchored chain, validity, revocation, timestamp proof and
   claimed time (`Verdict`); missing evidence is never reported as valid.
-- Limits: 10 GiB of document bytes and 1 GiB of accounted live buffers per operation by
-  default (accounting limits, not RSS measurements); see `docs/dev/sdk.md` for the full list,
+- Limits: 1 GiB of document bytes and 1 GiB of accounted live buffers per operation by
+  default; a document above 1 GiB is refused (accounting limits, not RSS measurements); see `docs/dev/sdk.md` for the full list,
   the semver and error-stability stance, and the publication-readiness status.
 
 Apache-2.0; see `LICENSE` and `NOTICE`.
