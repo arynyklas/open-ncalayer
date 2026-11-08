@@ -143,6 +143,24 @@ impl Fixture {
             .collect()
     }
 
+    /// The log once `count` of its lines end with `suffix` (as soon as that many do), or
+    /// what it holds when [`PATIENCE`] is over. A program the entry starts is not ended when
+    /// the entry is: the entry says it runs again when the system has created the process,
+    /// and the program writes its own line some time after that, as late as a loaded machine
+    /// is slow to start it. A test that reads the log once, at the entry's end, is early by
+    /// that much; this one waits for the line instead.
+    fn log_lines_until(&self, suffix: &str, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let lines = self.log_lines();
+            let found = lines.iter().filter(|l| l.ends_with(suffix)).count();
+            if found >= count || Instant::now() >= deadline {
+                return lines;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn setups_started(&self) -> usize {
         self.log_lines()
             .iter()
@@ -904,15 +922,17 @@ fn a_program_that_starts_while_the_installer_prepares_is_asked_not_stopped() {
         ],
     );
     assert_eq!(code, Exit::Success as u8, "{message}");
-    // It was held (asked) before Setup, so it is started again after the replacement; had
-    // it been left for Setup's force-stop it would be gone.
+    // It was held (asked) before Setup: had it not been, the entry would have refused with
+    // "busy" (a program it did not ask runs), and it would have no arguments to start the
+    // program again with. Setup's force-stop ends it in every run (the fake Setup ends
+    // everything under the installation, as the real one does); the entry starts it again.
     assert!(message.contains("running again"), "{message}");
-    let started = fx
-        .log_lines()
+    let lines = fx.log_lines_until("program started: run --allow-no-wss", 2);
+    let started = lines
         .iter()
         .filter(|l| l.ends_with("program started: run --allow-no-wss"))
         .count();
-    assert_eq!(started, 2, "{:?}", fx.log_lines());
+    assert_eq!(started, 2, "{lines:?}");
 }
 
 #[test]
