@@ -343,6 +343,7 @@ fn registry_and_listing(origin: &str) -> (PluginRegistry, ManualListing) {
         plugin_id: plain.id.clone(),
         plugin_version: plain.version.to_string(),
         plugin_name: plain.name.clone(),
+        reason: super::offer::WithoutReason::NoManualOperations,
     });
     listing.unusable.push(UnusablePlugin {
         plugin_id: "test.broken".to_owned(),
@@ -645,16 +646,20 @@ fn the_list_groups_operations_by_plugin_and_keeps_the_plugins_words_in_their_fra
         assert_eq!(hidden.len(), 2);
         assert_eq!(
             hidden[0].line,
-            t.without_ops
-                .replace("{0}", "test.plain")
-                .replace("{1}", "1.0.0")
+            format!(
+                "{} {}",
+                t.without_ops
+                    .replace("{0}", "test.plain")
+                    .replace("{1}", "1.0.0"),
+                t.why_no_manual
+            )
         );
         assert!(
             hidden[0].name.contains("EVIL-NAME"),
             "the name is in its frame"
         );
         assert_eq!(hidden[1].line, t.unusable.replace("{0}", "test.broken"));
-        assert_eq!(ui.get_hidden_why(), t.without_ops_why);
+        assert!(ui.get_hidden().iter().all(|r| !r.line.is_empty()));
         assert_eq!(ui.get_list_note(), "");
     }
 }
@@ -979,7 +984,26 @@ fn confirming_through_the_named_button_applies_the_key_once_and_says_so() {
     // The reply is the plugin's, in its frame, and the result says it is not saved.
     let reply = ui.get_reply().to_string();
     assert!(!reply.is_empty());
-    assert_eq!(ui.get_result_note(), t.no_save);
+    assert_eq!(ui.get_result_note(), t.save_note_offered);
+    // It can be saved, whole and as received, under the host's name; an existing file stays.
+    assert!(ui.get_save_offered());
+    assert_eq!(ui.get_save_reply_label(), t.save_reply);
+    let dir = rig.file("saved-here.txt", b"").parent().unwrap().to_owned();
+    let target = dir.join("kept.json");
+    std::fs::write(&target, b"mine").unwrap();
+    super::write_reply(&rig.ws, target.clone());
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert_eq!(rig.ui().get_save_note(), t.save_exists);
+    let fresh = dir.join("reply.json");
+    super::write_reply(&rig.ws, fresh.clone());
+    assert_eq!(std::fs::read(&fresh).unwrap(), reply.as_bytes());
+    assert!(rig.ui().get_save_note().contains("reply.json"));
+    // Other than `.json` gets `.json`.
+    super::write_reply(&rig.ws, dir.join("reply2.txt"));
+    assert_eq!(
+        std::fs::read(dir.join("reply2.txt.json")).unwrap(),
+        reply.as_bytes()
+    );
     for row in &rows {
         assert!(!row.contains(&reply), "the reply is in the host's rows");
     }

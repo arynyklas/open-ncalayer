@@ -11,8 +11,11 @@
 //! * Why Core refused a key use is said through [`RefusalWords`], a seam: the local mapping
 //!   [`TicketWords`] words each `TicketRefusal` of Core; when Core's refusal subcodes land the
 //!   page swaps this one implementation and nothing else.
-//! * Nothing here saves a file: the manifest declares no file output for the manual window and
-//!   Core's call has no output binding, so the result is shown, not saved (`no_save`).
+//! * The host saves nothing by itself. The reply of a verified-applied call (the success
+//!   condition above) can be saved, whole and as received, to a `.json` file the user places
+//!   (`save.rs`): the manifest declares no file output for the manual window and Core's call
+//!   has no output binding, so the reply is the only thing there is to save, and the host
+//!   never extracts a signature from it.
 
 use oncl_core::ErrorCode;
 use oncl_core::plugins::{
@@ -21,6 +24,7 @@ use oncl_core::plugins::{
 use oncl_flows::Locale;
 use oncl_pki::key::AppliedState;
 
+use super::save::SaveOffer;
 use super::texts::Texts;
 use crate::reports::{Row, controller::Tone};
 use crate::workspace::{JobError, Texts as WorkspaceTexts, error_text};
@@ -177,6 +181,9 @@ pub(super) struct ResultView {
     pub(super) rows: Vec<Row>,
     pub(super) reply: Option<ReplyView>,
     pub(super) note: String,
+    /// The whole reply and the name the host suggests, only for a call that was verified
+    /// applied (the same condition as the success tone).
+    pub(super) save: Option<SaveOffer>,
 }
 
 /// A reply as the frame draws it: line breaks and tabs become spaces, other control characters
@@ -336,12 +343,25 @@ pub(super) fn render(
             },
         }
     });
+    let save = report
+        .response
+        .as_deref()
+        .filter(|raw| verified && !raw.is_empty())
+        .map(|raw| SaveOffer::new(raw, facts.operation, facts.plugin_id));
     ResultView {
         tone,
         headline,
         rows,
         reply,
-        note: t.no_save.to_owned(),
+        note: if save.is_some() {
+            t.save_note_offered
+        } else if report.response.is_some() {
+            t.save_note_none
+        } else {
+            ""
+        }
+        .to_owned(),
+        save,
     }
 }
 
@@ -353,7 +373,8 @@ pub(super) fn render_lost(facts: &RunFacts<'_>, l: Locale) -> ResultView {
         headline: t.r_lost.to_owned(),
         rows: plain_rows(facts, l, t.row_key_unknown),
         reply: None,
-        note: t.no_save.to_owned(),
+        note: String::new(),
+        save: None,
     }
 }
 
@@ -366,6 +387,7 @@ pub(super) fn render_cancelled(facts: &RunFacts<'_>, l: Locale) -> ResultView {
         rows: plain_rows(facts, l, t.row_key_not_applied),
         reply: None,
         note: String::new(),
+        save: None,
     }
 }
 
@@ -720,5 +742,56 @@ mod tests {
         }
         let _ = (JobError::Cancelled, WorkspaceTexts::of(Locale::En));
         let _ = error_text;
+    }
+
+    /// The reply of a verified-applied call is offered whole (not the 2000 characters shown),
+    /// under a name built from the host's own facts; no other call offers anything.
+    #[test]
+    fn only_a_verified_applied_call_offers_the_whole_reply_under_a_host_made_name() {
+        let long = format!("{{\"x\":\"{}\"}}\n\u{202e}", "A".repeat(5000));
+        for l in ALL {
+            let ok = render(
+                &report(AppliedState::Applied, vec![], Some(&long), None),
+                &facts(),
+                l,
+                &TicketWords,
+            );
+            let offer = ok.save.expect("verified applied: offered");
+            assert_eq!(offer.reply.bytes(), long.as_bytes());
+            assert!(ok.reply.unwrap().text.chars().count() <= MAX_REPLY_CHARS);
+            assert_eq!(offer.name, "sign-xml-test.ui.json");
+            let t = Texts::of(l);
+            assert_eq!(ok.note, t.save_note_offered);
+            let cases = [
+                report(AppliedState::NotApplied, vec![], Some(&long), None),
+                report(AppliedState::Unknown, vec![], Some(&long), None),
+                report(AppliedState::Applied, vec![], None, None),
+                report(
+                    AppliedState::Applied,
+                    vec![],
+                    Some(&long),
+                    Some(ErrorCode::Cancelled),
+                ),
+                report(
+                    AppliedState::Applied,
+                    vec![TicketRefusal::Expired],
+                    Some(&long),
+                    None,
+                ),
+            ];
+            for case in cases {
+                let view = render(&case, &facts(), l, &TicketWords);
+                assert!(view.save.is_none(), "{case:?}");
+            }
+        }
+        // A reply that tries to name the file changes nothing about the name.
+        let hostile = "{\"file\":\"../../evil.exe\"}";
+        let view = render(
+            &report(AppliedState::Applied, vec![], Some(hostile), None),
+            &facts(),
+            Locale::En,
+            &TicketWords,
+        );
+        assert_eq!(view.save.unwrap().name, "sign-xml-test.ui.json");
     }
 }

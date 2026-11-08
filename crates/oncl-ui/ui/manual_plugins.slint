@@ -75,7 +75,6 @@ export global PluginsState {
     in property <string> list-note;
     in property <[PluginGroupRow]> groups;
     in property <string> hidden-heading;
-    in property <string> hidden-why;
     in property <[PluginHiddenRow]> hidden;
 
     // The form.
@@ -137,6 +136,9 @@ export global PluginsState {
     in property <string> reply;
     in property <string> reply-cut;
     in property <string> result-note;
+    in property <bool> save-offered;
+    in property <string> save-reply-label;
+    in property <string> save-note;
 
     callback refresh();
     // Group index, operation index.
@@ -156,6 +158,8 @@ export global PluginsState {
     callback back();
     callback again();
     callback finish();
+    // Save the reply of a verified call, as received.
+    callback save-reply();
 }
 
 // The confirmation: its first focus is on «Cancel»; Enter there cancels.
@@ -476,9 +480,6 @@ export component PluginsPage inherits EscapeScope {
                         label: row.name;
                     }
                 }
-                Hint {
-                    text: PluginsState.hidden-why;
-                }
             }
             if PluginsState.error != "": ErrorText {
                 text: PluginsState.error;
@@ -689,6 +690,23 @@ export component PluginsPage inherits EscapeScope {
             }
             Hint {
                 text: PluginsState.result-note;
+            }
+
+            // Saving the reply as received: after the reply, before «Back to the list»; never
+            // the primary button, so Enter does not press it.
+            if PluginsState.save-offered: HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: PluginsState.save-reply-label;
+                    accessible-label: PluginsState.save-reply-label;
+                    enabled: !PluginsState.busy;
+                    clicked => {
+                        PluginsState.save-reply();
+                    }
+                }
+            }
+            if PluginsState.save-note != "": Hint {
+                text: PluginsState.save-note;
             }
 
             HorizontalLayout {

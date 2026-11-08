@@ -59,7 +59,7 @@ pub use workspace::progress;
 pub use workspace::{
     DesktopEngineServices, JobControl, ManualListing, ManualPluginSource, NoManualPlugins,
     OfferError, OfferedOperation, PluginEngineKit, PluginOffer, UnusablePlugin, WithoutOperations,
-    desktop_limits, open_workspace, plugin_offer,
+    WithoutReason, desktop_limits, open_workspace, plugin_offer,
 };
 
 mod ui {

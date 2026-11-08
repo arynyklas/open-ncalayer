@@ -64,12 +64,27 @@ pub struct OfferedOperation {
     pub pki_endpoints: Vec<(HttpMethod, String)>,
 }
 
+/// Why an installed, readable plugin offers no operation to the manual window. Computed by the
+/// host from the plugin's manifest and its registry, never from a list of known ports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithoutReason {
+    /// The manifest declares no `[[operations]]`.
+    NoOperations,
+    /// It declares operations, none of them `manual` and runnable.
+    NoManualOperations,
+    /// Every manual operation needs `network = [urls]`, which the window does not run.
+    UnsupportedNetwork,
+    /// The registry did not accept the plugin's operations for the window.
+    NotRegistered,
+}
+
 /// An installed plugin that offers no operation to the manual window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WithoutOperations {
     pub plugin_id: String,
     pub plugin_version: String,
     pub plugin_name: Localized,
+    pub reason: WithoutReason,
 }
 
 /// An installed plugin whose package could not be read. The reason stays in the log.
