@@ -27,7 +27,7 @@ name = "sign-cms-attached-timestamp"
 module = "kz.energy.sign.SignEnergy"
 manual = true
 request = '{"module":"kz.energy.sign.SignEnergy","method":"sign","args":{"encapsulate":true,"isDigested":false,"tsaProfile":true,"data":[{"id":"1","name":"document","base64":"{file:base64}"}]}}'
-label = { ru = "Подписать CMS: с меткой времени (данные внутри)", kk = "CMS қол қою: уақыт белгісі бар (деректер ішінде)", en = "Sign a CMS: time-stamped (attached)" }
+label = { ru = "Подписать CMS: с меткой времени (данные внутри) (без окна ошибки)", kk = "CMS қол қою: уақыт белгісі бар (деректер ішінде) (қате терезесінсіз)", en = "Sign a CMS: time-stamped (attached) (no error window)" }
 
 [[operations.params]]
 name = "file"
@@ -50,7 +50,7 @@ name = "sign-cms-attached"
 module = "kz.energy.sign.SignEnergy"
 manual = true
 request = '{"module":"kz.energy.sign.SignEnergy","method":"sign","args":{"encapsulate":true,"isDigested":false,"tsaProfile":false,"data":[{"id":"1","name":"document","base64":"{file:base64}"}]}}'
-label = { ru = "Подписать CMS: данные внутри", kk = "CMS қол қою: деректер ішінде", en = "Sign a CMS: attached" }
+label = { ru = "Подписать CMS: данные внутри (без окна ошибки)", kk = "CMS қол қою: деректер ішінде (қате терезесінсіз)", en = "Sign a CMS: attached (no error window)" }
 
 [[operations.params]]
 name = "file"
@@ -72,7 +72,7 @@ name = "sign-cms-detached-timestamp"
 module = "kz.energy.sign.SignEnergy"
 manual = true
 request = '{"module":"kz.energy.sign.SignEnergy","method":"sign","args":{"encapsulate":false,"isDigested":false,"tsaProfile":true,"data":[{"id":"1","name":"document","base64":"{file:base64}"}]}}'
-label = { ru = "Подписать CMS: с меткой времени (отсоединённая)", kk = "CMS қол қою: уақыт белгісі бар (бөлек)", en = "Sign a CMS: time-stamped (detached)" }
+label = { ru = "Подписать CMS: с меткой времени (отсоединённая) (без окна ошибки)", kk = "CMS қол қою: уақыт белгісі бар (бөлек) (қате терезесінсіз)", en = "Sign a CMS: time-stamped (detached) (no error window)" }
 
 [[operations.params]]
 name = "file"
@@ -94,7 +94,7 @@ name = "sign-cms-detached"
 module = "kz.energy.sign.SignEnergy"
 manual = true
 request = '{"module":"kz.energy.sign.SignEnergy","method":"sign","args":{"encapsulate":false,"isDigested":false,"tsaProfile":false,"data":[{"id":"1","name":"document","base64":"{file:base64}"}]}}'
-label = { ru = "Подписать CMS: отсоединённая подпись", kk = "CMS қол қою: бөлек қолтаңба", en = "Sign a CMS: detached" }
+label = { ru = "Подписать CMS: отсоединённая подпись (без окна ошибки)", kk = "CMS қол қою: бөлек қолтаңба (қате терезесінсіз)", en = "Sign a CMS: detached (no error window)" }
 
 [[operations.params]]
 name = "file"

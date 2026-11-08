@@ -3,7 +3,6 @@
 //! (`oncl_plugin::operations::XmlExProfile`, `ticket.rs::xml_ex_profile`), so Core refuses
 //! the call whatever the declaration. The probe appends the closest declaration and shows the
 //! refusal before the key.
-use crate::ports::*;
 use crate::wave3_kit::*;
 use oncl_core::plugins::PluginParam;
 
@@ -39,7 +38,11 @@ output = { serialize = { declaration = true, standalone_no = true, trim = false 
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn the_transforms_the_module_asks_for_cannot_be_declared() {
-    let run = probe("qiwi", "probe", PROBE, &[("xml", PluginParam::Text("<r/>"))]);
-    assert_refused_before_the_key(&run);
-    assert_eq!(run.applications, 0);
+    let run = probe(
+        "qiwi",
+        "probe",
+        PROBE,
+        &[("xml", PluginParam::Text("<r/>"))],
+    );
+    assert_denied_for_transforms(&run);
 }

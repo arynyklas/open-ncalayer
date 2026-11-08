@@ -13,7 +13,12 @@ fn operation(suffix: &str) -> String {
 }
 
 fn run_operation(operation: &str, options: &RunOptions) -> PortRun {
-    run_port_operation(PORT, operation, &[("file", PluginParam::Document(DOC))], options)
+    run_port_operation(
+        PORT,
+        operation,
+        &[("file", PluginParam::Document(DOC))],
+        options,
+    )
 }
 
 fn cms_run(suffix: &str, attached: bool, timestamped: bool) {
@@ -82,5 +87,5 @@ fn a_wrong_profile_field_is_refused_before_the_key() {
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn every_declared_import_is_needed() {
-    assert_every_import_needed(PORT, &operations(), &run_operation);
+    assert_every_import_needed(PORT, &operations(), &[], &run_operation);
 }

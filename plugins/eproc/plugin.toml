@@ -33,7 +33,7 @@ kind = "text"
 max_chars = 65536
 
 [operations.uses]
-imports = ["keys_select", "random", "keys_sign_xml"]
+imports = ["keys_select", "keys_release", "random", "keys_sign_xml"]
 network = "pki"
 
 [[operations.uses.key]]
@@ -63,7 +63,7 @@ kind = "text"
 max_chars = 256
 
 [operations.uses]
-imports = ["keys_select", "random", "keys_sign_xml"]
+imports = ["keys_select", "keys_release", "random", "keys_sign_xml"]
 network = "pki"
 
 [[operations.uses.key]]

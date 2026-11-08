@@ -6,7 +6,8 @@ use oncl_core::plugins::PluginParam;
 use oncl_plugin::operations::{KeyKind, Profile};
 
 const PORT: &str = "efactoring";
-const TEXT: &str = "Договор №1: текст, который подтвердил пользователь\nвторая строка\tс табуляцией";
+const TEXT: &str =
+    "Договор №1: текст, который подтвердил пользователь\nвторая строка\tс табуляцией";
 const XML: &str = "<r><data Id=\"d1\">actual XML text</data></r>";
 
 fn text_operation(suffix: &str) -> String {
@@ -17,7 +18,12 @@ fn run_operation(operation: &str, options: &RunOptions) -> PortRun {
     if operation == "sign-xml" {
         run_port_operation(PORT, operation, &[("xml", PluginParam::Text(XML))], options)
     } else {
-        run_port_operation(PORT, operation, &[("text", PluginParam::Text(TEXT))], options)
+        run_port_operation(
+            PORT,
+            operation,
+            &[("text", PluginParam::Text(TEXT))],
+            options,
+        )
     }
 }
 
@@ -87,7 +93,10 @@ fn sign_xml_signs_the_whole_document() {
 }
 
 fn operations() -> Vec<String> {
-    let mut all: Vec<String> = CMS_VARIANTS.iter().map(|(s, ..)| text_operation(s)).collect();
+    let mut all: Vec<String> = CMS_VARIANTS
+        .iter()
+        .map(|(s, ..)| text_operation(s))
+        .collect();
     all.push("sign-xml".to_owned());
     all
 }
@@ -103,7 +112,10 @@ fn a_wrong_profile_field_is_refused_before_the_key() {
         ("strip_whitespace = true", "strip_whitespace = false"),
         ("base64_line_breaks = false", "base64_line_breaks = true"),
         ("trim = true", "trim = false"),
-        ("placement = \"document_element\"", "placement = \"first_child_of_document\""),
+        (
+            "placement = \"document_element\"",
+            "placement = \"first_child_of_document\"",
+        ),
     ] {
         tampers.push(("sign-xml".to_owned(), from.to_owned(), to.to_owned()));
     }
@@ -113,7 +125,7 @@ fn a_wrong_profile_field_is_refused_before_the_key() {
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn every_declared_import_is_needed() {
-    assert_every_import_needed(PORT, &operations(), &run_operation);
+    assert_every_import_needed(PORT, &operations(), &[], &run_operation);
 }
 
 const PROBE: &str = r#"
@@ -154,7 +166,14 @@ output = { serialize = { declaration = false, standalone_no = false, trim = true
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn the_element_form_of_xml_cannot_be_declared() {
-    let run = probe(PORT, "probe-element", PROBE, &[("xml", PluginParam::Text("<r><data Id=\"d1\">x</data><s/></r>"))]);
-    assert_refused_before_the_key(&run);
-    assert_eq!(run.applications, 0);
+    let run = probe(
+        PORT,
+        "probe-element",
+        PROBE,
+        &[(
+            "xml",
+            PluginParam::Text("<r><data Id=\"d1\">x</data><s/></r>"),
+        )],
+    );
+    assert_denied_for_transforms(&run);
 }

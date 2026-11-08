@@ -1,13 +1,12 @@
 //! `kz.rating1c.edo.signUtils`: `signXml`, `createCmsFromBase64`, `createRawSignFromBase64`.
 use crate::ports::*;
+use crate::wave3_kit::base64_of;
 use oncl_core::plugins::{PluginParam, TicketRefusal};
 use oncl_plugin::operations::{KeyKind, Profile};
 
 const PORT: &str = "rating1c";
 const DOC: &[u8] = b"1C-Rating EDO: the document the user approved";
 const XML: &str = "<r><data Id=\"d1\">actual XML text</data><s></s></r>";
-
-const IGNORE: &str = "needs the built port wasm: see docs/dev/plugins-manual-tests.md";
 
 fn response_object(run: &PortRun) -> serde_json::Value {
     let json = reply_json(run);
@@ -25,7 +24,6 @@ fn without_signature(signed: &str) -> String {
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn sign_xml_signs_the_whole_document() {
-    let _ = IGNORE;
     let params = [("xml", PluginParam::Text(XML))];
     let run = run_port_operation(PORT, "sign-xml", &params, &RunOptions::default());
     assert_applied(&run);
@@ -101,11 +99,6 @@ fn cms_run(operation: &str, attached: bool, timestamped: bool) {
         .iter()
         .any(|l| l.starts_with("GET http://tsp.pki.gov.kz/"));
     assert_eq!(tsa, timestamped, "{:?}", run.http_log);
-}
-
-fn base64_of(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[test]
