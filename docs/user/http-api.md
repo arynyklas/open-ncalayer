@@ -454,7 +454,7 @@ must match the declaration exactly: the ticket's plugin, package hash, operation
 token as caller, a named key of the grant, the declared kind and the declared options
 (`options-mismatch` otherwise) and it must be the request's only key use (a second plugin item or a second signature in the same request is `key-use-spent`).
 
-**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. The shipped plugins under `plugins/` declare 27 operations, but none declares `server = true`: no shipped operation can be granted on the server (or run by `oncl plugin call`); the server skips such a grant with an error in the log and the CLI refuses it with `not-declared`.
+**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. The shipped plugins under `plugins/` declare 30 operations, but none declares `server = true`: no shipped operation can be granted on the server (or run by `oncl plugin call`); the server skips such a grant with an error in the log and the CLI refuses it with `not-declared`.
 
 At start-up a grant of a declared plugin is checked against the manifest and **skipped with
 an error in the log** (the other grants and the server keep running) when it is wider than the

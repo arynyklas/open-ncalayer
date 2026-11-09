@@ -317,7 +317,7 @@ plugin_bytes = true                # the plugin / its client chooses what the ke
 
 ### Operator guidance for plugin grants
 
-* **Today there is nothing to grant.** The shipped plugins declare 27 operations in total, all
+* **Today there is nothing to grant.** The shipped plugins declare 30 operations in total, all
   `manual = true` and none `server = true` (see [the manual-window guide](manual-plugins.md)); a
   server grant for them is skipped with an `oncl-server: error:` line. Grants apply to
   third-party plugins that declare `server = true`, and to plugins without declarations.

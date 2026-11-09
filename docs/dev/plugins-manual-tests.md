@@ -104,7 +104,7 @@ oracle::verify_xml(signed, &cert, n) -> XmlFacts;  oracle::assert_xml_rejected(d
 
 Волна 1: `rating1c` (7 операций). Волна 2: `fhs` (`sign-xml`, `sign-text`: `args` — объект), `esf-osdkz` (`sign-plain-data`: корневой запрос, `raw` над текстом; Core отказывает на управляющих/bidi/невидимых символах).
 
-Волна 3: `energy` (4 операции `sign-cms-*`), `eproc` (2), `efactoring` и `market` (по 5: `sign-text-*` ×4, `sign-xml`), `dogovor24` (`sign-cms`). `qiwi.signXml` и `efactoring.xml` с элементом не объявлены: порт передаёт `transforms`, которых профиль не выражает (инвентаризация §9, W3-1/W3-2; пробы `qiwi.rs`, `efactoring.rs`). Общие таблицы негативных тестов (подмена профиля, удаление импорта) — `plugin_ports_manual/wave3_kit.rs`.
+Волна 3: `energy` (4 операции `sign-cms-*`), `eproc` (2), `efactoring` (6: `sign-text-*` ×4, `sign-xml`, `sign-xml-element`), `market` (5: `sign-text-*` ×4, `sign-xml`), `dogovor24` (`sign-cms`), `qiwi` (2: `sign-xml-rsa` и `sign-xml-gost2004`, по одной на алгоритм ключа; подпись ГОСТ 2004 проверяет только `oncl_xml::verify`, оракул lxml знает RSA). Профили с `transforms`: инвентаризация §9, W3-1/W3-2; тесты `qiwi.rs`, `efactoring.rs`. Общие таблицы негативных тестов (подмена профиля, удаление импорта) — `plugin_ports_manual/wave3_kit.rs`.
 
 ## Границы проверок (что оракулы НЕ доказывают)
 

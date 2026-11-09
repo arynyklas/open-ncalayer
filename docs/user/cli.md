@@ -185,7 +185,7 @@ A text parameter that a key profile reads (`element = "param:xpath"`) is also wh
 
 A plugin **without** `[[operations]]` is unchanged: it takes only `--args-file`, and `--param*` or a missing `--args-file` is refused (`PermissionDenied`, `subcode=not-declared`) because there is nothing to check them against. `--plugin-bytes` has no effect on it (a warning says so).
 
-`plugin call` runs only an operation with `server = true`. The plugins shipped in `plugins/` declare 27 operations, all `manual = true` for the desktop's manual window ([guide](manual-plugins.md)) and none `server = true`, so `oncl plugin call` refuses every one of them with `subcode=not-declared`; `plugin operations` still lists them.
+`plugin call` runs only an operation with `server = true`. The plugins shipped in `plugins/` declare 30 operations, all `manual = true` for the desktop's manual window ([guide](manual-plugins.md)) and none `server = true`, so `oncl plugin call` refuses every one of them with `subcode=not-declared`; `plugin operations` still lists them.
 
 ### Consent and audit
 
