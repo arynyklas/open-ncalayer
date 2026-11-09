@@ -181,3 +181,60 @@ pub fn trust_summary(v: &super::super::oncl::Verified, index: usize) -> String {
         v.check(index, "validity")
     )
 }
+
+/// The Kalkan JCE name of the signature algorithm of a GOST profile (hash and sign in one:
+/// Streebog-512 with the 2015 curve, GOST R 34.11-94 with the 2004 curve).
+pub fn kalkan_algorithm(profile: Profile) -> anyhow::Result<&'static str> {
+    match profile {
+        Profile::Gost2015 => Ok("ECGOST3410-2015-512"),
+        Profile::Gost2004 => Ok("ECGOST34310"),
+        Profile::Rsa => anyhow::bail!("Kalkan is the oracle of the GOST profiles, not of RSA"),
+    }
+}
+
+/// Kalkan's verdict on `signature` (as the signer wrote it) over `data` with the public key
+/// of the DER certificate `cert`.
+pub fn kalkan_raw(
+    ctx: &Ctx,
+    profile: Profile,
+    cert: &std::path::Path,
+    data: &[u8],
+    signature: &[u8],
+) -> anyhow::Result<bool> {
+    let data = ctx.write("kalkan.data", data)?;
+    let signature = ctx.write("kalkan.sig", signature)?;
+    let answer = ctx.java_json(&[
+        "raw",
+        kalkan_algorithm(profile)?,
+        super::super::oncl::path_str(cert)?,
+        super::super::oncl::path_str(&data)?,
+        super::super::oncl::path_str(&signature)?,
+    ])?;
+    Ok(super::super::kalkan::verdict(&answer))
+}
+
+/// Kalkan accepts `signature` over `data` and rejects the same signature over altered
+/// data: a verifier that said yes (or no) to everything fails here.
+pub fn kalkan_raw_discriminates(
+    ctx: &Ctx,
+    profile: Profile,
+    cert: &std::path::Path,
+    data: &[u8],
+    signature: &[u8],
+    maker: &str,
+) -> anyhow::Result<()> {
+    ensure!(
+        kalkan_raw(ctx, profile, cert, data, signature)?,
+        "Kalkan ({}) rejected {maker}'s raw {} signature ({} bytes)",
+        kalkan_algorithm(profile)?,
+        profile.label(),
+        signature.len()
+    );
+    let mut altered = data.to_vec();
+    altered[0] ^= 1;
+    ensure!(
+        !kalkan_raw(ctx, profile, cert, &altered, signature)?,
+        "Kalkan accepted {maker}'s signature over altered data"
+    );
+    Ok(())
+}

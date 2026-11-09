@@ -12,17 +12,49 @@
 | `openssl` 3.x | `cms -verify` с путём до корня, `cms -sign`, `pkcs12 -legacy` | RSA CMS/CAdES |
 | `pyhanko` 0.38.0 | PAdES: целостность, доверие, DSS, метки документа | RSA PDF |
 | `lxml`, `cryptography`, `asn1crypto` | каноническая форма XML, RSA над SignedInfo / signedAttrs, разбор BER/DER, токены RFC 3161, разбор ByteRange | RSA и структура |
+| `kalkan` (только локально) | настоящий провайдер Kalkan (`kalkancrypt` 0.7.8) и конфигурация XMLDSig `kalkancrypt_xmldsig` 0.5.2 в маленьком Java-проверяющем `xtask/assets/platform-interop/KalkanOracle.java`; jar-ы берутся у оператора, в репозитории их нет | независимый проверяющий ГОСТ-подписей, сделанных `oncl` и NCANode: сырые (ГОСТ 2004 и 2015-512), JWS `ECGOST3410-2015-512`, WS-Security XMLDSig. 12 строк матрицы |
 
 Окружение Python: `ONCL_PYHANKO_PYTHON` (venv с `pyHanko==0.38.0 pyhanko-certvalidator==0.33.0 lxml gostcrypto`; точные закреплённые версии прямых зависимостей — `xtask/assets/oracle/requirements.txt`, `pip install --require-virtualenv -r` в venv; их же ставит job `test` в CI). `ONCL_OPENSSL` — путь к OpenSSL. Контейнер и том NCANode: `ONCL_NCANODE_CONTAINER`, `ONCL_NCANODE_CACHE_VOLUME` (по умолчанию как у `interop-ncanode`; общий том не меняется, если задать свой). `cargo xtask fetch-fixtures` берёт `openapi.yml`, CAdES/PAdES/XAdES-образцы NCANode; ничего из этого не коммитится.
 
 Отсутствующий инструмент или другая версия, чем в дескрипторе, даёт строку `BLOCKED` с точной причиной, а не подмену.
+
+## Оракул Kalkan (только локально)
+
+12 строк раньше были `BLOCKED`, потому что ни один внешний проверяющий не мог судить ГОСТ-подпись, сделанную нашим кодом: `/wsse/verify` NCANode отвечает только `valid` (в нём цепочка, не доверенная для всех ключей матрицы), `/jwt/*` NCANode не знает `ECGOST3410-2015-512` (HTTP 400), сырого ГОСТ-проверяющего нет ни у NCANode, ни у OpenSSL/Python. Эти строки судит Kalkan напрямую, тем же провайдером, который стоит в NCALayer и в NCANode, но вызванным отдельно от `oncl`:
+
+| строки | что проверяет Kalkan |
+|---|---|
+| `wsse-sign-gost2015`, `wsse-sign-gost2004` | Santuario с классами ГОСТ из `kalkancrypt_xmldsig`: `SignatureValue` над каноническим `SignedInfo` и дайджест ссылки (подписанный узел — `Body`) судятся **отдельно**; сертификат берётся из `KeyIdentifier` самого сообщения |
+| `wsse-tamper-gost{2015,2004}-{body,signature}` | сначала контроль: нетронутое сообщение тем же проверяющим принято (`kalkan-control=verified/Body`), затем изменённое отвергнуто ровно по изменённой части: тело → `rejected/digest` (значение подписи цело), `SignatureValue` → `rejected/signature-value` (дайджест цел). Проверяющий, который говорит «да» или «нет» всему, не проходит ни одну из этих строк |
+| `jws-gost2015-independent-signature` | подпись `ECGOST3410-2015-512` над `header.payload` (общая сериализация переводится в компактную) принята, изменённая полезная нагрузка и изменённая подпись отвергнуты |
+| `x509-sign-{ours,ncanode}-gost{2015,2004}` | сырая подпись (`oncl sign --profile raw` / NCANode `/x509/sign`) с сертификатом подписанта: принята, она же над изменёнными данными отвергнута. Алгоритмы Kalkan: `ECGOST3410-2015-512` и `ECGOST34310`; байты подписи берутся как записал подписант, ничего не переставляется |
+| `plugin-sign-raw-gost2015` | подпись, которую вернул `keys_sign_raw`: то же, что в сырых строках |
+
+Ответ проверяющего — одна JSON-строка: `{"ok": true|false, ...}` — вердикт о подписи; `{"error": "..."}` (код 2) значит, что сам проверяющий не смог работать (нет алгоритма, битый вход), и строка падает, а не считается «отвергнуто». Santuario отдаёт подпись и дайджесты одной булевой, поэтому проверяющий считает `SignatureValue` сам и сверяет с совместным вызовом: расхождение — ошибка проверяющего. Часть вывода Kalkan в stdout (`gost big-endian block`) уходит в stderr.
+
+**Как дать jar-ы.** Они не лежат в репозитории и не копируются в него или в образ: у них нет текста лицензии, НУЦ просил убрать их из публичных репозиториев, поэтому и оракул работает только локально, у оператора, у которого они уже установлены с NCALayer. Пути задают переменные окружения, а дескриптор `kalkan` в `fixtures/platform/coverage.toml` закрепляет sha256 каждого файла (версия — это хеш, не имя):
+
+| переменная | файл (кэш NCALayer: `%APPDATA%\NCALayer\ncalayer-cache\`) | sha256 |
+|---|---|---|
+| `ONCL_KALKAN_JAR` | `bundle1\version0.0\bundle.jar` (`kalkancrypt` 0.7.8) | `5588f9ae497f48f4a82ac43491376210b57fee39d33f2c0cf579eb1cedbbc4ab` |
+| `ONCL_KALKAN_XMLDSIG_JAR` | `bundle9\version0.0\bundle.jar` (`kalkancrypt_xmldsig` 0.5.2) | `6bb88c85c9f3f7396f8f4b20a2b8095ea2cfb390b33cc161f546d5e8b36857d3` |
+
+Нужен `java` 17+ с модулем `jdk.compiler` (источник `KalkanOracle.java` компилируется при каждом вызове лаунчером исходников JDK: `java -cp <jar>:<jar> KalkanOracle.java <режим> ...`); другой `java` — `ONCL_KALKAN_JAVA`. Маршрут: матрица работает в WSL/Linux, проверяющий запускается там же, нативной JVM Linux (в Ubuntu WSL достаточно `openjdk-17-jre-headless`, у него есть `jdk.compiler`), а jar читается прямо с диска Windows (`/mnt/c/Users/<имя>/AppData/Roaming/NCALayer/ncalayer-cache/bundle1/version0.0/bundle.jar`). Windows-`java.exe` через interop не нужен (и пути пришлось бы переводить). Пример:
+
+```sh
+N=/mnt/c/Users/<имя>/AppData/Roaming/NCALayer/ncalayer-cache
+export ONCL_KALKAN_JAR=$N/bundle1/version0.0/bundle.jar ONCL_KALKAN_XMLDSIG_JAR=$N/bundle9/version0.0/bundle.jar
+cargo xtask platform-interop --out target/platform-interop --case wsse-sign-gost --case wsse-tamper-gost --case jws-gost2015-independent --case x509-sign-ours-gost --case x509-sign-ncanode-gost --case plugin-sign-raw-gost
+```
+
+Без переменной, с отсутствующим файлом, с другим sha256 или с негодной JVM каждая из 12 строк — `BLOCKED` с причиной, которая называет переменную, закреплённый хеш и найденный (так прогон выглядит в CI). Строка, которую судил Kalkan, помечена в отчёте как `oracle: kalkan (local-only, not reproducible in CI)`: её результат воспроизводит только машина с этими jar-ами, а не CI. Если Kalkan отвергнет подпись, сделанную `oncl`, это находка, а не повод править проверяющего: сначала порядок байтов, выбор хеша, каноникализация, набор параметров кривой (ГОСТ 2004 — кривая НУЦ `Pkigovkz2004A`).
 
 ## Состояние (на 2026-11-07, дерево `0.1.0-alpha.7`)
 
 Ниже — факты из журнала приёмки, а не обещания.
 
 * Последний полный прогон на Linux (до слияния 0196ffa1): **233 строки, 220 PASS, 1 известный DEFECT, 0 FIXED/CHANGED/FAIL, 12 BLOCKED, 0 UNRUN**.
-* **12 BLOCKED — не дефекты**: нет независимого проверяющего ГОСТ (OpenSSL и Python не имеют ГОСТ Р 34.10/34.11, NCANode не проверяет такие строки): WSSE ГОСТ — 6, сырой X.509 / плагин ГОСТ — 5, JOSE ГОСТ — 1 (алгоритм `ECGOST3410-2015-512` ручек NCALayer/AcBank не совпадает с `GG2015`/`GG2004` NCANode).
+* **Те 12 BLOCKED — не дефекты**: не было независимого проверяющего ГОСТ (OpenSSL и Python не имеют ГОСТ Р 34.10/34.11, NCANode не проверяет такие строки): WSSE ГОСТ — 6, сырой X.509 / плагин ГОСТ — 5, JOSE ГОСТ — 1 (алгоритм `ECGOST3410-2015-512` ручек NCALayer/AcBank не совпадает с `GG2015`/`GG2004` NCANode). Теперь их судит локальный оракул Kalkan (раздел выше). Прогон **только этих 12 строк** на этой машине (WSL Ubuntu, `openjdk-17-jre-headless`, jar-ы кэша NCALayer): **12 PASS, 0 FAIL, 0 BLOCKED**, подписи `oncl` Kalkan принял без единого расхождения по порядку байтов, хешу, каноникализации или кривой; без jar-ов те же 12 строк `BLOCKED`. Полный прогон матрицы с оракулом не выполнялся, итоги выше (233 строки, 12 BLOCKED) остаются результатом без него.
 * Найденные производственные дефекты D1–D6 исправлены и закрыты свежими прогонами: D1 (каждый NCANode-LT содержит полный CRL НУЦ ≈ 20–27 МБ: `MemoryLimit`/`MetadataLimit`), D2 (`sign --profile xml --add` поверх подписи всего документа: `InvalidInput` после применения ключа), D3 (`InvalidInput` для ГОСТ-XAdES NCANode, включая фикстуры репозитория), D4 (наш прямой `xades-lt` NCANode читает как уровень T: нет `CertificateValues`), D5 (`verify --profile pades-*` для PDF Kalkan давал `Signature(Malformed)`; теперь — подпись `Passed` плюс типизированное нарушение профиля), D6 (плотный PDF, бюджет xref). Нумерация D1–D6 здесь своя, она не совпадает с нумерацией дефектов приёмки V01.
 * Единственный оставшийся в том прогоне дефект — `pdf-verify-fixture-lta` (D5, PAdES-LTA-фикстура NCANode отвечала `InvalidInput`). Он исправлен (3bec6612/3d20c244, влит в 0196ffa1), маркер дефекта и запись `[[defect]]` удалены из `fixtures/platform/coverage.toml`. **Ожидается** свежий прогон на Linux с результатом **221 PASS / 0 DEFECT / 12 BLOCKED**; это ожидание, **не замер**: прогон после 0196ffa1 не выполнялся, а полная строка оценки LTA-ряда не подтверждена (тест исправления закрепляет только подпись `Passed`, `Profile(SigningTimeForbidden)`, отсутствие `ades_level` и вердикт `Invalid`).
 * Кодирование/шифрование (encrypt/decrypt, G01/G02) в матрице отсутствует: см. `[[excluded]] envelope`.
@@ -38,10 +70,10 @@
 - `/x509/verify` и `/pkcs12/info` складывают цепочку в `valid`, поэтому не различают хорошую и плохую подпись (оценка — OpenSSL);
 - NCANode не делает CAdES-LTA на просроченных ключах (HTTP 500); `/cms/extend` до LTA отвечает 500; `/pdf/extend` не строит LT/LTA для цепочки не НУЦ (400 «no OCSP or CRL data available») и не расширяет до T (400 «supports only LT and LTA»);
 - уровень PAdES у NCANode считается по документу, не по подписи (`detectLevel`: любой `/DocTimeStamp` даёт LTA): поэтому он читает наши шаги T и LT в `pades-extend-ours-*` как LTA (наш `extend --level t` добавляет метку документа); это ограничение оракула, не дефект;
-- `/wsse/verify` отвечает HTTP 200 `valid=false` и для хорошего, и для испорченного сообщения (цепочка в `valid`), поэтому ГОСТ-строки WS-Security «наша подпись → NCANode» помечены BLOCKED; RSA судят lxml + cryptography;
+- `/wsse/verify` отвечает HTTP 200 `valid=false` и для хорошего, и для испорченного сообщения (цепочка в `valid`), поэтому ГОСТ-строки WS-Security «наша подпись → NCANode» сами по себе не различают (`ncanode-nondiscriminating`): подпись и дайджесты судит оракул Kalkan (локально); RSA судят lxml + cryptography;
 - WSSE: NCANode принимает только SOAP 1.1 и только `KeyIdentifier` (BinarySecurityToken и SOAP 1.2 — HTTP 500);
-- `/x509/verify` одинаково отвечает `valid=false` на хорошую и изменённую сырую подпись (строка `x509-verify-ncanode-discrimination`), сырые ГОСТ-подписи судить нечем;
-- JWS/JWT: NCANode называет ГОСТ-алгоритмы `GG2015`/`GG2004`, у `oncl` — `ECGOST3410-2015-512` (идентификатор NCALayer/AcBank из `oncl-builtin-commonutils`): взаимно не проверяются (`jws-gost2015-name-mismatch`), независимой проверки нашей ГОСТ-подписи JOSE нет (BLOCKED); `/jwt/decode` сверяет `exp`/`nbf` с реальными часами NCANode;
+- `/x509/verify` одинаково отвечает `valid=false` на хорошую и изменённую сырую подпись (строка `x509-verify-ncanode-discrimination`), сырые ГОСТ-подписи судит оракул Kalkan (локально);
+- JWS/JWT: NCANode называет ГОСТ-алгоритмы `GG2015`/`GG2004`, у `oncl` — `ECGOST3410-2015-512` (идентификатор NCALayer/AcBank из `oncl-builtin-commonutils`): взаимно не проверяются (`jws-gost2015-name-mismatch`); нашу ГОСТ-подпись JOSE независимо проверяет Kalkan (`jws-gost2015-independent-signature`, локально); `/jwt/decode` сверяет `exp`/`nbf` с реальными часами NCANode;
 - любой LT от NCANode содержит полный CRL НУЦ (около 20 МБ) — см. дефект D1.
 - **нестабильность оракула (измерено на 3eac5397, A/B на 24 запусках):** девять строк `cms-verify-ncanode-*-lt` / `cms-extend-ncanode-*-lt` / `cms-extend-ncanode-*-lta` ожидают `ncanode=HTTP500`: JVM NCANode (`-Xmx512m`) падает с `OutOfMemoryError` на CMS около 20 МБ, который он сам собрал с CRL из своего кэша (подтверждено прямым POST фикстуры в чистый контейнер). Это ограничение оракула, не наш контракт: NCANode принимает JSON-строку около 30 МиБ (около 22 МБ сырых данных) при куче JVM `-Xmx512m`, тогда как гарантия OpenNCALayer — документ до 1 ГиБ. Во всех 24 запусках (оба коммита, тёплый и холодный кэш) ответ был 500. Один полный прогон на том же образе дал HTTP 200 `INDETERMINATE`: вероятная причина — пустой кэш CRL у NCANode в момент подписания (LT получается маленьким); размеры файлов того прогона не сохранены, это предположение, не доказанная причина. Ожидание `HTTP500` оставлено, потому что оно воспроизводится; строка с другим ответом NCANode означает «кэш CRL оракула не был заполнен», а не регрессию `oncl`. Часть `ours=` в этих строках не менялась между коммитами.
 

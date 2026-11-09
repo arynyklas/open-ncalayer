@@ -84,6 +84,30 @@ version = "1.5.1"
 match_version = "exact"
 role = "independent BER/DER reader of CMS, RFC 3161 tokens and certificates"
 
+# A LOCAL-ONLY oracle: the Kalkan jars have no licence text and the NCA asked for them to be
+# removed from public repositories, so they are never committed, copied into the repository or
+# baked into an image. The operator names their copies (those of an installed NCALayer) with
+# the environment variables below; the descriptor pins their sha256. Without them (as in CI)
+# every row that lists `kalkan` is BLOCKED with the missing file named.
+[[oracle]]
+id = "kalkan"
+tool = "Kalkan JCE provider kalkancrypt + kalkancrypt_xmldsig (Java verifier xtask/assets/platform-interop/KalkanOracle.java)"
+version = "kalkancrypt 0.7.8 + kalkancrypt_xmldsig 0.5.2"
+match_version = "exact"
+pin = "jar sha256 5588f9ae (kalkancrypt) and 6bb88c85 (kalkancrypt_xmldsig), full values in the artifact entries; JDK 17+ source launcher"
+role = "independent GOST R 34.10-2004 / 34.10-2015-512 verifier of signatures produced by oncl and NCANode: raw, JWS ECGOST3410-2015-512, WS-Security XMLDSig (signature value and reference digests judged apart); LOCAL-ONLY, not reproducible in CI"
+local_only = true
+
+[[oracle.artifact]]
+env = "ONCL_KALKAN_JAR"
+name = "kalkancrypt-0.7.8.jar (bundle1 of the NCALayer cache)"
+sha256 = "5588f9ae497f48f4a82ac43491376210b57fee39d33f2c0cf579eb1cedbbc4ab"
+
+[[oracle.artifact]]
+env = "ONCL_KALKAN_XMLDSIG_JAR"
+name = "kalkancrypt_xmldsig-0.5.2.jar (bundle9 of the NCALayer cache)"
+sha256 = "6bb88c85c9f3f7396f8f4b20a2b8095ea2cfb390b33cc161f546d5e8b36857d3"
+
 # ---- capabilities ---------------------------------------------------------------------
 
 [[capability]]
@@ -1612,25 +1636,25 @@ expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncano
 id = "wsse-sign-gost2015"
 capability = "wsse.sign"
 profile = "gost2015"
-oracles = ["ncanode"]
-what = "oncl signs the SOAP Body with gost2015 (NCANode key-identifier form); we verify strictly, NCANode verifies, lxml names the signed node (RSA)"
-expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "oncl signs the SOAP Body with gost2015 (NCANode key-identifier form); we verify strictly, NCANode verifies (it cannot judge the signature), Kalkan verifies the SignatureValue and the Body digest independently"
+expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false kalkan=verified/Body"
 
 [[case]]
 id = "wsse-tamper-gost2015-body"
 capability = "wsse.verify"
 profile = "gost2015"
-oracles = ["ncanode"]
-what = "the body of our gost2015 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "the body of our gost2015 WS-Security message altered: Kalkan verifies the untouched message (control), then rejects the altered one on the Body digest while the SignatureValue stays intact; oncl rejects; NCANode cannot tell"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false kalkan-control=verified/Body kalkan=rejected/digest"
 
 [[case]]
 id = "wsse-tamper-gost2015-signature"
 capability = "wsse.verify"
 profile = "gost2015"
-oracles = ["ncanode"]
-what = "the signature of our gost2015 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "the signature of our gost2015 WS-Security message altered: Kalkan verifies the untouched message (control), then rejects the altered one on the SignatureValue while the Body digest stays intact; oncl rejects; NCANode cannot tell"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false kalkan-control=verified/Body kalkan=rejected/signature-value"
 
 [[case]]
 id = "wsse-verify-ncanode-gost2015"
@@ -1644,25 +1668,25 @@ expected = "crypto=ok ours=Invalid/sig=Passed/chain=Failed/validity=Failed ncano
 id = "wsse-sign-gost2004"
 capability = "wsse.sign"
 profile = "gost2004"
-oracles = ["ncanode"]
-what = "oncl signs the SOAP Body with gost2004 (NCANode key-identifier form); we verify strictly, NCANode verifies, lxml names the signed node (RSA)"
-expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "oncl signs the SOAP Body with gost2004 (NCANode key-identifier form); we verify strictly, NCANode verifies (it cannot judge the signature), Kalkan verifies the SignatureValue and the Body digest independently"
+expected = "crypto=ok ours=Valid ncanode=HTTP200 signers=1 valid=false kalkan=verified/Body"
 
 [[case]]
 id = "wsse-tamper-gost2004-body"
 capability = "wsse.verify"
 profile = "gost2004"
-oracles = ["ncanode"]
-what = "the body of our gost2004 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "the body of our gost2004 WS-Security message altered: Kalkan verifies the untouched message (control), then rejects the altered one on the Body digest while the SignatureValue stays intact; oncl rejects; NCANode cannot tell"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false kalkan-control=verified/Body kalkan=rejected/digest"
 
 [[case]]
 id = "wsse-tamper-gost2004-signature"
 capability = "wsse.verify"
 profile = "gost2004"
-oracles = ["ncanode"]
-what = "the signature of our gost2004 WS-Security message altered: every judge must reject"
-expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false"
+oracles = ["ncanode", "kalkan"]
+what = "the signature of our gost2004 WS-Security message altered: Kalkan verifies the untouched message (control), then rejects the altered one on the SignatureValue while the Body digest stays intact; oncl rejects; NCANode cannot tell"
+expected = "crypto=failure ours=Invalid/Failed ncanode-nondiscriminating=HTTP200 valid=false kalkan-control=verified/Body kalkan=rejected/signature-value"
 
 [[case]]
 id = "wsse-verify-ncanode-gost2004"
@@ -1828,9 +1852,9 @@ expected = "ours-roundtrip=Valid/crypto=[Passed] ncanode-on-ours=HTTP400/unsuppo
 id = "jws-gost2015-independent-signature"
 capability = "jws.verify"
 profile = "gost2015"
-oracles = ["ncanode"]
-what = "independent verification of our ECGOST3410-2015-512 signature value"
-expected = "crypto=ok (requires independent ECGOST3410-2015-512 verifier)"
+oracles = ["kalkan"]
+what = "our ECGOST3410-2015-512 JWS (general serialization, converted to compact): Kalkan verifies the signature over header.payload with the signer certificate; an altered payload and an altered signature are rejected (NCANode names the algorithm GG2015 and answers 400, see jws-gost2015-name-mismatch)"
+expected = "crypto=ok ours=Valid/crypto=[Passed] kalkan=verified kalkan-altered-payload=rejected kalkan-altered-signature=rejected"
 
 [[case]]
 id = "x509-info-ours-rsa"
@@ -1869,7 +1893,7 @@ id = "x509-sign-ours-rsa"
 capability = "x509.sign"
 profile = "rsa"
 oracles = ["openssl"]
-what = "oncl sign --profile raw with rsa: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
+what = "oncl sign --profile raw with rsa: OpenSSL verifies the RSA signature value and rejects altered data (GOST: the x509-sign-*-gost rows, judged by Kalkan)"
 expected = "crypto=ok openssl=verified, altered data rejected signature-bytes=256"
 
 [[case]]
@@ -1877,7 +1901,7 @@ id = "x509-sign-ncanode-rsa"
 capability = "x509.sign"
 profile = "rsa"
 oracles = ["openssl"]
-what = "NCANode /x509/sign with its rsa key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
+what = "NCANode /x509/sign with its rsa key: OpenSSL verifies the RSA signature with the returned certificate (GOST: the x509-sign-*-gost rows, judged by Kalkan)"
 expected = "crypto=ok openssl=verified, altered data rejected oncl=no raw verify profile"
 
 [[case]]
@@ -1916,17 +1940,17 @@ expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,o
 id = "x509-sign-ours-gost2015"
 capability = "x509.sign"
 profile = "gost2015"
-oracles = ["openssl"]
-what = "oncl sign --profile raw with gost2015: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
-expected = "crypto=ok (requires independent raw GOST verifier)"
+oracles = ["kalkan"]
+what = "oncl sign --profile raw with gost2015: Kalkan (ECGOST3410-2015-512) verifies the signature value with the signer certificate and rejects altered data"
+expected = "crypto=ok kalkan=verified, altered data rejected signature-bytes=128"
 
 [[case]]
 id = "x509-sign-ncanode-gost2015"
 capability = "x509.sign"
 profile = "gost2015"
-oracles = ["openssl"]
-what = "NCANode /x509/sign with its gost2015 key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
-expected = "crypto=ok (requires independent raw GOST verifier)"
+oracles = ["ncanode", "kalkan"]
+what = "NCANode /x509/sign with its gost2015 key: Kalkan (ECGOST3410-2015-512) verifies the signature with the returned certificate and rejects altered data"
+expected = "crypto=ok kalkan=verified, altered data rejected oncl=no raw verify profile"
 
 [[case]]
 id = "x509-info-ours-gost2004"
@@ -1964,17 +1988,17 @@ expected = "aliases=one, equal(ncanode,openssl,oncl) serial=equal(ncanode,oncl,o
 id = "x509-sign-ours-gost2004"
 capability = "x509.sign"
 profile = "gost2004"
-oracles = ["openssl"]
-what = "oncl sign --profile raw with gost2004: OpenSSL verifies the RSA signature value and rejects altered data (GOST: no external verifier)"
-expected = "crypto=ok (requires independent raw GOST verifier)"
+oracles = ["kalkan"]
+what = "oncl sign --profile raw with gost2004: Kalkan (ECGOST34310) verifies the signature value with the signer certificate and rejects altered data"
+expected = "crypto=ok kalkan=verified, altered data rejected signature-bytes=64"
 
 [[case]]
 id = "x509-sign-ncanode-gost2004"
 capability = "x509.sign"
 profile = "gost2004"
-oracles = ["openssl"]
-what = "NCANode /x509/sign with its gost2004 key: OpenSSL verifies the RSA signature with the returned certificate (GOST: no external verifier)"
-expected = "crypto=ok (requires independent raw GOST verifier)"
+oracles = ["ncanode", "kalkan"]
+what = "NCANode /x509/sign with its gost2004 key: Kalkan (ECGOST34310) verifies the signature with the returned certificate and rejects altered data"
+expected = "crypto=ok kalkan=verified, altered data rejected oncl=no raw verify profile"
 
 [[case]]
 id = "x509-verify-ncanode-discrimination"
@@ -2060,9 +2084,9 @@ expected = "crypto=ok openssl=RSA signature verified other-handle=PermissionDeni
 id = "plugin-sign-raw-gost2015"
 capability = "plugin"
 profile = "gost2015"
-oracles = ["openssl"]
-what = "a guest signs with a GOST 2015 key: independent verification of the raw signature"
-expected = "crypto=ok (requires independent raw GOST verifier)"
+oracles = ["kalkan"]
+what = "a guest signs with a GOST 2015 key through keys_sign_raw: Kalkan (ECGOST3410-2015-512) verifies the signature with the signer certificate and rejects altered data"
+expected = "crypto=ok kalkan=verified, altered data rejected"
 
 [[case]]
 id = "large-cms-detached-rsa"

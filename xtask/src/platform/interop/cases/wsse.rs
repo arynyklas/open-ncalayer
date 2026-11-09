@@ -5,9 +5,10 @@ use std::path::Path;
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 
+use super::super::kalkan;
 use super::super::oncl::{INVALID, VALID, Verified, path_str};
 use super::super::world::Profile;
-use super::super::{Case, Ctx, Observed, blocked};
+use super::super::{Case, Ctx, Observed};
 use super::common::{grade, nc_key, trust_summary};
 
 /// The SOAP 1.1 request NCANode's own tests use, shortened.
@@ -49,17 +50,11 @@ enum Variant {
     Soap12,
 }
 
-/// Our GOST WS-Security signatures have no discriminating external verifier.
-fn no_gost_judge(profile: Profile) -> anyhow::Result<()> {
-    if profile == Profile::Rsa {
-        return Ok(());
-    }
-    blocked(
-        "no external verifier that discriminates GOST WS-Security signatures: NCANode's \
-         /wsse/verify answers HTTP 200 `valid=false` for good and altered messages alike (its \
-         `valid` folds the certificate chain, which is untrusted for every key here), and \
-         Kalkan is reachable only through that route; OpenSSL/Python have no GOST R 34.10",
-    )
+/// Kalkan's judgment of a WS-Security message (the GOST profiles): `(verdict, summary)` of
+/// the SignatureValue and the Body digest, judged apart.
+fn kalkan_wsse(ctx: &Ctx, file: &Path) -> anyhow::Result<(bool, String)> {
+    let answer = ctx.java_json(&["wsse", path_str(file)?])?;
+    Ok((kalkan::verdict(&answer), kalkan::wsse_summary(&answer)))
 }
 
 fn verify_ours(ctx: &Ctx, file: &Path, soap12: bool) -> anyhow::Result<Verified> {
@@ -128,7 +123,6 @@ fn sign(
 /// Our WS-Security signature, judged by us (strict), NCANode and (RSA) lxml + cryptography,
 /// which also names the signed node.
 fn ours_signs(ctx: &mut Ctx, profile: Profile, variant: Variant) -> anyhow::Result<Observed> {
-    no_gost_judge(profile)?;
     let (out, xml) = sign(ctx, profile, variant)?;
     let soap12 = matches!(variant, Variant::Soap12);
     let ours = verify_ours(ctx, &out, soap12)?;
@@ -176,11 +170,26 @@ fn ours_signs(ctx: &mut Ctx, profile: Profile, variant: Variant) -> anyhow::Resu
             "the signed node is {signed}, not the SOAP Body"
         );
         verdicts.push(("lxml-rsa", format!("ok/{signed}")));
+    } else {
+        let (accepted, summary) = kalkan_wsse(ctx, &out)?;
+        ensure!(
+            accepted && summary == "verified/Body",
+            "Kalkan rejected our {} WS-Security signature: {summary}",
+            profile.label()
+        );
+        verdicts.push(("kalkan", summary));
     }
     Ok(Observed {
         grade: grade(&verdicts),
         ours: ours.summary(),
-        oracle: format!("NCANode HTTP {status} {message}"),
+        oracle: format!(
+            "NCANode HTTP {status} {message}{}",
+            if profile == Profile::Rsa {
+                String::new()
+            } else {
+                format!("; {}", kalkan::LABEL)
+            }
+        ),
         detail: String::new(),
     })
 }
@@ -205,8 +214,7 @@ fn alter(xml: &str, tamper: &str) -> anyhow::Result<String> {
 }
 
 fn tampered(ctx: &mut Ctx, profile: Profile, tamper: &str) -> anyhow::Result<Observed> {
-    no_gost_judge(profile)?;
-    let (_, xml) = sign(ctx, profile, Variant::KeyIdentifier)?;
+    let (good, xml) = sign(ctx, profile, Variant::KeyIdentifier)?;
     let bad = alter(&xml, tamper)?;
     let path = ctx.write("tampered.xml", bad.as_bytes())?;
     let ours = verify_ours(ctx, &path, false)?;
@@ -229,6 +237,20 @@ fn tampered(ctx: &mut Ctx, profile: Profile, tamper: &str) -> anyhow::Result<Obs
         ),
         ("ncanode-nondiscriminating", nc),
     ];
+    if profile != Profile::Rsa {
+        // A verifier that rejects everything would pass a tamper row: the untouched message
+        // must verify with the same oracle, and the altered one must fail on the part that
+        // was altered (the Body digest or the SignatureValue), the other part staying intact.
+        let (control, control_summary) = kalkan_wsse(ctx, &good)?;
+        ensure!(
+            control && control_summary == "verified/Body",
+            "Kalkan rejected the untouched message: {control_summary}"
+        );
+        let (accepted, summary) = kalkan_wsse(ctx, &path)?;
+        ensure!(!accepted, "Kalkan accepted the altered message: {summary}");
+        verdicts.push(("kalkan-control", control_summary));
+        verdicts.push(("kalkan", summary));
+    }
     if profile == Profile::Rsa {
         let python = lxml(ctx, &path)?;
         ensure!(
@@ -240,7 +262,14 @@ fn tampered(ctx: &mut Ctx, profile: Profile, tamper: &str) -> anyhow::Result<Obs
     Ok(Observed {
         grade: grade(&verdicts),
         ours: ours.summary(),
-        oracle: format!("NCANode HTTP {status} valid={valid} {message}"),
+        oracle: format!(
+            "NCANode HTTP {status} valid={valid} {message}{}",
+            if profile == Profile::Rsa {
+                String::new()
+            } else {
+                format!("; {}", kalkan::LABEL)
+            }
+        ),
         detail: String::new(),
     })
 }

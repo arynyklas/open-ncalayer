@@ -51,7 +51,7 @@ cargo xtask interop-ncanode
 
 В CI команда запускается только в job `live` (по расписанию и вручную), не на каждый push. Все 47 проверок проходят.
 
-Полная независимая матрица семейств NCANode OpenAPI (CMS/CAdES, XML/XAdES, PDF/PAdES и далее) — `cargo xtask platform-interop`, см. [platform-interop.md](platform-interop.md). Эта команда проверяет наши ключевые файлы и XMLDSig/CMS Kalkan'ом.
+Полная независимая матрица семейств NCANode OpenAPI (CMS/CAdES, XML/XAdES, PDF/PAdES и далее) — `cargo xtask platform-interop`, см. [platform-interop.md](platform-interop.md). Эта команда проверяет наши ключевые файлы и XMLDSig/CMS Kalkan'ом. Там же — локальный оракул Kalkan (сам провайдер в маленьком Java-проверяющем, jar-ы оператора, не из репозитория) для ГОСТ-подписей, которые NCANode по своему API судить не может (WS-Security, сырая подпись, JWS `ECGOST3410-2015-512`).
 
 ## Что проверяется
 

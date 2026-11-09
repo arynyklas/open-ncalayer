@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::super::oncl::path_str;
 use super::super::world::Profile;
-use super::super::{Case, Ctx, Observed, blocked};
+use super::super::{Case, Ctx, Observed, kalkan};
 use super::common::{b64, grade, nc_key};
 
 const PAYLOAD: &[u8] = br#"{"a":1}"#;
@@ -55,16 +55,10 @@ pub fn cases() -> Vec<Case> {
     cases.push(Case::new("jwt-verify-ncanode-rsa", jwt_oracle));
     cases.push(Case::new("jwt-alg-none-refused", alg_none));
     cases.push(Case::new("jws-gost2015-name-mismatch", gost_name));
-    cases.push(Case::new("jws-gost2015-independent-signature", |_| {
-        blocked(
-            "no external verifier accepts ECGOST3410-2015-512: NCANode only accepts GG2015, \
-             GG2004, ES256/384/512 and RS256/384/512 (JwtAlgorithmUtil.java at the pinned \
-             commit; HTTP 400 `Unsupported algorithm` for ours), the `alg` is inside the \
-             signed header so a signature cannot be relabelled, and OpenSSL/Python have no \
-             GOST R 34.10-2015. The identifier is the NCALayer/AcBank one (oncl-builtin-\
-             commonutils), a documented compatibility choice, not an oncl defect",
-        )
-    }));
+    cases.push(Case::new(
+        "jws-gost2015-independent-signature",
+        gost_independent,
+    ));
     cases
 }
 
@@ -813,6 +807,82 @@ fn gost_name(ctx: &mut Ctx) -> anyhow::Result<Observed> {
         ours: summary(&report),
         oracle: "NCANode: Unsupported algorithm: ECGOST3410-2015-512; GG2015 JWS refused by oncl"
             .to_owned(),
+        detail: String::new(),
+    })
+}
+
+/// Our `ECGOST3410-2015-512` JWS, judged by the Kalkan provider (the library of NCALayer and
+/// AcBank, whose signature layout and algorithm name `oncl` follows): the signature over
+/// `protected.payload` verifies with the signer certificate; an altered payload and an
+/// altered signature do not.
+fn gost_independent(ctx: &mut Ctx) -> anyhow::Result<Observed> {
+    let payload = ctx.write("payload.json", PAYLOAD)?;
+    let out = ctx.file("gost.jws");
+    ours_sign_jws(
+        ctx,
+        "general",
+        false,
+        &payload,
+        &out,
+        false,
+        Profile::Gost2015,
+    )?;
+    let (code, report, brief) = jws_verify(ctx, "general", &out, None, None)?;
+    ensure!(code == Some(0), "our own GOST JWS: {brief}");
+    let jws: Value = serde_json::from_slice(&std::fs::read(&out)?)?;
+    let protected = jws["signatures"][0]["protected"]
+        .as_str()
+        .context("no protected header")?
+        .to_owned();
+    let body = jws["payload"].as_str().context("no payload")?.to_owned();
+    let signature = URL_SAFE_NO_PAD.decode(
+        jws["signatures"][0]["signature"]
+            .as_str()
+            .context("no signature")?,
+    )?;
+    let cert = ctx.world.signer(Profile::Gost2015).cert_der.clone();
+    let judge = |ctx: &Ctx, name: &str, body: &str, signature: &[u8]| -> anyhow::Result<bool> {
+        let compact = format!("{protected}.{body}.{}", URL_SAFE_NO_PAD.encode(signature));
+        let file = ctx.write(name, compact.as_bytes())?;
+        let answer = ctx.java_json(&["jws", path_str(&file)?, path_str(&cert)?])?;
+        Ok(kalkan::verdict(&answer))
+    };
+    ensure!(
+        judge(ctx, "kalkan.jws", &body, &signature)?,
+        "Kalkan rejected our ECGOST3410-2015-512 JWS signature ({} bytes)",
+        signature.len()
+    );
+    let mut other = URL_SAFE_NO_PAD.decode(&body)?;
+    other[0] ^= 1;
+    ensure!(
+        !judge(
+            ctx,
+            "kalkan-payload.jws",
+            &URL_SAFE_NO_PAD.encode(&other),
+            &signature
+        )?,
+        "Kalkan accepted the signature over an altered payload"
+    );
+    let mut flipped = signature.clone();
+    flipped[0] ^= 1;
+    ensure!(
+        !judge(ctx, "kalkan-signature.jws", &body, &flipped)?,
+        "Kalkan accepted an altered signature"
+    );
+    Ok(Observed {
+        grade: grade(&[
+            ("crypto", "ok".to_owned()),
+            ("ours", summary(&report)),
+            ("kalkan", "verified".to_owned()),
+            ("kalkan-altered-payload", "rejected".to_owned()),
+            ("kalkan-altered-signature", "rejected".to_owned()),
+        ]),
+        ours: summary(&report),
+        oracle: format!(
+            "Kalkan ECGOST3410-2015-512 over header.payload ({} signature bytes); {}",
+            signature.len(),
+            kalkan::LABEL
+        ),
         detail: String::new(),
     })
 }

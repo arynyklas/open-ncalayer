@@ -8,6 +8,8 @@
 //! and has the other judge it; counterexamples alter signed data and must be rejected by the
 //! oracle and by us. A row passes only when its observed grade is exactly the expected one;
 //! a row whose prerequisite is absent is `BLOCKED` with that prerequisite, never replaced.
+//! The Kalkan provider (`kalkan`, a Java verifier over the operator's own jars) is a
+//! local-only oracle: see `kalkan.rs`; without its jars its rows are `BLOCKED`.
 //!
 //! The grades keep the certificate verdict apart from the cryptographic one: the synthetic
 //! and NCANode test certificates do not chain to a root valid in NCANode's world, so a good
@@ -25,6 +27,8 @@ use serde_json::{Value, json};
 
 #[path = "interop/cases.rs"]
 mod cases;
+#[path = "interop/kalkan.rs"]
+pub mod kalkan;
 #[path = "interop/oncl.rs"]
 pub mod oncl;
 #[path = "interop/tools.rs"]
@@ -106,6 +110,14 @@ pub struct OracleDescriptor {
     #[serde(default)]
     pub pin: String,
     pub role: String,
+    /// A file the oracle needs that the operator supplies and that is never committed
+    /// (a licence-restricted jar): the environment variable that names it and its sha256.
+    #[serde(default)]
+    pub artifact: Vec<kalkan::Artifact>,
+    /// The oracle cannot run in CI (its software is not redistributable): the report marks
+    /// every row it judges.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +185,7 @@ pub struct Ctx {
     pub scratch: PathBuf,
     pub large_bytes: u64,
     pub coverage: std::sync::Arc<Coverage>,
+    kalkan: std::cell::OnceCell<Result<kalkan::Kalkan, String>>,
 }
 
 enum NodeState {
@@ -281,6 +294,40 @@ impl Ctx {
         let out = self.py(args)?;
         serde_json::from_slice(&out.stdout)
             .with_context(|| format!("the oracle script printed no JSON: {}", out.brief()))
+    }
+
+    /// The Kalkan oracle, found and checked on first use (its jars come from the operator's
+    /// environment and are never part of the repository): why it cannot serve, or itself.
+    pub fn kalkan_state(&self) -> &Result<kalkan::Kalkan, String> {
+        self.kalkan
+            .get_or_init(|| match self.coverage.descriptor("kalkan") {
+                Some(descriptor) => kalkan::Kalkan::discover(descriptor),
+                None => Err("coverage.toml has no descriptor of the Kalkan oracle".to_owned()),
+            })
+    }
+
+    /// Runs the Kalkan verifier (`KalkanOracle.java`, compiled by the JDK's source launcher)
+    /// with `args` (`raw|jws|wsse ...`). Blocks the case when the oracle is not available.
+    pub fn java<S: AsRef<str>>(&self, args: &[S]) -> anyhow::Result<tools::Out> {
+        let kalkan = match self.kalkan_state() {
+            Ok(kalkan) => kalkan,
+            Err(reason) => return blocked(reason.clone()),
+        };
+        let source = self.world.dir.path().join(kalkan::SOURCE_FILE);
+        if !source.is_file() {
+            std::fs::write(&source, kalkan::SOURCE)
+                .with_context(|| source.display().to_string())?;
+        }
+        let mut command = std::process::Command::new(&kalkan.java);
+        command.arg("-cp").arg(&kalkan.classpath).arg(&source);
+        command.args(args.iter().map(AsRef::as_ref));
+        tools::exec(&mut command, b"", tools::SHORT)
+    }
+
+    /// The Kalkan verifier's answer (`ok` is the verdict); an oracle that could not run is an
+    /// error, never a verdict.
+    pub fn java_json<S: AsRef<str>>(&self, args: &[S]) -> anyhow::Result<Value> {
+        kalkan::parse_answer(&self.java(args)?)
     }
 
     pub fn openssl<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> anyhow::Result<tools::Out> {
@@ -499,6 +546,7 @@ pub fn run(root: &Path, options: &Options) -> anyhow::Result<()> {
         scratch,
         large_bytes: options.large_bytes,
         coverage: coverage.clone(),
+        kalkan: std::cell::OnceCell::new(),
     };
     let oracle_versions = oracle_versions(&ctx, &coverage);
 
@@ -736,6 +784,9 @@ fn oracle_problem(ctx: &Ctx, descriptor: &OracleDescriptor) -> Option<String> {
     {
         return ctx.tools.python_missing.clone();
     }
+    if descriptor.id == "kalkan" {
+        return ctx.kalkan_state().as_ref().err().cloned();
+    }
     let found = oracle_version(ctx, &descriptor.id)?;
     let ok = match descriptor.match_version.as_str() {
         "exact" => found == descriptor.version,
@@ -792,6 +843,13 @@ fn oracle_versions(ctx: &Ctx, coverage: &Coverage) -> BTreeMap<String, String> {
         .map(|o| {
             let found = match o.id.as_str() {
                 "ncanode" => format!("{} ({})", o.version, o.pin),
+                "kalkan" => match ctx.kalkan_state() {
+                    Ok(_) => format!(
+                        "{} (local-only, not reproducible in CI; {})",
+                        o.version, o.pin
+                    ),
+                    Err(reason) => format!("unavailable: {reason}"),
+                },
                 _ => oracle_version(ctx, &o.id).unwrap_or_else(|| "unavailable".to_owned()),
             };
             (o.id.clone(), found)
@@ -1072,7 +1130,7 @@ fn report_json(
             "id": r.id,
             "capability": r.capability,
             "profile": r.profile,
-            "oracles": r.oracles,
+            "oracles": oracle_labels(coverage, &r.oracles),
             "expected": r.expected,
             "status": r.status.label(),
             "defect": r.defect,
@@ -1116,7 +1174,7 @@ fn report_md(coverage: &Coverage, rows: &[Row], report: &Value) -> String {
             row.id,
             row.capability,
             row.profile,
-            row.oracles.join("+"),
+            oracle_labels(coverage, &row.oracles).join("+"),
             row.expected,
             row.status.label(),
             row.grade
@@ -1159,4 +1217,17 @@ fn report_md(coverage: &Coverage, rows: &[Row], report: &Value) -> String {
         );
     }
     text
+}
+
+/// The oracle ids of a row, a local-only one marked as such (a row judged by it cannot be
+/// reproduced in CI).
+pub fn oracle_labels(coverage: &Coverage, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .map(|id| match coverage.descriptor(id) {
+            Some(descriptor) if descriptor.local_only => {
+                format!("{id} (local-only, not reproducible in CI)")
+            }
+            _ => id.clone(),
+        })
+        .collect()
 }

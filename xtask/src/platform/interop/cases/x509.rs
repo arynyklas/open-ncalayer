@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 
+use super::super::kalkan;
 use super::super::oncl::path_str;
 use super::super::world::{PASSWORD, Profile};
-use super::super::{Case, Ctx, Observed, blocked};
-use super::common::{NcKey, b64, grade, nc_key, unb64};
+use super::super::{Case, Ctx, Observed};
+use super::common::{NcKey, b64, grade, kalkan_algorithm, kalkan_raw_discriminates, nc_key, unb64};
 
 pub fn cases() -> Vec<Case> {
     let mut cases = Vec::new();
@@ -381,21 +382,22 @@ fn openssl_raw(ctx: &Ctx, cert_der: &Path, data: &[u8], signature: &[u8]) -> any
         .ok())
 }
 
-fn no_gost_raw_verifier() -> anyhow::Result<()> {
-    blocked(
-        "no external verifier judges a raw GOST signature: NCANode's /x509/verify folds the \
-         certificate chain into `valid` (false for every key here, good or altered data alike, \
-         shown by x509-verify-ncanode-discrimination), oncl has no raw verify profile, and \
-         OpenSSL/Python have no GOST R 34.10-2004/2015",
-    )
+/// Kalkan's judgment of a GOST raw signature: verified, and the same signature over altered
+/// data rejected.
+fn kalkan_judges(
+    ctx: &Ctx,
+    profile: Profile,
+    cert: &Path,
+    signature: &[u8],
+    maker: &str,
+) -> anyhow::Result<String> {
+    kalkan_raw_discriminates(ctx, profile, cert, RAW, signature, maker)?;
+    Ok("verified, altered data rejected".to_owned())
 }
 
-/// `oncl sign --profile raw` (RSA): OpenSSL verifies the signature value, rejects altered
-/// data.
+/// `oncl sign --profile raw`: OpenSSL (RSA) or Kalkan (GOST) verifies the signature value
+/// and rejects altered data.
 fn sign_ours(ctx: &mut Ctx, profile: Profile) -> anyhow::Result<Observed> {
-    if profile != Profile::Rsa {
-        return no_gost_raw_verifier().map(|()| Observed::default());
-    }
     let data = ctx.write("data.bin", RAW)?;
     let sig = ctx.file("raw.sig");
     ctx.oncl.sign(
@@ -408,34 +410,45 @@ fn sign_ours(ctx: &mut Ctx, profile: Profile) -> anyhow::Result<Observed> {
     )?;
     let bytes = std::fs::read(&sig)?;
     let cert = ctx.world.signer(profile).cert_der.clone();
-    ensure!(
-        openssl_raw(ctx, &cert, RAW, &bytes)?,
-        "OpenSSL rejected our raw RSA signature"
-    );
-    let mut altered = RAW.to_vec();
-    altered[0] ^= 1;
-    ensure!(
-        !openssl_raw(ctx, &cert, &altered, &bytes)?,
-        "OpenSSL accepted altered data"
-    );
+    let (judge, oracle) = if profile == Profile::Rsa {
+        ensure!(
+            openssl_raw(ctx, &cert, RAW, &bytes)?,
+            "OpenSSL rejected our raw RSA signature"
+        );
+        let mut altered = RAW.to_vec();
+        altered[0] ^= 1;
+        ensure!(
+            !openssl_raw(ctx, &cert, &altered, &bytes)?,
+            "OpenSSL accepted altered data"
+        );
+        (
+            ("openssl", "verified, altered data rejected".to_owned()),
+            "OpenSSL dgst -sha256 -verify".to_owned(),
+        )
+    } else {
+        (
+            (
+                "kalkan",
+                kalkan_judges(ctx, profile, &cert, &bytes, "oncl")?,
+            ),
+            format!("Kalkan {}; {}", kalkan_algorithm(profile)?, kalkan::LABEL),
+        )
+    };
     Ok(Observed {
         grade: grade(&[
             ("crypto", "ok".to_owned()),
-            ("openssl", "verified, altered data rejected".to_owned()),
+            judge,
             ("signature-bytes", bytes.len().to_string()),
         ]),
         ours: format!("{} signature bytes", bytes.len()),
-        oracle: "OpenSSL dgst -sha256 -verify".to_owned(),
+        oracle,
         detail: String::new(),
     })
 }
 
-/// NCANode's raw signature (`/x509/sign`, RSA): OpenSSL verifies it with the returned
-/// certificate; altered data is rejected.
+/// NCANode's raw signature (`/x509/sign`): OpenSSL (RSA) or Kalkan (GOST) verifies it with the
+/// returned certificate; altered data is rejected.
 fn sign_ncanode(ctx: &mut Ctx, profile: Profile) -> anyhow::Result<Observed> {
-    if profile != Profile::Rsa {
-        return no_gost_raw_verifier().map(|()| Observed::default());
-    }
     let key = nc_key(profile)?;
     let (status, answer) = ctx.nc_post(
         "/x509/sign",
@@ -447,24 +460,43 @@ fn sign_ncanode(ctx: &mut Ctx, profile: Profile) -> anyhow::Result<Observed> {
         "nc-signer.cer",
         &unb64(answer["certificate"].as_str().context("no certificate")?)?,
     )?;
-    ensure!(
-        openssl_raw(ctx, &cert, RAW, &signature)?,
-        "OpenSSL rejected NCANode's raw RSA signature"
-    );
-    let mut altered = RAW.to_vec();
-    altered[0] ^= 1;
-    ensure!(
-        !openssl_raw(ctx, &cert, &altered, &signature)?,
-        "OpenSSL accepted altered data"
-    );
+    let (judge, oracle) = if profile == Profile::Rsa {
+        ensure!(
+            openssl_raw(ctx, &cert, RAW, &signature)?,
+            "OpenSSL rejected NCANode's raw RSA signature"
+        );
+        let mut altered = RAW.to_vec();
+        altered[0] ^= 1;
+        ensure!(
+            !openssl_raw(ctx, &cert, &altered, &signature)?,
+            "OpenSSL accepted altered data"
+        );
+        (
+            ("openssl", "verified, altered data rejected".to_owned()),
+            "OpenSSL dgst -sha256 -verify with the certificate NCANode returned".to_owned(),
+        )
+    } else {
+        (
+            (
+                "kalkan",
+                kalkan_judges(ctx, profile, &cert, &signature, "NCANode")?,
+            ),
+            format!(
+                "Kalkan {} with the certificate NCANode returned ({} signature bytes); {}",
+                kalkan_algorithm(profile)?,
+                signature.len(),
+                kalkan::LABEL
+            ),
+        )
+    };
     Ok(Observed {
         grade: grade(&[
             ("crypto", "ok".to_owned()),
-            ("openssl", "verified, altered data rejected".to_owned()),
+            judge,
             ("oncl", "no raw verify profile".to_owned()),
         ]),
         ours: "oncl has no verify profile for a raw signature".to_owned(),
-        oracle: "OpenSSL dgst -sha256 -verify with the certificate NCANode returned".to_owned(),
+        oracle,
         detail: String::new(),
     })
 }

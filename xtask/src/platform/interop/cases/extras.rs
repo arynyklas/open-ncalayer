@@ -6,11 +6,14 @@ use anyhow::{Context, ensure};
 use oncl_pdk::abi::{self, Import};
 use serde_json::Value;
 
+use super::super::kalkan;
 use super::super::oncl::path_str;
 use super::super::tools::hex;
 use super::super::world::{NOW, Profile};
-use super::super::{Case, Ctx, Observed, blocked};
-use super::common::{CONTENT, b64, grade, nc_key, unb64};
+use super::super::{Case, Ctx, Observed};
+use super::common::{
+    CONTENT, b64, grade, kalkan_algorithm, kalkan_raw_discriminates, nc_key, unb64,
+};
 
 pub fn cases() -> Vec<Case> {
     vec![
@@ -25,12 +28,9 @@ pub fn cases() -> Vec<Case> {
             timestamp(ctx, "gost2015-512", false)
         }),
         Case::new("plugin-hash-sha256", plugin_hash),
-        Case::new("plugin-sign-raw-rsa", plugin_sign),
-        Case::new("plugin-sign-raw-gost2015", |_| {
-            blocked(
-                "no external verifier for a raw GOST R 34.10-2015 signature (OpenSSL/Python have \
-                 none; NCANode's /x509/verify cannot judge, see x509-verify-ncanode-discrimination)",
-            )
+        Case::new("plugin-sign-raw-rsa", |ctx| plugin_sign(ctx, Profile::Rsa)),
+        Case::new("plugin-sign-raw-gost2015", |ctx| {
+            plugin_sign(ctx, Profile::Gost2015)
         }),
     ]
 }
@@ -424,10 +424,11 @@ fn plugin_hash(ctx: &mut Ctx) -> anyhow::Result<Observed> {
     })
 }
 
-/// A plugin signs with the operator-bound key (`keys_sign_raw`, handle 1): OpenSSL verifies
-/// the RSA signature; another handle or a missing `--authorize` never reaches the key.
-fn plugin_sign(ctx: &mut Ctx) -> anyhow::Result<Observed> {
-    let signer = ctx.world.signer(Profile::Rsa);
+/// A plugin signs with the operator-bound key (`keys_sign_raw`, handle 1): OpenSSL (RSA) or
+/// Kalkan (GOST) verifies the signature; for RSA, another handle or a missing `--authorize`
+/// never reaches the key.
+fn plugin_sign(ctx: &mut Ctx, profile: Profile) -> anyhow::Result<Observed> {
+    let signer = ctx.world.signer(profile);
     let key = vec![
         "--key".to_owned(),
         path_str(&signer.p12)?.to_owned(),
@@ -453,6 +454,31 @@ fn plugin_sign(ctx: &mut Ctx) -> anyhow::Result<Observed> {
         run.brief()
     );
     let signature = ok_bytes(&decoded(&run.stdout_text())?)?;
+    if profile != Profile::Rsa {
+        let cert = signer.cert_der.clone();
+        kalkan_raw_discriminates(
+            ctx,
+            profile,
+            &cert,
+            b"plugin message",
+            &signature,
+            "the plugin",
+        )?;
+        return Ok(Observed {
+            grade: grade(&[
+                ("crypto", "ok".to_owned()),
+                ("kalkan", "verified, altered data rejected".to_owned()),
+            ]),
+            ours: run.brief(),
+            oracle: format!(
+                "Kalkan {} with the signer certificate ({} signature bytes); {}",
+                kalkan_algorithm(profile)?,
+                signature.len(),
+                kalkan::LABEL
+            ),
+            detail: String::new(),
+        });
+    }
     let cert = signer.cert_der.clone();
     let pubkey = ctx.file("plugin.pub");
     let x = ctx.openssl(&[
