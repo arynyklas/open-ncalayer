@@ -132,7 +132,10 @@ document of at most `input_bytes` of its own, so the signature and a payload of 
 Scratch and sizing. Lowering `input_bytes` requires lowering `container_bytes` too. At the
 defaults one `input` part of a verify, extend, extract or sign item is spooled up to
 `input_bytes + container_bytes` (2 GiB) before the engine refuses an unsupported document, and
-the engine then copies about `input_bytes`, so a hostile upload can write up to about 3 GiB to
+the engine then copies about `input_bytes` (a CAdES verify, extend or add copies the wire again
+while it parses it, up to `input_bytes + container_bytes` plus one 256 KiB chunk before a
+hostile wire is refused, so up to about 4 GiB at the defaults together with the upload
+spool), so a hostile upload can write several GiB to
 the scratch before it is refused; this is bounded by `temp_per_operation`, `total_temp` and
 `max_in_flight`. Measured peaks: signing a document at the limit holds about 3x `input_bytes`
 of scratch, and verifying a signed result about 2x. Rule of thumb:
