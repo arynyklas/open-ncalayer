@@ -1,6 +1,6 @@
 # oncl-core
 
-The embeddable Rust SDK of [OpenNCALayer](https://github.com/arynyklas/open-ncalayer): typed,
+The embeddable Rust SDK of [OpenNCALayer](https://github.com/arynyklas/OpenNCALayer): typed,
 streaming signing, verification, validation, inspection and time-stamping operations over files
 and byte streams, with explicit host-owned trust, keys, clock, network, audit and resource
 limits. It has no UI, daemon, listener, installer or self-update, and needs no display session.
@@ -17,25 +17,25 @@ By path, from a checkout of the repository at a tag or commit you have reviewed:
 
 ```toml
 [dependencies]
-oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
-oncl-pki = { path = "open-ncalayer/crates/oncl-pki" }
+oncl-core = { path = "OpenNCALayer/crates/oncl-core", features = ["full"] }
+oncl-pki = { path = "OpenNCALayer/crates/oncl-pki" }
 
 # The SDK is built against locally modified `streebog` and `hmac` (additive secret-input
 # variants): a consumer outside the workspace must carry the same patch.
 [patch.crates-io]
-streebog = { path = "open-ncalayer/vendor/streebog" }
-hmac = { path = "open-ncalayer/vendor/hmac" }
+streebog = { path = "OpenNCALayer/vendor/streebog" }
+hmac = { path = "OpenNCALayer/vendor/hmac" }
 ```
 
 or by git, pinned to a commit (the patch section then points at the same repository):
 
 ```toml
 [dependencies]
-oncl-core = { git = "https://github.com/arynyklas/open-ncalayer", rev = "<commit>", features = ["full"] }
+oncl-core = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>", features = ["full"] }
 
 [patch.crates-io]
-streebog = { git = "https://github.com/arynyklas/open-ncalayer", rev = "<commit>" }
-hmac = { git = "https://github.com/arynyklas/open-ncalayer", rev = "<commit>" }
+streebog = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>" }
+hmac = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>" }
 ```
 
 The minimal SDK is `default-features = false` (the same as the default): CMS/CAdES, hashing,

@@ -21,9 +21,9 @@
 | Открытый ключ обновлений в дереве | `crates/oncl-update/keys/current.pub` (идентификатор minisign `465A2F38D51A8BB6`); `next.pub` нет | файл |
 | Каталога `updates/` нет ни в дереве, ни на `origin/main` | значит, **индекс не публиковался ни разу**: alpha.7 даёт первый `beta.json` | `ls` корня; `index-check.yml`: без `updates/v1` проверяются только ключи |
 | Репозиторий | `origin` = `git@github.com:arynyklas/OpenNCALayer.git`; на `origin/main` лежит коммит `70424e67` «Rename repository to OpenNCALayer» | `.git/config`, `git log origin/main` |
-| Адрес в текстах этой ветки | `arynyklas/open-ncalayer` (`release.md`, `scripts/winget/*.ps1`, `xtask winget`) | файлы |
+| Адрес в текстах этой ветки | `arynyklas/OpenNCALayer` (`release.md`, `scripts/winget/*.ps1`, `xtask winget`, README, документация SDK) | файлы |
 
-Расхождение адресов — следствие переименования: ветка ещё не перебазирована на `origin/main`. После перебазирования `release.md` и сборка берут адрес `arynyklas/OpenNCALayer` (`release.md` на `origin/main` так и говорит). В командах ниже `<репозиторий>` = `arynyklas/OpenNCALayer`. Скрипты WinGet по умолчанию (`-Repository`) указывают на старое имя; GitHub перенаправляет старое имя, но проверка URL в `xtask winget` и в `index check` сравнивает адреса буквально — **[не проверено]**, будет ли старое имя принято после переименования; перед матрицей сверьте, что `winget`-часть и `index check` на перебазированной ветке используют один адрес.
+Адрес `arynyklas/OpenNCALayer` одинаков в `release.md`, сборке, скриптах WinGet (`-Repository` по умолчанию), `xtask winget` (константа `REPOSITORY`) и ссылках README; в командах ниже `<репозиторий>` = `arynyklas/OpenNCALayer`. Проверка URL в `xtask winget` и в `index check` сравнивает адреса буквально, старое имя `open-ncalayer` она не принимает. **Остаётся вам, на стороне GitHub:** проверить, что старое имя репозитория продолжает перенаправляться (для ссылок из уже выпущенных сборок и закладок) и что новое имя в нужном регистре открывается; это в репозитории не проверяется.
 
 ## 1. Предусловия: что должно быть зелёным
 
@@ -145,7 +145,7 @@ cargo xtask index check updates/v1 --base origin/main --vm-smoke --conformance
 - Для pre-release подписывается один файл: `beta.json`. `stable.json` для alpha.7 не создаётся.
 - `--conformance` в проверке PR (`index-check.yml`) запускается всегда, но для версии, идущей только в `beta`, статус не требуется (`update-index.md`). Локально можно опустить `--conformance`.
 - Ожидаемый вывод `index check` без ошибок — завершение с кодом 0; ошибки печатаются с причиной (подпись не тем ключом, `seq` не вырос, `HEAD` ≠ 200, нет статуса `vm-smoke`).
-- Закоммитить `updates/v1/beta.json` вместе с `updates/v1/beta.json.minisig`, запушить. Проверка `index-check.yml` стартует именно на этот пуш. Слить PR после зелёной проверки. Далее `pages.yml` публикует `updates/` на Pages: `https://arynyklas.github.io/OpenNCALayer/updates/v1/beta.json` (после переименования; до него — `open-ncalayer`).
+- Закоммитить `updates/v1/beta.json` вместе с `updates/v1/beta.json.minisig`, запушить. Проверка `index-check.yml` стартует именно на этот пуш. Слить PR после зелёной проверки. Далее `pages.yml` публикует `updates/` на Pages: `https://arynyklas.github.io/OpenNCALayer/updates/v1/beta.json`.
 - После слияния: `curl -fsS https://arynyklas.github.io/OpenNCALayer/updates/v1/beta.json.minisig` должен вернуть подпись (`release.md`, §8).
 
 Если до слияния вышла ещё одна версия, у второго PR конфликт по `seq`: конфликт **не разрешать вручную**, перезапустить job `index` (Actions → Release → Re-run job `index`) после слияния первого и подписать заново (`release.md`, §4).

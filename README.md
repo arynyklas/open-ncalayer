@@ -84,11 +84,11 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 ```toml
 [dependencies]
-oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
+oncl-core = { path = "OpenNCALayer/crates/oncl-core", features = ["full"] }
 
 [patch.crates-io]
-streebog = { path = "open-ncalayer/vendor/streebog" }
-hmac = { path = "open-ncalayer/vendor/hmac" }
+streebog = { path = "OpenNCALayer/vendor/streebog" }
+hmac = { path = "OpenNCALayer/vendor/hmac" }
 ```
 
 Features: без них (минимальный SDK: CMS/CAdES, хеширование, PKI-валидация, файлы ключей,
@@ -442,7 +442,7 @@ mkcert: центр сертификации ищется в `$CAROOT` или к�
 - **macOS** (Intel и Apple Silicon, одна универсальная программа): `openncalayer-<версия>-osx.pkg` ставит `OpenNCALayer.app` в `/Applications` или, при «Установить только для меня», в `~/Applications`, встраивает её для пользователя, вошедшего в систему, и запускает. `openncalayer-<версия>-osx.zip` — то же приложение без установщика: перетащите его в «Программы» и запустите. Удаление: `"/Applications/OpenNCALayer.app/Contents/MacOS/openncalayer" integration uninstall` (при установке «только для меня» — `"$HOME/Applications/OpenNCALayer.app/Contents/MacOS/openncalayer" integration uninstall`), затем приложение — в Корзину.
 - **Linux** (x86-64, glibc 2.28 и новее: Debian 10, Ubuntu 18.10, RHEL/AlmaLinux/Rocky 8, Fedora 29, Arch и новее): `openncalayer-<версия>-linux-x64.AppImage`. Положите файл туда, где он будет лежать (например, `~/Applications`), сделайте исполняемым (`chmod +x`) и запустите. AppImage монтирует себя через FUSE; где FUSE нет, запустите его с `--appimage-extract-and-run`. Внутри — библиотеки xkbcommon, которых может не быть в системе; остальное (glibc, fontconfig, X11 или Wayland) берётся из системы. Удаление: `openncalayer-<версия>-linux-x64.AppImage integration uninstall`, затем удалить файл.
 - **Arch Linux**: пакет AUR [`openncalayer-bin`](https://aur.archlinux.org/packages/openncalayer-bin) (только релизы, без предварительных версий): программы в `/usr/lib/openncalayer/`, команда `openncalayer`, пункт меню «OpenNCALayer». Обновляет его pacman, самообновление выключено. Перед удалением пакета выполните `openncalayer integration uninstall` от каждого пользователя, который запускал программу.
-- **WinGet** (Windows 10 1809+, x64 и x86, для пользователя): **пока недоступен.** Команда `winget install --id arynyklas.OpenNCALayer --exact` — цель, а не существующая функция: пакета нет в источнике WinGet, потому что нет ни опубликованного stable-релиза (последние версии — alpha, они в WinGet не попадут), ни проверенной установки на чистых Windows 10/11, ни принятого Microsoft манифеста. Генератор и проверки готовы локально, порядок и состояние — в [`docs/dev/winget.md`](docs/dev/winget.md). Пока ставьте установщик `win-*-setup.exe` из [Releases](https://github.com/arynyklas/open-ncalayer/releases).
+- **WinGet** (Windows 10 1809+, x64 и x86, для пользователя): **пока недоступен.** Команда `winget install --id arynyklas.OpenNCALayer --exact` — цель, а не существующая функция: пакета нет в источнике WinGet, потому что нет ни опубликованного stable-релиза (последние версии — alpha, они в WinGet не попадут), ни проверенной установки на чистых Windows 10/11, ни принятого Microsoft манифеста. Генератор и проверки готовы локально, порядок и состояние — в [`docs/dev/winget.md`](docs/dev/winget.md). Пока ставьте установщик `win-*-setup.exe` из [Releases](https://github.com/arynyklas/OpenNCALayer/releases).
 
 Что установка делает для пользователя (на Windows — установщик, на macOS — `.pkg` для вошедшего пользователя; AppImage, пакет AUR, `.zip` и пользователи, для которых установщик не запускался, — при первом запуске программы):
 - регистрирует relay браузеров, как `openncalayer nm install` (раздел [«Расширение браузера»](#расширение-браузера));

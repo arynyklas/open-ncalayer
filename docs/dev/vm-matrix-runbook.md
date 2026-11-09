@@ -129,7 +129,7 @@ cargo xtask winget candidate --release-json release.json --out target/winget-can
 
 ### 6.2 Ячейка (в ВМ, PowerShell, без повышения)
 
-Реальные параметры `scripts/winget/Invoke-WingetProbe.ps1` (из блока `param`): обязательные `-ManifestDir`, `-InstallerArch` (`x64`|`x86`), `-Tag`, `-OldSetup`, `-OldVersion`, `-Account` (`standard`|`admin_non_elevated`), `-OutFile`; необязательные `-Repository` (по умолчанию `arynyklas/open-ncalayer`), `-OtherAdminProfile`, `-SelfUpdateTargetVersion`, `-SelfUpdateWaitMinutes` (15), переключатель `-CleanImageAttested`.
+Реальные параметры `scripts/winget/Invoke-WingetProbe.ps1` (из блока `param`): обязательные `-ManifestDir`, `-InstallerArch` (`x64`|`x86`), `-Tag`, `-OldSetup`, `-OldVersion`, `-Account` (`standard`|`admin_non_elevated`), `-OutFile`; необязательные `-Repository` (по умолчанию `arynyklas/OpenNCALayer`), `-OtherAdminProfile`, `-SelfUpdateTargetVersion`, `-SelfUpdateWaitMinutes` (15), переключатель `-CleanImageAttested`.
 
 ```powershell
 .\Invoke-WingetProbe.ps1 -ManifestDir .\candidate -InstallerArch x64 -Tag v<версия> `

@@ -31,11 +31,11 @@ stable-релиз ──► cargo xtask winget candidate ──► (ВМ) script
 ### 1. Кандидат
 
 ```sh
-gh api repos/arynyklas/open-ncalayer/releases/tags/v<версия> > release.json
+gh api repos/arynyklas/OpenNCALayer/releases/tags/v<версия> > release.json
 cargo xtask winget candidate --release-json release.json --out target/winget-candidate
 ```
 
-Команда читает релиз GitHub API и отказывает, если он не опубликован как stable (таблица ниже). Затем **один раз** скачивает каждый из двух установщиков по URL вида `https://github.com/arynyklas/open-ncalayer/releases/download/v<версия>/<файл>` (только HTTPS, только публичные адреса, предел 512 МиБ), по этому же потоку считает SHA-256 и размер и сверяет их с `size` и `digest` из API; проверяет, что файл — установщик этой версии и архитектуры (полезная нагрузка читается так же, как её читает сам установщик, `oncl-winget-setup::payload::read`) и что у него есть таблица сертификатов Authenticode. Результат — каталог с тремя файлами (`arynyklas.OpenNCALayer.yaml`, `….locale.en-US.yaml`, `….installer.yaml`) и `target/winget-candidate.evidence.json`.
+Команда читает релиз GitHub API и отказывает, если он не опубликован как stable (таблица ниже). Затем **один раз** скачивает каждый из двух установщиков по URL вида `https://github.com/arynyklas/OpenNCALayer/releases/download/v<версия>/<файл>` (только HTTPS, только публичные адреса, предел 512 МиБ), по этому же потоку считает SHA-256 и размер и сверяет их с `size` и `digest` из API; проверяет, что файл — установщик этой версии и архитектуры (полезная нагрузка читается так же, как её читает сам установщик, `oncl-winget-setup::payload::read`) и что у него есть таблица сертификатов Authenticode. Результат — каталог с тремя файлами (`arynyklas.OpenNCALayer.yaml`, `….locale.en-US.yaml`, `….installer.yaml`) и `target/winget-candidate.evidence.json`.
 
 Кандидат — **вход проверки установки**, а не манифест для подачи: в нём нет сопоставления Apps & Features (его ещё не знает никто, кроме реальной установки), и `cargo xtask winget check` без `--candidate` его отвергает. Кандидат — чистая функция релиза и скачанных байт: повторный запуск даёт тот же `installer.yaml` побайтно, и его SHA-256 записан в отчёте проверки.
 
@@ -61,7 +61,7 @@ winget validate target/winget
 | Вход | Причина |
 |---|---|
 | Черновик; `prerelease: true`; тег не `v<major>.<minor>.<patch>` (alpha, beta, `+build`, `latest`); нет `published_at` | Нужен опубликованный stable. Флаг, снятый с alpha, не помогает: проверяется и тег. |
-| `browser_download_url` не равен `https://github.com/arynyklas/open-ncalayer/releases/download/v<версия>/<файл>` | `latest/download`, другой репозиторий, другой тег, `http`, строка запроса — изменяемые или чужие URL. |
+| `browser_download_url` не равен `https://github.com/arynyklas/OpenNCALayer/releases/download/v<версия>/<файл>` | `latest/download`, другой репозиторий, другой тег, `http`, строка запроса — изменяемые или чужие URL. |
 | Установщик другой версии или флейвора (`win7-*`, `arm64`, чужой номер) среди ассетов; нет одного из двух; дубликат; не `uploaded`; нулевой размер; `digest` не `sha256:<64 hex>` | Чужой или неподходящий ассет. До скачивания ничего не качается. |
 | Размер или `digest` из API ≠ байты потока | Подмена или обрыв. API — ожидаемое значение, фактическое даёт поток. |
 | Файл не PE нужной архитектуры, нет полезной нагрузки `Setup` этой версии и архитектуры, нет таблицы сертификатов | Не тот файл, не тот флейвор, не подписан. |

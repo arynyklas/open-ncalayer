@@ -21,11 +21,11 @@ variants), so the consumer carries the same `[patch.crates-io]`:
 
 ```toml
 [dependencies]
-oncl-core = { path = "open-ncalayer/crates/oncl-core", features = ["full"] }
+oncl-core = { path = "OpenNCALayer/crates/oncl-core", features = ["full"] }
 
 [patch.crates-io]
-streebog = { path = "open-ncalayer/vendor/streebog" }
-hmac = { path = "open-ncalayer/vendor/hmac" }
+streebog = { path = "OpenNCALayer/vendor/streebog" }
+hmac = { path = "OpenNCALayer/vendor/hmac" }
 ```
 
 For git, give every entry the same `git` URL and `rev`. `cargo xtask sdk smoke` (section 7)
