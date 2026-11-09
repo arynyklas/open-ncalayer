@@ -148,6 +148,19 @@ impl<'a> Client<'a> {
     /// Keyless extension of an XAdES or PAdES result to LT with the loopback PKI's CRLs as
     /// evidence.
     fn extend_lt(&self, pki: &Pki, profile: &str, input: &Path, output: &Path) -> Output {
+        self.extend(pki, profile, "lt", input, None, output)
+    }
+    /// Keyless extension to `level` (`lt` or `lta`), the content of a detached signature
+    /// given as `detached`.
+    fn extend(
+        &self,
+        pki: &Pki,
+        profile: &str,
+        level: &str,
+        input: &Path,
+        detached: Option<&Path>,
+        output: &Path,
+    ) -> Output {
         let crls = ["inter", "root"].map(|name| {
             self.file(
                 &format!("{name}.crl"),
@@ -163,7 +176,7 @@ impl<'a> Client<'a> {
             "--profile",
             profile,
             "--level",
-            "lt",
+            level,
             "--input",
             path(input),
             "--output",
@@ -175,6 +188,9 @@ impl<'a> Client<'a> {
         }
         for certificate in &chain {
             args.extend(["--evidence-certificate", path(certificate)]);
+        }
+        if let Some(detached) = detached {
+            args.extend(["--detached", path(detached)]);
         }
         self.run(&args)
     }
@@ -305,6 +321,180 @@ fn cms_and_pdf_signed_results_of_a_limit_sized_document_are_accepted_again_over_
     assert_eq!(json(&output)["verdict"], "Valid");
     assert!(
         files(&remote.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+}
+
+/// The proof's `cades-levels` chain at megabyte scale, attached and detached: CAdES-T over a
+/// document of exactly `input_bytes`, verify, keyless extension to LT and to LTA with
+/// evidence, verify each. The signature structure is container, not document, so the signed
+/// result (attached) and the signature read next to the document (detached) are admitted.
+#[test]
+fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
+    let pki = Pki::start();
+    let remote = small_server(&pki, 1 << 20);
+    let client = Client::new(&remote);
+    let content = payload(LIMIT);
+    let document = client.file("doc.bin", &content);
+    for detached in [false, true] {
+        let tag = if detached { "detached" } else { "attached" };
+        let signed = client.path(&format!("{tag}.t.p7s"));
+        let mut args = vec![
+            "sign",
+            "--profile",
+            "cades-t",
+            "--key-name",
+            "ops-key",
+            "--authorize",
+            "--input",
+            path(&document),
+            "--output",
+            path(&signed),
+            "--json",
+        ];
+        if detached {
+            args.push("--detached");
+        }
+        let output = client.run(&args);
+        assert_eq!(exit(&output), 0, "{tag} sign: {}", text(&output.stderr));
+        let signed_len = std::fs::metadata(&signed).unwrap().len();
+        assert!(
+            detached || signed_len > LIMIT as u64,
+            "an attached result exceeds the document allowance: {signed_len}"
+        );
+        let side = detached.then_some(document.as_path());
+        let verify = |profile: &str, input: &Path| {
+            let mut args = vec![
+                "verify",
+                "--profile",
+                profile,
+                "--input",
+                path(input),
+                "--json",
+            ];
+            if let Some(document) = side {
+                args.extend(["--detached", path(document)]);
+            }
+            client.run(&args)
+        };
+        let output = verify("cades-t", &signed);
+        assert_eq!(exit(&output), 0, "{tag} verify: {}", text(&output.stderr));
+        assert_eq!(json(&output)["verdict"], "Valid");
+
+        let lt = client.path(&format!("{tag}.lt.p7s"));
+        let output = client.extend(&pki, "cms", "lt", &signed, side, &lt);
+        assert_eq!(
+            exit(&output),
+            0,
+            "{tag} extend lt: {}",
+            text(&output.stderr)
+        );
+        let output = verify("cades-lt", &lt);
+        assert_eq!(
+            exit(&output),
+            0,
+            "{tag} verify lt: {}",
+            text(&output.stderr)
+        );
+        assert_eq!(json(&output)["verdict"], "Valid");
+
+        let lta = client.path(&format!("{tag}.lta.p7s"));
+        let output = client.extend(&pki, "cms", "lta", &lt, side, &lta);
+        assert_eq!(
+            exit(&output),
+            0,
+            "{tag} extend lta: {}",
+            text(&output.stderr)
+        );
+        let output = verify("cades-lta", &lta);
+        assert_eq!(
+            exit(&output),
+            0,
+            "{tag} verify lta: {}",
+            text(&output.stderr)
+        );
+        assert_eq!(json(&output)["verdict"], "Valid");
+    }
+    assert!(
+        files(&remote.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+
+    // The same results are refused by a server whose document allowance is one byte smaller,
+    // and the signature structure is bounded by `container_bytes`.
+    let signed_attached = client.path("attached.t.p7s");
+    let signed_detached = client.path("detached.t.p7s");
+    let narrow = Remote::start_with(&pki, |config, _| {
+        config.input_bytes = LIMIT as u64 - 1;
+        config.container_bytes = 1 << 20;
+    });
+    let narrow_client = Client::new(&narrow);
+    let attached = narrow_client.file("a.p7s", &std::fs::read(&signed_attached).unwrap());
+    let detached = narrow_client.file("d.p7s", &std::fs::read(&signed_detached).unwrap());
+    let document = narrow_client.file("doc.bin", &content);
+    assert_input_limit(
+        "attached verify one document byte past the allowance",
+        &narrow_client.verify("cades-t", &attached),
+    );
+    let output = narrow_client.run(&[
+        "verify",
+        "--profile",
+        "cades-t",
+        "--input",
+        path(&detached),
+        "--detached",
+        path(&document),
+        "--json",
+    ]);
+    assert_input_limit(
+        "detached verify one document byte past the allowance",
+        &output,
+    );
+    let output = narrow_client.extend(
+        &pki,
+        "cms",
+        "lt",
+        &detached,
+        Some(&document),
+        &narrow_client.path("refused.p7s"),
+    );
+    assert_input_limit(
+        "detached extend one document byte past the allowance",
+        &output,
+    );
+    assert!(!narrow_client.path("refused.p7s").exists());
+    assert!(
+        files(&narrow.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+
+    let tight = small_server(&pki, 1024);
+    let tight_client = Client::new(&tight);
+    let detached = tight_client.file("d.p7s", &std::fs::read(&signed_detached).unwrap());
+    let document = tight_client.file("doc.bin", &content);
+    let output = tight_client.run(&[
+        "verify",
+        "--profile",
+        "cades-t",
+        "--input",
+        path(&detached),
+        "--detached",
+        path(&document),
+        "--json",
+    ]);
+    assert_ne!(
+        exit(&output),
+        0,
+        "a signature past container_bytes is refused"
+    );
+    let stderr = text(&output.stderr);
+    assert!(
+        (stderr.contains("ContainerLimit") || stderr.contains("InputLimit"))
+            && stderr.contains("applied=NotApplied"),
+        "{stderr}"
+    );
+    assert!(
+        files(&tight.scratch()).is_empty(),
         "scratch must be empty afterwards"
     );
 }
