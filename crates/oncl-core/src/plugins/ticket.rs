@@ -868,8 +868,8 @@ pub(super) fn xml_profile(args: &abi::SignXmlArgs) -> Profile {
     })
 }
 
-/// `keys_sign_xml_ex`; `None` for `transforms`, `signature_id` or a signing-time object,
-/// which no profile can say.
+/// `keys_sign_xml_ex`; `None` for `signature_id`, a signing-time object or transforms the
+/// signing engine would not take, which no profile can say.
 pub(super) fn xml_ex_profile(args: &abi::SignXmlExArgs) -> Option<Profile> {
     let abi::SignXmlExArgs {
         handle: _,
@@ -889,8 +889,11 @@ pub(super) fn xml_ex_profile(args: &abi::SignXmlExArgs) -> Option<Profile> {
         base64_line_breaks,
         output,
     } = args;
-    if transforms.is_some() || signature_id.is_some() || signing_time_object.is_some() {
+    if signature_id.is_some() || signing_time_object.is_some() {
         return None;
+    }
+    if let Some(transforms) = transforms {
+        oncl_plugin::operations::check_transforms(transforms).ok()?;
     }
     Some(Profile::XmlEx(XmlExProfile {
         element: xpath(element),
@@ -921,6 +924,7 @@ pub(super) fn xml_ex_profile(args: &abi::SignXmlExArgs) -> Option<Profile> {
                 trim: *trim,
             },
         },
+        transforms: transforms.clone(),
     }))
 }
 
@@ -1360,7 +1364,36 @@ mod tests {
                 ),
             ],
         );
-        refused(k, "transforms", p(&|a| a.transforms = Some(Vec::new())));
+        let t = |list: &[abi::Transform]| {
+            let list = list.to_vec();
+            p(&move |a| a.transforms = Some(list.clone()))
+        };
+        let inc = abi::Transform::C14n(abi::C14n::Inclusive);
+        let incc = abi::Transform::C14n(abi::C14n::InclusiveWithComments);
+        let exc = abi::Transform::C14n(abi::C14n::Exclusive);
+        let excc = abi::Transform::C14n(abi::C14n::ExclusiveWithComments);
+        let env = abi::Transform::Enveloped;
+        let values = vec![
+            ("none", p(&|_| {})),
+            ("env", t(&[env])),
+            ("env+inc", t(&[env, inc])),
+            ("env+incc", t(&[env, incc])),
+            ("env+exc", t(&[env, exc])),
+            ("env+excc", t(&[env, excc])),
+            ("inc", t(&[inc])),
+            ("incc", t(&[incc])),
+            ("exc", t(&[exc])),
+            ("excc", t(&[excc])),
+        ];
+        // Every value says something and no two say the same.
+        for (label, profile) in &values {
+            assert!(profile.is_some(), "transforms {label} has a profile");
+        }
+        field(k, "transforms", values);
+        refused(k, "transforms empty", t(&[]));
+        refused(k, "transforms c14n before enveloped", t(&[inc, env]));
+        refused(k, "transforms two c14n", t(&[env, inc, exc]));
+        refused(k, "transforms enveloped twice", t(&[env, env]));
         refused(k, "signature_id", p(&|a| a.signature_id = Some("s".into())));
         refused(
             k,

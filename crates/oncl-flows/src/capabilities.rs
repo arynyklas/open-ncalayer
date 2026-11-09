@@ -113,6 +113,9 @@ pub enum ProfileFact {
     XmlBase64LineBreaks(bool),
     /// The output is re-serialised by the core.
     XmlSerialized,
+    /// The reference's transforms, in order, by the core's names for them (the signed bytes
+    /// are the element after these).
+    XmlTransforms(Vec<String>),
     /// CMS: the content is signed as it is, even if it is a CMS itself (`cosign = never`).
     ContentAsIs,
     /// CMS: the output is not DER.
@@ -307,6 +310,7 @@ fn fact_text(fact: &ProfileFact, l: Locale) -> String {
         ProfileFact::XmlBase64LineBreaks(true) => o.b64_breaks_on.to_owned(),
         ProfileFact::XmlBase64LineBreaks(false) => o.b64_breaks_off.to_owned(),
         ProfileFact::XmlSerialized => o.xml_serialized.to_owned(),
+        ProfileFact::XmlTransforms(names) => o.xml_transforms.replace("{0}", &names.join(", ")),
         ProfileFact::ContentAsIs => o.content_as_is.to_owned(),
         ProfileFact::CmsOutput(OutputForm::Base64) => o.out_base64.to_owned(),
         ProfileFact::CmsOutput(OutputForm::Pem) => o.out_pem.to_owned(),
@@ -360,6 +364,8 @@ struct OpTexts {
     b64_breaks_on: &'static str,
     b64_breaks_off: &'static str,
     xml_serialized: &'static str,
+    /// `{0}`: the transforms, in order.
+    xml_transforms: &'static str,
     content_as_is: &'static str,
     out_base64: &'static str,
     out_pem: &'static str,
@@ -422,6 +428,7 @@ impl OpTexts {
                 b64_breaks_on: "base64 жол үзілістерімен",
                 b64_breaks_off: "base64 жол үзілістерісіз",
                 xml_serialized: "нәтижені өзек қайта сериализациялайды",
+                xml_transforms: "қол қойылатын сілтеменің түрлендірулері: {0}",
                 content_as_is: "мазмұнға CMS болса да, сол күйінде қол қойылады",
                 out_base64: "нәтиже DER емес, base64 түрінде",
                 out_pem: "нәтиже DER емес, PEM түрінде",
@@ -477,6 +484,7 @@ impl OpTexts {
                 b64_breaks_on: "base64 с переносами строк",
                 b64_breaks_off: "base64 без переносов строк",
                 xml_serialized: "результат заново сериализует ядро",
+                xml_transforms: "преобразования подписываемой ссылки: {0}",
                 content_as_is: "содержимое подписывается как есть, даже если это CMS",
                 out_base64: "результат не DER, а base64",
                 out_pem: "результат не DER, а PEM",
@@ -532,6 +540,7 @@ impl OpTexts {
                 b64_breaks_on: "base64 with line breaks",
                 b64_breaks_off: "base64 without line breaks",
                 xml_serialized: "the output is re-serialised by the core",
+                xml_transforms: "transforms of the signed reference: {0}",
                 content_as_is: "the content is signed as it is, even if it is a CMS",
                 out_base64: "the output is base64, not DER",
                 out_pem: "the output is PEM, not DER",
@@ -720,6 +729,7 @@ mod tests {
                 ProfileFact::XmlBase64LineBreaks(true),
                 ProfileFact::XmlBase64LineBreaks(false),
                 ProfileFact::XmlSerialized,
+                ProfileFact::XmlTransforms(vec!["X1".to_owned(), "X2".to_owned()]),
                 ProfileFact::ContentAsIs,
                 ProfileFact::CmsOutput(OutputForm::Base64),
                 ProfileFact::CmsOutput(OutputForm::Pem),
@@ -788,6 +798,29 @@ mod tests {
         assert_eq!(
             capability_text(&CapabilityLine::Added(AddedLine::Server), Locale::En),
             "NEW or WIDER: newly available to servers and the CLI"
+        );
+    }
+
+    #[test]
+    fn transforms_are_said_in_host_words_in_every_locale() {
+        let line = CapabilityLine::KeyProfile(vec![ProfileFact::XmlTransforms(vec![
+            "enveloped signature".to_owned(),
+            "inclusive canonicalisation with comments".to_owned(),
+        ])]);
+        assert_eq!(
+            capability_text(&line, Locale::En),
+            "signature form (fixed by the core): transforms of the signed reference: \
+             enveloped signature, inclusive canonicalisation with comments"
+        );
+        assert_eq!(
+            capability_text(&line, Locale::Ru),
+            "вид подписи (задаёт ядро): преобразования подписываемой ссылки: \
+             enveloped signature, inclusive canonicalisation with comments"
+        );
+        assert_eq!(
+            capability_text(&line, Locale::Kk),
+            "қолтаңба түрі (өзек белгілейді): қол қойылатын сілтеменің түрлендірулері: \
+             enveloped signature, inclusive canonicalisation with comments"
         );
     }
 

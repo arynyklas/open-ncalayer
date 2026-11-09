@@ -20,7 +20,7 @@ use oncl_flows::capabilities::{
     AddedLine, CapabilityLine, CmsAttribute, KeyUseKind, NetworkLine, OperationConsent, OutputForm,
     PlacementKind, ProfileFact, TsaFamily, XadesLevelKind,
 };
-use oncl_pdk::abi::{C14n, CmsOutput, Import, Placement, XadesLevel};
+use oncl_pdk::abi::{C14n, CmsOutput, Import, Placement, Transform, XadesLevel};
 use semver::{BuildMetadata, Prerelease, Version};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -929,9 +929,9 @@ pub enum XmlOutputProfile {
     },
 }
 
-/// `keys_sign_xml_ex`. Never allowed (absent): `transforms`, `signature_id`,
-/// `signing_time_object`, a `signature_method` or `digest_method` outside
-/// [`SIGNATURE_METHODS`] / [`DIGEST_METHODS`].
+/// `keys_sign_xml_ex`. Never allowed (absent): `signature_id`, `signing_time_object`, a
+/// `signature_method` or `digest_method` outside [`SIGNATURE_METHODS`] /
+/// [`DIGEST_METHODS`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct XmlExProfile {
@@ -957,6 +957,12 @@ pub struct XmlExProfile {
     pub base64_line_breaks: Option<bool>,
     /// Field 11; default `as_is`.
     pub output: XmlOutputProfile,
+    /// Field 12; absent: Kalkan's transforms. The reference's transforms, written
+    /// `["enveloped", { c14n = "inclusive_with_comments" }]`: `enveloped` first (if at
+    /// all), then at most one canonicalisation ([`check_transforms`]). An empty list says
+    /// nothing and is refused. Written to the canonical encoding only when present, so
+    /// the hash of every profile without it is what it was before this field existed.
+    pub transforms: Option<Vec<Transform>>,
 }
 
 /// The TSA of a XAdES profile (`Custom` is never allowed).
@@ -1120,6 +1126,7 @@ impl Profile {
                 strip_whitespace,
                 base64_line_breaks,
                 output,
+                transforms,
             }) => {
                 match element {
                     None => facts.push(ProfileFact::XmlWholeDocument),
@@ -1181,6 +1188,11 @@ impl Profile {
                 match output {
                     XmlOutputProfile::AsIs => {}
                     XmlOutputProfile::Serialize { .. } => facts.push(ProfileFact::XmlSerialized),
+                }
+                if let Some(transforms) = transforms {
+                    facts.push(ProfileFact::XmlTransforms(
+                        transforms.iter().map(transform_name).collect(),
+                    ));
                 }
             }
             Profile::Xades(XadesProfile {
@@ -1342,6 +1354,20 @@ impl Profile {
                         w.bool(declaration);
                         w.bool(standalone_no);
                         w.bool(trim);
+                    }
+                }
+                if let Some(transforms) = &p.transforms {
+                    check_transforms(transforms).ok()?;
+                    w.u8(12);
+                    w.u32(transforms.len() as u32);
+                    for t in transforms {
+                        w.u8(match t {
+                            Transform::Enveloped => 0,
+                            Transform::C14n(C14n::Inclusive) => 1,
+                            Transform::C14n(C14n::InclusiveWithComments) => 2,
+                            Transform::C14n(C14n::Exclusive) => 3,
+                            Transform::C14n(C14n::ExclusiveWithComments) => 4,
+                        });
                     }
                 }
             }
@@ -2278,6 +2304,16 @@ impl RawKeyUse {
                     ));
                 }
                 methods(&p.signature_method, &p.digest_method).map_err(profile_error)?;
+                if let Some(transforms) = &p.transforms {
+                    check_transforms(transforms).map_err(profile_error)?;
+                    // The signature of a whole document is inside what it signs: only the
+                    // enveloped transform keeps it out of its own digest.
+                    if p.element.is_none() && !transforms.contains(&Transform::Enveloped) {
+                        return Err(profile_error(
+                            "transforms of a whole-document signature need `enveloped`".to_owned(),
+                        ));
+                    }
+                }
                 Profile::XmlEx(p)
             }
             KeyKind::Xades => {
@@ -2311,6 +2347,36 @@ impl RawKeyUse {
             content,
             profile,
         })
+    }
+}
+
+/// The core's name of a transform, as the consent states it.
+fn transform_name(t: &Transform) -> String {
+    match t {
+        Transform::Enveloped => "enveloped signature".to_owned(),
+        Transform::C14n(C14n::Inclusive) => "inclusive canonicalisation".to_owned(),
+        Transform::C14n(C14n::InclusiveWithComments) => {
+            "inclusive canonicalisation with comments".to_owned()
+        }
+        Transform::C14n(C14n::Exclusive) => "exclusive canonicalisation".to_owned(),
+        Transform::C14n(C14n::ExclusiveWithComments) => {
+            "exclusive canonicalisation with comments".to_owned()
+        }
+    }
+}
+
+/// The transforms of a reference as the signing engine takes them: `enveloped` first (if
+/// at all), then at most one canonicalisation. A list the engine would refuse, or an empty
+/// one (which says nothing: absent means Kalkan's), is an error.
+pub fn check_transforms(transforms: &[Transform]) -> Result<(), String> {
+    let rest = match transforms {
+        [Transform::Enveloped, rest @ ..] => rest,
+        rest => rest,
+    };
+    match (transforms, rest) {
+        ([], _) => Err("transforms is empty: leave it out for Kalkan's".to_owned()),
+        (_, [] | [Transform::C14n(_)]) => Ok(()),
+        _ => Err("transforms: enveloped first, then at most one canonicalisation".to_owned()),
     }
 }
 

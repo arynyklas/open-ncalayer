@@ -1644,6 +1644,30 @@ fn every_profile_field_of_every_kind_changes_the_canonical_bytes() {
             ("c14n = \"exclusive\"", "c14n = \"exclusive_with_comments\""),
             ("c14n = \"exclusive\"", "c14n = \"inclusive_with_comments\""),
             ("c14n = \"exclusive\"\n", ""),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [\"enveloped\"]",
+            ),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [{ c14n = \"inclusive_with_comments\" }]",
+            ),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [\"enveloped\", { c14n = \"inclusive_with_comments\" }]",
+            ),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [\"enveloped\", { c14n = \"exclusive_with_comments\" }]",
+            ),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [\"enveloped\", { c14n = \"inclusive\" }]",
+            ),
+            (
+                "strip_whitespace = true",
+                "strip_whitespace = true\ntransforms = [\"enveloped\", { c14n = \"exclusive\" }]",
+            ),
             ("strip_whitespace = true", "strip_whitespace = false"),
             ("base64_line_breaks = true", "base64_line_breaks = false"),
             ("base64_line_breaks = true\n", ""),
@@ -1749,6 +1773,94 @@ fn every_profile_field_of_every_kind_changes_the_canonical_bytes() {
             ("\nsignature_method", "\n#signature_method"),
         ],
     );
+}
+
+#[test]
+fn xml_ex_transforms_are_checked_like_the_signing_engine_takes_them() {
+    let transforms = |list: &str| {
+        op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"pki\"",
+            &format!("transforms = {list}"),
+        )
+    };
+    for ok in [
+        "[\"enveloped\"]",
+        "[\"enveloped\", { c14n = \"inclusive_with_comments\" }]",
+        "[\"enveloped\", { c14n = \"exclusive\" }]",
+    ] {
+        parse(&transforms(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    // Without `enveloped` only an element can be signed (a whole document holds its own
+    // signature): the manifest says so before the signing engine would.
+    let element_form = |list: &str| {
+        op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"pki\"",
+            &format!(
+                "element = \"/a/b\"\nparent = \"/a\"\nplacement = \"parent\"\ntransforms = {list}"
+            ),
+        )
+    };
+    parse(&element_form("[{ c14n = \"inclusive\" }]")).unwrap();
+    let e = refused(&transforms("[{ c14n = \"inclusive\" }]")).to_string();
+    assert!(
+        e.contains("whole-document") && e.contains("enveloped"),
+        "{e}"
+    );
+    const ORDER: &str = "enveloped first, then at most one canonicalisation";
+    for (bad, wanted) in [
+        ("[]", "is empty"),
+        ("[{ c14n = \"inclusive\" }, \"enveloped\"]", ORDER),
+        (
+            "[\"enveloped\", { c14n = \"inclusive\" }, { c14n = \"exclusive\" }]",
+            ORDER,
+        ),
+        ("[\"enveloped\", \"enveloped\"]", ORDER),
+        (
+            "[{ c14n = \"inclusive\" }, { c14n = \"inclusive\" }]",
+            ORDER,
+        ),
+    ] {
+        let e = refused(&transforms(bad)).to_string();
+        assert!(e.contains(wanted), "{bad}: {e}");
+    }
+    // Not a transform of the list.
+    for bad in ["[\"xpath\"]", "[{ c14n = \"md5\" }]", "\"enveloped\""] {
+        assert!(
+            matches!(refused(&transforms(bad)), OperationError::Profile { .. }),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn the_transforms_field_is_written_only_when_present() {
+    // `xml_ex_base` has no transforms: its bytes are the golden vector's (field 11 last).
+    let without = key_options(&xml_ex_base());
+    assert!(
+        without.ends_with(&[0x0b, 0x01, 0x01, 0x00, 0x01]),
+        "{without:?}"
+    );
+    let with_transforms = |list: &str| {
+        key_options(&xml_ex_base().replacen(
+            "strip_whitespace = true",
+            &format!("strip_whitespace = true\ntransforms = {list}"),
+            1,
+        ))
+    };
+    // Field 12: a count, then one tag per transform (enveloped 0, inclusive with comments 2).
+    let mut wanted = without.clone();
+    wanted.extend_from_slice(&[0x0c, 0, 0, 0, 2, 0x00, 0x02]);
+    assert_eq!(
+        with_transforms("[\"enveloped\", { c14n = \"inclusive_with_comments\" }]"),
+        wanted
+    );
+    let mut wanted = without.clone();
+    wanted.extend_from_slice(&[0x0c, 0, 0, 0, 1, 0x00]);
+    assert_eq!(with_transforms("[\"enveloped\"]"), wanted);
 }
 
 #[test]
@@ -1955,7 +2067,7 @@ mod abi_guard {
             signature_method: _,    // profile
             digest_method: _,       // profile
             signed_info_c14n: _,    // profile c14n
-            transforms: _,          // must be default none
+            transforms: _,          // profile (checked list)
             signature_id: _,        // must be default none
             signing_time_object: _, // must be default none
             strip_whitespace: _,    // profile
@@ -2087,6 +2199,22 @@ mod consent {
                 ProfileFact::XmlStripWhitespace,
                 ProfileFact::XmlBase64LineBreaks(false),
                 ProfileFact::XmlSerialized,
+            ]
+        );
+        let facts = facts_of(&op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"pki\"",
+            "transforms = [\"enveloped\", { c14n = \"inclusive_with_comments\" }]",
+        ));
+        assert_eq!(
+            facts,
+            [
+                ProfileFact::XmlWholeDocument,
+                ProfileFact::XmlTransforms(vec![
+                    "enveloped signature".to_owned(),
+                    "inclusive canonicalisation with comments".to_owned()
+                ]),
             ]
         );
         let facts = facts_of(&op_of(
