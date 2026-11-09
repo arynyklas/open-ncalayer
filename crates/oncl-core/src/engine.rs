@@ -155,6 +155,14 @@ impl OperationAdmission {
     pub fn resources(&mut self) -> &mut oncl_pki::resource::ResourceScope {
         &mut self.scope
     }
+    /// Takes the `max_in_flight` slot of an admission made with [`Engine::admit_intake`].
+    /// `CapacityExceeded` when all are taken (nothing changes, the call may be repeated);
+    /// `Ok` when the admission holds one already. [`Engine::begin_admitted`] takes the slot
+    /// itself when this was not called, so this exists to wait for a slot while the intake
+    /// (spooled documents) is kept.
+    pub fn occupy_slot(&self) -> Result<(), OperationError> {
+        self.scope.occupy_slot().map_err(OperationError::from)
+    }
 }
 impl Engine {
     pub fn new(services: EngineServices) -> Result<Self, OperationError> {
@@ -219,13 +227,37 @@ impl Engine {
         &self,
         control: Arc<dyn OperationControl>,
     ) -> Result<OperationAdmission, OperationError> {
+        self.admit_with(control, true)
+    }
+    /// [`Self::admit`] without a `max_in_flight` slot, for a host that receives a request body
+    /// first (spooling documents, waiting for a slow client) and bounds those uploads itself.
+    /// Memory, temporary disk, metadata, document allowances, deadline and control are charged
+    /// exactly as for an admission; only the count of running operations is not. The slot is
+    /// taken by [`OperationAdmission::occupy_slot`] or, at the latest, by
+    /// [`Self::begin_admitted`], which is the only way to authority and fails with
+    /// `CapacityExceeded` when every slot is taken.
+    pub fn admit_intake(
+        &self,
+        control: Arc<dyn OperationControl>,
+    ) -> Result<OperationAdmission, OperationError> {
+        self.admit_with(control, false)
+    }
+    fn admit_with(
+        &self,
+        control: Arc<dyn OperationControl>,
+        slot: bool,
+    ) -> Result<OperationAdmission, OperationError> {
         // Waits first if a maintainer holds the gate: the operation does not exist yet, so it
         // holds no resource while it waits.
         let activity = self
             .activity
             .as_ref()
             .map(crate::activity::ActivityGate::begin);
-        let scope = self.budget.begin(self.limits.clone(), control)?;
+        let scope = if slot {
+            self.budget.begin(self.limits.clone(), control)?
+        } else {
+            self.budget.begin_unslotted(self.limits.clone(), control)?
+        };
         // Counted until the LAST owner of the operation lets go: the context, but also a
         // native worker that outlives it, a pending response or an artifact.
         if let Some(activity) = activity {
@@ -259,7 +291,8 @@ impl Engine {
         if grant.is_empty() {
             return Err(OperationError::PermissionDenied);
         }
-        admission.scope.checkpoint()?;
+        // The deadline and control, and the `max_in_flight` slot when intake did not take it.
+        admission.scope.occupy_slot()?;
         Ok(Self::admitted_context(admission, grant, policy))
     }
     fn admitted_context(

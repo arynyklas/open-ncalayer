@@ -1,5 +1,7 @@
-//! D7: a stalled (slow-loris) upload must not hold an admission slot until the whole
-//! operation deadline. Real `oncl-server` process, real sockets, scaled timings.
+//! D7: a stalled (slow-loris) upload must not hold an admission slot, a native worker or the
+//! capacity of other clients until the whole operation deadline. The body is captured in its
+//! own phase with its own limit (`max_uploads`). Real `oncl-server` process, real sockets,
+//! scaled timings.
 #[path = "server_support/mod.rs"]
 mod support;
 
@@ -12,6 +14,15 @@ use std::{
 
 const METADATA: &str = r#"{"items":[{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"h","role":"document"}]}"#;
 
+/// Plenty of slots and workers: only the upload phase can be the limit.
+fn config_wide(root: &std::path::Path, extra: &str) -> String {
+    format!(
+        "scratch_directory = {}\nmax_in_flight = 16\nblocking_workers = 16\nqueue_capacity = 16\n{extra}",
+        support::toml_path(&root.join("scratch"))
+    )
+}
+
+/// The default executor shape is `max_in_flight = 2`, `blocking_workers = 2`.
 fn config(root: &std::path::Path, extra: &str) -> String {
     format!(
         "scratch_directory = {}\nmax_in_flight = 2\nblocking_workers = 2\nqueue_capacity = 2\n{extra}",
@@ -19,11 +30,20 @@ fn config(root: &std::path::Path, extra: &str) -> String {
     )
 }
 
+/// One slot and one worker only: a single stalled upload would have been enough to starve
+/// every other request before the upload phase had its own limit.
+fn config_one(root: &std::path::Path, extra: &str) -> String {
+    format!(
+        "scratch_directory = {}\nmax_in_flight = 1\nblocking_workers = 1\nqueue_capacity = 1\n{extra}",
+        support::toml_path(&root.join("scratch"))
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Route {
-    /// `POST /v1/hash`, the raw body is read by the native hashing worker.
+    /// `POST /v1/hash`, the raw body is hashed while it is read.
     Hash,
-    /// `POST /v1/operations`, multipart read through the bounded intake.
+    /// `POST /v1/operations`, multipart captured by the bounded intake.
     Multipart,
 }
 
@@ -151,27 +171,47 @@ fn assert_typed_refusal(reply: &Reply, status: u16, code: &str) {
     );
 }
 
-/// The scaled D7 reproduction: both slots taken by stalled uploads (one per read path),
-/// then more clients. Operation deadline 8 s, idle timeout 1.5 s, admission wait 0.6 s.
+/// The starvation this design removes: ONE admission slot and ONE native worker, and two
+/// stalled uploads (one per read path). Before the upload phase had its own limit a single
+/// stalled upload took the slot or the worker and every other client got `503` until the
+/// stall ended. Now other requests complete at once while both stalls are pending, and the
+/// stalls end at the idle timeout (4 s), not at the operation deadline (12 s).
 #[test]
-fn stalled_uploads_release_their_slots_at_the_idle_timeout_not_the_operation_deadline() {
+fn stalled_uploads_take_neither_an_admission_slot_nor_a_native_worker() {
     let process = support::Process::configured("127.0.0.1:0", |root| {
-        config(
+        config_one(
             root,
-            "admission_wait_ms = 600\noperation_timeout_ms = 8000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
+            "admission_wait_ms = 600\noperation_timeout_ms = 12000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 4000\n",
         )
     });
     let hold_hash = stalled(&process, Route::Hash);
     let hold_multipart = stalled(&process, Route::Multipart);
     sleep(Duration::from_millis(300));
 
-    // Both slots are held: an honest, typed refusal, but only AFTER waiting admission_wait.
-    let refused = small_hash(&process);
-    assert_typed_refusal(&refused, 503, "CapacityExceeded");
+    let pending = Instant::now();
+    for round in 0..3 {
+        let reply = small_hash(&process);
+        assert_eq!(reply.status, 200, "hash round {round}: {}", reply.body);
+        assert!(reply.body.contains(
+            "\"digest\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
+        ));
+        assert!(
+            reply.elapsed < Duration::from_millis(550),
+            "round {round}: a hash must not wait behind a stalled upload (admission wait is 600 ms), took {:?}",
+            reply.elapsed
+        );
+        let reply = small_operation(&process, "/v1/operations");
+        assert_eq!(reply.status, 200, "operations round {round}: {}", reply.body);
+        assert!(
+            reply.elapsed < Duration::from_millis(550),
+            "round {round}: an operation must not wait behind a stalled upload, took {:?}",
+            reply.elapsed
+        );
+    }
     assert!(
-        refused.elapsed >= Duration::from_millis(500),
-        "a refusal must follow the admission wait, took {:?}",
-        refused.elapsed
+        pending.elapsed() < Duration::from_millis(3000),
+        "the small requests must have run while both stalls were still pending, took {:?}",
+        pending.elapsed()
     );
 
     for held in [hold_hash, hold_multipart] {
@@ -179,19 +219,16 @@ fn stalled_uploads_release_their_slots_at_the_idle_timeout_not_the_operation_dea
         let reply = held.finish();
         assert_typed_refusal(&reply, 504, "DeadlineExceeded");
         assert!(
-            reply.elapsed >= Duration::from_millis(1400)
-                && reply.elapsed < Duration::from_millis(4500),
-            "{route:?}: the idle timeout (1.5 s), not the 8 s operation deadline, ends a stall; took {:?}",
+            reply.elapsed >= Duration::from_millis(3900)
+                && reply.elapsed < Duration::from_millis(9000),
+            "{route:?}: the idle timeout (4 s), not the 12 s operation deadline, ends a stall; took {:?}",
             reply.elapsed
         );
     }
 
-    // The slots and the spool are free again: a CPU/hash client completes at once.
+    // The spool of the stalled multipart upload is released with its request.
     let reply = small_hash(&process);
     assert_eq!(reply.status, 200, "{}", reply.body);
-    assert!(reply.body.contains(
-        "\"digest\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
-    ));
     let scratch = process.directory.path().join("scratch");
     assert!(
         walk(&scratch).is_empty(),
@@ -216,31 +253,175 @@ fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-/// admission_wait_ms queues a client that arrives while max_in_flight operations run, and
-/// admits it as soon as a slot frees.
+/// `max_uploads` is the limit of the upload phase: with every upload slot taken by a stalled
+/// body (one per read path) a further client waits `admission_wait_ms` and gets the typed
+/// `503 CapacityExceeded`/`NotApplied` on every body route; the refusal comes before its body
+/// is read, and the slots are free again when the stalls have ended.
 #[test]
-fn a_client_arriving_at_the_in_flight_cap_waits_for_a_slot_within_admission_wait() {
+fn upload_cap_exhaustion_is_a_typed_503_after_the_admission_wait_and_frees_when_uploads_end() {
     let process = support::Process::configured("127.0.0.1:0", |root| {
-        config(
+        config_wide(
             root,
-            "admission_wait_ms = 6000\noperation_timeout_ms = 10000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
+            "max_uploads = 2\nadmission_wait_ms = 500\noperation_timeout_ms = 8000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 3000\n",
         )
     });
-    let hold_a = stalled(&process, Route::Hash);
-    let hold_b = stalled(&process, Route::Hash);
+    let hold_hash = stalled(&process, Route::Hash);
+    let hold_multipart = stalled(&process, Route::Multipart);
     sleep(Duration::from_millis(300));
-    let waited = small_hash(&process);
-    assert_eq!(waited.status, 200, "{}", waited.body);
+
+    let refused = small_hash(&process);
+    assert_typed_refusal(&refused, 503, "CapacityExceeded");
     assert!(
-        waited.elapsed >= Duration::from_millis(900)
-            && waited.elapsed < Duration::from_millis(5000),
-        "queued until the stalls ended at the idle timeout, took {:?}",
-        waited.elapsed
+        refused.elapsed >= Duration::from_millis(450) && refused.elapsed < Duration::from_millis(2500),
+        "a refusal must follow the admission wait, took {:?}",
+        refused.elapsed
     );
-    for held in [hold_a, hold_b] {
+    for path in ["/v1/operations", "/v1/batch"] {
+        let refused = small_operation(&process, path);
+        assert_typed_refusal(&refused, 503, "CapacityExceeded");
+        assert!(
+            refused.elapsed >= Duration::from_millis(450),
+            "{path}: {:?}",
+            refused.elapsed
+        );
+    }
+
+    for held in [hold_hash, hold_multipart] {
         assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
     }
+    let reply = small_hash(&process);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    for path in ["/v1/operations", "/v1/batch"] {
+        let reply = small_operation(&process, path);
+        assert_eq!(reply.status, 200, "{path}: {}", reply.body);
+    }
     process.stop();
+}
+
+/// A client that arrives while every upload slot is taken waits for one within
+/// `admission_wait_ms` and is served as soon as a stalled upload ends.
+#[test]
+fn a_client_at_the_upload_cap_waits_for_a_slot_within_admission_wait() {
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config_wide(
+            root,
+            "max_uploads = 2\nadmission_wait_ms = 6000\noperation_timeout_ms = 10000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
+        )
+    });
+    for path in ["/v1/hash", "/v1/operations", "/v1/batch"] {
+        let hold_a = stalled(&process, Route::Hash);
+        let hold_b = stalled(&process, Route::Multipart);
+        sleep(Duration::from_millis(300));
+        let waited = if path == "/v1/hash" {
+            small_hash(&process)
+        } else {
+            small_operation(&process, path)
+        };
+        assert_eq!(waited.status, 200, "{path}: {}", waited.body);
+        assert!(
+            waited.elapsed >= Duration::from_millis(900)
+                && waited.elapsed < Duration::from_millis(5000),
+            "{path}: queued until the stalls ended at the idle timeout, took {:?}",
+            waited.elapsed
+        );
+        for held in [hold_a, hold_b] {
+            assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
+        }
+    }
+    process.stop();
+}
+
+/// A client that disconnects in the middle of its upload releases the upload slot, the
+/// spool and the temp reservation: with room for exactly one full-size upload, a client that
+/// sent most of a document and hung up does not stop the next full-size operation.
+#[test]
+fn a_disconnect_during_the_upload_releases_slot_spool_and_temp() {
+    const LIMIT: usize = 1 << 20;
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config_wide(
+            root,
+            &format!(
+                "max_uploads = 1\ninput_bytes = {LIMIT}\ncontainer_bytes = {LIMIT}\ntotal_temp = {}\ntemp_per_operation = {}\nadmission_wait_ms = 600\noperation_timeout_ms = 20000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 15000\n",
+                2 * LIMIT,
+                2 * LIMIT
+            ),
+        )
+    });
+    let scratch = process.directory.path().join("scratch");
+    for round in 0..3 {
+        let mut upload = Upload::open(&process, Route::Multipart, None);
+        let mut first = Upload::prefix(Route::Multipart);
+        first.extend_from_slice(&vec![5u8; LIMIT - 4096]);
+        upload.send(true, &first).unwrap();
+        // The spool exists while the upload is in progress.
+        let started = Instant::now();
+        while walk(&scratch).is_empty() && started.elapsed() < Duration::from_secs(5) {
+            sleep(Duration::from_millis(20));
+        }
+        assert!(!walk(&scratch).is_empty(), "round {round}: the upload spools to scratch");
+        // Hang up in the middle of the document.
+        upload
+            .stream
+            .shutdown(std::net::Shutdown::Both)
+            .unwrap();
+        drop(upload.stream);
+        let _ = upload.collector.join();
+
+        // The one upload slot is free at once (no idle timeout, no admission wait elapsed).
+        let reply = full_size_operation(&process, LIMIT);
+        assert_eq!(reply.status, 200, "round {round}: {}", reply.body);
+        assert!(
+            reply.elapsed < Duration::from_millis(550),
+            "round {round}: the slot must be free right after the disconnect, took {:?}",
+            reply.elapsed
+        );
+        let started = Instant::now();
+        while !walk(&scratch).is_empty() && started.elapsed() < Duration::from_secs(5) {
+            sleep(Duration::from_millis(20));
+        }
+        assert!(
+            walk(&scratch).is_empty(),
+            "round {round}: the spool must be gone: {:?}",
+            walk(&scratch)
+        );
+    }
+    process.stop();
+}
+
+/// A `hash` operation over a document of exactly `size` bytes.
+fn full_size_operation(process: &support::Process, size: usize) -> Reply {
+    let mut body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&vec![3u8; size]);
+    body.extend_from_slice(b"\r\n--b--\r\n");
+    let mut stream = TcpStream::connect(process.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let started = Instant::now();
+    write!(
+        stream,
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        process.address,
+        process.token.as_str(),
+        body.len()
+    )
+    .unwrap();
+    stream.write_all(&body).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    Reply {
+        status: text
+            .strip_prefix("HTTP/1.1 ")
+            .and_then(|r| r.get(..3))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0),
+        body: text,
+        elapsed: started.elapsed(),
+    }
 }
 
 /// A slow client that keeps sending (4 KiB every 400 ms = 10 KiB/s, 4 s in total, far
@@ -335,6 +516,60 @@ fn the_upload_knobs_have_safe_defaults_and_bounded_ranges() {
     off.validate().expect("0 switches the rate rule off");
 }
 
+/// `max_uploads`: at least 1, at most 256, and every upload must be able to reserve its
+/// largest spool (`input_bytes + container_bytes`) in the shared temp budget at once, i.e.
+/// `max_uploads <= total_temp / (input_bytes + container_bytes)`.
+#[test]
+fn max_uploads_is_bounded_by_the_temp_budget_and_a_fixed_range() {
+    use oncl_server::config::ServerConfig;
+    const GIB: u64 = 1 << 30;
+    let defaults = ServerConfig::default();
+    // 16 GiB of temp / (1 GiB input + 1 GiB container) = 8.
+    assert_eq!(defaults.max_uploads, 8);
+    assert_eq!(
+        defaults.total_temp / (defaults.input_bytes + defaults.container_bytes),
+        8
+    );
+    defaults.validate().expect("the default is accepted at the default config");
+
+    let with = |max_uploads: usize, tweak: &dyn Fn(&mut ServerConfig)| {
+        let mut config = ServerConfig {
+            max_uploads,
+            ..Default::default()
+        };
+        tweak(&mut config);
+        config.validate()
+    };
+    let nothing = |_: &mut ServerConfig| {};
+    assert!(with(0, &nothing).is_err(), "0 uploads can never admit a client");
+    // The temp rule: one more than the budget allows is refused, the boundary is accepted.
+    assert!(with(9, &nothing).is_err(), "9 spools of 2 GiB do not fit 16 GiB");
+    assert!(with(8, &nothing).is_ok());
+    assert!(with(1, &nothing).is_ok());
+    // A larger budget lifts the rule up to the fixed ceiling of 256.
+    let large = |config: &mut ServerConfig| {
+        config.total_temp = 1024 * GIB;
+    };
+    assert!(with(256, &large).is_ok(), "256 spools fit 1024 GiB / 2 GiB = 512");
+    assert!(with(257, &large).is_err(), "257 is past the fixed ceiling");
+    // The divisor is input_bytes + container_bytes: a smaller document allowance admits more.
+    let small_documents = |config: &mut ServerConfig| {
+        config.input_bytes = GIB / 4;
+        config.container_bytes = GIB / 4;
+    };
+    assert!(with(32, &small_documents).is_ok(), "16 GiB / 0.5 GiB = 32");
+    assert!(with(33, &small_documents).is_err());
+    // A budget below one spool admits no upload at all.
+    let tiny = |config: &mut ServerConfig| {
+        config.total_temp = GIB;
+        config.temp_per_operation = GIB;
+    };
+    assert!(with(1, &tiny).is_err(), "1 GiB of temp cannot hold one 2 GiB spool");
+    // The key is part of the documented TOML surface.
+    let parsed: ServerConfig = toml::from_str("max_uploads = 3").expect("max_uploads is a key");
+    assert_eq!(parsed.max_uploads, 3);
+}
+
 /// A small `hash` request of the given body kind for `/v1/operations` or `/v1/batch`.
 fn small_operation(process: &support::Process, path: &str) -> Reply {
     let body = format!(
@@ -365,56 +600,6 @@ fn small_operation(process: &support::Process, path: &str) -> Reply {
         body: text,
         elapsed: started.elapsed(),
     }
-}
-
-/// The slot wait also applies to `/v1/operations` and `/v1/batch`: queued, then admitted
-/// when the stalls end; and refused only after the wait when they last longer.
-#[test]
-fn operations_and_batch_clients_queue_for_a_slot_too() {
-    let process = support::Process::configured("127.0.0.1:0", |root| {
-        config(
-            root,
-            "admission_wait_ms = 6000\noperation_timeout_ms = 10000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 1500\n",
-        )
-    });
-    for path in ["/v1/operations", "/v1/batch"] {
-        let hold_a = stalled(&process, Route::Hash);
-        let hold_b = stalled(&process, Route::Hash);
-        sleep(Duration::from_millis(300));
-        let waited = small_operation(&process, path);
-        assert_eq!(waited.status, 200, "{path}: {}", waited.body);
-        assert!(
-            waited.elapsed >= Duration::from_millis(900),
-            "{path}: queued until the stalls ended, took {:?}",
-            waited.elapsed
-        );
-        for held in [hold_a, hold_b] {
-            assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
-        }
-    }
-    process.stop();
-    let process = support::Process::configured("127.0.0.1:0", |root| {
-        config(
-            root,
-            "admission_wait_ms = 500\noperation_timeout_ms = 8000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 3000\n",
-        )
-    });
-    let hold_a = stalled(&process, Route::Hash);
-    let hold_b = stalled(&process, Route::Hash);
-    sleep(Duration::from_millis(300));
-    for path in ["/v1/operations", "/v1/batch"] {
-        let refused = small_operation(&process, path);
-        assert_typed_refusal(&refused, 503, "CapacityExceeded");
-        assert!(
-            refused.elapsed >= Duration::from_millis(450),
-            "{path}: {:?}",
-            refused.elapsed
-        );
-    }
-    for held in [hold_a, hold_b] {
-        assert_typed_refusal(&held.finish(), 504, "DeadlineExceeded");
-    }
-    process.stop();
 }
 
 /// The JSON body path is paced as well: a stalled `application/json` upload is ended at

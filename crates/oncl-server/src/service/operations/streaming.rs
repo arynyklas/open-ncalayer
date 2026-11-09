@@ -52,6 +52,7 @@ pub(super) async fn response(
     runtime: StreamRuntime,
     mut ctx: OperationContext,
     prepared: intake::Prepared,
+    documents: intake::Documents,
     private: PrivateState,
     mode: Mode,
 ) -> Result<Response, ApiError> {
@@ -82,7 +83,6 @@ pub(super) async fn response(
     let worker_engine = runtime.engine;
     let worker_failure = failure.clone();
     let (native_ready, ready) = oneshot::channel();
-    let handle = tokio::runtime::Handle::current();
     let work = executor
         .submit_owned(ctx, move |ctx| {
             let native = runtime.progress.native()?;
@@ -112,20 +112,7 @@ pub(super) async fn response(
             };
             let _reservations = prepared.reservations;
             let metadata = prepared.metadata;
-            let mut documents = match prepared.payload.capture(
-                &metadata,
-                runtime.source_store.as_ref(),
-                guard.context(),
-                handle,
-            ) {
-                Ok(documents) => documents,
-                Err(error) => {
-                    let _ = native_ready.send(Err(processing_error(worker_failure.recover(error))));
-                    return Err(
-                        worker_failure.recover(ProcessingError::InvalidInput("intake failed"))
-                    );
-                }
-            };
+            let mut documents = documents;
             if let Err(api) = (private.recheck)(&metadata) {
                 let _ = native_ready.send(Err(api));
                 return Err(ProcessingError::InvalidInput("authorization changed"));

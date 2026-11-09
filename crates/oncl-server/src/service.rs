@@ -6,7 +6,7 @@ use crate::{
     config::{Exposure, ServerConfig, invalid, normalized_peer},
     executor::{BoundedExecutor, CancelOnDrop, Cancellation},
     keys::{KeyBinding, OperatorKeys},
-    pace::UploadPace,
+    pace::{PaceConfig, UploadPace},
     telemetry::{Route as ObservedRoute, Telemetry},
 };
 use axum::{
@@ -24,10 +24,12 @@ use oncl_core::{
     Action, Engine, EngineServices, OperationContext, OperationError, OperationPolicy,
 };
 use oncl_pki::{
+    digest::{DigestValue, HashStream},
     io::Source,
     key::HashAlg,
     resource::{
-        Deadline, OperationControl, ProcessingError, Progress, ResourceReservation, SharedBudget,
+        Deadline, OperationControl, ProcessingError, Progress, ResourceReservation, ResourceScope,
+        SharedBudget,
     },
 };
 use oncl_token::{PcscBackend, Tokens, execution::TokenGateRegistry};
@@ -57,6 +59,10 @@ pub struct ServiceHost {
     store: Option<oncl_pki::io::TemporaryStore>,
     output_store: Option<Arc<operations::artifact::ArtifactStore>>,
     host_policy: Arc<operations::HostPolicy>,
+    /// The `max_uploads` slots of the upload phase (see `hash_unobserved` and `operations`):
+    /// taken before a body is read, held until the operation takes its `max_in_flight` slot
+    /// or ends.
+    uploads: Arc<tokio::sync::Semaphore>,
 }
 struct InvocationControl {
     cancel: Arc<Cancellation>,
@@ -204,6 +210,7 @@ impl ServiceHost {
             plugin_policy,
             trust_bytes: config.pki.trust_bytes()?,
         });
+        let uploads = Arc::new(tokio::sync::Semaphore::new(config.max_uploads));
         Ok(Arc::new(Self {
             engine,
             policy,
@@ -215,6 +222,7 @@ impl ServiceHost {
             store,
             output_store,
             host_policy,
+            uploads,
         }))
     }
     fn principal(&self, metadata: &RequestMetadata) -> Result<Principal, ApiError> {
@@ -510,10 +518,9 @@ fn begin_operation(
 const ADMISSION_POLL: Duration = Duration::from_millis(10);
 /// Runs `attempt` until it is admitted. A refusal with `CapacityExceeded` (every
 /// `max_in_flight` slot taken) is retried for at most `wait` (`admission_wait_ms`) before it
-/// is returned; any other result is final. The request holds no slot, spool or body read
-/// while it waits. A client that disconnects meanwhile is not noticed (the unread request
-/// body keeps Hyper from seeing the close): the wait ends at `wait` at the latest and the
-/// request is then refused, or admitted and ended by the idle rule.
+/// is returned; any other result is final. A request that reaches this point has taken its
+/// whole body: it keeps its upload slot, spool and temp reservation while it waits, and
+/// they are released with the refusal.
 async fn admit_within<T>(
     wait: Duration,
     mut attempt: impl FnMut() -> Result<T, ApiError>,
@@ -532,6 +539,19 @@ async fn admit_within<T>(
         }
     }
 }
+/// One of the `max_uploads` slots of the upload phase. A request waits for it for at most
+/// `wait` (`admission_wait_ms`) before the typed `CapacityExceeded` refusal, which comes
+/// before any byte of its body is read. Dropping the permit (every exit of the phase, a
+/// dropped connection included) frees the slot.
+async fn acquire_upload(
+    uploads: &Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    match tokio::time::timeout(wait, uploads.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(ApiError::not_applied(ErrorCode::CapacityExceeded)),
+    }
+}
 fn core_error(error: OperationError) -> ApiError {
     match error {
         OperationError::Processing(error) => processing_error(error),
@@ -539,13 +559,51 @@ fn core_error(error: OperationError) -> ApiError {
         _ => ApiError::not_applied(ErrorCode::Internal),
     }
 }
+/// Hashes a raw request body while it arrives. Every wait for the client is asynchronous
+/// and governed by the pace rules, the operation deadline and `cancel`; a piece is at most
+/// one Hyper frame (32 KiB) and is hashed where it arrives, so no thread is held while the
+/// client is silent. Returns the SHA-256 and the number of bytes.
+async fn hash_body(
+    mut body: Body,
+    scope: &ResourceScope,
+    deadline: Deadline,
+    pace: PaceConfig,
+    cancel: &Arc<Cancellation>,
+) -> Result<(DigestValue, u64), ApiError> {
+    let invalid = || ApiError::not_applied(ErrorCode::InvalidRequest);
+    let mut pace = UploadPace::new(pace);
+    let mut hasher = HashStream::new(HashAlg::Sha256, scope).map_err(processing_error)?;
+    let mut total = 0u64;
+    loop {
+        let frame = tokio::select! {
+            _ = cancel.cancelled() => return Err(processing_error(ProcessingError::Cancelled)),
+            frame = pace.frame(&mut body, deadline) => frame.map_err(processing_error)?,
+        };
+        let Some(frame) = frame else { break };
+        let data = frame
+            .map_err(|_| invalid())?
+            .into_data()
+            .map_err(|_| invalid())?;
+        if data.len() > 32_768 {
+            return Err(invalid());
+        }
+        hasher.update(&data, scope).map_err(processing_error)?;
+        total += data.len() as u64;
+    }
+    let digest = hasher.finish(scope).map_err(processing_error)?;
+    Ok((digest, total))
+}
 impl ServiceHost {
+    /// `POST /v1/hash`. The body is hashed while it arrives, in the upload phase: waiting
+    /// for the client takes no `max_in_flight` slot and no native worker (every piece is
+    /// hashed where it arrives and the next wait is asynchronous), only one of the
+    /// `max_uploads`. The slot and a worker are taken when the whole body has been hashed.
     fn hash_unobserved(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
         let engine = self.engine.clone();
         let policy = self.policy.clone();
         let audit = self.audit.clone();
-        let keys = self.keys.clone();
         let executor = self.executor.clone();
+        let uploads = self.uploads.clone();
         let operation_timeout = Duration::from_millis(self.config.operation_timeout_ms);
         let admission_wait = Duration::from_millis(self.config.admission_wait_ms);
         let pace = self.config.upload_pace();
@@ -554,82 +612,69 @@ impl ServiceHost {
         Box::pin(async move {
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let principal = principal?;
-            // A client that finds every slot taken queues for at most `admission_wait`;
-            // each attempt's deadline starts at its own admission, never at arrival.
-            let (ctx, binding, metadata_reservation, deadline) =
-                admit_within(admission_wait, || {
-                    let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
-                    let (mut ctx, binding) = begin_operation(
-                        &engine,
-                        &policy,
-                        &audit,
-                        &keys,
-                        &principal,
-                        Action::Hash,
-                        None,
-                        Arc::new(InvocationControl {
-                            cancel: cancel.clone(),
-                            deadline,
-                            progress: None,
-                        }),
-                    )?;
-                    if metadata
-                        .content_length
-                        .is_some_and(|n| n > ctx.resources().limits().input_bytes)
-                    {
-                        return Err(ApiError::not_applied(ErrorCode::InputLimit));
-                    }
-                    let header_bytes = metadata
-                        .headers
-                        .iter()
-                        .try_fold(0u64, |n, (k, v)| {
-                            n.checked_add((k.as_str().len() + v.as_bytes().len() + 4) as u64)
-                        })
-                        .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
-                    let metadata_reservation = ctx
-                        .resources()
-                        .reserve_metadata(header_bytes)
-                        .map_err(processing_error)?;
-                    Ok((ctx, binding, metadata_reservation, deadline))
+            // Audit health and the token right are decided before a body byte is read.
+            if audit.health() != AuditHealth::Healthy {
+                return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
+            }
+            let grant = policy
+                .authorize(&principal, Action::Hash, None, None)
+                .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+            // The upload limit: a client that finds every upload slot taken queues for at
+            // most `admission_wait`; the deadline starts at its own admission, never at arrival.
+            let upload = acquire_upload(&uploads, admission_wait).await?;
+            let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
+            let mut admission = engine
+                .admit_intake(Arc::new(InvocationControl {
+                    cancel: cancel.clone(),
+                    deadline,
+                    progress: None,
+                }))
+                .map_err(core_error)?;
+            if metadata
+                .content_length
+                .is_some_and(|n| n > admission.resources().limits().input_bytes)
+            {
+                return Err(ApiError::not_applied(ErrorCode::InputLimit));
+            }
+            let header_bytes = metadata
+                .headers
+                .iter()
+                .try_fold(0u64, |n, (k, v)| {
+                    n.checked_add((k.as_str().len() + v.as_bytes().len() + 4) as u64)
                 })
-                .await?;
-            let runtime = tokio::runtime::Handle::current();
-            let worker_cancel = cancel.clone();
+                .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
+            let metadata_reservation = admission
+                .resources()
+                .reserve_metadata(header_bytes)
+                .map_err(processing_error)?;
+            let ingress = admission
+                .resources()
+                .reserve_memory(32_768)
+                .map_err(processing_error)?;
+            let (digest, bytes_in) =
+                hash_body(body, admission.resources(), deadline, pace, &cancel).await?;
+            if metadata.content_length.is_some_and(|n| n != bytes_in) {
+                return Err(ApiError::not_applied(ErrorCode::InvalidRequest));
+            }
+            // The whole body is in: only now the operation takes an in-flight slot.
+            admit_within(admission_wait, || {
+                admission.occupy_slot().map_err(core_error)
+            })
+            .await?;
+            drop(upload);
+            let ctx = engine
+                .begin_admitted(admission, grant, OperationPolicy::strict_online())
+                .map_err(core_error)?;
             let work = executor
                 .submit(ctx, move |ctx| {
-                    let _binding = binding;
                     let _metadata = metadata_reservation;
-                    let _ingress = ctx.resources().reserve_memory(32_768)?;
-                    let mut reader = BodyReader {
-                        body,
-                        pace: UploadPace::new(pace),
-                        pending: Bytes::new(),
-                        runtime,
-                        deadline,
-                        cancel: worker_cancel,
-                    };
-                    let report = engine
-                        .hash(
-                            HashAlg::Sha256,
-                            Source::sequential(&mut reader, metadata.content_length),
-                            ctx,
-                        )
-                        .map_err(|error| match error {
-                            OperationError::Processing(error) => error,
-                            _ => ProcessingError::InvalidInput("hash failed"),
-                        })?;
-                    if metadata
-                        .content_length
-                        .is_some_and(|n| n != report.bytes_in)
-                    {
-                        return Err(ProcessingError::InvalidInput("content length mismatch"));
-                    }
+                    let _ingress = ingress;
                     let reservation = ctx.resources().reserve_memory(512)?;
                     let dto = HashResponse {
-                        operation_id: report.id.get(),
+                        operation_id: ctx.id().get(),
                         algorithm: "sha256".into(),
-                        digest: crate::auth::encode(report.digest.as_bytes()),
-                        bytes_in: report.bytes_in,
+                        digest: crate::auth::encode(digest.as_bytes()),
+                        bytes_in,
                     };
                     let bytes = serde_json::to_vec(&dto)
                         .map_err(|_| ProcessingError::InvalidInput("response serialization"))?;
@@ -776,62 +821,6 @@ impl axum::body::HttpBody for DeliveryBody {
     }
     fn size_hint(&self) -> hyper::body::SizeHint {
         hyper::body::SizeHint::with_exact(self.data.as_ref().map_or(0, |bytes| bytes.len() as u64))
-    }
-}
-struct BodyReader {
-    body: Body,
-    pace: UploadPace,
-    pending: Bytes,
-    runtime: tokio::runtime::Handle,
-    deadline: Deadline,
-    cancel: Arc<Cancellation>,
-}
-impl Read for BodyReader {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            if !self.pending.is_empty() {
-                let n = out.len().min(self.pending.len());
-                out[..n].copy_from_slice(&self.pending[..n]);
-                self.pending = self.pending.slice(n..);
-                return Ok(n);
-            }
-            let (cancel, pace, body, deadline) =
-                (&self.cancel, &mut self.pace, &mut self.body, self.deadline);
-            let frame = self.runtime.block_on(async {
-                tokio::select! {
-                    _ = cancel.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted,"cancelled")),
-                    result = pace.frame(body, deadline) => match result {
-                        Ok(Some(Ok(frame))) => Ok(Some(frame)),
-                        Ok(None) => Ok(None),
-                        Ok(Some(Err(_))) => Err(io::Error::new(io::ErrorKind::InvalidData,"invalid request body")),
-                        // Idle, minimum rate or operation deadline: keep the typed refusal.
-                        Err(error) => Err(operations::intake::typed_io(error)),
-                    }
-                }
-            })?;
-            match frame {
-                None => return Ok(0),
-                Some(frame) => {
-                    if let Ok(data) = frame.into_data() {
-                        if data.len() > 32_768 {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "body frame exceeds ingress bound",
-                            ));
-                        }
-                        self.pending = data;
-                    } else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "trailers unsupported",
-                        ));
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -348,6 +348,13 @@ pub struct ServerConfig {
     pub max_connections: usize,
     pub header_timeout_ms: u64,
     pub max_in_flight: u64,
+    /// Requests that may be receiving their body at once (the upload phase: waiting for the
+    /// client and spooling the documents), a limit of its own. An upload takes no
+    /// `max_in_flight` slot and no native worker while it waits for the client; it holds one
+    /// of these until its operation is admitted to run. 1 ..= 256, and at most
+    /// `total_temp / (input_bytes + container_bytes)`, so that every upload can reserve the
+    /// largest spool in the shared temp budget at once.
+    pub max_uploads: usize,
     pub total_memory: u64,
     pub total_temp: u64,
     pub memory_per_operation: u64,
@@ -403,6 +410,7 @@ impl Default for ServerConfig {
             max_connections: 32,
             header_timeout_ms: 5000,
             max_in_flight: 2,
+            max_uploads: 8,
             total_memory: 536_870_912,
             total_temp: 17_179_869_184,
             memory_per_operation: 268_435_456,
@@ -477,6 +485,10 @@ impl ServerConfig {
                 .and_then(|n| n.checked_add(65_536))
                 .is_none()
             || self.metadata_bytes < 32_768
+            || self.max_uploads == 0
+            || self.max_uploads > 256
+            || self.max_uploads as u64
+                > self.total_temp / self.input_bytes.saturating_add(self.container_bytes)
             || self.memory_per_operation < 65_536
             || self.total_memory < self.memory_per_operation
             || self.total_temp < self.temp_per_operation

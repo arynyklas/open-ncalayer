@@ -136,11 +136,13 @@ the engine then copies about `input_bytes` (a CAdES verify, extend or add copies
 while it parses it, up to `input_bytes + container_bytes` plus one 256 KiB chunk before a
 hostile wire is refused, so up to about 4 GiB at the defaults together with the upload
 spool), so a hostile upload can write several GiB to
-the scratch before it is refused; this is bounded by `temp_per_operation`, `total_temp` and
-`max_in_flight`. Measured peaks: signing a document at the limit holds about 3x `input_bytes`
+the scratch before it is refused; this is bounded by `temp_per_operation`, `total_temp`,
+`max_uploads` (the bodies being received) and `max_in_flight`. Measured peaks: signing a
+document at the limit holds about 3x `input_bytes`
 of scratch, and verifying a signed result about 2x. Rule of thumb:
 `temp_per_operation >= 3 * (input_bytes + container_bytes)`. The configuration does not check
-this. A request declaring a length past the ceiling is refused at once with `InputLimit`; an
+this rule, only that every upload can spool its largest input at once:
+`max_uploads <= total_temp / (input_bytes + container_bytes)`. A request declaring a length past the ceiling is refused at once with `InputLimit`; an
 upload without a declared length is counted and refused with `FramingLimit` when the wire passes
 the ceiling. A sign or extend item takes at most 64 evidence references (more is
 `InvalidRequest`, before any part is read). `container_bytes` must be positive and
@@ -213,8 +215,14 @@ Before a completed response, execution failures use the stable `code` and
 DeadlineExceeded (also for an upload that stalls or falls below the minimum upload rate,
 see [the server guide](server.md)). An error answer may add an optional `subcode` string next
 to `code` (see "Error subcodes" below). Hashing never applies a private key. Authentication occurs
-before body intake; the original admission root starts before bounded metadata
-intake, then the host consumes that same root into an authorized operation
+before body intake. Receiving the body is a phase of its own with its own limit
+(`max_uploads`): a request takes an upload slot before its first body byte is read, and
+neither waiting for a slow client nor spooling the documents takes a `max_in_flight` slot, a
+native worker or an audit binding, so a stalled upload leaves every other request unaffected
+except for that one upload slot. `503 CapacityExceeded` means that no upload slot (before the
+body is read) or, once the whole body was accepted, no operation slot freed within the
+server's `admission_wait_ms`; nothing was applied. The original admission root starts before
+bounded metadata intake, then the host consumes that same root into an authorized operation
 context. Queueing, SDK work, response ownership and actual network writes retain
 the original deadline and shared budgets. Dropping a response does not make a
 still-running worker free, and retaining/cloning response bytes retains their

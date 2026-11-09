@@ -180,24 +180,24 @@ impl ServiceHost {
         let keys = self.keys.clone();
         let inline_enabled = self.config.inline_pkcs12;
         let host_policy = self.host_policy.clone();
+        let uploads = self.uploads.clone();
         Box::pin(async move {
             let principal = std::sync::Arc::new(principal?);
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let (progress_hub, progress_receiver) = progress::ProgressHub::channel();
-            // A client that finds every slot taken queues for at most `admission_wait`;
-            // each attempt's deadline starts at its own admission, never at arrival.
-            let (mut admission, deadline) = super::admit_within(admission_wait, || {
-                let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
-                let admission = engine
-                    .admit(Arc::new(InvocationControl {
-                        cancel: cancel.clone(),
-                        deadline,
-                        progress: Some(progress_hub.clone()),
-                    }))
-                    .map_err(core_error)?;
-                Ok((admission, deadline))
-            })
-            .await?;
+            // The upload phase has a limit of its own: a client that finds every upload slot
+            // taken queues for at most `admission_wait`, before any byte of its body is read.
+            // The deadline starts at its own admission, never at arrival. No `max_in_flight`
+            // slot and no native worker is taken until the whole body has been accepted.
+            let upload = super::acquire_upload(&uploads, admission_wait).await?;
+            let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
+            let mut admission = engine
+                .admit_intake(Arc::new(InvocationControl {
+                    cancel: cancel.clone(),
+                    deadline,
+                    progress: Some(progress_hub.clone()),
+                }))
+                .map_err(core_error)?;
             let header_bytes = metadata
                 .headers
                 .iter()
@@ -209,7 +209,7 @@ impl ServiceHost {
                 .resources()
                 .reserve_metadata(header_bytes)
                 .map_err(processing_error)?;
-            let mut prepared = intake::prepare(
+            let (mut prepared, payload) = intake::prepare(
                 &metadata,
                 body,
                 &mut admission,
@@ -285,6 +285,20 @@ impl ServiceHost {
                 );
             }
             let failure = prepared.failure.clone();
+            // The rest of the body: every document goes to the temporary store while the
+            // client sends it (asynchronous waits, no native worker, no slot).
+            let documents = payload
+                .capture(&prepared.metadata, store.as_ref(), admission.resources())
+                .await
+                .map_err(|error| processing_error(failure.recover(error)))?;
+            // The whole body has been accepted: only now the operation takes its
+            // `max_in_flight` slot (waiting for one for at most `admission_wait`), and with
+            // it, a native worker and the audit binding. Its upload slot is free from here.
+            super::admit_within(admission_wait, || {
+                admission.occupy_slot().map_err(core_error)
+            })
+            .await?;
+            drop(upload);
             let mut ctx = engine
                 .begin_admitted(admission, grant, OperationPolicy::strict_online())
                 .map_err(core_error)?;
@@ -339,6 +353,7 @@ impl ServiceHost {
                     },
                     ctx,
                     prepared,
+                    documents,
                     streaming::PrivateState {
                         selectors: resolved.selectors,
                         reservations: resolved.reservations,
@@ -369,7 +384,6 @@ impl ServiceHost {
                 )
                 .await;
             }
-            let runtime = tokio::runtime::Handle::current();
             let (worker_policy, worker_principal, worker_host) =
                 (policy.clone(), principal.clone(), host_policy.clone());
             let caller =
@@ -379,10 +393,7 @@ impl ServiceHost {
                     let _headers = headers;
                     let _intake = prepared.reservations;
                     let request = prepared.metadata;
-                    let mut documents =
-                        prepared
-                            .payload
-                            .capture(&request, store.as_ref(), ctx, runtime)?;
+                    let mut documents = documents;
                     // The whole body has been taken: authority may have changed
                     // (revocation, key right removal, policy generation) since intake.
                     if let Err(api) = dispatch::precheck(

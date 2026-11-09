@@ -35,6 +35,7 @@ bind = "127.0.0.1:13579"
 audit_directory = "/private/oncl-audit"
 recover_audit = false
 max_in_flight = 2
+max_uploads = 8   # bodies being received at once; at most total_temp / (input_bytes + container_bytes)
 blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000
@@ -357,7 +358,11 @@ either method. A generation change invalidates all previously authenticated Prin
 objects for minting *new* grants. Already admitted work retains its original
 immutable grant and truthful outcome; revocation does not claim rollback.
 
-Document admission precedes body reading. Worker/queue slots are acquired before
+Admission precedes body reading, in two steps. A request that carries a body first takes one
+of the `max_uploads` upload slots (below) and is then received: waiting for the client and
+spooling the documents run without a `max_in_flight` slot and without a native worker.
+Only when the whole body has been accepted does the operation take its `max_in_flight` slot,
+its audit binding and a native worker: worker/queue slots are acquired before
 `spawn_blocking`, and no more than `blocking_workers` native closures run. Queued
 owned contexts retain the initial scope/deadline; queue expiry is explicit.
 Disconnect/cancel stops waiting and cooperative intake, but a native call's slot
@@ -373,19 +378,52 @@ After headers have been sent, expiry is a transport abort, not a promised new
 JSON error/status. Timers do not make retained Bytes clones/slices or a running
 native operation free: their actual final owners must still release them.
 
-**Waiting for a slot.** `max_in_flight` bounds the operations that run at once. A request
-that arrives while all of them are taken (after authentication, before it reads any of
-its body) waits up to `admission_wait_ms`, polling every 10 ms with no order guarantee
-between waiters, and gets `503 CapacityExceeded`/`NotApplied` only if no slot freed in
-that time. The wait holds no slot, spool or body read. A client that disconnects while waiting is
-not noticed (Hyper does not see a close while the request body is unread), so the wait
-always runs to `admission_wait_ms` at most. It is not part of the operation deadline, which starts at admission. An admitted
-operation waits for a free native worker for at most the same `admission_wait_ms`; with
-`blocking_workers >= max_in_flight` (the default) that second wait does not normally arise.
+**Uploads.** Receiving a request body is a phase of its own with its own limit,
+`max_uploads` (default 8, 1 .. 256). A request that carries a body (`POST /v1/hash`,
+`/v1/operations`, `/v1/batch`) takes one upload slot after authentication and before it reads
+any byte of the body, and keeps it while it waits for the client, spools its documents to the
+scratch directory and, once the body is complete, waits for an `max_in_flight` slot. A client
+that stalls mid-body therefore holds one upload slot, its spool and its temp and memory
+reservations, and **nothing else**: no `max_in_flight` slot, no `blocking_workers` worker, no
+audit binding. Requests without a body (`GET /health`, `GET /v1/openapi.json`) never take an
+upload slot, and a request that finds every upload slot taken waits up to `admission_wait_ms`
+(a free slot goes to the oldest waiter) and gets `503 CapacityExceeded`/`NotApplied` only if none
+freed in that time, before its body is read (Hyper sends `100 Continue` only when the body
+is first read, so an `Expect: 100-continue` client sees the refusal instead). Every exit of the
+phase frees the slot, the spool and its temp reservation at once: the end of the body, a client
+that disconnects, the idle timeout or minimum rate (below), the operation deadline, a
+cancellation, a shutdown and any refusal (such as `InputLimit`).
 
-**Stalled and crawling uploads.** An upload that stops must not hold its slot, worker and
-spool for the whole `operation_timeout_ms` (default 300 s: two silent clients would block
-a server with `max_in_flight = 2` for five minutes). Every wait for the next body chunk
+The phase takes a slot of its own, not one more native worker: waiting for the client is
+asynchronous. Writing a received piece to the spool (a Hyper frame, at most 32 KiB) is a short
+blocking section, one at a time per upload, on the runtime's blocking pool; that pool holds
+`blocking_workers + max_uploads` threads so that a long operation cannot keep uploads from
+progressing. The hash route (`POST /v1/hash`) hashes each received piece where it arrives, on
+the runtime's own threads (a CPU section of one frame), without any spool; a hash upload that
+stalls thus holds an upload slot and no worker either.
+
+`max_uploads` must be at least 1, at most 256 and at most
+`total_temp / (input_bytes + container_bytes)` (integer division; with the defaults 16 GiB /
+2 GiB = 8): every upload must be able to reserve the largest spool it may need (a signed
+input spools up to `input_bytes + container_bytes`) in the shared temp budget at the same
+time. The server refuses to start with a larger value; with a larger `input_bytes` or
+`container_bytes` lower `max_uploads` (or raise `total_temp`). The temp budget still bounds
+every spool: an upload that cannot reserve more is refused with `TempLimit` as before.
+
+**Waiting for an operation slot.** `max_in_flight` bounds the operations that run at
+once. A request whose body has been accepted waits up to `admission_wait_ms`, polling every
+10 ms with no order guarantee between waiters, for one of them, and gets `503
+CapacityExceeded`/`NotApplied` only if none freed in that time (nothing was applied, the
+spool is deleted). It keeps its upload slot and its spool while it waits, so operations
+queued here count against `max_uploads` too. The operation deadline starts at the
+request's admission to the upload phase and also covers the upload; `admission_wait_ms` is not
+part of it, but the deadline keeps running. An admitted operation waits for a free native
+worker for at most the same `admission_wait_ms`; with `blocking_workers >= max_in_flight` (the
+default) that second wait does not normally arise.
+
+**Stalled and crawling uploads.** An upload that stops must not hold its upload slot and
+spool for the whole `operation_timeout_ms` (default 300 s: `max_uploads` silent clients would
+block every body-carrying route for five minutes). Every wait for the next body chunk
 (hash body, JSON, multipart metadata and documents, the epilogue) is governed by two rules.
 Only time spent waiting *for the client* counts, never time spent hashing, spooling or
 queueing, so a slow server is never charged to a client.
@@ -403,30 +441,24 @@ queueing, so a slow server is never charged to a client.
   clients slower than about 16 KiB/s).
 
 Either rule ends the request with the existing `504 DeadlineExceeded`/`NotApplied`: it
-happens during intake, before any private key is used, so no audit `BEGIN` is written, the
-spool is deleted and the slot is free immediately. No new error code exists. Neither rule
-replaces the operation deadline, which still bounds a healthy transfer: a 1 GiB upload
-over a slow link needs `operation_timeout_ms` raised to cover it, not these two values. A
-client that keeps delivering at least the minimum rate, without a silence longer than the
-idle timeout, is never stopped by them.
+happens during intake, before any private key is used, so no audit binding or `BEGIN` is
+written, the spool is deleted and the upload slot is free immediately. No new error code
+exists. Neither rule replaces the operation deadline, which still bounds a healthy transfer: a
+1 GiB upload over a slow link needs `operation_timeout_ms` raised to cover it, not these two
+values. A client that keeps delivering at least the minimum rate, without a silence longer
+than the idle timeout, is never stopped by them.
 
-**Known limitation: a stalled upload holds a native worker.** The multipart intake runs on a
-blocking worker, so a client that stalls mid-body occupies one of the `blocking_workers` for up
-to `upload_idle_timeout_ms` (default 30 s). With the default `blocking_workers = 2`, two such
-clients make every other request wait for `admission_wait_ms` and then receive `503
-CapacityExceeded` until a stall ends; the refusal is typed and honest, and `/health` stays
-answerable, but the service is not available to other clients meanwhile. Raise
-`blocking_workers` above the number of slow clients you must tolerate, and lower
-`upload_idle_timeout_ms` (never below the slowest legitimate link, see above). The
-`overload-profile` case of `platform-proof` uses 4 workers precisely so that admitted work can
-complete next to two stalled uploads; its PASS does not show that stalled uploads cannot
-starve admission (the `overload-slot-release` case shows that the slots are released).
-
-Residual limits: a client that sends exactly the minimum rate still holds its slot for the
-whole `operation_timeout_ms`, so two such authenticated clients can block `max_in_flight = 2`
-for that long; on a LAN raise `upload_min_bytes_per_second` to tens of KiB/s. The reverse
-direction is not governed either: a client that never reads a large response pins its slot
-until the operation deadline.
+**What a stalled upload still costs.** A stalled client no longer starves the service of
+workers or operation slots (other requests complete at once next to it), but it does hold
+one of the `max_uploads` slots until the idle timeout: with `max_uploads` authenticated clients
+stalled at once, every other body-carrying request waits `admission_wait_ms` and gets `503
+CapacityExceeded` until a stall ends, while `/health` and the operations that already run
+are not affected. Lower `upload_idle_timeout_ms` (never below the slowest legitimate link, see
+above) and raise `max_uploads` as far as the temp budget allows to widen the margin. A
+client that sends exactly the minimum rate holds an upload slot for the whole
+`operation_timeout_ms`; on a LAN raise `upload_min_bytes_per_second` to tens of KiB/s. The
+reverse direction is not governed either: a client that never reads a large response pins
+its in-flight slot until the operation deadline.
 
 
 There are also finite pre-auth connection/header/TLS-handshake limits. HTTP/1

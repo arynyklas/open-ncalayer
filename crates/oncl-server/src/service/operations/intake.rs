@@ -4,13 +4,14 @@ use futures_util::stream;
 use oncl_api::multipart::BoundedMultipart;
 use oncl_core::OperationAdmission;
 use oncl_pki::{
-    io::{FrozenInput, TemporaryStore},
+    io::{FrozenInput, InputSpool, TemporaryStore},
     resource::ResourceScope,
 };
 
+/// What the metadata part of a request settled (and its secrets): everything but the
+/// documents, which [`Payload::capture`] takes from the rest of the body.
 pub(super) struct Prepared {
     pub metadata: OperationMetadata,
-    pub payload: Payload,
     pub secrets: Secrets,
     pub reservations: Vec<ResourceReservation>,
     pub failure: Arc<Failure>,
@@ -188,11 +189,6 @@ impl std::error::Error for SharedFatal {
         Some(self.0.as_ref())
     }
 }
-/// An I/O error whose first cause is the typed `error`, for a `Read` bridge that must keep
-/// the stable refusal code through the SDK's own error wrapping.
-pub(in crate::service) fn typed_io(error: ProcessingError) -> io::Error {
-    io::Error::other(SharedFatal(Arc::new(error)))
-}
 pub(in crate::service) fn first_cause(mut error: &ProcessingError) -> &ProcessingError {
     while let ProcessingError::Io(carrier) = error {
         match carrier
@@ -320,7 +316,7 @@ pub(super) async fn prepare(
     pace: PaceConfig,
     cancel: Arc<Cancellation>,
     precheck: &(dyn Fn(&OperationMetadata) -> Result<(), ApiError> + Sync),
-) -> Result<Prepared, ApiError> {
+) -> Result<(Prepared, Payload), ApiError> {
     let content_type = metadata
         .headers
         .get("content-type")
@@ -400,13 +396,15 @@ pub(super) async fn prepare(
         if request.documents.len() != request.metadata.parts.len() {
             return Err(invalid_request());
         }
-        return Ok(Prepared {
-            metadata: request.metadata,
-            payload: Payload::Text(request.documents),
-            secrets: Secrets::default(),
-            reservations: vec![transport, parsed, metadata_reservation],
-            failure: failure.clone(),
-        });
+        return Ok((
+            Prepared {
+                metadata: request.metadata,
+                secrets: Secrets::default(),
+                reservations: vec![transport, parsed, metadata_reservation],
+                failure: failure.clone(),
+            },
+            Payload::Text(request.documents),
+        ));
     }
     if !content_type.starts_with("multipart/form-data;") {
         return Err(invalid_request());
@@ -552,11 +550,14 @@ pub(super) async fn prepare(
             },
         );
     }
-    Ok(Prepared {
-        metadata: request,
-        secrets,
-        failure: failure.clone(),
-        payload: Payload::Multipart {
+    Ok((
+        Prepared {
+            metadata: request,
+            secrets,
+            failure: failure.clone(),
+            reservations: vec![transport, parsed, metadata_reservation],
+        },
+        Payload::Multipart {
             parser,
             wire,
             metadata_bytes: bytes.len() as u64 + secret_total,
@@ -565,68 +566,36 @@ pub(super) async fn prepare(
             cancel,
             ledger,
         },
-        reservations: vec![transport, parsed, metadata_reservation],
-    })
+    ))
 }
 fn multer_boundary(content_type: &str) -> Result<String, ApiError> {
     // Boundary parameter parsing is delegated to the proven multipart parser.
     multer::parse_boundary(content_type).map_err(|_| invalid_request())
 }
-struct FieldReader<'a> {
-    field: multer::Field<'a>,
-    pending: Bytes,
-    runtime: tokio::runtime::Handle,
-    deadline: Deadline,
-    cancel: Arc<Cancellation>,
-    failure: Arc<Failure>,
-    scope: ResourceScope,
-}
-impl Read for FieldReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        if self.failure.stopped() {
-            return Err(io::Error::other("intake stopped"));
-        }
-        self.scope.checkpoint().map_err(|error| {
-            self.failure.record(error);
-            io::Error::other("intake control failed")
-        })?;
-        loop {
-            if !self.pending.is_empty() {
-                let n = out.len().min(self.pending.len());
-                out[..n].copy_from_slice(&self.pending[..n]);
-                self.pending = self.pending.slice(n..);
-                return Ok(n);
-            }
-            let chunk=self.runtime.block_on(async{
-                tokio::select!{
-                    _=self.cancel.cancelled()=>Err(ProcessingError::Cancelled),
-                    result=tokio::time::timeout(self.deadline.remaining(),self.field.chunk())=>match result{
-                        Ok(Ok(value))=>Ok(value),
-                        Ok(Err(_))=>Err(ProcessingError::InvalidInput("invalid multipart field")),
-                        Err(_)=>Err(ProcessingError::DeadlineExceeded),
-                    }
-                }
-            }).map_err(|error| {
-                self.failure.record(error);
-                io::Error::other("multipart field intake failed")
-            })?;
-            match chunk {
-                Some(bytes) => self.pending = bytes,
-                None => return Ok(0),
-            }
-        }
-    }
+/// Runs a spool write (a full chunk, or the last one) on a blocking thread and gives the
+/// spool back. Only the disk is waited for, never the client; the section ends by itself,
+/// also when the request that started it is gone (the spool is then dropped there, which
+/// deletes the file and releases its reservations).
+async fn spool_write<T: Send + 'static>(
+    mut spool: InputSpool,
+    write: impl FnOnce(&mut InputSpool) -> Result<T, ProcessingError> + Send + 'static,
+) -> Result<(InputSpool, T), ProcessingError> {
+    tokio::task::spawn_blocking(move || write(&mut spool).map(|value| (spool, value)))
+        .await
+        .map_err(|_| ProcessingError::InvalidInput("spool write did not complete"))?
 }
 impl Payload {
-    pub(super) fn capture(
+    /// Takes every declared document of the body into the temporary store: the upload phase.
+    /// Waiting for the client is asynchronous (pace rules, operation deadline and
+    /// cancellation as ever); a spool takes the bytes as they arrive and only its chunk
+    /// writes to disk run, one at a time, in short blocking sections. No native worker and no
+    /// `max_in_flight` slot is involved: `scope` is the admission's (unslotted) one, and the
+    /// spools, their temp reservations and the chunk memory are charged to it.
+    pub(super) async fn capture(
         self,
         metadata: &OperationMetadata,
         store: Option<&TemporaryStore>,
-        ctx: &mut OperationContext,
-        runtime: tokio::runtime::Handle,
+        scope: &mut ResourceScope,
     ) -> Result<Documents, ProcessingError> {
         match self {
             Self::Text(documents) => Ok(Documents::Text(documents)),
@@ -651,12 +620,10 @@ impl Payload {
                     .iter()
                     .filter(|p| p.role == PartRole::Document);
                 let documents_expected = declared.clone().count();
-                while let Some(field) = runtime.block_on(parser.next_field()).map_err(|_| {
+                while let Some(mut field) = parser.next_field().await.map_err(|_| {
                     failure.recover(ProcessingError::InvalidInput("invalid multipart framing"))
                 })? {
-                    ctx.resources()
-                        .checkpoint()
-                        .map_err(|error| failure.recover(error))?;
+                    scope.checkpoint().map_err(|error| failure.recover(error))?;
                     let name = field
                         .name()
                         .ok_or(ProcessingError::InvalidInput(
@@ -678,35 +645,46 @@ impl Payload {
                         ));
                     }
                     parser.admit_data();
-                    let mut reader = FieldReader {
-                        field,
-                        pending: Bytes::new(),
-                        runtime: runtime.clone(),
-                        deadline,
-                        cancel: cancel.clone(),
-                        failure: failure.clone(),
-                        scope: ctx.resources().shared_view(),
-                    };
-                    let source = Source::sequential(&mut reader, None);
                     // The input of a verify, extend, extract or sign item may be a signed result:
                     // it is spooled as unclassified wire and the engine, which reads it like
                     // the SDK and the CLI read a file, charges `input_bytes` for the document
                     // and the format's container allowance for the signature. Every other part
                     // is a document and stays within `input_bytes` at once. Evidence is validation
                     // material, bounded per item and not charged to the document allowance.
-                    let frozen = if super::dispatch::wire_inputs(metadata).any(|n| n == name) {
-                        FrozenInput::capture_wire(source, store, ctx.resources(), None)
+                    let mut spool = if super::dispatch::wire_inputs(metadata).any(|n| n == name) {
+                        InputSpool::wire(store, scope, None)
                     } else if super::dispatch::evidence_inputs(metadata).any(|n| n == name) {
-                        FrozenInput::capture_wire(
-                            source,
-                            store,
-                            ctx.resources(),
-                            Some(super::dispatch::EVIDENCE_ITEM_BYTES),
-                        )
+                        InputSpool::wire(store, scope, Some(super::dispatch::EVIDENCE_ITEM_BYTES))
                     } else {
-                        FrozenInput::capture(source, store, ctx.resources())
+                        InputSpool::document(store, scope)
                     }
                     .map_err(|error| failure.recover(error))?;
+                    loop {
+                        if failure.stopped() {
+                            return Err(failure.recover(ProcessingError::InvalidInput(
+                                "intake stopped",
+                            )));
+                        }
+                        scope.checkpoint().map_err(|error| failure.recover(error))?;
+                        let chunk = tokio::select! {
+                            _ = cancel.cancelled() => Err(ProcessingError::Cancelled),
+                            result = tokio::time::timeout(deadline.remaining(), field.chunk()) => match result {
+                                Ok(Ok(value)) => Ok(value),
+                                Ok(Err(_)) => Err(ProcessingError::InvalidInput("invalid multipart field")),
+                                Err(_) => Err(ProcessingError::DeadlineExceeded),
+                            }
+                        }
+                        .map_err(|error| failure.recover(error))?;
+                        let Some(bytes) = chunk else { break };
+                        // Every piece is on disk before the next wait for the client, so the
+                        // time a write takes is never charged to the client by the pace rules.
+                        spool = spool_write(spool, move |spool| spool.push(&bytes))
+                            .await
+                            .map_err(|error| failure.recover(error))?
+                            .0;
+                    }
+                    drop(field);
+                    let frozen = spool.finish().map_err(|error| failure.recover(error))?;
                     payload = payload
                         .checked_add(frozen.len())
                         .ok_or(ProcessingError::FramingLimit)?;
@@ -715,7 +693,7 @@ impl Payload {
                 drop(parser);
                 // multer stops at the closing delimiter. Read the remaining HTTP
                 // entity as well so epilogues/lying lengths cannot evade quotas.
-                let admitted_total = runtime.block_on(async { wire.lock().await.total });
+                let admitted_total = wire.lock().await.total;
                 let known = ledger.framing.load(std::sync::atomic::Ordering::SeqCst);
                 let remaining = admitted_total
                     .checked_sub(payload)
@@ -724,15 +702,13 @@ impl Payload {
                 multer::FramingObserver::observe(ledger.as_ref(), remaining).map_err(|_| {
                     failure.recover(ProcessingError::InvalidInput("epilogue admission failed"))
                 })?;
-                runtime.block_on(async {
-                    wire.lock().await.tail_ledger = Some(ledger.clone());
-                });
-                while runtime
-                    .block_on(frame(&wire, deadline, &cancel))
+                wire.lock().await.tail_ledger = Some(ledger.clone());
+                while frame(&wire, deadline, &cancel)
+                    .await
                     .map_err(|error| failure.recover(error))?
                     .is_some()
                 {}
-                let total = runtime.block_on(async { wire.lock().await.total });
+                let total = wire.lock().await.total;
                 if content_length.is_some_and(|n| n != total) || seen.len() != documents_expected {
                     return Err(ProcessingError::InvalidInput(
                         "multipart length or field mismatch",

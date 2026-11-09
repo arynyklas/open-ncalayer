@@ -41,11 +41,15 @@ fn runtime() -> tokio::runtime::Runtime {
         .build()
         .unwrap()
 }
+/// N = 8 concurrent clients, two of them mid-body. A body that is still arriving holds one of
+/// the `max_uploads` (here 2), not an in-flight slot or a worker: the other six are refused
+/// with the typed `CapacityExceeded`. (The in-flight cap of completed uploads is proven by the
+/// gated `oncl-api` tests.)
 #[test]
-fn n_requests_shared_cap() {
+fn n_requests_shared_upload_cap() {
     use std::io::{Read, Write};
     let process = server_support::Process::start(
-        "max_in_flight = 2\nblocking_workers = 2\nqueue_capacity = 1",
+        "max_uploads = 2\nmax_in_flight = 2\nblocking_workers = 2\nqueue_capacity = 1",
     );
     let mut admitted = Vec::new();
     for _ in 0..2 {
@@ -96,7 +100,7 @@ fn n_requests_shared_cap() {
         socket.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200"));
     }
-    eprintln!("standalone: N=8 with shared max_in_flight=2 admits 2 held streams and refuses 6");
+    eprintln!("standalone: N=8 with max_uploads=2 admits 2 held streams and refuses 6");
     process.stop();
 }
 #[test]
@@ -440,11 +444,11 @@ fn real_hash_output_owns_original_root_until_bytes_are_released() {
 fn actual_process_overload_heartbeat_and_disconnect() {
     use std::io::{Read, Write};
     let process = server_support::Process::start(
-        "max_in_flight = 1\nblocking_workers = 1\nqueue_capacity = 1",
+        "max_uploads = 1\nmax_in_flight = 1\nblocking_workers = 1\nqueue_capacity = 1",
     );
     let mut pending = std::net::TcpStream::connect(process.address).unwrap();
-    // Hyper 1.12 sends Continue only after Incoming is polled. Here that happens
-    // inside the admitted native hash worker, not merely after TCP accept.
+    // Hyper 1.12 sends Continue only after Incoming is polled. Here that happens inside the
+    // upload phase (which holds the only upload slot), not merely after TCP accept.
     pending
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();

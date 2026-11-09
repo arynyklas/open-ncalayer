@@ -197,6 +197,33 @@ impl SharedBudget {
         limits.validate()?;
         let deadline = Deadline::after(limits.operation_timeout)?;
         let mut usage = lock(&self.usage);
+        usage.in_flight = self.next_in_flight(&usage, &limits)?;
+        drop(usage);
+        Ok(self.scope(limits, deadline, control, true))
+    }
+
+    /// Admit an operation that is still only receiving its input and takes no
+    /// `max_in_flight` slot yet. Every other budget (memory, temporary disk, metadata,
+    /// document, container and framing allowances, the deadline and the control) is
+    /// charged exactly as for [`Self::begin`]; only the count of running operations is not.
+    /// The host takes the slot with [`ResourceScope::occupy_slot`] before it starts work and
+    /// bounds the number of such operations itself.
+    pub fn begin_unslotted(
+        self: &Arc<Self>,
+        limits: ResourceLimits,
+        control: Arc<dyn OperationControl>,
+    ) -> Result<ResourceScope, ProcessingError> {
+        limits.validate()?;
+        let deadline = Deadline::after(limits.operation_timeout)?;
+        Ok(self.scope(limits, deadline, control, false))
+    }
+
+    /// The count after one more slot, or the refusal when `max_in_flight` is reached.
+    fn next_in_flight(
+        &self,
+        usage: &Usage,
+        limits: &ResourceLimits,
+    ) -> Result<u64, ProcessingError> {
         let count = usage
             .in_flight
             .checked_add(1)
@@ -204,21 +231,30 @@ impl SharedBudget {
         if count > self.limits.max_in_flight || count > limits.max_in_flight {
             return Err(ProcessingError::CapacityExceeded);
         }
-        usage.in_flight = count;
-        drop(usage);
-        Ok(ResourceScope {
+        Ok(count)
+    }
+
+    fn scope(
+        self: &Arc<Self>,
+        limits: ResourceLimits,
+        deadline: Deadline,
+        control: Arc<dyn OperationControl>,
+        slot: bool,
+    ) -> ResourceScope {
+        ResourceScope {
             state: Arc::new(ScopeState {
                 root: OperationLease(Arc::new(LeaseInner {
                     budget: self.clone(),
                     deadline,
                     guard: std::sync::OnceLock::new(),
+                    slot: std::sync::atomic::AtomicBool::new(slot),
                 })),
                 limits,
                 deadline,
                 control,
                 usage: Mutex::new(Usage::default()),
             }),
-        })
+        }
     }
 }
 
@@ -292,12 +328,17 @@ struct LeaseInner {
     deadline: Deadline,
     /// Dropped with the lease, i.e. when the last owner of the operation lets go.
     guard: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// Whether this operation holds one of the `max_in_flight` slots. Changed only under the
+    /// budget's usage lock.
+    slot: std::sync::atomic::AtomicBool,
 }
 impl Drop for LeaseInner {
     fn drop(&mut self) {
         let mut usage = lock(&self.budget.usage);
-        // Exactly one decrement for each successful admission.
-        if let Some(remaining) = usage.in_flight.checked_sub(1) {
+        // Exactly one decrement for each slot taken, none for an operation that never took one.
+        if self.slot.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(remaining) = usage.in_flight.checked_sub(1)
+        {
             usage.in_flight = remaining;
         }
     }
@@ -360,6 +401,30 @@ impl std::fmt::Debug for ResourceScope {
 impl ResourceScope {
     pub fn lease(&self) -> OperationLease {
         self.state.root.clone()
+    }
+    /// Takes the `max_in_flight` slot of an operation admitted with
+    /// [`SharedBudget::begin_unslotted`]; `Ok` at once when the operation already holds one
+    /// (every operation admitted with [`SharedBudget::begin`] does). `CapacityExceeded` when
+    /// every slot is taken: nothing changes then and the call may be repeated. The slot is
+    /// released when the last owner of the operation lets go, like the one of `begin`.
+    pub fn occupy_slot(&self) -> Result<(), ProcessingError> {
+        self.checkpoint()?;
+        let lease = &self.state.root.0;
+        let mut usage = lock(&lease.budget.usage);
+        if lease.slot.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        usage.in_flight = lease.budget.next_in_flight(&usage, &self.state.limits)?;
+        lease.slot.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+    /// Whether this operation holds a `max_in_flight` slot.
+    pub fn holds_slot(&self) -> bool {
+        self.state
+            .root
+            .0
+            .slot
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     /// Share live checkpoint state without a new quota, stale progress or cycle.
     pub fn operation_control(&self) -> Arc<dyn OperationControl> {

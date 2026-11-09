@@ -15,11 +15,19 @@ fn the_default_profile_guarantees_one_gibibyte_documents_inside_the_engine_ceili
 
 #[test]
 fn an_operator_may_raise_the_input_limit_above_the_default() {
+    // 16 GiB of temp hold 3 spools of 4 GiB + 1 GiB: `max_uploads` must come down with the
+    // allowance (the default 8 is refused, see `max_uploads_is_bounded_by_the_temp_budget_...`).
     let config = ServerConfig {
         input_bytes: 4 * 1_073_741_824,
+        max_uploads: 3,
         ..ServerConfig::default()
     };
     config.validate().unwrap();
+    let too_many = ServerConfig {
+        max_uploads: 4,
+        ..config
+    };
+    assert!(too_many.validate().is_err());
 }
 
 #[test]
@@ -49,10 +57,13 @@ fn a_nonsensical_container_allowance_is_refused() {
         };
         assert!(config.validate().is_err(), "{container_bytes}");
     }
-    // The largest sum that still fits u64 (input + container + framing + 64 KiB) is accepted.
+    // The largest sum that still fits u64 (input + container + framing + 64 KiB) is accepted,
+    // given a temp budget that holds one spool of that size (and `max_uploads` to match).
     let defaults = ServerConfig::default();
     let config = ServerConfig {
         container_bytes: u64::MAX - defaults.input_bytes - defaults.framing_bytes - 65_536,
+        total_temp: u64::MAX,
+        max_uploads: 1,
         ..defaults
     };
     config.validate().unwrap();

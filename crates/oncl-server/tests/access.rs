@@ -893,10 +893,13 @@ fn actual_dual_stack_proxy_peers_normalize_only_ipv4_mapped_addresses() {
 }
 
 #[test]
-fn admitted_truncated_declared_body_is_typed_and_releases_actual_worker() {
+fn admitted_truncated_declared_body_is_typed_and_releases_its_upload_slot() {
     use std::io::{Read, Write};
-    let process =
-        server_support::Process::start("max_in_flight = 1\nblocking_workers = 1\ninput_bytes = 4");
+    // A body that is still arriving holds one of the `max_uploads` (not an in-flight slot or a
+    // worker): with one upload slot a second client is refused until the first one ended.
+    let process = server_support::Process::start(
+        "max_uploads = 1\nmax_in_flight = 1\nblocking_workers = 1\ninput_bytes = 4",
+    );
     let mut socket = std::net::TcpStream::connect(process.address).unwrap();
     socket
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))

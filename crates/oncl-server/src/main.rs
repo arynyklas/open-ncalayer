@@ -107,7 +107,10 @@ fn run() -> io::Result<()> {
             let host = ServiceHost::new(config.clone())?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
-                .max_blocking_threads(config.blocking_workers)
+                // The executor runs at most `blocking_workers` native closures; the upload
+                // phase adds at most one short spool write per upload in progress, so a
+                // long operation never keeps an upload from making progress.
+                .max_blocking_threads(config.blocking_workers + config.max_uploads)
                 .enable_all()
                 .build()?;
             let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();

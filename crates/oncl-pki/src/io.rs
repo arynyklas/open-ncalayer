@@ -28,7 +28,7 @@ mod byte_string;
 pub use byte_string::{decode_pdf_byte_string, padded_der_sequence};
 #[path = "io/frozen.rs"]
 mod frozen;
-pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
+pub use frozen::{DerivedInput, FrozenInput, FrozenReader, InputSpool, SnapshotEncoding};
 #[path = "io/pdf_output.rs"]
 mod pdf_output;
 pub use pdf_output::PdfSignatureOutput;

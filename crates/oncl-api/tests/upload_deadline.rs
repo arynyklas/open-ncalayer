@@ -332,3 +332,107 @@ async fn sign_route_stalled_secret_upload_is_ended_by_the_idle_timeout_before_an
     );
     service.stop().await;
 }
+
+fn begins(service: &Running) -> usize {
+    service
+        .host
+        .audit
+        .records()
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r.kind, oncl_server::audit::RecordKind::Begin))
+        .count()
+}
+
+/// ONE `max_in_flight` slot and ONE native worker: a signing upload that stalls in the middle of
+/// its document (the secrets are in, no key was used) holds neither, so a complete signing
+/// request next to it runs to the end and journals its one `BEGIN`; the stalled one then ends
+/// at the idle timeout, typed and `NotApplied`, and the journal holds no second `BEGIN` (the
+/// durable binding and the key use come only after the whole body was accepted).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_sign_upload_takes_no_slot_or_worker_and_never_reaches_the_journal() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = std::sync::Arc::new(
+        Running::start_with(|config, dir| {
+            config.inline_pkcs12 = true;
+            config.tokens[0].inline_pkcs12 = true;
+            config.pki = pki.config(dir);
+            idle_config(config);
+            config.upload_idle_timeout_ms = 4000;
+            config.max_in_flight = 1;
+            config.blocking_workers = 1;
+            config.queue_capacity = 1;
+            config.memory_per_operation = 1 << 30;
+            config.total_memory = 2 << 30;
+        })
+        .await,
+    );
+    let metadata = r#"{"items":[{"id":"s1","operation":{"kind":"sign","profile":"cms","input":"doc","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"s1","role":"secret"},{"name":"pw","item_id":"s1","role":"secret"},{"name":"doc","item_id":"s1","role":"document"}]}"#;
+    let secrets = [
+        Part {
+            name: "p12",
+            filename: None,
+            bytes: &p12,
+        },
+        Part {
+            name: "pw",
+            filename: None,
+            bytes: PASSWORD.as_bytes(),
+        },
+    ];
+    let mut prefix = multipart(metadata, &secrets);
+    prefix.truncate(prefix.len() - b"--b--\r\n".len());
+    prefix.extend_from_slice(
+        b"--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\nfirst bytes of a document that never completes",
+    );
+    let stalled = tokio::spawn({
+        let service = service.clone();
+        async move { stalled_upload(&service, "/v1/operations", &prefix, 1 << 20).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let body = multipart(
+        metadata,
+        &[
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: b"a complete document",
+            },
+        ],
+    );
+    let started = std::time::Instant::now();
+    let (status, content_type, response) = service.post(FORM, body).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let parts = mixed(&content_type, response).await;
+    assert_eq!(final_event(&parts)["status"], "completed");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(3000) && !stalled.is_finished(),
+        "the complete request must finish while the stalled upload is still pending: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(begins(&service), 1, "only the complete request used its key");
+
+    assert_typed_deadline(&stalled.await.unwrap());
+    assert_eq!(
+        begins(&service),
+        1,
+        "the stalled upload never reached the journal"
+    );
+    std::sync::Arc::try_unwrap(service)
+        .ok()
+        .expect("no other owner")
+        .stop()
+        .await;
+}

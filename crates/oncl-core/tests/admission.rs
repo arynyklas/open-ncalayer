@@ -122,3 +122,46 @@ fn admission_rejects_empty_authority_expiry_and_original_cancellation() {
     );
     assert!(engine.admit(Arc::new(Control::default())).is_ok());
 }
+
+#[test]
+fn intake_admission_takes_no_slot_until_the_input_is_in() {
+    let engine = engine(Duration::from_secs(3));
+    // The engine's single slot is free while several requests are still receiving.
+    let mut receiving: Vec<_> = (0..3)
+        .map(|_| engine.admit_intake(Arc::new(Control::default())).unwrap())
+        .collect();
+    // Their intake is charged like any admission's (shared memory budget, input allowance).
+    let memory = receiving[0].resources().reserve_memory(1_048_576).unwrap();
+    assert!(receiving[1].resources().reserve_memory(1).is_err());
+    drop(memory);
+    receiving[1].resources().account_input(4).unwrap();
+    assert!(receiving[1].resources().account_input(1).is_err());
+    // A slotted admission still takes the only slot and the first one to have its input
+    // is refused (and may try again) while that slot is taken.
+    let running = engine.admit(Arc::new(Control::default())).unwrap();
+    assert!(
+        matches!(receiving[0].occupy_slot(), Err(e) if e.code() == ErrorCode::CapacityExceeded)
+    );
+    assert!(
+        matches!(receiving[0].occupy_slot(), Err(e) if e.code() == ErrorCode::CapacityExceeded)
+    );
+    drop(running);
+    receiving[0].occupy_slot().unwrap();
+    // The one that holds the slot is not counted twice by `begin_admitted`; one that does not
+    // is refused by it with the same typed error, and nothing is authorized.
+    let first = receiving.remove(0);
+    let ctx = engine
+        .begin_admitted(first, grant(), OperationPolicy::strict_online())
+        .unwrap();
+    let second = receiving.remove(0);
+    assert!(
+        matches!(engine.begin_admitted(second, grant(), OperationPolicy::strict_online()), Err(e) if e.code() == ErrorCode::CapacityExceeded)
+    );
+    // The slot is the context's until it ends.
+    assert!(
+        matches!(engine.admit(Arc::new(Control::default())), Err(e) if e.code() == ErrorCode::CapacityExceeded)
+    );
+    drop(ctx);
+    drop(receiving);
+    assert!(engine.admit(Arc::new(Control::default())).is_ok());
+}

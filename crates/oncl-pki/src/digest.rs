@@ -1,7 +1,9 @@
 //! Fixed-size digests and streaming RustCrypto hash states. No document buffering.
 use crate::io::Source;
 use crate::key::HashAlg;
-use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceScope};
+use crate::resource::{
+    IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope,
+};
 use sha2::Digest;
 use std::io::Read;
 
@@ -179,4 +181,49 @@ pub fn hash_source(
     let digest = state.finish();
     scope.checkpoint()?;
     Ok(digest)
+}
+
+/// [`hash_source`] for a host that is handed the bytes instead of reading them, so that it can
+/// wait for the client without holding a thread. The accounting is the one of `hash_source`
+/// for an ordinary source: every byte is charged to `input_bytes` before it is hashed, with
+/// the same N+1 probe at the limit (`InputLimit` for the byte that passes it) and the same
+/// control/deadline checks. The hash state is metadata-accounted; the caller owns (and
+/// accounts) the buffer the pieces come from.
+pub struct HashStream {
+    state: HashState,
+    _metadata: ResourceReservation,
+}
+impl HashStream {
+    pub fn new(algorithm: HashAlg, scope: &ResourceScope) -> Result<Self, ProcessingError> {
+        scope.checkpoint()?;
+        scope.check_input()?;
+        let metadata = scope.reserve_metadata(std::mem::size_of::<HashState>() as u64)?;
+        Ok(Self {
+            state: HashState::new(algorithm),
+            _metadata: metadata,
+        })
+    }
+    /// Hashes `bytes` after charging them to the operation.
+    pub fn update(&mut self, mut bytes: &[u8], scope: &ResourceScope) -> Result<(), ProcessingError> {
+        while !bytes.is_empty() {
+            scope.checkpoint()?;
+            let request = scope.input_request(bytes.len())?;
+            if request == 0 || request > bytes.len() {
+                return Err(ProcessingError::InvalidInput(
+                    "reader exceeded its supplied buffer",
+                ));
+            }
+            scope.consumed_input(request as u64)?;
+            scope.checkpoint()?;
+            self.state.update(&bytes[..request]);
+            bytes = &bytes[request..];
+        }
+        Ok(())
+    }
+    pub fn finish(self, scope: &ResourceScope) -> Result<DigestValue, ProcessingError> {
+        scope.checkpoint()?;
+        let digest = self.state.finish();
+        scope.checkpoint()?;
+        Ok(digest)
+    }
 }

@@ -482,7 +482,7 @@ fn responses() -> Value {
         "413":error("Document, framing, memory, temp, metadata or output limit",ErrorCode::InputLimit),
         "422":error("Validation or operation failure before any response header",ErrorCode::ValidationFailed),
         "500":error("Internal failure",ErrorCode::Internal),
-        "503":error("Capacity (no slot freed within the server's admission wait), audit or required host configuration unavailable; nothing was applied",ErrorCode::CapacityExceeded),
+        "503":error("Capacity (no upload slot to receive the body, or no operation slot to run it, freed within the server's admission wait), audit or required host configuration unavailable; nothing was applied",ErrorCode::CapacityExceeded),
         "504":error("The original operation deadline expired; or the upload stalled (no byte within the idle timeout) or fell below the server's minimum upload rate, which happens before any key use (nothing applied)",ErrorCode::DeadlineExceeded)})
 }
 /// Resource profile text shown in the `sign`/`extend` operation descriptions.

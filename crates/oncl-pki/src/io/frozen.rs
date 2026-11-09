@@ -869,6 +869,135 @@ impl super::SnapshotReader for FrozenReader<'_> {
     }
 }
 
+/// How an [`InputSpool`] bounds and accounts the bytes it takes.
+enum SpoolBound {
+    /// Like [`FrozenInput::capture`]: a document charged to `input_bytes` as it arrives.
+    Document { limit: u64 },
+    /// Like [`FrozenInput::capture_wire`]: unclassified wire, only the ceiling is enforced.
+    Wire { ceiling: u64 },
+}
+
+/// [`FrozenInput::capture`] / [`FrozenInput::capture_wire`] for a host that is handed the
+/// bytes instead of reading them: it can wait for the client (asynchronously, holding no
+/// thread) and give the spool each piece as it arrives.
+///
+/// Accounting, bounds and refusals are those of the one-call captures: the same N+1 probe
+/// at the limit, the same `InputLimit`, the same temporary-disk charges, checked against the
+/// operation's control before and after every piece. Every accepted piece is written to the
+/// file at once ([`Self::push`] touches the disk, so a caller on an event loop runs it on a
+/// blocking thread); the spool holds no buffer of its own, the piece belongs to the caller
+/// (who accounts it). Dropping the spool deletes the file and releases its temporary-disk
+/// reservation.
+pub struct InputSpool {
+    stage: StagedArtifact,
+    scope: ResourceScope,
+    bound: SpoolBound,
+}
+impl InputSpool {
+    /// A spool for a plain document, as [`FrozenInput::capture`].
+    pub fn document(
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+    ) -> Result<Self, ProcessingError> {
+        Self::open(store, scope, |scope| SpoolBound::Document {
+            limit: scope.limits().input_bytes,
+        })
+    }
+    /// A spool for unclassified wire, as [`FrozenInput::capture_wire`] with `maximum`.
+    pub fn wire(
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum: Option<u64>,
+    ) -> Result<Self, ProcessingError> {
+        Self::open(store, scope, |scope| {
+            let ceiling = scope
+                .input_remaining()
+                .saturating_add(scope.container_remaining());
+            SpoolBound::Wire {
+                ceiling: maximum.map_or(ceiling, |m| m.min(ceiling)),
+            }
+        })
+    }
+    fn open(
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        bound: impl FnOnce(&ResourceScope) -> SpoolBound,
+    ) -> Result<Self, ProcessingError> {
+        scope.checkpoint()?;
+        scope.check_input()?;
+        let bound = bound(scope);
+        let stage = store.stage_source(scope)?;
+        Ok(Self {
+            stage,
+            scope: scope.retain(),
+            bound,
+        })
+    }
+    /// Bytes taken so far.
+    pub fn len(&self) -> u64 {
+        self.stage.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_empty()
+    }
+    /// Takes `bytes`, accounting them against the operation first, and writes them to the
+    /// file. `InputLimit` for the byte that passes the limit (the spool is then unusable), or
+    /// any refusal of the operation's control, deadline or budgets.
+    pub fn push(&mut self, mut bytes: &[u8]) -> Result<(), ProcessingError> {
+        while !bytes.is_empty() {
+            self.scope.checkpoint()?;
+            let (limit, document) = match self.bound {
+                SpoolBound::Document { limit } => (limit, true),
+                SpoolBound::Wire { ceiling } => (ceiling, false),
+            };
+            // One byte past the limit is taken, to tell an oversized stream from an exact one.
+            let offered = limit
+                .saturating_sub(self.stage.len())
+                .saturating_add(1)
+                .min(bytes.len().min(IO_CHUNK_BYTES) as u64) as usize;
+            let count = if document {
+                self.scope.input_request(offered)?
+            } else {
+                offered
+            };
+            if count == 0 || count > offered {
+                return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
+            }
+            if document {
+                self.scope.consumed_input(count as u64)?;
+            }
+            if self
+                .stage
+                .len()
+                .checked_add(count as u64)
+                .is_none_or(|n| n > limit)
+            {
+                self.scope.terminate_input_limit();
+                return Err(ProcessingError::InputLimit);
+            }
+            self.scope.checkpoint()?;
+            self.stage.write_chunk(&bytes[..count])?;
+            bytes = &bytes[count..];
+        }
+        Ok(())
+    }
+    /// Returns the frozen input.
+    pub fn finish(self) -> Result<FrozenInput, ProcessingError> {
+        self.scope.checkpoint()?;
+        Ok(FrozenInput {
+            stage: self.stage,
+            identity: Arc::new(()),
+            output_derived: false,
+            pending_format: false,
+            pending_accounting: false,
+            classification: None,
+            wire_digest: None,
+            surcharge: false,
+            wire: matches!(self.bound, SpoolBound::Wire { .. }),
+        })
+    }
+}
+
 struct PendingCapture {
     scope: ResourceScope,
     identity: Arc<()>,
