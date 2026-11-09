@@ -127,9 +127,14 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let collector = Collector::start()?;
     let settings = ServerSettings {
         max_in_flight: 4,
-        blocking_workers: 2,
+        // the two stalled uploads pin two blocking workers for the whole idle window (the intake
+        // runs on the worker); with only 2 workers nothing else could ever be admitted. Keep
+        // more workers than stallers so the storm still tests admitted work next to them.
+        blocking_workers: 4,
         queue_capacity: 2,
-        admission_wait_ms: 3000,
+        // long enough that the first CPU wave outlives the abandoned uploads that hold slots when
+        // it arrives (they release within a second or two), short enough to refuse the surplus
+        admission_wait_ms: 8000,
         operation_timeout_ms: timeout_ms,
         memory_per_operation: 268_435_456,
         total_memory: 536_870_912,
@@ -202,7 +207,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     for _ in 0..6 {
         add(
             Kind::Upload,
-            2500,
+            3000,
             Upload {
                 path: "/v1/operations".into(),
                 metadata: hash_metadata(),
@@ -234,7 +239,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
                 expect_continue: true,
                 bytes_per_second: Some(128 * MIB),
                 stall_after: None,
-                abort_after: Some(big.min(200 * MIB)),
+                abort_after: Some(big.min(64 * MIB)),
             },
             None,
         );
