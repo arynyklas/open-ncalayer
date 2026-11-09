@@ -131,7 +131,10 @@ fn kinds() -> Vec<(&'static str, KeyKind)> {
 
 /// At exactly `manual_call_budget` every operation signs (the model is enough); with one byte
 /// less of the metadata budget, or of the memory budget, Core refuses it before the user is
-/// asked and before the key is used (`resource-budget`), and no key is applied.
+/// asked and before the key is used (`resource-budget`), and no key is applied. The estimate
+/// is the engine's own: the text parameters count as key import arguments on top of the
+/// bound content (`Engine::plugin_prepare` sums every text parameter, the bound XML text
+/// included, since a `param:` option may name any of them).
 #[test]
 #[ignore = "needs the built port wasm: see docs/dev/plugins-manual-tests.md"]
 fn the_estimate_signs_and_one_byte_less_is_refused_before_the_key() {
@@ -151,8 +154,20 @@ fn the_estimate_signs_and_one_byte_less_is_refused_before_the_key() {
             vec![("file", PluginParam::Document(&doc))]
         };
         let len = if xml { XML.len() } else { doc.len() };
-        let need =
-            oncl_core::plugins::manual_call_budget(&desktop.instance, kind, len as u64, 0).unwrap();
+        let text_len: usize = params
+            .iter()
+            .map(|(_, p)| match p {
+                PluginParam::Text(text) => text.len(),
+                _ => 0,
+            })
+            .sum();
+        let need = oncl_core::plugins::manual_call_budget(
+            &desktop.instance,
+            kind,
+            len as u64,
+            text_len as u64,
+        )
+        .unwrap();
         let with = |metadata_bytes: u64, memory_bytes: u64| RunOptions {
             limits: Some(ManualLimits {
                 resources: ResourceLimits {
