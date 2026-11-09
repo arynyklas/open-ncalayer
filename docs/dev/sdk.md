@@ -239,8 +239,10 @@ for a CMS `Digest` input) and `options_sha256`. The options hash is the SHA-256 
 `oncl_plugin::operations::Profile::encode` over a profile built from the actual arguments, the
 very encoder `KeyUse::options_sha256` uses for the declared profile. Arguments no profile can
 express (a co-signed CMS, `attrs.extra`, `econtent_type`, a `digest` choice, `Extra`
-certificates, a custom TSA, a non-default signingTime, XML `transforms`/`signature_id`/
-signing-time object, a XAdES chain) are refused before the key is opened. `cosign = Auto` is
+certificates, a custom TSA, a non-default signingTime, XML `signature_id`/signing-time
+object, XML `transforms` that are not a checked list, a XAdES chain) are refused before the key is opened. XML `transforms` are accepted only as a checked list: `enveloped` first, then at most one
+canonicalisation (an empty list and any other order are refused); the list is part of the
+options hash. `cosign = Auto` is
 forced to `Never` first, so the ticket's content is the effective content. An import whose kind
 the operation does not declare, or whose declared content is `derived`, is refused. A declared
 operation binds at most one key; every key-taking import (`keys_describe`, `keys_chain`,
