@@ -637,7 +637,7 @@ mod tests {
     fn the_line_never_carries_the_text_of_an_error() {
         let trace = ownership::Trace::default();
         let io = ProcessingError::Io(std::io::Error::other(
-            "CANARY drive_C:/Users/CANARY/secret-contract.pdf",
+            "CANARY os message about secret-contract.pdf",
         ));
         let text = line(&io, &trace);
         assert!(text.contains("code=invalid_request cause=Io "), "{text}");
