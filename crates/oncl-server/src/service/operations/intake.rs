@@ -280,7 +280,9 @@ async fn frame(
                 staging,
                 ..
             } = &mut *wire;
+            let unused = tokio::sync::Notify::new();
             let staging = staging.as_deref();
+            let dirty = staging.map_or(&unused, |staging| &staging.dirty);
             let flush = || async {
                 match staging {
                     Some(staging) => staging.flush().await,
@@ -289,7 +291,7 @@ async fn frame(
             };
             tokio::select! {
                 _=cancel.cancelled()=>return Err(ProcessingError::Cancelled),
-                result=pace.frame_after(body,deadline,flush)=>result?,
+                result=pace.frame_after(body,deadline,dirty,flush)=>result?,
             }
         };
         let Some(result) = result else {
@@ -605,6 +607,8 @@ fn multer_boundary(content_type: &str) -> Result<String, ApiError> {
 /// charge is released with the request, up to one write earlier than the buffer itself).
 pub(super) struct Staging {
     inner: std::sync::Mutex<StagingState>,
+    /// Told when bytes were gathered, so that a wait that is already running writes them.
+    dirty: tokio::sync::Notify,
     #[cfg(test)]
     writes: std::sync::atomic::AtomicUsize,
 }
@@ -619,6 +623,7 @@ impl Staging {
                 spool: None,
                 buffer: Vec::new(),
             }),
+            dirty: tokio::sync::Notify::new(),
             #[cfg(test)]
             writes: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -653,6 +658,8 @@ impl Staging {
             };
             if full {
                 self.flush().await?;
+            } else {
+                self.dirty.notify_one();
             }
         }
         Ok(())
@@ -1068,6 +1075,49 @@ mod tests {
         assert_eq!(staging.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
         let spool = staging.finish().await.unwrap();
         assert_eq!(spool.len(), 100 * 1024, "everything received was written");
+    }
+
+    /// Bytes gathered while the server is already waiting for the client are written during
+    /// that wait, not at its end.
+    #[tokio::test]
+    async fn bytes_gathered_during_a_wait_are_written_during_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut scope) = staging_scope(1 << 30, directory.path());
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        let wire = Arc::new(tokio::sync::Mutex::new(Wire {
+            body: Body::from_stream(futures_util::stream::pending::<Result<Bytes, io::Error>>()),
+            pace: UploadPace::new(PaceConfig {
+                idle: Duration::from_millis(600),
+                min_rate: 0,
+            }),
+            total: 0,
+            limit: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            scope: scope.shared_view(),
+            failure: Arc::new(Failure::default()),
+            tail_ledger: None,
+            staging: Some(staging.clone()),
+        }));
+        let deadline = Deadline::after(Duration::from_secs(30)).unwrap();
+        let waiting = tokio::spawn({
+            let wire = wire.clone();
+            async move { frame(&wire, deadline, &Arc::new(Cancellation::new())).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        staging.push(&[4u8; 1000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiting.is_finished(),
+            "the client is still being waited for"
+        );
+        assert_eq!(
+            staging.state().spool.as_ref().map(InputSpool::len),
+            Some(1000),
+            "written while the wait goes on"
+        );
+        assert!(waiting.await.unwrap().is_err());
     }
 
     /// The buffer and the spool of a request that is gone (here: dropped between two
