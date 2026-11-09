@@ -608,6 +608,13 @@ fn multer_boundary(content_type: &str) -> Result<String, ApiError> {
 pub(super) struct Staging {
     inner: std::sync::Mutex<StagingState>,
     /// Told when bytes were gathered, so that a wait that is already running writes them.
+    /// Not dead: the multipart parser keeps the frame wait it started (a future suspended
+    /// inside the parser's stream) across `chunk()` calls, and polls it before it hands out
+    /// bytes it already buffered, so bytes pushed after that wait began would stay in the
+    /// buffer for the whole wait without this. The cost is one stored permit, so one extra
+    /// (empty) flush loop per non-full push. Removing it fails
+    /// `a_disconnect_mid_buffer_releases_the_charge_and_the_file` (nothing is written
+    /// before the wait ends).
     dirty: tokio::sync::Notify,
     #[cfg(test)]
     writes: std::sync::atomic::AtomicUsize,
@@ -665,6 +672,12 @@ impl Staging {
         Ok(())
     }
     /// Writes what is buffered (nothing: no hop).
+    ///
+    /// The buffer is taken for the write and comes back with it. When the write is cancelled
+    /// or fails the buffer is not put back: the state then holds a buffer of capacity 0, and
+    /// a later `push` would grow it with an allocation that is not charged. That happens
+    /// only for a request that is already failing (its capture ends with the error or is
+    /// dropped), so it is not guarded against.
     async fn flush(&self) -> Result<(), ProcessingError> {
         let (mut spool, mut buffer) = {
             let mut state = self.state();
@@ -1120,35 +1133,215 @@ mod tests {
         assert!(waiting.await.unwrap().is_err());
     }
 
-    /// The buffer and the spool of a request that is gone (here: dropped between two
-    /// writes) release their memory charge and their file.
-    #[tokio::test]
-    async fn a_dropped_staging_releases_its_charge_and_its_file() {
-        const MEMORY: u64 = 8 << 20;
+    /// A request in the upload phase that has reached `Payload::capture`: its engine, store,
+    /// admission and what `prepare` made of the metadata. `body` carries the multipart head
+    /// (metadata part and the start of the `doc` part) and then whatever the case sends.
+    struct Capture {
+        engine: Engine,
+        store: TemporaryStore,
+        directory: tempfile::TempDir,
+        admission: OperationAdmission,
+        prepared: Prepared,
+        payload: Payload,
+    }
+    const MEMORY: u64 = 64 << 20;
+    const HEAD: &str = concat!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n",
+        r#"{"items":[{"id":"first","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"first","role":"document"}]}"#,
+        "\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\n"
+    );
+    async fn capture_scene(body: Body) -> Capture {
+        let engine = Engine::new(EngineServices::hash_only(ResourceLimits {
+            memory_bytes: MEMORY,
+            ..ResourceLimits::default()
+        }))
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        let (store, mut scope) = staging_scope(MEMORY, directory.path());
-        let charge = scope.reserve_memory(IO_CHUNK_BYTES as u64).unwrap();
-        assert!(scope.reserve_memory(MEMORY).is_err(), "the charge is held");
-        let staging = Staging::new();
-        staging
-            .begin(InputSpool::document(&store, &mut scope).unwrap())
+        let store = TemporaryStore::new(directory.path()).unwrap();
+        let cancel = Arc::new(Cancellation::new());
+        let deadline = Deadline::after(Duration::from_secs(30)).unwrap();
+        let mut admission = engine
+            .admit_intake(Arc::new(InvocationControl {
+                cancel: cancel.clone(),
+                deadline,
+                progress: None,
+            }))
             .unwrap();
-        staging.push(&[1u8; 100 * 1024]).await.unwrap();
-        drop(staging);
-        drop(charge);
-        scope
-            .reserve_memory(MEMORY)
-            .expect("the whole budget is free again");
-        fn files(root: &std::path::Path) -> usize {
-            std::fs::read_dir(root)
-                .unwrap()
-                .map(|entry| {
-                    let path = entry.unwrap().path();
-                    if path.is_dir() { files(&path) } else { 1 }
-                })
-                .sum()
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "multipart/form-data; boundary=b".parse().unwrap(),
+        );
+        let request = RequestMetadata {
+            peer: "127.0.0.1:1".parse().unwrap(),
+            headers,
+            content_length: None,
+        };
+        let (prepared, payload) = prepare(
+            &request,
+            body,
+            &mut admission,
+            deadline,
+            PaceConfig {
+                idle: Duration::from_secs(20),
+                min_rate: 0,
+            },
+            cancel,
+            &|_| Ok(()),
+        )
+        .await
+        .map_err(|error| error.code)
+        .unwrap();
+        Capture {
+            engine,
+            store,
+            directory,
+            admission,
+            prepared,
+            payload,
         }
-        assert_eq!(files(directory.path()), 0);
+    }
+    fn files_under(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                if path.is_dir() { files_under(&path) } else { 1 }
+            })
+            .sum()
+    }
+    /// What a request leaves behind once every handle of it is gone: no spool file, and the
+    /// memory charge released exactly once (the whole budget can be taken again, and not a
+    /// byte more: a double release would let more through than the budget holds).
+    async fn assert_nothing_left(scene: Capture) {
+        let Capture {
+            engine,
+            directory,
+            admission,
+            prepared,
+            store,
+            ..
+        } = scene;
+        drop(prepared);
+        drop(admission);
+        drop(store);
+        let began = std::time::Instant::now();
+        // A write that was in flight ends by itself and drops its spool there.
+        while files_under(directory.path()) != 0 {
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "the spool file is still there"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut fresh = engine
+            .admit_intake(Arc::new(InvocationControl {
+                cancel: Arc::new(Cancellation::new()),
+                deadline: Deadline::after(Duration::from_secs(30)).unwrap(),
+                progress: None,
+            }))
+            .unwrap();
+        let all = fresh
+            .resources()
+            .reserve_memory(MEMORY)
+            .expect("every byte of the memory budget is free again");
+        assert!(
+            fresh.resources().reserve_memory(1).is_err(),
+            "released once: not a byte beyond the budget"
+        );
+        drop(all);
+    }
+
+    /// The capture future is dropped (a cancelled or timed-out request) while one of its
+    /// chunk writes is in flight: the buffer's charge and the spool file go with it.
+    #[tokio::test]
+    async fn capture_dropped_during_a_write_releases_its_charge_and_its_file() {
+        let frame = Bytes::from(vec![b'x'; 60 * 1024]);
+        let body = Body::from_stream(
+            futures_util::stream::once(async {
+                Ok::<_, io::Error>(Bytes::from_static(HEAD.as_bytes()))
+            })
+            .chain(futures_util::stream::repeat(frame).map(Ok::<_, io::Error>)),
+        );
+        let mut scene = capture_scene(body).await;
+        let Payload::Multipart { staging, .. } = &scene.payload else {
+            panic!("a multipart payload");
+        };
+        let watched = staging.clone();
+        let payload = std::mem::replace(&mut scene.payload, Payload::Text(BTreeMap::new()));
+        let mut capture = Box::pin(payload.capture(
+            &scene.prepared.metadata,
+            Some(&scene.store),
+            scene.admission.resources(),
+        ));
+        let began = std::time::Instant::now();
+        // In flight: a write was started and its spool is out in the blocking section.
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut capture => panic!("capture ended: {:?}", result.err()),
+                () = tokio::task::yield_now() => {}
+            }
+            let in_flight = watched.writes.load(std::sync::atomic::Ordering::SeqCst) >= 1
+                && watched.state().spool.is_none();
+            if in_flight {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(10), "no write began");
+        }
+        drop(capture);
+        drop(watched);
+        assert_nothing_left(scene).await;
+    }
+
+    /// The client goes away in the middle of a document, with bytes gathered and not yet
+    /// written: capture ends with an error, and its charge and the spool file are released.
+    /// The first 1000 bytes are written before the server waits; the next 2000 arrive with
+    /// the break in one go, so they are still in the gathering buffer when capture ends.
+    #[tokio::test]
+    async fn a_disconnect_mid_buffer_releases_the_charge_and_the_file() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
+        let mut first = HEAD.as_bytes().to_vec();
+        first.extend_from_slice(&[7u8; 1000]);
+        tx.send(Ok(Bytes::from(first))).unwrap();
+        let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
+            rx.recv().await.map(|frame| (frame, rx))
+        }));
+        let mut scene = capture_scene(body).await;
+        let Payload::Multipart { staging, .. } = &scene.payload else {
+            panic!("a multipart payload");
+        };
+        let watched = staging.clone();
+        let payload = std::mem::replace(&mut scene.payload, Payload::Text(BTreeMap::new()));
+        let feeder = async {
+            while watched.writes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            tx.send(Ok(Bytes::from(vec![8u8; 2000]))).unwrap();
+            tx.send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+                .unwrap();
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                payload.capture(
+                    &scene.prepared.metadata,
+                    Some(&scene.store),
+                    scene.admission.resources(),
+                ),
+                feeder
+            )
+        })
+        .await
+        .expect("capture ends when the body breaks");
+        assert!(outcome.is_err(), "a body that breaks is not a document");
+        {
+            let state = watched.state();
+            assert_eq!(state.buffer.len(), 2000, "bytes were gathered, not written");
+            assert_eq!(state.spool.as_ref().map(InputSpool::len), Some(1000));
+        }
+        drop(outcome);
+        drop(watched);
+        assert_nothing_left(scene).await;
     }
 
     #[test]

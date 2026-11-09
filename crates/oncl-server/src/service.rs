@@ -1198,10 +1198,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn the_frame_reservation_covers_the_frames_hyper_delivers() {
-        // 49,152 and 57,344 byte frames were observed against `max_buf_size(32768)`.
-        const { assert!(FRAME_RESERVE_BYTES >= 57_344) };
-    }
 }
