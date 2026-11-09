@@ -159,6 +159,9 @@ fn a_cades_document_one_byte_past_input_bytes_is_input_limit() {
     }
 }
 
+/// A container allowance one byte short of the signature structure is refused. A detached
+/// signature is all structure: the parse charge hits `ContainerLimit`. An attached result is
+/// also past `input_bytes + container_bytes` as a whole, which the intake refuses first.
 #[test]
 fn a_cades_signature_structure_past_container_bytes_is_refused() {
     for attached in [true, false] {
@@ -169,17 +172,16 @@ fn a_cades_signature_structure_past_container_bytes_is_refused() {
             let error = verify(
                 &wire,
                 detached,
-                limits(DATA.len() as u64, structure / 2),
+                limits(DATA.len() as u64, structure - 1),
                 known,
             )
             .unwrap_err();
-            assert!(
-                matches!(
-                    error.code(),
-                    ErrorCode::ContainerLimit | ErrorCode::InputLimit
-                ),
-                "attached={attached} known={known}: {error:?}"
-            );
+            let expected = if attached {
+                ErrorCode::InputLimit
+            } else {
+                ErrorCode::ContainerLimit
+            };
+            assert_eq!(error.code(), expected, "attached={attached} known={known}");
         }
     }
 }

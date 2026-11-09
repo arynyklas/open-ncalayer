@@ -3694,3 +3694,88 @@ fn wsse_fixround_fresh_core_and_b01_reject_comment_framing_and_generation_failur
         }
     }
 }
+
+/// D9: a plain CMS co-sign re-reads the existing wire with the engine's accounting: the
+/// signed result of a document of exactly `input_bytes` is accepted (structure is container),
+/// one byte more is `InputLimit` and no key is used.
+#[test]
+fn cms_add_at_the_input_limit_admits_the_existing_wire_and_refuses_one_byte_more() {
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let first = selector("user-rsa-sign");
+    let second = selector("user-gost2004-sign");
+    for attached in [true, false] {
+        let guard = Arc::new(Guard::default());
+        let creator = engine(guard.clone(), KeySources::new(), Some(store.clone()), true);
+        let mut ctx = begin(
+            &creator,
+            &first,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut original = vec![];
+        creator
+            .sign(
+                SignRequest::cms_create(
+                    vec![KeyRequest::new(&first, Some("C02 synthetic"))],
+                    attached,
+                ),
+                Source::sequential(&mut Cursor::new(DATA), None),
+                &mut original,
+                &mut ctx,
+            )
+            .unwrap();
+        drop(ctx);
+        assert!(original.len() > DATA.len());
+        for (input_bytes, admitted) in [(DATA.len() as u64, true), (DATA.len() as u64 - 1, false)] {
+            let guard = Arc::new(Guard::default());
+            let limited = Engine::new(
+                EngineServices::hash_only(ResourceLimits {
+                    input_bytes,
+                    container_bytes: 1 << 20,
+                    ..ResourceLimits::default()
+                })
+                .with_keys(Arc::new(KeySources::new()), guard.clone())
+                .with_validation(validation())
+                .with_temporary_store(store.clone()),
+            )
+            .unwrap();
+            let mut ctx = begin(
+                &limited,
+                &second,
+                &[Action::Sign],
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            );
+            let mut data = Cursor::new(DATA);
+            let mut output = vec![];
+            let result = limited.sign(
+                SignRequest::cms_add(
+                    vec![KeyRequest::new(&second, Some("C02 synthetic"))],
+                    (!attached).then(|| Source::sequential(&mut data, None)),
+                ),
+                Source::sequential(&mut Cursor::new(&original), None),
+                &mut output,
+                &mut ctx,
+            );
+            if admitted {
+                result.unwrap_or_else(|e| panic!("attached={attached}: {e:?}"));
+                assert_eq!(guard.events.lock().unwrap().len(), 1);
+                assert_eq!(
+                    cms::verify(&output, (!attached).then_some(DATA))
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_eq!(ctx.resources().input_remaining(), 0);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code(), ErrorCode::InputLimit, "attached={attached}");
+                assert_eq!(error.applied_state(), AppliedState::NotApplied);
+                assert_eq!(guard.events.lock().unwrap().len(), 0, "no key use");
+                assert!(output.is_empty());
+            }
+        }
+    }
+}
