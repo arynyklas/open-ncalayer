@@ -242,6 +242,12 @@ impl Engine {
     ) -> Result<OperationAdmission, OperationError> {
         self.admit_with(control, false)
     }
+    /// Whether a `max_in_flight` slot is free now, for a host that refuses a request before it
+    /// reads its body. Best effort: the answer may be stale at once; only
+    /// [`OperationAdmission::occupy_slot`] and [`Self::begin_admitted`] decide.
+    pub fn slot_available(&self) -> bool {
+        self.budget.slot_available(&self.limits)
+    }
     fn admit_with(
         &self,
         control: Arc<dyn OperationControl>,

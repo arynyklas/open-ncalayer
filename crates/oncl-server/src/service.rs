@@ -280,6 +280,10 @@ impl ServiceHost {
             control,
         )
     }
+    /// How many of the `max_uploads` upload slots are free now (diagnostics and tests).
+    pub fn upload_slots_free(&self) -> usize {
+        self.uploads.available_permits()
+    }
     pub fn router(self: &Arc<Self>) -> axum::Router {
         oncl_api::server::router(self.clone())
     }
@@ -552,6 +556,27 @@ async fn acquire_upload(
         _ => Err(ApiError::not_applied(ErrorCode::CapacityExceeded)),
     }
 }
+/// The request is refused before its body is read when no `max_in_flight` slot is free and
+/// none frees up within `wait` (`admission_wait_ms`), and otherwise takes an upload slot
+/// within the rest of `wait`: a refusal costs no body bytes, as it did before the upload
+/// phase, and an `Expect: 100-continue` client is never told to send. Best effort: a slot
+/// can be taken meanwhile, the check after the body stays authoritative.
+async fn admit_to_upload(
+    engine: &Engine,
+    uploads: &Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    let began = tokio::time::Instant::now();
+    admit_within(wait, || {
+        if engine.slot_available() {
+            Ok(())
+        } else {
+            Err(ApiError::not_applied(ErrorCode::CapacityExceeded))
+        }
+    })
+    .await?;
+    acquire_upload(uploads, wait.saturating_sub(began.elapsed())).await
+}
 fn core_error(error: OperationError) -> ApiError {
     match error {
         OperationError::Processing(error) => processing_error(error),
@@ -650,7 +675,7 @@ impl ServiceHost {
                 .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
             // The upload limit: a client that finds every upload slot taken queues for at
             // most `admission_wait`; the deadline starts at its own admission, never at arrival.
-            let upload = acquire_upload(&uploads, admission_wait).await?;
+            let upload = admit_to_upload(&engine, &uploads, admission_wait).await?;
             let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
             let mut admission = engine
                 .admit_intake(Arc::new(InvocationControl {

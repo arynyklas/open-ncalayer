@@ -218,6 +218,13 @@ impl SharedBudget {
         Ok(self.scope(limits, deadline, control, false))
     }
 
+    /// Whether a slot is free now. Best effort: the answer is stale at once, only
+    /// [`ResourceScope::occupy_slot`] and [`Self::begin`] decide.
+    pub fn slot_available(&self, limits: &ResourceLimits) -> bool {
+        let usage = lock(&self.usage);
+        self.next_in_flight(&usage, limits).is_ok()
+    }
+
     /// The count after one more slot, or the refusal when `max_in_flight` is reached.
     fn next_in_flight(
         &self,

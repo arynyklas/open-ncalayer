@@ -188,10 +188,15 @@ async fn multipart_document_bytes_are_not_framing_but_epilogue_is_bounded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn original_admission_holds_global_quota_during_first_metadata_and_deadline() {
+async fn slow_first_metadata_holds_the_upload_slot_and_the_shared_budget_but_no_in_flight_slot_until_the_deadline()
+{
     let service = Running::start_with(|c| {
         c.max_in_flight = 1;
         c.max_uploads = Some(1);
+        // One operation may take the whole shared memory budget, so that what the upload in
+        // progress holds of it is visible to a probe.
+        c.total_memory = 64 << 20;
+        c.memory_per_operation = 64 << 20;
         // Must outlast the first 503 probe on a loaded machine: the deadline is the
         // only thing that releases the held admission, so it is not a speed bound.
         c.operation_timeout_ms = 6_000;
@@ -239,6 +244,24 @@ async fn original_admission_holds_global_quota_during_first_metadata_and_deadlin
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // The slow first request is still receiving its metadata. It holds shared budget (memory
+    // of its frame reservation and parser): a probe that asks for nearly all of the memory
+    // is refused. It holds no `max_in_flight` slot: the only one is free for a request that
+    // is admitted the ordinary way.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let cancel = || std::sync::Arc::new(oncl_server::executor::Cancellation::new());
+    let mut probe = service.host.engine.admit_intake(cancel()).unwrap();
+    let nearly_all = probe.resources().limits().memory_bytes - 16 * 1024;
+    assert!(
+        probe.resources().reserve_memory(nearly_all).is_err(),
+        "the upload in progress holds shared memory budget"
+    );
+    drop(probe);
+    assert!(
+        service.host.engine.slot_available(),
+        "an upload in progress holds no max_in_flight slot"
+    );
+    drop(service.host.engine.admit(cancel()).expect("the only in-flight slot is free"));
     let mut response = Vec::new();
     tokio::time::timeout(Duration::from_secs(30), first.read_to_end(&mut response))
         .await
@@ -248,10 +271,211 @@ async fn original_admission_holds_global_quota_during_first_metadata_and_deadlin
     assert!(text.starts_with("HTTP/1.1 504"), "{text}");
     assert!(text.contains("DeadlineExceeded"));
     assert!(!text.contains("\"status\":\"completed\""));
+    // Everything the request held is released with its end.
+    let mut probe = service.host.engine.admit_intake(cancel()).unwrap();
+    let all = probe.resources().limits().memory_bytes;
+    probe
+        .resources()
+        .reserve_memory(all)
+        .expect("the shared budget is free again");
+    drop(probe);
     let (status, _) = service
         .request("application/json", body, &service.token)
         .await;
     assert_eq!(status, 200);
+    service.stop().await;
+}
+
+const HASH_METADATA: &str = r#"{"items":[{"id":"first","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"first","role":"document"}]}"#;
+
+fn cancellation() -> std::sync::Arc<oncl_server::executor::Cancellation> {
+    std::sync::Arc::new(oncl_server::executor::Cancellation::new())
+}
+
+/// A request that has taken its whole body keeps its upload slot while it waits for a
+/// `max_in_flight` slot, and frees it when it has one. The request passes the early capacity
+/// check (a slot is free), is still sending, and the only slot is then taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_operation_keeps_its_upload_slot_until_it_has_an_in_flight_slot() {
+    let service = Running::start_with(|c| {
+        c.max_in_flight = 1;
+        c.max_uploads = Some(2);
+        c.admission_wait_ms = 20_000;
+        c.operation_timeout_ms = 40_000;
+        c.header_timeout_ms = 5_000;
+    })
+    .await;
+    assert_eq!(service.host.upload_slots_free(), 2);
+    let mut body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{HASH_METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\nabc"
+    )
+    .into_bytes();
+    let (first, rest) = (body.clone(), b"\r\n--b--\r\n".to_vec());
+    body.extend_from_slice(&rest);
+    let mut stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let headers = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        service.address,
+        service.token.as_str(),
+        body.len()
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    stream.write_all(&first).await.unwrap();
+    // The request is in its upload phase: it holds an upload slot (and no in-flight slot).
+    let began = std::time::Instant::now();
+    while service.host.upload_slots_free() != 1 {
+        assert!(began.elapsed() < Duration::from_secs(5), "no upload slot taken");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The only in-flight slot is taken, then the body ends: the operation queues for it.
+    let hold = service.host.engine.admit(cancellation()).unwrap();
+    stream.write_all(&rest).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        service.host.upload_slots_free(),
+        1,
+        "a queued operation keeps its upload slot until it has an in-flight slot"
+    );
+    drop(hold);
+    let mut result = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut result))
+        .await
+        .unwrap()
+        .unwrap();
+    let text = String::from_utf8_lossy(&result);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    let began = std::time::Instant::now();
+    while service.host.upload_slots_free() != 2 {
+        assert!(began.elapsed() < Duration::from_secs(5), "upload slot not freed");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    service.stop().await;
+}
+
+/// With the only `max_in_flight` slot busy, a request is refused after `admission_wait_ms`
+/// without its body being read, as before the upload phase: the client is stopped by the
+/// socket (it fills the buffers and blocks) rather than sending all of 64 MiB, and an
+/// `Expect: 100-continue` client is never told to send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_server_refuses_before_the_body_is_read() {
+    const CHUNK: usize = 64 * 1024;
+    const CHUNKS: usize = 1024;
+    let service = Running::start_with(|c| {
+        c.max_in_flight = 1;
+        c.admission_wait_ms = 300;
+        c.operation_timeout_ms = 30_000;
+        c.header_timeout_ms = 5_000;
+    })
+    .await;
+    let hold = service.host.engine.admit(cancellation()).unwrap();
+    let stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let (mut read, mut write) = stream.into_split();
+    let headers = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        service.address,
+        service.token.as_str()
+    );
+    let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = written.clone();
+    let started = std::time::Instant::now();
+    let writer = tokio::spawn(async move {
+        if write.write_all(headers.as_bytes()).await.is_err() {
+            return;
+        }
+        let first = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{HASH_METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\n"
+        );
+        let chunk = vec![b'x'; CHUNK];
+        let mut pieces = vec![first.into_bytes()];
+        pieces.extend(std::iter::repeat_n(chunk, CHUNKS));
+        for piece in pieces {
+            let framed = [format!("{:x}\r\n", piece.len()).as_bytes(), &piece, b"\r\n"].concat();
+            if write.write_all(&framed).await.is_err() {
+                return;
+            }
+            counted.fetch_add(piece.len(), std::sync::atomic::Ordering::SeqCst);
+        }
+        let _ = write.write_all(b"0\r\n\r\n").await;
+    });
+    let mut response = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let reply = tokio::time::timeout(Duration::from_secs(10), async {
+        while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+            match read.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&buffer[..n]),
+            }
+        }
+    })
+    .await;
+    let elapsed = started.elapsed();
+    assert!(reply.is_ok(), "no answer");
+    let text = String::from_utf8_lossy(&response).into_owned();
+    assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the refusal follows the admission wait, took {elapsed:?}"
+    );
+    // The server must not have taken the body: only what fits in the socket buffers went.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let sent = written.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        sent < CHUNK * CHUNKS / 2,
+        "the refusal came after the body was taken: the client sent {sent} of {} bytes",
+        CHUNK * CHUNKS
+    );
+    writer.abort();
+
+    // `Expect: 100-continue`, both body routes: the refusal is the first thing sent.
+    for path in ["/v1/operations", "/v1/hash"] {
+        let mut stream = tokio::net::TcpStream::connect(service.address)
+            .await
+            .unwrap();
+        let content_type = if path == "/v1/hash" {
+            "application/octet-stream"
+        } else {
+            "multipart/form-data; boundary=b"
+        };
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: {content_type}\r\nContent-Length: 10000000\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+                    service.address,
+                    service.token.as_str()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut buffer = [0u8; 4096];
+            while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => response.extend_from_slice(&buffer[..n]),
+                }
+            }
+        })
+        .await;
+        assert!(read.is_ok(), "{path}: no answer to the headers");
+        let text = String::from_utf8_lossy(&response).into_owned();
+        assert!(text.starts_with("HTTP/1.1 503"), "{path}: {text}");
+        assert!(!text.contains("100 Continue"), "{path}: {text}");
+    }
+    // The slot is free again: the same request is served.
+    drop(hold);
+    let mut body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{HASH_METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(b"abc\r\n--b--\r\n");
+    let (status, response) = service.chunked(&body, 65536).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
     service.stop().await;
 }
 

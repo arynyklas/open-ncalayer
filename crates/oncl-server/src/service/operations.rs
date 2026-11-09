@@ -186,10 +186,11 @@ impl ServiceHost {
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let (progress_hub, progress_receiver) = progress::ProgressHub::channel();
             // The upload phase has a limit of its own: a client that finds every upload slot
-            // taken queues for at most `admission_wait`, before any byte of its body is read.
+            // taken, or finds no `max_in_flight` slot free, queues for at most `admission_wait` and is
+            // then refused, before any byte of its body is read.
             // The deadline starts at its own admission, never at arrival. No `max_in_flight`
             // slot and no native worker is taken until the whole body has been accepted.
-            let upload = super::acquire_upload(&uploads, admission_wait).await?;
+            let upload = super::admit_to_upload(&engine, &uploads, admission_wait).await?;
             let deadline = Deadline::after(operation_timeout).map_err(processing_error)?;
             let mut admission = engine
                 .admit_intake(Arc::new(InvocationControl {
