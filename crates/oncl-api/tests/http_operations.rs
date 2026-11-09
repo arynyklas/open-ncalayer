@@ -366,6 +366,118 @@ async fn a_queued_operation_keeps_its_upload_slot_until_it_has_an_in_flight_slot
     service.stop().await;
 }
 
+/// A small, complete hash request over a fresh connection: the head of the response and how
+/// long the answer took.
+async fn small_operation(service: &Running) -> (String, Duration) {
+    let body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{HASH_METADATA}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\nabc\r\n--b--\r\n"
+    );
+    let mut stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let request = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        service.address,
+        service.token.as_str(),
+        body.len()
+    );
+    let started = std::time::Instant::now();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut result = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut result))
+        .await
+        .unwrap()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&result).into_owned(),
+        started.elapsed(),
+    )
+}
+
+/// The check before the body waits for an operation slot: with the only `max_in_flight` slot
+/// held and released after about half of `admission_wait_ms`, the request is admitted and
+/// succeeds (a wait of zero would refuse it at once).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slot_freed_within_the_admission_wait_admits_the_request() {
+    let service = Running::start_with(|c| {
+        c.max_in_flight = 1;
+        c.admission_wait_ms = 2_000;
+        c.operation_timeout_ms = 30_000;
+        c.header_timeout_ms = 5_000;
+    })
+    .await;
+    let hold = service.host.engine.admit(cancellation()).unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        drop(hold);
+    });
+    let (text, elapsed) = small_operation(&service).await;
+    release.await.unwrap();
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "it waited for the slot, took {elapsed:?}"
+    );
+    service.stop().await;
+}
+
+/// The upload-slot wait gets what is left of `admission_wait_ms`, not a second full wait: the
+/// operation slot is freed after 60 % of it, the only upload slot never is, and the typed 503
+/// comes after about `admission_wait_ms` in all, well before twice that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_upload_slot_wait_gets_the_remainder_of_the_admission_wait() {
+    const WAIT: u64 = 2_000;
+    let service = Running::start_with(|c| {
+        c.max_in_flight = 1;
+        c.max_uploads = Some(1);
+        c.admission_wait_ms = WAIT;
+        c.operation_timeout_ms = 30_000;
+        c.header_timeout_ms = 5_000;
+    })
+    .await;
+    // A stalled upload holds the only upload slot (and no operation slot).
+    let mut stalled = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    stalled
+        .write_all(
+            format!(
+                "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n--b\r\n",
+                service.address,
+                service.token.as_str()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let began = std::time::Instant::now();
+    while service.host.upload_slots_free() != 0 {
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "no upload slot taken"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let hold = service.host.engine.admit(cancellation()).unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(WAIT * 6 / 10)).await;
+        drop(hold);
+    });
+    let (text, elapsed) = small_operation(&service).await;
+    release.await.unwrap();
+    assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+    assert!(
+        elapsed >= Duration::from_millis(WAIT - 100),
+        "refused after the whole admission wait, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(WAIT * 3 / 2),
+        "the upload-slot wait took the remainder, not a second wait: {elapsed:?}"
+    );
+    drop(stalled);
+    service.stop().await;
+}
+
 /// With the only `max_in_flight` slot busy, a request is refused after `admission_wait_ms`
 /// without its body being read, as before the upload phase: the client is stopped by the
 /// socket (it fills the buffers and blocks) rather than sending all of 64 MiB, and an
