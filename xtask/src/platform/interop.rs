@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[path = "interop/cases.rs"]
-mod cases;
+pub mod cases;
 #[path = "interop/kalkan.rs"]
 pub mod kalkan;
 #[path = "interop/oncl.rs"]

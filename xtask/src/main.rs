@@ -102,8 +102,9 @@ enum Command {
         /// temporary directory]: use a volume with a few GiB free.
         #[arg(long)]
         scratch: Option<PathBuf>,
-        /// Size in bytes of the large artifacts of the matrix.
-        #[arg(long, default_value_t = 1_181_116_006)]
+        /// Size in bytes of the large artifacts of the matrix: just below the 1 GiB
+        /// guarantee, so that `oncl` accepts them (a size at or above it is refused).
+        #[arg(long, default_value_t = xtask::platform_interop::cases::large::DEFAULT_LARGE_BYTES)]
         large_bytes: u64,
     },
     /// Sign an update index with minisign: writes `<index>.minisig` beside it, with the

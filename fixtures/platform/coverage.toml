@@ -2093,32 +2093,32 @@ id = "large-cms-detached-rsa"
 capability = "large"
 profile = "rsa"
 oracles = ["openssl", "asn1crypto", "cryptography"]
-what = "a 1.1 GiB pseudo-random file, detached CMS: OpenSSL streams -content, Python streams the digest and checks signedAttrs RSA; one flipped bit in the middle is rejected by all"
-expected = "size=1.1GiB crypto=ok ours=Valid openssl=streamed -content verified decomposition=streamed sha256 = messageDigest, RSA over signedAttrs ok altered=rejected by oncl, OpenSSL and the streamed digest"
+what = "a pseudo-random file of 1.06e9 bytes, just below the 1 GiB guarantee, detached CMS: OpenSSL streams -content, Python streams the digest and checks signedAttrs RSA; one flipped bit in the middle is rejected by all (the exact 1 GiB boundary is the product unit test, not this row)"
+expected = "size=just below 1 GiB crypto=ok ours=Valid openssl=streamed -content verified decomposition=streamed sha256 = messageDigest, RSA over signedAttrs ok altered=rejected by oncl, OpenSSL and the streamed digest"
 
 [[case]]
 id = "large-xml-enveloped-rsa"
 capability = "large"
 profile = "rsa"
 oracles = ["lxml", "cryptography"]
-what = "a 1.1 GiB canonical-by-construction XML document, enveloped signature: streamed digest of the bytes outside ds:Signature and the SignedInfo RSA check; one flipped bit is rejected"
-expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed sha256 of the bytes outside ds:Signature = DigestValue, SignedInfo RSA ok altered=rejected by oncl and the independent digest"
+what = "a canonical-by-construction XML document of about 1.06e9 bytes, just below the 1 GiB guarantee, enveloped signature: streamed digest of the bytes outside ds:Signature and the SignedInfo RSA check; one flipped bit is rejected"
+expected = "size=just below 1 GiB crypto=ok ours=Valid decomposition=streamed sha256 of the bytes outside ds:Signature = DigestValue, SignedInfo RSA ok altered=rejected by oncl and the independent digest"
 
 [[case]]
 id = "large-pdf-signature-rsa"
 capability = "large"
 profile = "rsa"
 oracles = ["asn1crypto", "cryptography"]
-what = "a 1.1 GiB PDF of many content-bearing pages, adbe.pkcs7.detached: memory-mapped ByteRange decomposition (digest, CMS RSA) without a PDF library; one flipped bit is rejected"
-expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"
+what = "a PDF of about 1.06e9 bytes, just below the 1 GiB guarantee, of many content-bearing pages, adbe.pkcs7.detached: memory-mapped ByteRange decomposition (digest, CMS RSA) without a PDF library; one flipped bit is rejected"
+expected = "size=just below 1 GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"
 
 [[case]]
 id = "large-pdf-signature-rsa-1mib-pages"
 capability = "large"
 profile = "rsa"
 oracles = ["asn1crypto", "cryptography"]
-what = "the same 1.1 GiB PDF with 1 MiB content streams (about 1100 pages instead of 71000): the object count, not the size, is what varies"
-expected = "size=1.1GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"
+what = "the same PDF just below the 1 GiB guarantee with 1 MiB content streams (about 1000 pages instead of 64000): the object count, not the size, is what varies"
+expected = "size=just below 1 GiB crypto=ok ours=Valid decomposition=streamed ByteRange sha256 = messageDigest, RSA over signedAttrs ok, range covers the file altered=rejected by oncl and the independent ByteRange digest"
 
 [[case]]
 id = "pdf-many-pages-128mib-rsa"

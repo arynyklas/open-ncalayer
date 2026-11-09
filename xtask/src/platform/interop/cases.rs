@@ -13,7 +13,7 @@ mod extras;
 #[path = "cases/jose.rs"]
 mod jose;
 #[path = "cases/large.rs"]
-mod large;
+pub mod large;
 #[path = "cases/pdf.rs"]
 mod pdf;
 #[path = "cases/wsse.rs"]
