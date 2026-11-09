@@ -378,6 +378,47 @@ After headers have been sent, expiry is a transport abort, not a promised new
 JSON error/status. Timers do not make retained Bytes clones/slices or a running
 native operation free: their actual final owners must still release them.
 
+**Aborted response streams.** When a failure ends a response stream that has started (the
+server decided `200` and began streaming; how much of the head and the first frames reached
+the client varies), the server cuts the response without a terminal record, because no JSON
+error can follow. Which failures: a resource, deadline or cancellation failure of the first
+operation that applied no key (`MetadataLimit`, `OutputLimit`, `MemoryLimit`, `TempLimit`,
+`CapacityExceeded`, ...), one the stream itself observes between frames, and a failure while
+building the stream's own frames or terminal record. The client sees only a lost response
+(`ResponseLost`) and cannot tell these apart; **the cause is visible only on the server**,
+and the protocol and the clients are unchanged. For every such stream the server writes
+exactly one line to stderr (and the same facts as a `tracing` event, target
+`oncl::stream_abort`, level `error`; the standalone binary installs no `tracing`
+subscriber, so there the stderr line is the log):
+
+```
+oncl-server: stream aborted: operation=1 route=operations item=0 kind=sign code=metadata_limit cause=MetadataLimit applied=not_applied elapsed_ms=6 bytes_in=0 bytes_out=218
+```
+
+| Field | Meaning |
+|---|---|
+| `operation` | the operation id (the `operation_id` of the progress frames and, for a private operation, of the audit journal's records) |
+| `route` | `operations` or `batch` |
+| `item`, `kind` | manifest index and operation kind (the closed `oncl.operation.kind` values) of the item that was running; `none` before the first item |
+| `code` | the closed `oncl.error.code` value of the typed cause (`metadata_limit`, `output_limit`, `memory_limit`, `temp_limit`, `capacity_exceeded`, `deadline_exceeded`, `cancelled`, `invalid_request`, …) |
+| `cause` | the name of the typed failure variant (`MetadataLimit`, `OutputLimit`, …); never its message |
+| `applied` | `not_applied`, `applied` or `unknown`: the key-application state of the items that finished before the abort |
+| `elapsed_ms` | milliseconds from the start of the response stream |
+| `bytes_in`, `bytes_out` | the byte counts of the latest progress snapshot |
+
+Every value is a number or a closed name. No error text, item id, part or file name,
+document content, key, password, token, URL or path is ever written (tests assert this
+with recognisable values in the request). The same abort increments the counter
+`oncl.stream.aborted`. Not covered: a client that disconnects, and a transport abort by the
+connection's own deadline timer, which end the body without a typed failure of the
+stream. The audit journal is not changed by an abort. A `BEGIN` exists only for a private
+key use and the failures of the first kind above come before any key is applied, so there is
+no `BEGIN` to finalise; a stream-level failure after a key use leaves the `BEGIN` and the
+`FINAL` that the key use itself wrote (`applied`, `succeeded`), and the log line says
+`applied=applied`. A `FINAL` has no field for an error code and the frame format is not
+changed for this, so the journal never names the abort cause; the log line does, and its
+`operation` is the journal's `operation_id`.
+
 **Uploads.** Receiving a request body is a phase of its own with its own limit,
 `max_uploads` (unset: 8, or less when `total_temp` holds fewer spools, see below; 1 .. 256). A request that carries a body (`POST /v1/hash`,
 `/v1/operations`, `/v1/batch`) takes one upload slot after authentication and before it reads
@@ -632,6 +673,8 @@ applied state), `oncl.delivery` (response body delivery).
 
 Metrics: counters `oncl.requests`, `oncl.operations`, `oncl.key.uses` (counts of
 operations that applied or may have applied a private key; **no key identity**),
+`oncl.stream.aborted` (response streams the server cut short after the head, by route,
+`oncl.error.code` and `oncl.key.applied`; see "Aborted response streams" above),
 `oncl.executor.rejected`, `oncl.telemetry.dropped`; histograms in seconds
 `oncl.request.duration`, `oncl.admission.duration` (includes the upload, see above),
 `oncl.executor.duration`,

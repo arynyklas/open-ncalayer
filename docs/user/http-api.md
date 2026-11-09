@@ -395,7 +395,8 @@ token's `keys` is 403, never a 404 existence oracle), 405 with
 500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration, 504
 DeadlineExceeded. The two 404 causes differ by the JSON `code` (`InvalidRequest` on
 `NotApplied` for a route, `KeyNotFound` for a key). After headers only the terminal `final` record or a transport
-abort can report failure.
+abort can report failure; a transport abort carries no reason to the client (the server
+logs it, see "Aborted response streams" in `server.md`).
 
 Progress parts are coalesced from a single latest-value channel (at most one frame
 per observed change, never queued per checkpoint); each frame is charged as output
@@ -511,7 +512,11 @@ test; JKS signing over HTTP is therefore not evidenced.
 `error: {code, applied}` and withholds every artifact of the request (there is no
 partial success); prior items' `applied` values stay visible in `results`. Resource,
 deadline and cancellation failures that never applied a key abort the transport as
-before. A stream without a `completed` final record is not a result.
+before. A stream without a `completed` final record is not a result. The client gets no
+reason for such an abort (only a lost response); the **server** logs the typed cause
+(error code, item, applied state, elapsed time, byte counts; never user data) and counts
+it in `oncl.stream.aborted`, see "Aborted response streams" in `server.md`. The protocol
+and the clients are unchanged: they cannot see this log.
 
 ## Closed batch (`POST /v1/batch`)
 
@@ -576,7 +581,9 @@ one `artifact` part per **finished** output, and a mandatory last `final` part,
   never success); the durable audit journal holds the per-item facts, and the native
   worker keeps the original root until it returns. A deadline that expires while the
   client is still uploading is a typed `504 DeadlineExceeded` (`NotApplied`) before
-  any header.
+  any header. (A deadline or disconnect that cuts the transport itself writes no log
+  line; an abort the stream ends with a typed failure does, see "Aborted response
+  streams" in `server.md`.)
 
 ## Test oracles
 
