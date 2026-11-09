@@ -20,7 +20,6 @@ use http_body_util::BodyExt;
 use hyper::body::Frame;
 use oncl_pki::resource::{Deadline, ProcessingError};
 use std::time::{Duration, Instant};
-use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PaceConfig {
@@ -69,21 +68,19 @@ impl UploadPace {
         body: &mut Body,
         deadline: Deadline,
     ) -> Result<Option<Result<Frame<Bytes>, axum::Error>>, ProcessingError> {
-        self.frame_after(body, deadline, &Notify::new(), || async { Ok(()) })
-            .await
+        self.frame_after(body, deadline, || async { Ok(()) }).await
     }
     /// As [`Self::frame`], for a server that gathers what it receives before it writes it.
-    /// When no frame is ready the server has to wait for the client: `flush` runs first (and
-    /// again whenever `dirty` is notified during the wait, because the consumer gathered more
-    /// meanwhile), and the idle timer and the pace window only run while the body is being
-    /// waited for, so the work of `flush` is never charged to the client. A frame that is
-    /// ready costs no wait and runs nothing.
+    /// When no frame is ready the server has to wait for the client: `flush` runs first, and
+    /// the idle timer and the pace window only run while the body is being waited for, so the
+    /// work of `flush` is never charged to the client. A frame that is ready costs no wait
+    /// and runs nothing. The consumer gathers bytes only between two calls (it is the task
+    /// that polls this wait), so nothing can be gathered while the wait runs.
     pub(crate) async fn frame_after<Flush: Future<Output = Result<(), ProcessingError>>>(
         &mut self,
         body: &mut Body,
         deadline: Deadline,
-        dirty: &Notify,
-        flush: impl Fn() -> Flush,
+        flush: impl FnOnce() -> Flush,
     ) -> Result<Option<Result<Frame<Bytes>, axum::Error>>, ProcessingError> {
         let mut next = std::pin::pin!(body.frame());
         // One poll with the task's own waker: when it is not ready, the very same future is
@@ -93,29 +90,14 @@ impl UploadPace {
             self.arrived(Duration::ZERO, Self::data_len(&ready))?;
             return Ok(ready);
         }
-        let mut idle_left = self.config.idle;
-        let mut waited = Duration::ZERO;
-        loop {
-            flush().await?;
-            let limit = idle_left.min(deadline.remaining());
-            let began = Instant::now();
-            let wait = tokio::time::timeout(limit, next.as_mut());
-            tokio::select! {
-                frame = wait => {
-                    let frame = frame.map_err(|_| ProcessingError::DeadlineExceeded)?;
-                    self.arrived(waited + began.elapsed(), Self::data_len(&frame))?;
-                    return Ok(frame);
-                }
-                () = dirty.notified() => {
-                    let spent = began.elapsed();
-                    waited += spent;
-                    idle_left = idle_left.saturating_sub(spent);
-                    if idle_left.is_zero() {
-                        return Err(ProcessingError::DeadlineExceeded);
-                    }
-                }
-            }
-        }
+        flush().await?;
+        let limit = self.config.idle.min(deadline.remaining());
+        let began = Instant::now();
+        let frame = tokio::time::timeout(limit, next.as_mut())
+            .await
+            .map_err(|_| ProcessingError::DeadlineExceeded)?;
+        self.arrived(began.elapsed(), Self::data_len(&frame))?;
+        Ok(frame)
     }
     fn data_len(frame: &Option<Result<Frame<Bytes>, axum::Error>>) -> u64 {
         frame
@@ -214,7 +196,7 @@ mod tests {
         let deadline = Deadline::after(Duration::from_secs(60)).unwrap();
         let ran = std::cell::Cell::new(false);
         let frame = p
-            .frame_after(&mut body, deadline, &Notify::new(), || async {
+            .frame_after(&mut body, deadline, || async {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 ran.set(true);
                 Ok(())
@@ -238,9 +220,8 @@ mod tests {
         );
         let deadline = Deadline::after(Duration::from_secs(60)).unwrap();
         let runs = std::cell::Cell::new(0);
-        let dirty = Notify::new();
         assert!(
-            p.frame_after(&mut body, deadline, &dirty, || async {
+            p.frame_after(&mut body, deadline, || async {
                 runs.set(runs.get() + 1);
                 Ok(())
             })
@@ -250,7 +231,7 @@ mod tests {
         );
         assert_eq!(runs.get(), 0, "a ready frame is not a wait");
         assert!(matches!(
-            p.frame_after(&mut body, deadline, &dirty, || async {
+            p.frame_after(&mut body, deadline, || async {
                 runs.set(runs.get() + 1);
                 Ok(())
             })
@@ -260,47 +241,5 @@ mod tests {
         assert_eq!(runs.get(), 1, "a stall flushes once, before the idle timer");
     }
 
-    /// Bytes gathered while the server already waits are written too, and the writes do not
-    /// use up the idle allowance: 3 notices with 30 ms of work each (and one at the start)
-    /// against an idle timeout of 250 ms still end only after 250 ms of actual waiting.
-    #[tokio::test]
-    async fn work_requested_during_the_wait_is_not_charged_either() {
-        let mut p = UploadPace::new(PaceConfig {
-            idle: Duration::from_millis(250),
-            min_rate: 0,
-        });
-        let mut body =
-            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
-        let deadline = Deadline::after(Duration::from_secs(60)).unwrap();
-        let dirty = Notify::new();
-        let runs = std::cell::Cell::new(0);
-        let began = Instant::now();
-        let outcome = {
-            let notifier = async {
-                for _ in 0..3 {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
-                    dirty.notify_one();
-                }
-                std::future::pending::<()>().await
-            };
-            tokio::select! {
-                r = p.frame_after(&mut body, deadline, &dirty, || async {
-                    runs.set(runs.get() + 1);
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    Ok(())
-                }) => r,
-                () = notifier => unreachable!(),
-            }
-        };
-        assert!(matches!(outcome, Err(ProcessingError::DeadlineExceeded)));
-        assert!(
-            runs.get() >= 4,
-            "flushed at the start and after each notice"
-        );
-        assert!(
-            began.elapsed() >= Duration::from_millis(250 + 100),
-            "the writes were not part of the 250 ms of waiting: {:?}",
-            began.elapsed()
-        );
-    }
+
 }
