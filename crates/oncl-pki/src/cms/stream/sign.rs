@@ -268,19 +268,97 @@ pub(super) fn copy_region(
     }
     Ok(())
 }
-pub(super) fn snapshot(
+/// Parse a spooled SignedData wire again from its source-role spool. Uncharged replay of
+/// bytes whose intake was already classified; the spool is never an intake.
+pub(super) fn parse_stage(
+    stage: &mut StagedArtifact,
+    scope: &mut ResourceScope,
+    extra: &[SigAlg],
+    retain_bulk: bool,
+) -> Result<super::Parsed, StreamError> {
+    let length = stage.len();
+    let mut reader = StageReader {
+        stage,
+        position: 0,
+        error: None,
+    };
+    let parsed = super::parse_with(
+        Source::sequential(&mut reader, Some(length)),
+        scope,
+        true,
+        None,
+        extra,
+        true,
+        retain_bulk,
+    );
+    if let Some(error) = reader.error.take() {
+        return Err(error.into());
+    }
+    parsed
+}
+/// Spools the bytes it reads from `input` into `stage` as they pass.
+struct SpoolTee<'a, 'b> {
+    input: Source<'a>,
+    stage: &'b mut StagedArtifact,
+    fatal: Option<ProcessingError>,
+}
+impl Read for SpoolTee<'_, '_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let count = self.input.read(output)?;
+        if let Err(error) = self.stage.write_chunk(&output[..count]) {
+            self.fatal = Some(error);
+            return Err(io::Error::other("signature spool failed"));
+        }
+        Ok(count)
+    }
+}
+/// Freeze a SignedData wire into a source-role spool and parse it.
+///
+/// An external wire is read once by the classifying parser while it is spooled, not as
+/// opaque content: its signature structure is container (`container_bytes`) and only an
+/// embedded eContent is document (`input_bytes`), exactly as the plain CMS verify reads
+/// it. A signed result of a document of exactly `input_bytes` (embedded), or the signature
+/// of a detached document of that size (whose content is charged separately), is therefore
+/// admitted; one byte of document more, or a signature structure past `container_bytes`,
+/// is not. An already admitted same-operation source is replayed uncharged, as everywhere
+/// else, and parsed from its spool.
+pub(super) fn parse_frozen(
     input: Source<'_>,
     store: Option<&TemporaryStore>,
     scope: &mut ResourceScope,
-) -> Result<StagedArtifact, StreamError> {
+    extra: &[SigAlg],
+    retain_bulk: bool,
+) -> Result<(StagedArtifact, super::Parsed), StreamError> {
     let mut stage = store
         .ok_or(StreamError::MissingTemporaryStore)?
         .stage_source(scope)?;
-    Reader::new(input, scope)?.raw_content(|bytes| {
-        stage.write_chunk(bytes)?;
-        Ok(())
-    })?;
-    Ok(stage)
+    if input.is_snapshot_for(scope)? || input.is_output_projection_for(scope)? {
+        Reader::new(input, scope)?.raw_content(|bytes| {
+            stage.write_chunk(bytes)?;
+            Ok(())
+        })?;
+        let parsed = parse_stage(&mut stage, scope, extra, retain_bulk)?;
+        return Ok((stage, parsed));
+    }
+    let length = input.known_len();
+    let mut tee = SpoolTee {
+        input,
+        stage: &mut stage,
+        fatal: None,
+    };
+    let parsed = super::parse_with(
+        Source::sequential(&mut tee, length),
+        scope,
+        true,
+        None,
+        extra,
+        false,
+        retain_bulk,
+    );
+    if let Some(error) = tee.fatal.take() {
+        return Err(error.into());
+    }
+    Ok((stage, parsed?))
 }
 pub(super) fn metadata_region(
     stage: &mut StagedArtifact,
@@ -511,27 +589,8 @@ fn sign_impl(
             let validation =
                 validation.ok_or_else(|| malformed("Add requires host validation services"))?;
             let input = input.ok_or_else(|| malformed("Add requires CMS input"))?;
-            let mut existing = snapshot(input, temp, &mut operation)?;
-            let length = existing.len();
-            let mut reader = StageReader {
-                stage: &mut existing,
-                position: 0,
-                error: None,
-            };
             let needed: Vec<_> = signers.iter().map(|s| s.algorithm()).collect();
-            let parsed = super::parse_with(
-                Source::sequential(&mut reader, Some(length)),
-                &mut operation,
-                true,
-                None,
-                &needed,
-                true,
-                true,
-            );
-            if let Some(error) = reader.error.take() {
-                return Err(error.into());
-            }
-            let mut parsed = parsed?;
+            let (existing, mut parsed) = parse_frozen(input, temp, &mut operation, &needed, true)?;
             if !parsed.inspection.detached && detached.is_some() {
                 return Err(malformed("attached Add does not accept detached data"));
             }

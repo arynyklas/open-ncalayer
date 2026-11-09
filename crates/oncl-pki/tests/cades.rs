@@ -1205,6 +1205,269 @@ mod cades {
         assert_eq!(scoped.progress().bytes_out, bytes.len() as u64);
         assert_eq!(oncl_pki::cms::verify(&bytes, None).unwrap().len(), 1);
     }
+    fn limited(input_bytes: u64, container_bytes: u64) -> ResourceLimits {
+        ResourceLimits {
+            input_bytes,
+            container_bytes,
+            ..limits()
+        }
+    }
+    fn scope_with(limits: ResourceLimits) -> oncl_pki::resource::ResourceScope {
+        Arc::new(SharedBudget::new(limits.clone()).unwrap())
+            .begin(limits, Arc::new(Control))
+            .unwrap()
+    }
+    /// Source of a signature wire or detached content; a known length unless `unknown`.
+    fn source<'a>(cursor: &'a mut Cursor<&[u8]>, unknown: bool) -> Source<'a> {
+        let length = cursor.get_ref().len() as u64;
+        Source::sequential(cursor, (!unknown).then_some(length))
+    }
+    /// Verify (`target` None) or extend to `target`, on a fresh scope with `limits`.
+    fn at_limits(
+        f: &Fixture,
+        wire: &[u8],
+        detached: Option<&[u8]>,
+        target: Option<AdesLevel>,
+        limits: ResourceLimits,
+        unknown_length: bool,
+    ) -> Result<(Vec<u8>, ades::AdesReport), ades::AdesError> {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let scope = scope_with(limits);
+        let mut wire = Cursor::new(wire);
+        let mut content = detached.map(Cursor::new);
+        let content = content
+            .as_mut()
+            .map(|cursor| source(cursor, unknown_length));
+        let mut output = Vec::new();
+        match target {
+            Some(level) => ades::extend(
+                level,
+                source(&mut wire, unknown_length),
+                content,
+                &services,
+                &[SigAlg::RsaSha256],
+                &mut output,
+                &scope,
+            )
+            .map(|report| (output, report)),
+            None => ades::verify(
+                AdesLevel::B,
+                source(&mut wire, unknown_length),
+                content,
+                &services,
+                &[SigAlg::RsaSha256],
+                &scope,
+            )
+            .map(|report| (Vec::new(), report)),
+        }
+    }
+    fn is_input_limit(error: &ades::AdesError) -> bool {
+        matches!(
+            error,
+            ades::AdesError::Processing(ProcessingError::InputLimit)
+                | ades::AdesError::Stream(oncl_pki::cms::stream::StreamError::Processing(
+                    ProcessingError::InputLimit
+                ))
+        )
+    }
+    /// A signed result of a document exactly at `input_bytes` is document + signature: the
+    /// signature wire is container, so verify and every keyless extension re-read it.
+    #[test]
+    fn cades_document_exactly_at_input_limit_verifies_and_extends() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let limits = limited(DATA.len() as u64, 1 << 20);
+        for attached in [true, false] {
+            for unknown in [false, true] {
+                let detached = (!attached).then_some(DATA);
+                let wire = baseline(&f, attached, NOW - time::Duration::MINUTE, &store);
+                assert!(
+                    wire.len() as u64 > limits.input_bytes,
+                    "the signature wire alone exceeds the document allowance"
+                );
+                let (_, report) = at_limits(&f, &wire, detached, None, limits.clone(), unknown)
+                    .unwrap_or_else(|e| {
+                        panic!("verify attached={attached} unknown={unknown}: {e:?}")
+                    });
+                assert_eq!(report.verdict, Verdict::Valid);
+                let (lt, report) = at_limits(
+                    &f,
+                    &wire,
+                    detached,
+                    Some(AdesLevel::Lt),
+                    limits.clone(),
+                    unknown,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("extend LT attached={attached} unknown={unknown}: {e:?}")
+                });
+                assert_eq!(report.level(), Some(AdesLevel::Lt));
+                let (lta, report) = at_limits(
+                    &f,
+                    &lt,
+                    detached,
+                    Some(AdesLevel::Lta),
+                    limits.clone(),
+                    unknown,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("extend LTA attached={attached} unknown={unknown}: {e:?}")
+                });
+                assert_eq!(report.level(), Some(AdesLevel::Lta));
+                let (_, report) = at_limits(&f, &lta, detached, None, limits.clone(), unknown)
+                    .unwrap_or_else(|e| panic!("verify LTA attached={attached}: {e:?}"));
+                assert_eq!(report.verdict, Verdict::Valid);
+                assert_eq!(report.level(), Some(AdesLevel::Lta));
+            }
+        }
+    }
+    /// One byte past `input_bytes` is still a too large document, detached or embedded.
+    #[test]
+    fn cades_document_one_byte_past_input_limit_is_refused() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let limits = limited(DATA.len() as u64 - 1, 1 << 20);
+        for attached in [true, false] {
+            for unknown in [false, true] {
+                let detached = (!attached).then_some(DATA);
+                let wire = baseline(&f, attached, NOW - time::Duration::MINUTE, &store);
+                for target in [None, Some(AdesLevel::Lt)] {
+                    let error = at_limits(&f, &wire, detached, target, limits.clone(), unknown)
+                        .unwrap_err();
+                    assert!(
+                        is_input_limit(&error),
+                        "attached={attached} unknown={unknown} target={target:?}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+    /// The signature wire is container and evidence, never document: it is bounded by
+    /// `container_bytes` (the wire and the evidence copied out of it), whatever
+    /// `input_bytes` is, and a wire the container allowance cannot hold is refused.
+    #[test]
+    fn cades_signature_wire_is_bounded_by_container_bytes() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let wire = baseline(&f, false, NOW - time::Duration::MINUTE, &store);
+        let roomy = limited(DATA.len() as u64, 4 * wire.len() as u64);
+        let (_, report) = at_limits(&f, &wire, Some(DATA), None, roomy, false).unwrap();
+        assert_eq!(report.verdict, Verdict::Valid);
+        let short = limited(DATA.len() as u64, wire.len() as u64 - 1);
+        for unknown in [false, true] {
+            let error = at_limits(&f, &wire, Some(DATA), None, short.clone(), unknown).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ades::AdesError::Processing(
+                        ProcessingError::ContainerLimit | ProcessingError::InputLimit
+                    ) | ades::AdesError::Stream(oncl_pki::cms::stream::StreamError::Processing(
+                        ProcessingError::ContainerLimit | ProcessingError::InputLimit
+                    ))
+                ),
+                "unknown={unknown}: {error:?}"
+            );
+        }
+    }
+    /// Co-signing re-reads the existing wire with the same accounting, and the refusal of an
+    /// oversized document precedes any application of the new key.
+    #[test]
+    fn cades_add_at_input_limit_admits_the_existing_wire_and_refuses_one_byte_more() {
+        use oncl_pki::{
+            digest::DigestValue,
+            key::{DigestSigner, KeyError},
+        };
+        struct Spy {
+            key: KeyEntry,
+            calls: usize,
+        }
+        impl DigestSigner for Spy {
+            fn certificate(&self) -> &Certificate {
+                &self.key.cert
+            }
+            fn algorithm(&self) -> SigAlg {
+                SigAlg::RsaSha256
+            }
+            fn sign_digest(&mut self, digest: &DigestValue) -> Result<Vec<u8>, KeyError> {
+                self.calls += 1;
+                DigestSigner::sign_digest(&mut self.key, digest)
+            }
+        }
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        for attached in [true, false] {
+            let wire = baseline(&f, attached, NOW - time::Duration::MINUTE, &store);
+            for (input_bytes, admitted) in
+                [(DATA.len() as u64, true), (DATA.len() as u64 - 1, false)]
+            {
+                let mut key = f.doc.clone();
+                let mut spec = TestCertSpec::from_cert(&key.cert);
+                spec.serial = vec![0x63, 3, 7];
+                strip(&mut spec);
+                key.cert = issue_cert(&f.root, spec);
+                let mut signer = Spy { key, calls: 0 };
+                let mut content = Cursor::new(DATA);
+                let mut output = Vec::new();
+                let result = ades::sign(
+                    &CmsSignRequest::add(),
+                    AdesLevel::B,
+                    Source::sequential(&mut Cursor::new(&wire), Some(wire.len() as u64)),
+                    (!attached).then(|| Source::sequential(&mut content, Some(DATA.len() as u64))),
+                    &mut [&mut signer],
+                    &CmsSignServices::new(Some(&context), Some(&store)),
+                    Some(&services),
+                    &mut output,
+                    &scope_with(limited(input_bytes, 1 << 20)),
+                );
+                if admitted {
+                    result.unwrap_or_else(|e| panic!("attached={attached}: {e:?}"));
+                    assert_eq!(signer.calls, 1);
+                    assert_eq!(
+                        oncl_pki::cms::verify(&output, (!attached).then_some(DATA))
+                            .unwrap()
+                            .len(),
+                        2
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(is_input_limit(&error), "attached={attached}: {error:?}");
+                    assert_eq!(signer.calls, 0, "refused before any key use");
+                    assert!(output.is_empty());
+                }
+            }
+        }
+    }
     #[test]
     fn evidence_reader_limit_is_fatal_not_a_completed_invalid_report() {
         let f = Fixture::new();

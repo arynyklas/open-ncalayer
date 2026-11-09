@@ -6,8 +6,10 @@
 #[path = "ades/pdf.rs"]
 pub(crate) mod pdf;
 use super::reader::{Metadata, Reader, malformed};
-use super::sign::{Output, StageReader, copy_region, metadata_region, size, snapshot, sum};
-use super::{ALGORITHMS, CmsSignRequest, CmsSignServices, Parsed, StreamError, parse_with};
+use super::sign::{
+    Output, StageReader, copy_region, metadata_region, parse_frozen, parse_stage, size, sum,
+};
+use super::{ALGORITHMS, CmsSignRequest, CmsSignServices, Parsed, StreamError};
 use crate::ber;
 use crate::cert::Certificate;
 use crate::cms::asn1::{Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo};
@@ -342,8 +344,18 @@ fn freeze_extra(
 ) -> Result<Frozen, AdesError> {
     services.limits.validate()?;
     let mut operation = scope.retain();
-    let source = snapshot(input, Some(services.temporary), &mut operation)?;
-    freeze_stage_extra(source, detached, false, scope, extra)
+    // The wire is classified while it is read (signature structure is container, an
+    // embedded eContent is document); a detached content is document, charged below.
+    // The CRLs stay in the frozen source and `Frozen::status`: a second resident copy
+    // inside the parsed metadata would only be charged and never read.
+    let (source, parsed) = parse_frozen(
+        input,
+        Some(services.temporary),
+        &mut operation,
+        extra,
+        false,
+    )?;
+    finish_freeze(source, parsed, detached, false, operation, scope)
 }
 fn freeze_stage(
     source: StagedArtifact,
@@ -368,27 +380,17 @@ fn freeze_stage_extra(
     extra: &[SigAlg],
 ) -> Result<Frozen, AdesError> {
     let mut operation = scope.retain();
-    let length = source.len();
-    let mut reader = StageReader {
-        stage: &mut source,
-        position: 0,
-        error: None,
-    };
-    let parsed = parse_with(
-        Source::sequential(&mut reader, Some(length)),
-        &mut operation,
-        true,
-        None,
-        extra,
-        true,
-        // The CRLs stay in the frozen source and `Frozen::status`: a second resident
-        // copy inside the parsed metadata would only be charged and never read.
-        false,
-    );
-    if let Some(error) = reader.error.take() {
-        return Err(error.into());
-    }
-    let mut parsed = parsed?;
+    let parsed = parse_stage(&mut source, &mut operation, extra, false)?;
+    finish_freeze(source, parsed, detached, replay_detached, operation, scope)
+}
+fn finish_freeze(
+    mut source: StagedArtifact,
+    mut parsed: Parsed,
+    detached: Option<Source<'_>>,
+    replay_detached: bool,
+    mut operation: ResourceScope,
+    scope: &ResourceScope,
+) -> Result<Frozen, AdesError> {
     if !parsed.inspection.detached && detached.is_some() {
         return Err(invalid("attached CAdES does not accept detached content"));
     }
