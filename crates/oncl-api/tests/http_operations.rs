@@ -189,7 +189,7 @@ async fn multipart_document_bytes_are_not_framing_but_epilogue_is_bounded() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_first_metadata_holds_the_upload_slot_and_the_shared_budget_but_no_in_flight_slot_until_the_deadline()
-{
+ {
     let service = Running::start_with(|c| {
         c.max_in_flight = 1;
         c.max_uploads = Some(1);
@@ -261,7 +261,13 @@ async fn slow_first_metadata_holds_the_upload_slot_and_the_shared_budget_but_no_
         service.host.engine.slot_available(),
         "an upload in progress holds no max_in_flight slot"
     );
-    drop(service.host.engine.admit(cancel()).expect("the only in-flight slot is free"));
+    drop(
+        service
+            .host
+            .engine
+            .admit(cancel())
+            .expect("the only in-flight slot is free"),
+    );
     let mut response = Vec::new();
     tokio::time::timeout(Duration::from_secs(30), first.read_to_end(&mut response))
         .await
@@ -326,7 +332,10 @@ async fn a_queued_operation_keeps_its_upload_slot_until_it_has_an_in_flight_slot
     // The request is in its upload phase: it holds an upload slot (and no in-flight slot).
     let began = std::time::Instant::now();
     while service.host.upload_slots_free() != 1 {
-        assert!(began.elapsed() < Duration::from_secs(5), "no upload slot taken");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "no upload slot taken"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     // The only in-flight slot is taken, then the body ends: the operation queues for it.
@@ -348,7 +357,10 @@ async fn a_queued_operation_keeps_its_upload_slot_until_it_has_an_in_flight_slot
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     let began = std::time::Instant::now();
     while service.host.upload_slots_free() != 2 {
-        assert!(began.elapsed() < Duration::from_secs(5), "upload slot not freed");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "upload slot not freed"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     service.stop().await;

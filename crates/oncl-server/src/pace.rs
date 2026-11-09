@@ -269,9 +269,8 @@ mod tests {
             idle: Duration::from_millis(250),
             min_rate: 0,
         });
-        let mut body = Body::from_stream(futures_util::stream::pending::<
-            Result<Bytes, std::io::Error>,
-        >());
+        let mut body =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
         let deadline = Deadline::after(Duration::from_secs(60)).unwrap();
         let dirty = Notify::new();
         let runs = std::cell::Cell::new(0);
@@ -294,7 +293,10 @@ mod tests {
             }
         };
         assert!(matches!(outcome, Err(ProcessingError::DeadlineExceeded)));
-        assert!(runs.get() >= 4, "flushed at the start and after each notice");
+        assert!(
+            runs.get() >= 4,
+            "flushed at the start and after each notice"
+        );
         assert!(
             began.elapsed() >= Duration::from_millis(250 + 100),
             "the writes were not part of the 250 ms of waiting: {:?}",
@@ -302,4 +304,3 @@ mod tests {
         );
     }
 }
-

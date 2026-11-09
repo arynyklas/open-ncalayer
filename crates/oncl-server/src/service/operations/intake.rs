@@ -672,10 +672,9 @@ impl Staging {
                 return Ok(());
             }
             // Bytes with no spool cannot be: `begin` comes first and `finish` flushes.
-            let spool = state
-                .spool
-                .take()
-                .ok_or(ProcessingError::InvalidInput("spool write did not complete"))?;
+            let spool = state.spool.take().ok_or(ProcessingError::InvalidInput(
+                "spool write did not complete",
+            ))?;
             (spool, std::mem::take(&mut state.buffer))
         };
         #[cfg(test)]
@@ -699,7 +698,9 @@ impl Staging {
         self.state()
             .spool
             .take()
-            .ok_or(ProcessingError::InvalidInput("spool write did not complete"))
+            .ok_or(ProcessingError::InvalidInput(
+                "spool write did not complete",
+            ))
     }
 }
 impl Payload {
@@ -858,9 +859,9 @@ impl Payload {
 mod tests {
     use super::*;
     use crate::executor::{BoundedExecutor, ExecutorConfig};
+    use futures_util::StreamExt;
     use oncl_core::ExecutionGrant;
     use oncl_pki::resource::ResourceLimits;
-    use futures_util::StreamExt;
     use std::sync::Condvar;
 
     struct Release(Arc<(Mutex<bool>, Condvar)>);
@@ -975,10 +976,7 @@ mod tests {
         }
     }
 
-    fn staging_scope(
-        memory: u64,
-        directory: &std::path::Path,
-    ) -> (TemporaryStore, ResourceScope) {
+    fn staging_scope(memory: u64, directory: &std::path::Path) -> (TemporaryStore, ResourceScope) {
         let limits = ResourceLimits {
             input_bytes: 64 << 20,
             memory_bytes: memory,
@@ -1110,7 +1108,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         staging.push(&[4u8; 1000]).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!waiting.is_finished(), "the client is still being waited for");
+        assert!(
+            !waiting.is_finished(),
+            "the client is still being waited for"
+        );
         assert_eq!(
             staging.state().spool.as_ref().map(InputSpool::len),
             Some(1000),
@@ -1217,4 +1218,3 @@ mod tests {
         assert!(engine.admit(Arc::new(Cancellation::new())).is_ok());
     }
 }
-
