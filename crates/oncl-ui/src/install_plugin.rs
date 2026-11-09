@@ -32,7 +32,7 @@ use crate::foreground;
 use crate::plugins_view::{LocalizedText, ReplacedBundle};
 use crate::prompter::select_desktop_language;
 use crate::ui::{InstallPluginWindow, OperationBlock};
-use crate::view::page_text;
+use crate::view::{page_text, page_text_upto};
 use crate::windows::{self, Desktop};
 
 /// How long after the window appears «Установить» is enabled.
@@ -42,9 +42,11 @@ pub const INSTALL_DELAY: Duration = Duration::from_millis(1500);
 /// allows 80, the frame a little less so that it stays a note, not a paragraph.
 pub const MAX_UNTRUSTED_LABEL: usize = 60;
 
-/// The most characters of a plugin's own XPath the frame shows (then `…`): the manifest
-/// allows 1024 bytes.
-pub const MAX_UNTRUSTED_XPATH: usize = 120;
+/// The most characters of a plugin's own XPath the frame shows (then `…`): the manifest's own
+/// limit, so a valid XPath is never shown cut. An XPath is part of what the user's signature
+/// covers (it picks the signed element and where the signature goes), so a tail beyond a
+/// shorter cut could change what is signed without being read.
+pub const MAX_UNTRUSTED_XPATH: usize = oncl_plugin::operations::MAX_XPATH;
 
 /// A plugin about to be installed, and what to do with the user's answer.
 pub struct InstallPluginRequest {
@@ -290,7 +292,7 @@ struct BlockTexts {
     lines: Vec<String>,
     calls: String,
     label: String,
-    /// More of the plugin's own text (its XPaths), each captioned and cut.
+    /// More of the plugin's own text (its XPaths), each captioned.
     plugin_lines: Vec<String>,
 }
 
@@ -299,6 +301,12 @@ struct BlockTexts {
 /// text: there is no markup in a Slint `Text`.
 pub(crate) fn untrusted_label(text: &str) -> String {
     cut(&page_text(text), MAX_UNTRUSTED_LABEL)
+}
+
+/// A plugin's own XPath for the frame: control and bidirectional characters gone, and shown
+/// whole (at most [`MAX_UNTRUSTED_XPATH`] characters, which no valid XPath exceeds).
+pub(crate) fn untrusted_xpath(text: &str) -> String {
+    page_text_upto(text, MAX_UNTRUSTED_XPATH)
 }
 
 /// `text` of at most `max` characters, then `…` if it was longer.
@@ -331,10 +339,7 @@ fn block(operation: &OperationConsent, l: Locale) -> BlockTexts {
         plugin_lines: operation
             .xpaths
             .iter()
-            .map(|x| {
-                t.xpath
-                    .replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH))
-            })
+            .map(|x| t.xpath.replace("{0}", &untrusted_xpath(x)))
             .collect(),
     }
 }
@@ -994,10 +999,17 @@ mod tests {
     }
 
     #[test]
-    fn a_plugins_xpath_is_framed_cut_and_never_a_host_line() {
-        let crafted = format!("/a/Install / Allow / Core verified {}", "x".repeat(200));
+    fn a_plugins_xpath_is_framed_whole_and_never_a_host_line() {
+        // The longest the manifest allows (1024 bytes): shown to its last character, in the
+        // plugin's frame, so no tail of what is signed stays unread.
+        let head = "/a/Install / Allow / Core verified ";
+        let crafted = format!(
+            "{head}{}/TAIL",
+            "x".repeat(oncl_plugin::operations::MAX_XPATH - head.len() - "/TAIL".len())
+        );
+        assert_eq!(crafted.len(), oncl_plugin::operations::MAX_XPATH);
         let mut op = operation("sign-file", "Sign");
-        op.xpaths = vec![crafted];
+        op.xpaths = vec![crafted.clone()];
         let request = with_operations(vec![op], false);
         for l in ALL {
             let b = &texts(&request, l).operations[0];
@@ -1008,8 +1020,8 @@ mod tests {
             );
             assert_eq!(b.plugin_lines.len(), 1);
             assert!(b.plugin_lines[0].contains("Core verified"));
-            assert!(b.plugin_lines[0].ends_with('…'));
-            assert!(b.plugin_lines[0].chars().count() < MAX_UNTRUSTED_XPATH + 40);
+            assert!(b.plugin_lines[0].contains(&crafted), "{l:?}: cut");
+            assert!(!b.plugin_lines[0].ends_with('…'));
         }
     }
 

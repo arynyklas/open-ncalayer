@@ -25,10 +25,7 @@ use oncl_plugin::operations::{KeyKind, Operation, Profile, Source};
 use super::form::Frozen;
 use super::offer::OfferedOperation;
 use super::texts::Texts;
-use crate::install_plugin::{
-    MAX_UNTRUSTED_XPATH, cut, frame_caption, frame_xpath, untrusted_label,
-};
-use crate::view::page_text;
+use crate::install_plugin::{frame_caption, frame_xpath, untrusted_label, untrusted_xpath};
 
 /// Everything [`compose`] needs.
 pub(super) struct ConsentInput<'a> {
@@ -162,7 +159,7 @@ fn algorithm(alg: HashAlg) -> &'static str {
 }
 
 /// Text that is not the program's own, as the page draws it: control and bidirectional
-/// characters gone, at most [`page_text`]'s length.
+/// characters gone, at most [`crate::view::page_text`]'s length.
 fn plain(text: &str) -> String {
     crate::view::display_text(text)
 }
@@ -414,9 +411,13 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
             lines: names
                 .into_iter()
                 .chain(choices)
-                .chain(declared.consent(None).xpaths.iter().map(|x| {
-                    frame_xpath(l).replace("{0}", &cut(&page_text(x), MAX_UNTRUSTED_XPATH))
-                }))
+                .chain(
+                    declared
+                        .consent(None)
+                        .xpaths
+                        .iter()
+                        .map(|x| frame_xpath(l).replace("{0}", &untrusted_xpath(x))),
+                )
                 .collect(),
         },
         confirm_label: t.confirm_label.replace("{0}", &summary.operation),
@@ -464,8 +465,11 @@ mod tests {
     const EVIL: [&str; 3] = ["EVIL-NAME", "EVIL-LABEL", "EVIL-DESCRIPTION"];
 
     fn manifest() -> Manifest {
-        Manifest::from_toml(
-            r#"id = "test.ui"
+        Manifest::from_toml(manifest_source()).unwrap()
+    }
+
+    fn manifest_source() -> &'static str {
+        r#"id = "test.ui"
 name.ru = "EVIL-NAME-RU"
 name.kk = "EVIL-NAME-KK"
 name.en = "EVIL-NAME-EN"
@@ -505,9 +509,7 @@ kind = "xml"
 content = "param:file"
 [operations.uses.key.profile]
 element = "param:path"
-"#,
-        )
-        .unwrap()
+"#
     }
 
     fn offered(m: &Manifest) -> OfferedOperation {
@@ -694,6 +696,90 @@ element = "param:path"
             assert_eq!(v.cancel_label, t.consent_cancel);
             // The approval's time is told.
             assert!(v.ttl_line.contains("120"), "{l:?}");
+        }
+    }
+
+    /// The transforms a profile fixes are the host's words on the page the user confirms, in
+    /// every language, and the XPath the user typed stays in the inputs, quoted.
+    #[test]
+    fn the_transforms_of_the_profile_are_said_on_the_page_in_every_language() {
+        use oncl_plugin::operations::XmlExProfile;
+        let text = manifest_source()
+            .replace("kind = \"xml\"", "kind = \"xml_ex\"")
+            .replace("keys_sign_xml\"", "keys_sign_xml_ex\"")
+            .replace(
+                "element = \"param:path\"",
+                "element = \"param:path\"\ntransforms = [\"enveloped\", { c14n = \"inclusive_with_comments\" }]",
+            );
+        let m = Manifest::from_toml(&text).unwrap();
+        let typed = format!("/r/{}", "x".repeat(50));
+        let mut s = summary();
+        s.kind = KeyKind::XmlEx;
+        s.profile = Profile::XmlEx(XmlExProfile {
+            element: Some(Source::Fixed(typed.clone())),
+            transforms: Some(vec![
+                oncl_pdk::abi::Transform::Enveloped,
+                oncl_pdk::abi::Transform::C14n(oncl_pdk::abi::C14n::InclusiveWithComments),
+            ]),
+            ..XmlExProfile::default()
+        });
+        let mut typed_entered = entered();
+        typed_entered[1] = ("path".to_owned(), Frozen::Text(typed.clone()));
+        for l in ALL {
+            let v = view_with(&m, &s, &typed_entered, l).unwrap();
+            let profile = v
+                .trusted
+                .iter()
+                .find(|line| line.contains("enveloped signature"))
+                .unwrap_or_else(|| panic!("{l:?}: no transforms line in {:?}", v.trusted));
+            assert!(
+                profile.contains("inclusive canonicalisation with comments"),
+                "{l:?}: {profile}"
+            );
+            // The fact's own sentence is the one the install window uses.
+            let declared = capability_text(
+                m.operations()[0]
+                    .consent(None)
+                    .lines
+                    .iter()
+                    .find(|line| matches!(line, CapabilityLine::KeyProfile(_)))
+                    .unwrap(),
+                l,
+            );
+            assert_eq!(*profile, declared, "{l:?}");
+            // The typed XPath is listed, quoted.
+            assert!(
+                v.inputs.iter().any(|i| i.contains(&format!("\"{typed}\""))),
+                "{l:?}: {:?}",
+                v.inputs
+            );
+        }
+    }
+
+    /// A fixed XPath of the profile picks what is signed: the plugin's frame shows it to its
+    /// last character, not cut at the length of a page's text.
+    #[test]
+    fn a_fixed_xpath_is_shown_whole_in_the_plugins_frame() {
+        let long = format!("/r/{}/TAIL", "x".repeat(400));
+        let text =
+            manifest_source().replace("element = \"param:path\"", &format!("element = \"{long}\""));
+        let m = Manifest::from_toml(&text).unwrap();
+        let mut s = summary();
+        s.profile = Profile::Xml(XmlProfile {
+            element: Some(Source::Fixed(long.clone())),
+            parent: None,
+        });
+        for l in ALL {
+            let v = view_with(&m, &s, &entered(), l).unwrap();
+            assert!(
+                v.frame.lines.iter().any(|line| line.contains(&long)),
+                "{l:?}: {:?}",
+                v.frame.lines
+            );
+            assert!(
+                v.frame.lines.iter().all(|line| !line.ends_with('…')),
+                "{l:?}"
+            );
         }
     }
 

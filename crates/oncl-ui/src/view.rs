@@ -30,12 +30,18 @@ pub(crate) fn is_invisible(c: char) -> bool {
 /// bidirectional controls (U+202A–U+202E, U+2066–U+2069), at most [`MAX_PAGE_TEXT`]
 /// characters (then `…`).
 pub fn page_text(text: &str) -> String {
+    page_text_upto(text, MAX_PAGE_TEXT)
+}
+
+/// [`page_text`] with another limit: for text whose reader must see all of it (a plugin's
+/// XPath, which picks what is signed), never the shorter [`MAX_PAGE_TEXT`].
+pub(crate) fn page_text_upto(text: &str, max: usize) -> String {
     let shown = |c: &char| {
         !c.is_control()
             && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     };
     let mut chars = text.chars().filter(shown);
-    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
+    let mut shown: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
         shown.push('…');
     }
