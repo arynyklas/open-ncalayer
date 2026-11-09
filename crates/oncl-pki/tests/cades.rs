@@ -1273,7 +1273,7 @@ mod cades {
         let profile = profile();
         let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
         let crls = [f.crl.as_slice()];
-        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let services = services(&context, &network, store, &profile, &certs, &crls);
         let mut wire = Cursor::new(wire);
         let mut content = detached.map(Cursor::new);
         let content = content
@@ -1288,7 +1288,7 @@ mod cades {
                 &services,
                 &[SigAlg::RsaSha256],
                 &mut output,
-                &scope,
+                scope,
             )
             .map(|report| (output, report)),
             None => ades::verify(
@@ -1297,7 +1297,7 @@ mod cades {
                 content,
                 &services,
                 &[SigAlg::RsaSha256],
-                &scope,
+                scope,
             )
             .map(|report| (Vec::new(), report)),
         }
@@ -1401,14 +1401,7 @@ mod cades {
         for unknown in [false, true] {
             let error = at_limits(&f, &wire, Some(DATA), None, short.clone(), unknown).unwrap_err();
             assert!(
-                matches!(
-                    error,
-                    ades::AdesError::Processing(
-                        ProcessingError::ContainerLimit | ProcessingError::InputLimit
-                    ) | ades::AdesError::Stream(oncl_pki::cms::stream::StreamError::Processing(
-                        ProcessingError::ContainerLimit | ProcessingError::InputLimit
-                    ))
-                ),
+                exact_error(&error, |e| matches!(e, ProcessingError::ContainerLimit)),
                 "unknown={unknown}: {error:?}"
             );
         }
