@@ -123,7 +123,11 @@ Every other document part (a detached payload, an inspected container, JOSE inpu
 documents: each is bounded at 1 MiB and the engine's evidence limits, and none is charged to the
 document allowance, exactly as the CLI reads evidence files. The oversize refusal of a signed
 input is found by the engine after the response status is chosen, so a streamed request reports
-it as a failed final record with `InputLimit` and `NotApplied`, never as a dropped stream.
+it as a failed final record with `InputLimit` and `NotApplied`, never as a dropped stream. CAdES
+follows the same rule for verify, extend and `add`: an attached result is document + signature,
+and a detached signature (the `input` part) is container only, its detached payload being a
+document of at most `input_bytes` of its own, so the signature and a payload of exactly
+`input_bytes` are accepted together.
 
 Scratch and sizing. Lowering `input_bytes` requires lowering `container_bytes` too. At the
 defaults one `input` part of a verify, extend, extract or sign item is spooled up to
