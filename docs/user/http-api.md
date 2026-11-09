@@ -222,11 +222,19 @@ neither waiting for a slow client nor spooling the documents takes a `max_in_fli
 native worker or an audit binding, so a stalled upload leaves every other request unaffected
 except for that one upload slot. `503 CapacityExceeded` means that no upload slot, or no
 operation slot (`max_in_flight`), freed within the server's `admission_wait_ms` before the
-body was read (the server checks both before it reads the first body byte, so a busy server
-refuses at once without taking the upload and an `Expect: 100-continue` client is never told
-to send), or, once the whole body was accepted, that no operation slot freed within
+body was read (the server checks both before it reads the first body byte, waiting up to
+`admission_wait_ms` for a slot; a busy server then refuses without taking the upload and an
+`Expect: 100-continue` client is never told to send), or, once the whole body was accepted, that no operation slot freed within
 `admission_wait_ms`; nothing was applied. The check before the body is best effort: a slot
-can be taken between it and the end of the body, which is then refused after the body. The original admission root starts before
+can be taken between it and the end of the body, which is then refused after the body.
+
+A client that is still writing a large body when the server refuses and closes the connection
+can see a connection reset (or an empty response) instead of the typed `503`: the server
+answers without reading the body, and closing a socket that still has unread incoming data
+can reset the connection, which on Windows may discard the response in transit. This is
+inherent to refusing before the body is read. A client SHOULD read the response while it
+sends, or send `Expect: 100-continue` and wait for the answer before it sends the body (the
+reference client does). The original admission root starts before
 bounded metadata intake, then the host consumes that same root into an authorized operation
 context. Queueing, SDK work, response ownership and actual network writes retain
 the original deadline and shared budgets. Dropping a response does not make a

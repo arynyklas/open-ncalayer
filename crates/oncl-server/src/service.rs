@@ -589,6 +589,10 @@ fn core_error(error: OperationError) -> ApiError {
 /// capacity of that buffer plus what was already buffered: 49,152 and 57,344 bytes were
 /// observed from a client that writes 64 KiB at once, so a frame is *not* at most 32 KiB.
 /// Two buffers' worth (the retained one plus one read) covers it.
+///
+/// This is a nominal charge, not a measured guarantee: the largest frame seen was 57,344
+/// bytes and Hyper's read-buffer growth stops at 65,536, but nothing enforces that bound, so a
+/// larger frame would be under-charged silently.
 pub(crate) const FRAME_RESERVE_BYTES: u64 = 65_536;
 /// A digest state that runs on an async runtime thread, between two network waits. That is
 /// acceptable only for SHA-2 (measured per 32 KiB frame: SHA-256 12 us, SHA-512 37 us); the

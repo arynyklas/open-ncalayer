@@ -395,9 +395,14 @@ fn a_disconnect_during_the_upload_releases_slot_spool_and_temp() {
 
 /// What the server has received is in the spool before it waits for the client again: a
 /// client that sends 100 KiB of a document (less than the gathering chunk) and then stalls
-/// has all of it on disk while the server waits, long before the idle timeout (15 s) fires.
+/// has it on disk while the server waits, long before the idle timeout (15 s) fires.
+///
+/// "Received" is what multer has handed over: it withholds up to the boundary length minus 1
+/// trailing bytes while they contain `\r` and could begin a boundary. The payload here is a
+/// constant byte without `\r`, so nothing is withheld and the whole 100 KiB is exact; a
+/// payload ending in `\r\n-` would legitimately leave a few bytes out.
 #[test]
-fn a_stalled_upload_has_everything_it_sent_in_the_spool() {
+fn a_stalled_upload_has_what_the_server_received_in_the_spool() {
     const SENT: usize = 100 * 1024;
     let process = support::Process::configured("127.0.0.1:0", |root| {
         config_wide(

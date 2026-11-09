@@ -401,12 +401,15 @@ see below), a client that disconnects, the idle timeout or minimum rate (below),
 deadline, a cancellation, a shutdown and any refusal (such as `InputLimit`).
 
 The phase takes a slot of its own, not one more native worker: waiting for the client is
-asynchronous. Received pieces (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB) are gathered
+asynchronous. Received pieces (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB: a nominal charge, not a measured guarantee; Hyper's read-buffer growth stops at 65,536 bytes, and a larger frame would be under-charged silently) are gathered
 into a 256 KiB buffer, charged to the operation's memory budget once per request, and written
 to the spool in one short blocking section per 256 KiB, one at a time per upload, on the runtime's
-blocking pool. What is gathered is written before the server waits for the client again (so a
-stalled client's bytes are in the spool, and the disk time is not charged to the client by the
-pace rules below), and at the end of each document. That pool holds
+blocking pool. What is gathered is written before the server waits for the client again (so
+what the server has received from a stalled client is in the spool, and the disk time is not
+charged to the client by the pace rules below), and at the end of each document. "Received"
+is what the multipart parser has handed over: it withholds up to the boundary length minus 1
+trailing bytes of a document while they could begin a boundary (when they contain `\r`), so
+the last few bytes of what a client sent may not be in the spool yet. That pool holds
 `blocking_workers + max_uploads` threads so that a long operation cannot keep uploads from
 progressing. The hash route (`POST /v1/hash`) hashes each received piece where it arrives, on
 the runtime's own threads (a CPU section of one frame), without any spool; a hash upload that
