@@ -410,6 +410,18 @@ over a slow link needs `operation_timeout_ms` raised to cover it, not these two 
 client that keeps delivering at least the minimum rate, without a silence longer than the
 idle timeout, is never stopped by them.
 
+**Known limitation: a stalled upload holds a native worker.** The multipart intake runs on a
+blocking worker, so a client that stalls mid-body occupies one of the `blocking_workers` for up
+to `upload_idle_timeout_ms` (default 30 s). With the default `blocking_workers = 2`, two such
+clients make every other request wait for `admission_wait_ms` and then receive `503
+CapacityExceeded` until a stall ends; the refusal is typed and honest, and `/health` stays
+answerable, but the service is not available to other clients meanwhile. Raise
+`blocking_workers` above the number of slow clients you must tolerate, and lower
+`upload_idle_timeout_ms` (never below the slowest legitimate link, see above). The
+`overload-profile` case of `platform-proof` uses 4 workers precisely so that admitted work can
+complete next to two stalled uploads; its PASS does not show that stalled uploads cannot
+starve admission (the `overload-slot-release` case shows that the slots are released).
+
 Residual limits: a client that sends exactly the minimum rate still holds its slot for the
 whole `operation_timeout_ms`, so two such authenticated clients can block `max_in_flight = 2`
 for that long; on a LAN raise `upload_min_bytes_per_second` to tens of KiB/s. The reverse
