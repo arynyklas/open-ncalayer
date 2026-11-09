@@ -510,7 +510,10 @@ is normalized into a tree and keeps the amplified charge. `EvidenceStore::collec
 admits an evidence item from base64 text with decoded-size quotas, for XML carriers.
 
 Hosts: the CLI admits CRLs up to 32 MiB (16/1 MiB for other evidence, 48 MiB total) and a
-document-sized coverage ceiling. `oncl-server` (2 MiB per CRL) and `oncl-ui` (1 MiB) keep
+document-sized coverage ceiling (the output ceiling); `oncl-server` has the same coverage
+ceiling (its `max_coverage_bytes` is the operation output ceiling, not `input_bytes`: a PAdES
+LT -> LTA timestamp covers the whole signed document, which at the full allowance already
+exceeds `input_bytes`). `oncl-server` (2 MiB per CRL) and `oncl-ui` (1 MiB) keep
 the earlier bounds and therefore refuse sign/extend with a complete NCA CRL (about 20 MB);
 a host that wants it sets the `max_crl_*` fields. A host that also bounds PDF evidence
 separately should derive that bound from `EvidenceLimits.max_total_bytes` (no shipped host

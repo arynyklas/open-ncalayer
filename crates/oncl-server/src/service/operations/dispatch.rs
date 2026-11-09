@@ -442,7 +442,9 @@ pub(super) fn evidence_limits(limits: &oncl_pki::resource::ResourceLimits) -> Ev
         max_chain_len: 8,
         max_proofs: 16,
         max_coverage_parts: 4096,
-        max_coverage_bytes: limits.input_bytes,
+        // Proofs hash the signed document plus the container it carries (as the CLI does):
+        // bounded by the output ceiling, not by the unsigned `input_bytes`.
+        max_coverage_bytes: limits.output_bytes,
     }
 }
 pub(super) fn verify_request(
@@ -1619,6 +1621,25 @@ fn run_item(
 mod tests {
     use super::*;
     use oncl_pki::key::AppliedState::*;
+    /// A timestamp or archive proof covers the whole signed document and the container it
+    /// carries, so the coverage ceiling must reach the document plus its container: a
+    /// ceiling of `input_bytes` alone refused the keyless PAdES LT -> LTA extension of a
+    /// document of the full input allowance (its LT result is already past `input_bytes`)
+    /// with `MetadataLimit`, which the stream then reported as a lost response.
+    #[test]
+    fn evidence_coverage_reaches_a_full_size_document_with_its_container() {
+        let limits = crate::config::ServerConfig::default().limits();
+        let largest_signed_wire = limits.input_bytes + limits.container_bytes;
+        let coverage = evidence_limits(&limits).max_coverage_bytes;
+        assert!(
+            coverage >= largest_signed_wire,
+            "coverage {coverage} < signed wire {largest_signed_wire}"
+        );
+        assert!(
+            coverage <= limits.output_bytes,
+            "coverage is finite and bounded by the output ceiling"
+        );
+    }
     fn plugin_metadata(keys: &str) -> OperationMetadata {
         serde_json::from_str(&format!(
             r#"{{"items":[{{"id":"p","operation":{{"kind":"plugin","plugin":"vendor.x","operation":"run","args":"{{}}","keys":[{keys}]}}}}],"parts":[]}}"#
