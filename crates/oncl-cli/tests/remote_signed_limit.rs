@@ -468,7 +468,8 @@ fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
         "scratch must be empty afterwards"
     );
 
-    let tight = small_server(&pki, 1024);
+    let structure = std::fs::metadata(&signed_detached).unwrap().len();
+    let tight = small_server(&pki, structure - 1);
     let tight_client = Client::new(&tight);
     let detached = tight_client.file("d.p7s", &std::fs::read(&signed_detached).unwrap());
     let document = tight_client.file("doc.bin", &content);
@@ -488,13 +489,120 @@ fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
         "a signature past container_bytes is refused"
     );
     let stderr = text(&output.stderr);
+    // The server admits the detached document first, so the wire ceiling of the signature is
+    // exactly `container_bytes`: a signature one byte over it is refused at the spool, before
+    // the engine's parse-side container charge (pinned in the pki and core tests).
     assert!(
-        (stderr.contains("ContainerLimit") || stderr.contains("InputLimit"))
-            && stderr.contains("applied=NotApplied"),
+        stderr.contains("InputLimit") && stderr.contains("applied=NotApplied"),
         "{stderr}"
     );
     assert!(
         files(&tight.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+}
+
+/// A CAdES co-sign (`sign --add`) of a signed result at the allowance, attached and detached:
+/// the detached document is admitted once at intake and not charged again by the engine.
+#[test]
+fn a_cades_co_sign_at_the_allowance_is_accepted_and_one_byte_more_is_refused_over_http() {
+    let pki = Pki::start();
+    let remote = small_server(&pki, 1 << 20);
+    let client = Client::new(&remote);
+    let content = payload(LIMIT);
+    let document = client.file("doc.bin", &content);
+    for detached in [false, true] {
+        let tag = if detached { "detached" } else { "attached" };
+        let signed = client.path(&format!("{tag}.b.p7s"));
+        let mut args = vec![
+            "sign",
+            "--profile",
+            "cades-b",
+            "--key-name",
+            "ops-key",
+            "--authorize",
+            "--input",
+            path(&document),
+            "--output",
+            path(&signed),
+            "--json",
+        ];
+        if detached {
+            args.push("--detached");
+        }
+        let output = client.run(&args);
+        assert_eq!(exit(&output), 0, "{tag} sign: {}", text(&output.stderr));
+        let added = client.path(&format!("{tag}.added.p7s"));
+        let mut args = vec![
+            "sign",
+            "--profile",
+            "cades-b",
+            "--add",
+            "--key-name",
+            "ops-key",
+            "--authorize",
+            "--input",
+            path(&signed),
+            "--output",
+            path(&added),
+            "--json",
+        ];
+        if detached {
+            args.extend(["--detached-input", path(&document)]);
+        }
+        let begins = remote.audit_begins();
+        let output = client.run(&args);
+        assert_eq!(exit(&output), 0, "{tag} add: {}", text(&output.stderr));
+        assert_eq!(remote.audit_begins(), begins + 1, "{tag}: one key use");
+        assert!(
+            std::fs::metadata(&added).unwrap().len() > std::fs::metadata(&signed).unwrap().len()
+        );
+    }
+    assert!(
+        files(&remote.scratch()).is_empty(),
+        "scratch must be empty afterwards"
+    );
+
+    // One document byte less allowance: refused, and no key is used.
+    let narrow = Remote::start_with(&pki, |config, _| {
+        config.input_bytes = LIMIT as u64 - 1;
+        config.container_bytes = 1 << 20;
+    });
+    let narrow_client = Client::new(&narrow);
+    let document = narrow_client.file("doc.bin", &content);
+    for detached in [false, true] {
+        let tag = if detached { "detached" } else { "attached" };
+        let signed = narrow_client.file(
+            &format!("{tag}.p7s"),
+            &std::fs::read(client.path(&format!("{tag}.b.p7s"))).unwrap(),
+        );
+        let refused = narrow_client.path("refused.p7s");
+        let mut args = vec![
+            "sign",
+            "--profile",
+            "cades-b",
+            "--add",
+            "--key-name",
+            "ops-key",
+            "--authorize",
+            "--input",
+            path(&signed),
+            "--output",
+            path(&refused),
+            "--json",
+        ];
+        if detached {
+            args.extend(["--detached-input", path(&document)]);
+        }
+        let begins = narrow.audit_begins();
+        assert_input_limit(
+            &format!("{tag} add one document byte past the allowance"),
+            &narrow_client.run(&args),
+        );
+        assert_eq!(narrow.audit_begins(), begins, "{tag}: no key use");
+    }
+    assert!(
+        files(&narrow.scratch()).is_empty(),
         "scratch must be empty afterwards"
     );
 }
