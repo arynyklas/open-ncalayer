@@ -333,11 +333,19 @@ fn freeze(
     services: &AdesServices<'_>,
     scope: &ResourceScope,
 ) -> Result<Frozen, AdesError> {
-    freeze_extra(input, detached, services, scope, &[SigAlg::RsaSha256])
+    freeze_extra(
+        input,
+        detached,
+        false,
+        services,
+        scope,
+        &[SigAlg::RsaSha256],
+    )
 }
 fn freeze_extra(
     input: Source<'_>,
     detached: Option<Source<'_>>,
+    replay_detached: bool,
     services: &AdesServices<'_>,
     scope: &ResourceScope,
     extra: &[SigAlg],
@@ -355,7 +363,7 @@ fn freeze_extra(
         extra,
         false,
     )?;
-    finish_freeze(source, parsed, detached, false, operation, scope)
+    finish_freeze(source, parsed, detached, replay_detached, operation, scope)
 }
 fn freeze_stage(
     source: StagedArtifact,
@@ -709,6 +717,10 @@ fn sign_impl(
             }
         }
         let frozen = if let Some(detached) = detached {
+            // Decided before the tee strips the provenance: a detached document the host
+            // already admitted (an `oncl-server` spool) was charged at its intake.
+            let replay =
+                detached.is_snapshot_for(scope)? || detached.is_output_projection_for(scope)?;
             let length = detached.known_len();
             let mut tee = Tee {
                 input: detached,
@@ -718,6 +730,7 @@ fn sign_impl(
             let result = freeze_extra(
                 input,
                 Some(Source::sequential(&mut tee, length)),
+                replay,
                 services,
                 scope,
                 &needed[..needed_len],
@@ -727,7 +740,7 @@ fn sign_impl(
             }
             result?
         } else {
-            freeze_extra(input, None, services, scope, &needed[..needed_len])?
+            freeze_extra(input, None, false, services, scope, &needed[..needed_len])?
         };
         let proof = verify_frozen(
             AdesLevel::B,

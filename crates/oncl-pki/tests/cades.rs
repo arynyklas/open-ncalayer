@@ -211,11 +211,20 @@ mod cades {
         now: OffsetDateTime,
         store: &TemporaryStore,
     ) -> Vec<u8> {
+        baseline_of(f, DATA, attached, now, store)
+    }
+    fn baseline_of(
+        f: &Fixture,
+        content: &[u8],
+        attached: bool,
+        now: OffsetDateTime,
+        store: &TemporaryStore,
+    ) -> Vec<u8> {
         // Independent producer uses the established legacy encoder with real
         // mandatory baseline signed attrs; adding CRL does not change them.
         let mut bytes = oncl_pki::cms::sign(
             &f.doc,
-            DATA,
+            content,
             &oncl_pki::cms::SignOptions {
                 encapsulate: attached,
                 digested: false,
@@ -1222,7 +1231,6 @@ mod cades {
         let length = cursor.get_ref().len() as u64;
         Source::sequential(cursor, (!unknown).then_some(length))
     }
-    /// Verify (`target` None) or extend to `target`, on a fresh scope with `limits`.
     fn at_limits(
         f: &Fixture,
         wire: &[u8],
@@ -1233,6 +1241,26 @@ mod cades {
     ) -> Result<(Vec<u8>, ades::AdesReport), ades::AdesError> {
         let dir = tempfile::tempdir().unwrap();
         let store = TemporaryStore::new(dir.path()).unwrap();
+        at_scope(
+            f,
+            &store,
+            &scope_with(limits),
+            wire,
+            detached,
+            target,
+            unknown_length,
+        )
+    }
+    /// The same on a caller's store and scope, whose counters the caller reads afterwards.
+    fn at_scope(
+        f: &Fixture,
+        store: &TemporaryStore,
+        scope: &oncl_pki::resource::ResourceScope,
+        wire: &[u8],
+        detached: Option<&[u8]>,
+        target: Option<AdesLevel>,
+        unknown_length: bool,
+    ) -> Result<(Vec<u8>, ades::AdesReport), ades::AdesError> {
         let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
         let context = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
@@ -1246,7 +1274,6 @@ mod cades {
         let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
         let crls = [f.crl.as_slice()];
         let services = services(&context, &network, &store, &profile, &certs, &crls);
-        let scope = scope_with(limits);
         let mut wire = Cursor::new(wire);
         let mut content = detached.map(Cursor::new);
         let content = content
@@ -1467,6 +1494,207 @@ mod cades {
                 }
             }
         }
+    }
+    fn exact_error(error: &ades::AdesError, expected: fn(&ProcessingError) -> bool) -> bool {
+        match error {
+            ades::AdesError::Processing(e)
+            | ades::AdesError::Stream(oncl_pki::cms::stream::StreamError::Processing(e)) => {
+                expected(e)
+            }
+            _ => false,
+        }
+    }
+    fn files_under(path: &std::path::Path) -> usize {
+        std::fs::read_dir(path).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() { files_under(&path) } else { 1 }
+                })
+                .sum()
+        })
+    }
+    /// A detached document the host already admitted (a `FrozenInput`, as the server's
+    /// spool is) is charged once by a co-sign, at exactly `input_bytes` as well.
+    #[test]
+    fn cades_add_of_an_admitted_detached_document_is_charged_once() {
+        use oncl_pki::{
+            digest::DigestValue,
+            io::{FrozenInput, Region},
+            key::{DigestSigner, KeyError},
+        };
+        struct Counting {
+            key: KeyEntry,
+            calls: usize,
+        }
+        impl DigestSigner for Counting {
+            fn certificate(&self) -> &Certificate {
+                &self.key.cert
+            }
+            fn algorithm(&self) -> SigAlg {
+                SigAlg::RsaSha256
+            }
+            fn sign_digest(&mut self, digest: &DigestValue) -> Result<Vec<u8>, KeyError> {
+                self.calls += 1;
+                DigestSigner::sign_digest(&mut self.key, digest)
+            }
+        }
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let wire = baseline(&f, false, NOW - time::Duration::MINUTE, &store);
+        let length = DATA.len() as u64;
+        for input_bytes in [length, 2 * length] {
+            let mut scope = scope_with(limited(input_bytes, 1 << 20));
+            let mut frozen = FrozenInput::capture(
+                Source::sequential(&mut Cursor::new(DATA), Some(length)),
+                &store,
+                &mut scope,
+            )
+            .unwrap();
+            assert_eq!(scope.input_remaining(), input_bytes - length);
+            let mut key = f.doc.clone();
+            let mut spec = TestCertSpec::from_cert(&key.cert);
+            spec.serial = vec![0x63, 3, 8];
+            strip(&mut spec);
+            key.cert = issue_cert(&f.root, spec);
+            let mut signer = Counting { key, calls: 0 };
+            let mut reader = frozen
+                .reader(
+                    &[Region {
+                        offset: 0,
+                        len: length,
+                    }],
+                    &scope,
+                )
+                .unwrap();
+            let mut output = Vec::new();
+            ades::sign(
+                &CmsSignRequest::add(),
+                AdesLevel::B,
+                Source::sequential(&mut Cursor::new(&wire), Some(wire.len() as u64)),
+                Some(reader.source()),
+                &mut [&mut signer],
+                &CmsSignServices::new(Some(&context), Some(&store)),
+                Some(&services),
+                &mut output,
+                &scope,
+            )
+            .unwrap_or_else(|e| panic!("input_bytes={input_bytes}: {e:?}"));
+            reader.finish().unwrap();
+            drop(reader);
+            assert_eq!(signer.calls, 1);
+            assert_eq!(
+                scope.input_remaining(),
+                input_bytes - length,
+                "the admitted document is charged once, not again by the co-sign"
+            );
+            assert_eq!(oncl_pki::cms::verify(&output, Some(DATA)).unwrap().len(), 2);
+        }
+        // One byte past the allowance never reaches the co-sign: the intake refuses it.
+        let mut scope = scope_with(limited(length - 1, 1 << 20));
+        assert!(matches!(
+            FrozenInput::capture(
+                Source::sequential(&mut Cursor::new(DATA), Some(length)),
+                &store,
+                &mut scope
+            ),
+            Err(ProcessingError::InputLimit)
+        ));
+    }
+    /// The spool of the wire is temporary storage and is charged as such: a store that cannot
+    /// hold it refuses with `TempLimit`, leaves nothing behind and releases its reservation.
+    #[test]
+    fn cades_wire_spool_is_bounded_by_temp_bytes() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        for attached in [true, false] {
+            let wire = baseline(&f, attached, NOW - time::Duration::MINUTE, &store);
+            let temp_bytes = 1000;
+            assert!(wire.len() as u64 > temp_bytes);
+            let limits = ResourceLimits {
+                temp_bytes,
+                ..limited(DATA.len() as u64, 1 << 20)
+            };
+            for unknown in [false, true] {
+                let scope = scope_with(limits.clone());
+                let error = at_scope(
+                    &f,
+                    &store,
+                    &scope,
+                    &wire,
+                    (!attached).then_some(DATA),
+                    None,
+                    unknown,
+                )
+                .unwrap_err();
+                assert!(
+                    exact_error(&error, |e| matches!(e, ProcessingError::TempLimit)),
+                    "attached={attached} unknown={unknown}: {error:?}"
+                );
+                assert_eq!(files_under(dir.path()), 0, "no spool survives the refusal");
+                scope
+                    .reserve_temp(temp_bytes)
+                    .expect("the refused spool released its reservation");
+            }
+        }
+    }
+    /// Content several chunks long (the reader's chunk is 256 KiB): the document is charged
+    /// to `input_bytes` once, the signature structure to `container_bytes`, and the counters
+    /// say so.
+    #[test]
+    fn cades_multi_chunk_document_at_the_input_limit_is_accounted_exactly() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let content: Vec<u8> = (0..3 * 1024 * 1024 + 12_345u32)
+            .map(|n| (n.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let length = content.len() as u64;
+        let container = 1u64 << 20;
+        for attached in [true, false] {
+            let wire = baseline_of(&f, &content, attached, NOW - time::Duration::MINUTE, &store);
+            let detached = (!attached).then_some(content.as_slice());
+            let structure = wire.len() as u64 - if attached { length } else { 0 };
+            for unknown in [false, true] {
+                let scope = scope_with(limited(length, container));
+                let (_, report) = at_scope(&f, &store, &scope, &wire, detached, None, unknown)
+                    .unwrap_or_else(|e| panic!("attached={attached} unknown={unknown}: {e:?}"));
+                assert_eq!(report.verdict, Verdict::Valid);
+                assert_eq!(scope.input_remaining(), 0, "the document, once");
+                let charged = container - scope.container_remaining();
+                assert!(
+                    charged >= structure && charged < container,
+                    "container charged {charged} for a structure of {structure}"
+                );
+                let read = scope.progress().bytes_in;
+                assert_eq!(read, wire.len() as u64 + if attached { 0 } else { length });
+                // One byte less is a document past the allowance.
+                let scope = scope_with(limited(length - 1, container));
+                let error =
+                    at_scope(&f, &store, &scope, &wire, detached, None, unknown).unwrap_err();
+                assert!(
+                    exact_error(&error, |e| matches!(e, ProcessingError::InputLimit)),
+                    "attached={attached} unknown={unknown}: {error:?}"
+                );
+            }
+        }
+        assert_eq!(files_under(dir.path()), 0);
     }
     #[test]
     fn evidence_reader_limit_is_fatal_not_a_completed_invalid_report() {

@@ -268,8 +268,9 @@ pub(super) fn copy_region(
     }
     Ok(())
 }
-/// Parse a spooled SignedData wire again from its source-role spool. Uncharged replay of
-/// bytes whose intake was already classified; the spool is never an intake.
+/// Parse a spooled SignedData wire again from its source-role spool in replay mode: no
+/// intake is charged (the wire's intake was already classified), the structure still counts
+/// against container and framing; the spool is never an intake.
 pub(super) fn parse_stage(
     stage: &mut StagedArtifact,
     scope: &mut ResourceScope,
@@ -297,6 +298,11 @@ pub(super) fn parse_stage(
     parsed
 }
 /// Spools the bytes it reads from `input` into `stage` as they pass.
+///
+/// Known cosmetic difference: if the spool write fails (temporary limit, I/O), the chunk
+/// just read from `input` is not recorded as consumed (`consumed_wire` runs in the reader
+/// after this read returns), so `progress().bytes_in` lags by that chunk; the operation
+/// is terminal either way.
 struct SpoolTee<'a, 'b> {
     input: Source<'a>,
     stage: &'b mut StagedArtifact,
@@ -320,8 +326,9 @@ impl Read for SpoolTee<'_, '_> {
 /// it. A signed result of a document of exactly `input_bytes` (embedded), or the signature
 /// of a detached document of that size (whose content is charged separately), is therefore
 /// admitted; one byte of document more, or a signature structure past `container_bytes`,
-/// is not. An already admitted same-operation source is replayed uncharged, as everywhere
-/// else, and parsed from its spool.
+/// is not. An already admitted same-operation source is copied and parsed in replay mode:
+/// no document or intake bytes are charged again (they were at its admission), but the
+/// structure bytes still count against container and framing, as for any replay parse.
 pub(super) fn parse_frozen(
     input: Source<'_>,
     store: Option<&TemporaryStore>,
