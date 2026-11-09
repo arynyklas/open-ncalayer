@@ -3652,6 +3652,7 @@ async fn lt_levels_need_status_material_and_the_pades_memory_profile_before_any_
 /// Send `body` in two halves with `middle` executed between them (body held open).
 async fn split_request(service: &Running, body: &[u8], middle: impl FnOnce()) -> (u16, Vec<u8>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let slots = service.host.upload_slots_free();
     let mut stream = tokio::net::TcpStream::connect(service.address)
         .await
         .unwrap();
@@ -3666,8 +3667,15 @@ async fn split_request(service: &Running, body: &[u8], middle: impl FnOnce()) ->
     stream.write_all(&body[..cut]).await.unwrap();
     stream.flush().await.unwrap();
     // The body is held open mid-upload: the server is in its upload phase, waiting for the
-    // unsent tail without any native worker (and without an operation slot).
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // unsent tail without any native worker (and without an operation slot). That is observed,
+    // not slept for: the request holds an upload slot (so it is authenticated) and has opened
+    // the spool of its first document (so its metadata was accepted and its rights decided
+    // once already). A revocation made now can only be caught by the check after the body; a
+    // 403 for a request that never got this far would prove nothing.
+    wait_for("the request to be in its upload phase", || {
+        service.host.upload_slots_free() < slots && !spool_files(&service.scratch()).is_empty()
+    })
+    .await;
     assert_eq!(service.host.executor.running(), 0);
     middle();
     stream.write_all(&body[cut..]).await.unwrap();

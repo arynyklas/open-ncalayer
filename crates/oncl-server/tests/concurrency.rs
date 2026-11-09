@@ -43,13 +43,14 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 /// N = 8 concurrent clients, two of them mid-body. A body that is still arriving holds one of
 /// the `max_uploads` (here 2), not an in-flight slot or a worker: the other six are refused
-/// with the typed `CapacityExceeded`. (The in-flight cap of completed uploads is proven by the
-/// gated `oncl-api` tests.)
+/// with the typed `CapacityExceeded`. The in-flight slots, the workers and the queue are
+/// plentiful (16 each), so that only the upload cap can produce the 503. (The in-flight cap of
+/// completed uploads is proven by the gated `oncl-api` tests.)
 #[test]
 fn n_requests_shared_upload_cap() {
     use std::io::{Read, Write};
     let process = server_support::Process::start(
-        "max_uploads = 2\nmax_in_flight = 2\nblocking_workers = 2\nqueue_capacity = 1",
+        "max_uploads = 2\nmax_in_flight = 16\nblocking_workers = 16\nqueue_capacity = 16",
     );
     let mut admitted = Vec::new();
     for _ in 0..2 {
