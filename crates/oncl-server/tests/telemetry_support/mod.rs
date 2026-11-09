@@ -340,12 +340,13 @@ pub const ALLOWED_SPANS: [&str; 6] = [
     "oncl.operation",
     "oncl.delivery",
 ];
-pub const ALLOWED_METRICS: [&str; 13] = [
+pub const ALLOWED_METRICS: [&str; 14] = [
     "oncl.requests",
     "oncl.request.duration",
     "oncl.admission.duration",
     "oncl.executor.duration",
     "oncl.executor.rejected",
+    "oncl.stream.aborted",
     "oncl.operations",
     "oncl.operation.duration",
     "oncl.key.uses",
@@ -624,4 +625,47 @@ pub async fn post(
         .to_bytes()
         .to_vec();
     (status, bytes)
+}
+
+/// Like [`post`], but a response body cut short by the server is a result, not a panic:
+/// the status, the bytes received before the cut and whether the body ended cleanly.
+pub async fn post_lossy(
+    address: SocketAddr,
+    token: &str,
+    path: &str,
+    body: Vec<u8>,
+    content_type: &str,
+) -> (u16, Vec<u8>, bool) {
+    use http_body_util::BodyExt;
+    let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("host", address.to_string())
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", content_type)
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    let mut body = response.into_body();
+    let mut bytes = Vec::new();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    bytes.extend_from_slice(&data);
+                }
+            }
+            Some(Err(_)) => return (status, bytes, false),
+            None => return (status, bytes, true),
+        }
+    }
 }

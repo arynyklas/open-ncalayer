@@ -768,6 +768,10 @@ fn drive(
         |event| match event {
             BatchEvent::Started { .. } | BatchEvent::Finished { .. } => {}
             BatchEvent::ItemStarted { index, .. } => {
+                root.trace().begin_item(
+                    index,
+                    crate::telemetry::OperationKind::of(&metadata.items[index].operation),
+                );
                 let finished = state.borrow().records.len() as u32;
                 hub.publish_items(ItemCursor {
                     total: total as u32,
@@ -776,6 +780,7 @@ fn drive(
                 });
             }
             BatchEvent::ItemFinished { result, .. } => {
+                root.trace().item_done(api_applied(result.applied_state()));
                 let mut state = state.borrow_mut();
                 let index = state.records.len();
                 let artifact = state.artifact_of.get(index).cloned().flatten();

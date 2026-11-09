@@ -34,8 +34,8 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider, Temporality},
     trace::{Sampler, SdkTracer, SdkTracerProvider},
 };
-use safe::{Applied, Delivery, Outcome, SafeAttr, Status as HttpStatus};
-pub(crate) use safe::{ErrorClass, Family, OperationKind, Route, Stage};
+pub(crate) use safe::{Applied, ErrorClass, Family, OperationKind, Route, Stage};
+use safe::{Delivery, Outcome, SafeAttr, Status as HttpStatus};
 use serde::Deserialize;
 use std::{
     cell::RefCell,
@@ -251,6 +251,7 @@ struct Instruments {
     key_uses: Counter<u64>,
     delivery_duration: Histogram<f64>,
     response_size: Histogram<f64>,
+    stream_aborted: Counter<u64>,
 }
 impl Instruments {
     fn new(meter: &Meter, stats: &Stats) -> Self {
@@ -300,6 +301,10 @@ impl Instruments {
                 .with_unit("By")
                 .with_boundaries(SIZE_BYTES.to_vec())
                 .build(),
+            stream_aborted: counter(
+                "oncl.stream.aborted",
+                "Response streams the server cut short after the 200 head, by the typed cause.",
+            ),
         }
     }
 }
@@ -876,6 +881,20 @@ impl Observer {
     pub(crate) fn executor_rejected(&self) {
         if let Some(request) = &self.0 {
             request.shared.counter(|i| &i.executor_rejected, &[]);
+        }
+    }
+    /// A response stream the server aborted after its 200 head (the client sees only a
+    /// lost response): the typed cause as a closed error code, never a message.
+    pub(crate) fn stream_aborted(&self, error: ErrorClass, applied: AppliedState) {
+        if let Some(request) = &self.0 {
+            request.shared.counter(
+                |i| &i.stream_aborted,
+                &[
+                    SafeAttr::Route(request.route),
+                    SafeAttr::Error(error),
+                    SafeAttr::Applied(Applied(applied)),
+                ],
+            );
         }
     }
     /// Make this request current for the calling worker thread until the guard drops.

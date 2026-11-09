@@ -18,7 +18,7 @@ pub(crate) enum Route {
     Batch,
 }
 impl Route {
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Hash => "hash",
             Self::Operations => "operations",
@@ -67,7 +67,7 @@ impl OperationKind {
             Operation::VerifyStamp { .. } => Self::VerifyStamp,
         }
     }
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Hash => "hash",
             Self::Verify => "verify",
@@ -172,7 +172,7 @@ impl ErrorClass {
             _ => Outcome::Failed,
         }
     }
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self.0 {
             ErrorCode::PermissionDenied => "permission_denied",
             ErrorCode::InteractionRequired => "interaction_required",
@@ -201,7 +201,7 @@ impl ErrorClass {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Applied(pub(crate) AppliedState);
 impl Applied {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self.0 {
             AppliedState::NotApplied => "not_applied",
             AppliedState::Applied => "applied",

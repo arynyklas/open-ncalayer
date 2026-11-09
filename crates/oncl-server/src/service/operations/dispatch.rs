@@ -558,6 +558,9 @@ fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
 /// (see [`wire_inputs`]), so the oversize refusal of such a document is only found here, and
 /// it stays the typed, not applied `InputLimit` that any other oversize document gets at intake.
 pub(super) enum Failure {
+    /// Once the response stream has started this ends it without a terminal record. The
+    /// client then sees only a lost response, so `streaming::StreamState::report_abort`
+    /// writes the typed cause to the server log and counts it (`oncl.stream.aborted`).
     Abort(ProcessingError),
     Typed(ApiError),
 }

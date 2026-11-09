@@ -1,4 +1,5 @@
 use super::*;
+use crate::telemetry::OperationKind;
 use oncl_core::OperationId;
 use oncl_pki::resource::ResourceScope;
 
@@ -12,6 +13,53 @@ pub(super) struct OperationOutput {
     identity: Arc<()>,
     artifacts: Mutex<Vec<Arc<super::artifact::ArtifactState>>>,
     _metadata: ResourceReservation,
+    trace: Trace,
+}
+/// Where the native work of one operation stands, kept only for the one log line and the
+/// counter of an aborted stream: an index, a closed operation kind and a closed applied
+/// state; never an item id, a name, a size or a message.
+#[derive(Default)]
+pub(super) struct Trace {
+    current: Mutex<Option<(u32, OperationKind)>>,
+    /// 0 = NotApplied, 1 = Applied, 2 = Unknown; only ever raised.
+    applied: std::sync::atomic::AtomicU8,
+}
+impl Trace {
+    /// The item the native work started (by manifest index).
+    pub(super) fn begin_item(&self, index: usize, kind: OperationKind) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((u32::try_from(index).unwrap_or(u32::MAX), kind));
+    }
+    /// An item finished: its key-application state joins the operation's (`Unknown`
+    /// outranks `Applied`).
+    pub(super) fn item_done(&self, applied: oncl_api::error::AppliedState) {
+        use oncl_api::error::AppliedState as A;
+        self.applied.fetch_max(
+            match applied {
+                A::NotApplied => 0,
+                A::Applied => 1,
+                A::Unknown => 2,
+            },
+            std::sync::atomic::Ordering::AcqRel,
+        );
+    }
+    pub(super) fn current(&self) -> Option<(u32, OperationKind)> {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub(super) fn applied(&self) -> oncl_api::error::AppliedState {
+        use oncl_api::error::AppliedState as A;
+        match self.applied.load(std::sync::atomic::Ordering::Acquire) {
+            0 => A::NotApplied,
+            1 => A::Applied,
+            _ => A::Unknown,
+        }
+    }
 }
 pub(super) struct ContextGuard {
     context: Option<OperationContext>,
@@ -113,6 +161,7 @@ impl OperationOutput {
             delivery,
             failure,
             _metadata: metadata,
+            trace: Trace::default(),
             identity: Arc::new(()),
             artifacts: Mutex::new(artifacts),
         });
@@ -133,6 +182,9 @@ impl OperationOutput {
     }
     pub(super) fn failure(&self) -> &Arc<intake::Failure> {
         &self.failure
+    }
+    pub(super) fn trace(&self) -> &Trace {
+        &self.trace
     }
     pub(super) fn identity(&self) -> &Arc<()> {
         &self.identity

@@ -74,6 +74,13 @@ mod telemetry {
     impl Rig {
         /// `unreachable_tsa`: the TSA is a closed loopback port (a network failure).
         async fn start(telemetry: TelemetryConfig, unreachable_tsa: bool) -> Self {
+            Self::start_with(telemetry, unreachable_tsa, |_| {}).await
+        }
+        async fn start_with(
+            telemetry: TelemetryConfig,
+            unreachable_tsa: bool,
+            tweak: impl FnOnce(&mut ServerConfig),
+        ) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let operator_path = directory.path().join("operator");
             let operator = PrivateDirectory::create(&operator_path).unwrap();
@@ -139,6 +146,7 @@ mod telemetry {
                 });
                 config.pki.tsa.as_mut().unwrap().url = format!("{origin}/{CANARY_TSA_PATH}");
             }
+            tweak(&mut config);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let host = ServiceHost::new(config)
@@ -247,6 +255,140 @@ mod telemetry {
             .count()
     }
 
+    /// A one-item sign batch (a streamed response whatever the route).
+    fn sign_batch_body() -> Vec<u8> {
+        let metadata = format!(
+            r#"{{"items":[{{"id":"{CANARY_ITEM}","operation":{{"kind":"sign","profile":"cms","input":"{CANARY_DOC}","keys":[{{"source":"named","name":"{CANARY_KEY}"}}]}}}}],"parts":[{{"name":"{CANARY_DOC}","item_id":"{CANARY_ITEM}","role":"document"}}]}}"#
+        );
+        multipart(&metadata, &[(CANARY_DOC, Some(CANARY_PATH), &document())])
+    }
+    /// The `oncl::stream_abort` events this test binary saw, as `name=value` text.
+    static ABORT_EVENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    struct AbortEvents;
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+    impl tracing::Subscriber for AbortEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "oncl::stream_abort"
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            ABORT_EVENTS.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// D10 class: a first-fatal resource failure after the 200 head and the first frame.
+    /// `metadata_bytes = 85_000` admits the request and starts the stream but is too small
+    /// for the sign item's result, so the server cuts the response without a terminal
+    /// record and the client sees only a lost response. The server must still say why: a
+    /// `tracing` event with the typed cause, and the `oncl.stream.aborted` counter by the
+    /// closed error code. No private key was used, so the journal holds nothing for it.
+    #[test]
+    fn an_aborted_stream_is_counted_and_traced_by_its_typed_cause() {
+        let _ = tracing::subscriber::set_global_default(AbortEvents);
+        let collector = Collector::start();
+        let runtime = server_support::runtime();
+        let (rig, status, response, clean) = runtime.block_on(async {
+            let rig =
+                Rig::start_with(enabled(&collector), false, |c| c.metadata_bytes = 85_000).await;
+            let (status, response, clean) = collector::post_lossy(
+                rig.address,
+                &rig.admin,
+                "/v1/operations",
+                sign_batch_body(),
+                FORM,
+            )
+            .await;
+            (rig, status, response, clean)
+        });
+        let text = String::from_utf8_lossy(&response).to_string();
+        assert_eq!(status, 200, "{text}");
+        assert!(!clean, "the body must be cut short: {text}");
+        assert!(
+            text.contains("name=\"progress\"") && !text.contains("name=\"final\""),
+            "a head and the first frame, no terminal record: {text}"
+        );
+        let list = canaries(&rig);
+        let host = runtime.block_on(rig.stop());
+        let facts =
+            collector::assert_private(&without_credential(&collector.received()), &refs(&list));
+        assert_eq!(
+            facts.metric_total(
+                "oncl.stream.aborted",
+                &[
+                    ("oncl.route", "operations"),
+                    ("oncl.error.code", "metadata_limit"),
+                    ("oncl.key.applied", "not_applied"),
+                ]
+            ),
+            1.0,
+            "{:?}",
+            facts.points
+        );
+        assert_eq!(facts.metric_total("oncl.stream.aborted", &[]), 1.0);
+        assert_eq!(
+            facts.metric_total(
+                "oncl.requests",
+                &[("oncl.outcome", "aborted"), ("oncl.delivery", "aborted")]
+            ),
+            1.0
+        );
+        // The failing item is counted with the same code, so the two agree.
+        assert_eq!(
+            facts.metric_total(
+                "oncl.operations",
+                &[
+                    ("oncl.operation.kind", "sign"),
+                    ("oncl.error.code", "metadata_limit")
+                ]
+            ),
+            1.0
+        );
+        // Audit: the abort came before any private use, so nothing began and nothing is
+        // left to finalise (a FINAL exists only for a BEGIN and carries no error code).
+        let records = host.audit.records().unwrap();
+        assert_eq!(begin_records(&host), 0);
+        assert!(records.iter().all(|r| r.kind != RecordKind::Final));
+        assert_eq!(host.audit.health(), AuditHealth::Healthy);
+        let events = ABORT_EVENTS.lock().unwrap().clone();
+        let event = events
+            .iter()
+            .find(|e| e.contains("kind=\"sign\"") && e.contains("code=\"metadata_limit\""))
+            .unwrap_or_else(|| panic!("no stream_abort event: {events:?}"));
+        for field in [
+            "route=\"operations\"",
+            "item=0 ",
+            "cause=\"MetadataLimit\"",
+            "applied=\"not_applied\"",
+            "operation=",
+            "elapsed_ms=",
+            "bytes_in=",
+            "bytes_out=",
+        ] {
+            assert!(event.contains(field), "{field} missing from {event}");
+        }
+        for event in &events {
+            for canary in &list {
+                assert!(
+                    !event.contains(&*String::from_utf8_lossy(canary)),
+                    "{event}"
+                );
+            }
+        }
+    }
     fn canaries(rig: &Rig) -> Vec<Vec<u8>> {
         let mut list: Vec<Vec<u8>> = [
             CANARY_IIN,
@@ -682,6 +824,11 @@ mod telemetry {
         let received = collector.received();
         let facts = collector::assert_private(&without_credential(&received), &[]);
         assert!(facts.spans.is_empty(), "ratio 0 exports no span");
+        assert_eq!(
+            facts.metric_total("oncl.stream.aborted", &[]),
+            0.0,
+            "healthy streams are never counted as aborted"
+        );
         assert_eq!(
             facts.metric_total("oncl.key.uses", &[("oncl.key.applied", "applied")]),
             3.0

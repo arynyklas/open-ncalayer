@@ -9,6 +9,8 @@ use futures_util::stream;
 use std::{collections::VecDeque, future::Future, pin::Pin};
 use tokio::sync::{oneshot, watch};
 
+use crate::telemetry::{Applied, ErrorClass, Observer, OperationKind};
+
 pub(super) struct StreamRuntime {
     pub engine: Arc<Engine>,
     pub executor: BoundedExecutor,
@@ -74,6 +76,8 @@ pub(super) async fn response(
     } else {
         None
     };
+    let started = std::time::Instant::now();
+    let observer = Observer::current();
     let deadline = runtime.delivery.deadline;
     let failure = runtime.failure.clone();
     let executor = runtime.executor.clone();
@@ -221,6 +225,10 @@ pub(super) async fn response(
         next_progress: tokio::time::Instant::now(),
         handed_terminal: false,
         ids,
+        route: mode,
+        started,
+        observer,
+        reported: false,
     };
     let body = Body::from_stream(stream::unfold(state, |mut state| async move {
         match state.next().await {
@@ -228,6 +236,7 @@ pub(super) async fn response(
             Ok(None) => None,
             Err(error) => {
                 state.phase = Phase::Done;
+                state.report_abort(&error);
                 Some((Err(error), state))
             }
         }
@@ -248,7 +257,9 @@ fn execute(
     let mut reservations = Vec::with_capacity(metadata.items.len());
     let mut artifacts = Vec::new();
     let mut applied_any = false;
-    for item in metadata.items {
+    for (index, item) in metadata.items.into_iter().enumerate() {
+        root.trace()
+            .begin_item(index, OperationKind::of(&item.operation));
         let id = format!("artifact-{}", artifacts.len());
         let outcome = dispatch::run(
             item.operation,
@@ -289,6 +300,7 @@ fn execute(
         };
         reservations.push(reservation);
         let item_applied = dispatch::applied_of(&result);
+        root.trace().item_done(item_applied);
         applied_any |= item_applied != oncl_api::error::AppliedState::NotApplied;
         if let Some(artifact) = artifact {
             artifacts.push((id, artifact));
@@ -333,6 +345,90 @@ struct StreamState {
     next_progress: tokio::time::Instant,
     handed_terminal: bool,
     ids: Option<(Arc<[Box<str>]>, ResourceReservation)>,
+    route: Mode,
+    started: std::time::Instant,
+    observer: Observer,
+    /// The abort was reported (logged and counted) already: once per stream.
+    reported: bool,
+}
+/// The `ProcessingError` variant of an abort, by name only: the payload of `InvalidInput`
+/// and `Io` (developer text, an OS error) never reaches a log.
+fn cause_name(error: &ProcessingError) -> &'static str {
+    match error {
+        ProcessingError::Cancelled => "Cancelled",
+        ProcessingError::DeadlineExceeded => "DeadlineExceeded",
+        ProcessingError::CapacityExceeded => "CapacityExceeded",
+        ProcessingError::InputLimit => "InputLimit",
+        ProcessingError::ContainerLimit => "ContainerLimit",
+        ProcessingError::FramingLimit => "FramingLimit",
+        ProcessingError::OutputLimit => "OutputLimit",
+        ProcessingError::MemoryLimit => "MemoryLimit",
+        ProcessingError::TempLimit => "TempLimit",
+        ProcessingError::MetadataLimit => "MetadataLimit",
+        ProcessingError::InvalidLimits => "InvalidLimits",
+        ProcessingError::InvalidInput(_) => "InvalidInput",
+        ProcessingError::Io(_) => "Io",
+    }
+}
+/// The facts of one aborted stream: numbers and closed names only. Nothing here is built
+/// from the text of an error, an item id, a part name, a document, a key, a URL or a path.
+struct AbortReport {
+    operation: u64,
+    route: &'static str,
+    item: Option<(u32, &'static str)>,
+    class: ErrorClass,
+    cause: &'static str,
+    applied: oncl_api::error::AppliedState,
+    elapsed_ms: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+}
+impl AbortReport {
+    fn new(
+        error: &ProcessingError,
+        trace: &ownership::Trace,
+        stream: (u64, Mode, std::time::Duration),
+        bytes: (u64, u64),
+    ) -> Self {
+        let (operation, mode, elapsed) = stream;
+        Self {
+            operation,
+            route: match mode {
+                Mode::Operations => "operations",
+                Mode::Batch => "batch",
+            },
+            item: trace.current().map(|(index, kind)| (index, kind.as_str())),
+            class: ErrorClass::new(processing_code(error)),
+            cause: cause_name(intake::first_cause(error)),
+            applied: trace.applied(),
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            bytes_in: bytes.0,
+            bytes_out: bytes.1,
+        }
+    }
+}
+impl std::fmt::Display for AbortReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "oncl-server: stream aborted: operation={} route={} ",
+            self.operation, self.route
+        )?;
+        match self.item {
+            Some((index, kind)) => write!(f, "item={index} kind={kind} ")?,
+            None => f.write_str("item=none kind=none ")?,
+        }
+        write!(
+            f,
+            "code={} cause={} applied={} elapsed_ms={} bytes_in={} bytes_out={}",
+            self.class.as_str(),
+            self.cause,
+            Applied(self.applied).as_str(),
+            self.elapsed_ms,
+            self.bytes_in,
+            self.bytes_out
+        )
+    }
 }
 impl StreamState {
     fn json_part(&mut self, name: &str, event: Bytes) -> Result<(), ProcessingError> {
@@ -448,11 +544,127 @@ impl StreamState {
             }
         }
     }
+    /// The server cuts the response short after the 200 head: the client sees only a lost
+    /// response, so the typed cause is reported here, on the server, exactly once (a log
+    /// line on stderr and a `tracing` event, and the `oncl.stream.aborted` counter). Every
+    /// field is a number or a closed name; no document, item id, key, URL or message.
+    fn report_abort(&mut self, error: &ProcessingError) {
+        use std::io::Write;
+        if std::mem::replace(&mut self.reported, true) {
+            return;
+        }
+        let progress = self.receiver.borrow().progress;
+        let report = AbortReport::new(
+            error,
+            self.root.trace(),
+            (self.root.id().get(), self.route, self.started.elapsed()),
+            (progress.bytes_in, progress.bytes_out),
+        );
+        // A closed stderr must never panic a response stream: `eprintln!` would.
+        let _ = writeln!(std::io::stderr().lock(), "{report}");
+        tracing::error!(
+            target: "oncl::stream_abort",
+            operation = report.operation,
+            route = report.route,
+            item = report.item.map_or(-1, |(index, _)| i64::from(index)),
+            kind = report.item.map_or("none", |(_, kind)| kind),
+            code = report.class.as_str(),
+            cause = report.cause,
+            applied = Applied(report.applied).as_str(),
+            elapsed_ms = report.elapsed_ms,
+            bytes_in = report.bytes_in,
+            bytes_out = report.bytes_out,
+            "response stream aborted after the head"
+        );
+        self.observer.stream_aborted(report.class, report.applied);
+    }
 }
 impl Drop for StreamState {
     fn drop(&mut self) {
         if !self.handed_terminal {
             self.root.delivery().cancel.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oncl_api::error::AppliedState;
+    use std::time::Duration;
+
+    fn line(error: &ProcessingError, trace: &ownership::Trace) -> String {
+        AbortReport::new(
+            error,
+            trace,
+            (7, Mode::Operations, Duration::from_millis(42)),
+            (3, 218),
+        )
+        .to_string()
+    }
+
+    /// The line is the contract operators grep: exact shape, closed names, numbers.
+    #[test]
+    fn the_line_names_the_typed_cause_and_where_the_operation_stood() {
+        let trace = ownership::Trace::default();
+        trace.begin_item(0, OperationKind::Hash);
+        trace.item_done(AppliedState::NotApplied);
+        trace.begin_item(2, OperationKind::Verify);
+        assert_eq!(
+            line(&ProcessingError::MetadataLimit, &trace),
+            "oncl-server: stream aborted: operation=7 route=operations item=2 kind=verify \
+             code=metadata_limit cause=MetadataLimit applied=not_applied elapsed_ms=42 \
+             bytes_in=3 bytes_out=218"
+        );
+        trace.item_done(AppliedState::Applied);
+        assert!(line(&ProcessingError::OutputLimit, &trace).contains("applied=applied "));
+        trace.item_done(AppliedState::Unknown);
+        trace.item_done(AppliedState::NotApplied);
+        assert!(
+            line(&ProcessingError::DeadlineExceeded, &trace).contains("applied=unknown "),
+            "a later keyless item never lowers an earlier state"
+        );
+        assert!(
+            line(&ProcessingError::Cancelled, &ownership::Trace::default()).contains(
+                "item=none kind=none code=cancelled cause=Cancelled applied=not_applied "
+            )
+        );
+    }
+
+    /// An error's own text can carry a path, an OS message or a developer string: only its
+    /// variant name and closed code are ever written.
+    #[test]
+    fn the_line_never_carries_the_text_of_an_error() {
+        let trace = ownership::Trace::default();
+        let io = ProcessingError::Io(std::io::Error::other(
+            "CANARY drive_C:/Users/CANARY/secret-contract.pdf",
+        ));
+        let text = line(&io, &trace);
+        assert!(text.contains("code=invalid_request cause=Io "), "{text}");
+        assert!(
+            !text.contains("CANARY") && !text.contains("secret"),
+            "{text}"
+        );
+        let invalid = ProcessingError::InvalidInput("CANARY-developer-string");
+        let text = line(&invalid, &trace);
+        assert!(
+            text.contains("code=invalid_request cause=InvalidInput "),
+            "{text}"
+        );
+        assert!(!text.contains("CANARY"), "{text}");
+    }
+
+    /// The first cause behind the shared-failure carrier is what is reported, not the
+    /// carrier's own generic I/O shape.
+    #[test]
+    fn the_first_cause_behind_a_shared_failure_is_reported() {
+        let failure = intake::Failure::default();
+        failure.record(ProcessingError::MetadataLimit);
+        let carried = failure.recover(ProcessingError::InvalidInput("fallback"));
+        let text = line(&carried, &ownership::Trace::default());
+        assert!(
+            text.contains("code=metadata_limit cause=MetadataLimit "),
+            "{text}"
+        );
     }
 }
