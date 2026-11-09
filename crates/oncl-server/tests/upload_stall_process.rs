@@ -393,6 +393,56 @@ fn a_disconnect_during_the_upload_releases_slot_spool_and_temp() {
     process.stop();
 }
 
+/// What the server has received is in the spool before it waits for the client again: a
+/// client that sends 100 KiB of a document (less than the gathering chunk) and then stalls
+/// has all of it on disk while the server waits, long before the idle timeout (15 s) fires.
+#[test]
+fn a_stalled_upload_has_everything_it_sent_in_the_spool() {
+    const SENT: usize = 100 * 1024;
+    let process = support::Process::configured("127.0.0.1:0", |root| {
+        config_wide(
+            root,
+            "admission_wait_ms = 600\noperation_timeout_ms = 20000\nheader_timeout_ms = 2000\nupload_idle_timeout_ms = 15000\n",
+        )
+    });
+    let scratch = process.directory.path().join("scratch");
+    let mut upload = Upload::open(&process, Route::Multipart, None);
+    let mut first = Upload::prefix(Route::Multipart);
+    first.extend_from_slice(&vec![5u8; SENT]);
+    upload.send(true, &first).unwrap();
+    let staged = |files: Vec<std::path::PathBuf>| {
+        files
+            .iter()
+            // Through a handle: the directory entry of a file that is still open for
+            // writing may show a stale length on Windows.
+            .map(|file| {
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(windows)]
+                std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 7);
+                options
+                    .open(file)
+                    .and_then(|open| open.metadata())
+                    .map_or(0, |m| m.len())
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    let started = Instant::now();
+    while staged(walk(&scratch)) < SENT as u64 && started.elapsed() < Duration::from_secs(5) {
+        sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        staged(walk(&scratch)),
+        SENT as u64,
+        "all received document bytes are in the spool while the client is silent"
+    );
+    upload.stream.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(upload.stream);
+    let _ = upload.collector.join();
+    process.stop();
+}
+
 /// A `hash` operation over a document of exactly `size` bytes.
 fn full_size_operation(process: &support::Process, size: usize) -> Reply {
     let mut body = format!(

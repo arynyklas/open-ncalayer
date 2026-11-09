@@ -5,7 +5,7 @@ use oncl_api::multipart::BoundedMultipart;
 use oncl_core::OperationAdmission;
 use oncl_pki::{
     io::{FrozenInput, InputSpool, TemporaryStore},
-    resource::ResourceScope,
+    resource::{IO_CHUNK_BYTES, ResourceScope},
 };
 
 /// What the metadata part of a request settled (and its secrets): everything but the
@@ -240,6 +240,7 @@ pub(super) enum Payload {
     Multipart {
         parser: BoundedMultipart<'static>,
         wire: Arc<tokio::sync::Mutex<Wire>>,
+        staging: Arc<Staging>,
         metadata_bytes: u64,
         content_length: Option<u64>,
         deadline: Deadline,
@@ -257,6 +258,9 @@ pub(super) struct Wire {
     scope: ResourceScope,
     failure: Arc<Failure>,
     tail_ledger: Option<Arc<Ledger>>,
+    /// The document being taken, when there is one: its buffered bytes are written before
+    /// the server waits for the client (see [`Staging`]).
+    staging: Option<Arc<Staging>>,
 }
 async fn frame(
     wire: &Arc<tokio::sync::Mutex<Wire>>,
@@ -270,10 +274,24 @@ async fn frame(
     let result = async {
         wire.scope.checkpoint()?;
         let result = {
-            let Wire { body, pace, .. } = &mut *wire;
+            let Wire {
+                body,
+                pace,
+                staging,
+                ..
+            } = &mut *wire;
+            let unused = tokio::sync::Notify::new();
+            let staging = staging.as_deref();
+            let dirty = staging.map_or(&unused, |staging| &staging.dirty);
+            let flush = || async {
+                match staging {
+                    Some(staging) => staging.flush().await,
+                    None => Ok(()),
+                }
+            };
             tokio::select! {
                 _=cancel.cancelled()=>return Err(ProcessingError::Cancelled),
-                result=pace.frame(body,deadline)=>result?,
+                result=pace.frame_after(body,deadline,dirty,flush)=>result?,
             }
         };
         let Some(result) = result else {
@@ -352,6 +370,7 @@ pub(super) async fn prepare(
             scope,
             failure: failure.clone(),
             tail_ledger: None,
+            staging: None,
         }));
         let mut bytes = Vec::new();
         bytes
@@ -426,6 +445,7 @@ pub(super) async fn prepare(
         return Err(ApiError::not_applied(ErrorCode::InputLimit));
     }
     let wire_limit = Arc::new(std::sync::atomic::AtomicU64::new(ordinary_wire));
+    let staging = Staging::new();
     let wire = Arc::new(tokio::sync::Mutex::new(Wire {
         body,
         pace: UploadPace::new(pace),
@@ -434,6 +454,7 @@ pub(super) async fn prepare(
         scope: scope.shared_view(),
         failure: failure.clone(),
         tail_ledger: None,
+        staging: Some(staging.clone()),
     }));
     let source = stream::unfold(
         (wire.clone(), cancel.clone()),
@@ -561,6 +582,7 @@ pub(super) async fn prepare(
         Payload::Multipart {
             parser,
             wire,
+            staging,
             metadata_bytes: bytes.len() as u64 + secret_total,
             content_length: metadata.content_length,
             deadline,
@@ -573,17 +595,112 @@ fn multer_boundary(content_type: &str) -> Result<String, ApiError> {
     // Boundary parameter parsing is delegated to the proven multipart parser.
     multer::parse_boundary(content_type).map_err(|_| invalid_request())
 }
-/// Runs a spool write (a full chunk, or the last one) on a blocking thread and gives the
-/// spool back. Only the disk is waited for, never the client; the section ends by itself,
-/// also when the request that started it is gone (the spool is then dropped there, which
-/// deletes the file and releases its reservations).
-async fn spool_write<T: Send + 'static>(
-    mut spool: InputSpool,
-    write: impl FnOnce(&mut InputSpool) -> Result<T, ProcessingError> + Send + 'static,
-) -> Result<(InputSpool, T), ProcessingError> {
-    tokio::task::spawn_blocking(move || write(&mut spool).map(|value| (spool, value)))
+/// The bytes of one document between the network and its spool. Pieces (a Hyper frame is
+/// 16-57 KiB) are gathered up to `IO_CHUNK_BYTES` and written to the spool in one blocking
+/// section, so the disk is not visited once per frame. What is gathered is written
+/// (flushed) before the server waits for the client with no frame ready (`Wire` does this,
+/// before the pace timer starts, so the write is never charged to the client and the bytes
+/// are in the spool while the server waits), and at the end of the document. Only the disk
+/// is waited for in a blocking section, never the client; a section ends by itself also
+/// when the request that started it is gone (the spool and the buffer are then dropped
+/// there: the file is deleted and its reservations are released; the buffer's own memory
+/// charge is released with the request, up to one write earlier than the buffer itself).
+pub(super) struct Staging {
+    inner: std::sync::Mutex<StagingState>,
+    /// Told when bytes were gathered, so that a wait that is already running writes them.
+    dirty: tokio::sync::Notify,
+    #[cfg(test)]
+    writes: std::sync::atomic::AtomicUsize,
+}
+struct StagingState {
+    spool: Option<InputSpool>,
+    buffer: Vec<u8>,
+}
+impl Staging {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(StagingState {
+                spool: None,
+                buffer: Vec::new(),
+            }),
+            dirty: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+    /// Starts a document. The buffer (`IO_CHUNK_BYTES`, charged by the caller) is allocated
+    /// once and serves every document of the request.
+    fn begin(&self, spool: InputSpool) -> Result<(), ProcessingError> {
+        let mut state = self.state();
+        let wanted = IO_CHUNK_BYTES - state.buffer.len();
+        state
+            .buffer
+            .try_reserve_exact(wanted)
+            .map_err(|_| ProcessingError::MemoryLimit)?;
+        state.spool = Some(spool);
+        Ok(())
+    }
+    fn state(&self) -> std::sync::MutexGuard<'_, StagingState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    /// Takes `data`, writing every full chunk.
+    async fn push(&self, mut data: &[u8]) -> Result<(), ProcessingError> {
+        while !data.is_empty() {
+            let full = {
+                let mut state = self.state();
+                let room = IO_CHUNK_BYTES - state.buffer.len();
+                let (head, rest) = data.split_at(room.min(data.len()));
+                state.buffer.extend_from_slice(head);
+                data = rest;
+                state.buffer.len() == IO_CHUNK_BYTES
+            };
+            if full {
+                self.flush().await?;
+            } else {
+                self.dirty.notify_one();
+            }
+        }
+        Ok(())
+    }
+    /// Writes what is buffered (nothing: no hop).
+    async fn flush(&self) -> Result<(), ProcessingError> {
+        let (mut spool, mut buffer) = {
+            let mut state = self.state();
+            if state.buffer.is_empty() {
+                return Ok(());
+            }
+            // Bytes with no spool cannot be: `begin` comes first and `finish` flushes.
+            let spool = state
+                .spool
+                .take()
+                .ok_or(ProcessingError::InvalidInput("spool write did not complete"))?;
+            (spool, std::mem::take(&mut state.buffer))
+        };
+        #[cfg(test)]
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (spool, buffer) = tokio::task::spawn_blocking(move || {
+            let result = spool.push(&buffer);
+            buffer.clear();
+            result.map(|()| (spool, buffer))
+        })
         .await
-        .map_err(|_| ProcessingError::InvalidInput("spool write did not complete"))?
+        .map_err(|_| ProcessingError::InvalidInput("spool write did not complete"))??;
+        let mut state = self.state();
+        state.spool = Some(spool);
+        state.buffer = buffer;
+        Ok(())
+    }
+    /// The end of the document: everything written, the spool given back.
+    async fn finish(&self) -> Result<InputSpool, ProcessingError> {
+        self.flush().await?;
+        self.state()
+            .spool
+            .take()
+            .ok_or(ProcessingError::InvalidInput("spool write did not complete"))
+    }
 }
 impl Payload {
     /// Takes every declared document of the body into the temporary store: the upload phase.
@@ -603,6 +720,7 @@ impl Payload {
             Self::Multipart {
                 mut parser,
                 wire,
+                staging,
                 metadata_bytes,
                 content_length,
                 deadline,
@@ -613,6 +731,7 @@ impl Payload {
                 let store = store.ok_or(ProcessingError::InvalidInput(
                     "explicit scratch directory required",
                 ))?;
+                let mut buffer_charge: Option<ResourceReservation> = None;
                 let mut seen = BTreeSet::new();
                 let mut documents = BTreeMap::new();
                 let mut payload = metadata_bytes;
@@ -652,7 +771,7 @@ impl Payload {
                     // and the format's container allowance for the signature. Every other part
                     // is a document and stays within `input_bytes` at once. Evidence is validation
                     // material, bounded per item and not charged to the document allowance.
-                    let mut spool = if super::dispatch::wire_inputs(metadata).any(|n| n == name) {
+                    let spool = if super::dispatch::wire_inputs(metadata).any(|n| n == name) {
                         InputSpool::wire(store, scope, None)
                     } else if super::dispatch::evidence_inputs(metadata).any(|n| n == name) {
                         InputSpool::wire(store, scope, Some(super::dispatch::EVIDENCE_ITEM_BYTES))
@@ -660,6 +779,18 @@ impl Payload {
                         InputSpool::document(store, scope)
                     }
                     .map_err(|error| failure.recover(error))?;
+                    // The gathering buffer is charged like any chunk buffer, for as long as
+                    // the request is.
+                    if buffer_charge.is_none() {
+                        buffer_charge = Some(
+                            scope
+                                .reserve_memory(IO_CHUNK_BYTES as u64)
+                                .map_err(|error| failure.recover(error))?,
+                        );
+                    }
+                    staging
+                        .begin(spool)
+                        .map_err(|error| failure.recover(error))?;
                     loop {
                         if failure.stopped() {
                             return Err(
@@ -677,14 +808,16 @@ impl Payload {
                         }
                         .map_err(|error| failure.recover(error))?;
                         let Some(bytes) = chunk else { break };
-                        // Every piece is on disk before the next wait for the client, so the
-                        // time a write takes is never charged to the client by the pace rules.
-                        spool = spool_write(spool, move |spool| spool.push(&bytes))
+                        staging
+                            .push(&bytes)
                             .await
-                            .map_err(|error| failure.recover(error))?
-                            .0;
+                            .map_err(|error| failure.recover(error))?;
                     }
                     drop(field);
+                    let spool = staging
+                        .finish()
+                        .await
+                        .map_err(|error| failure.recover(error))?;
                     let frozen = spool.finish().map_err(|error| failure.recover(error))?;
                     payload = payload
                         .checked_add(frozen.len())
@@ -727,6 +860,7 @@ mod tests {
     use crate::executor::{BoundedExecutor, ExecutorConfig};
     use oncl_core::ExecutionGrant;
     use oncl_pki::resource::ResourceLimits;
+    use futures_util::StreamExt;
     use std::sync::Condvar;
 
     struct Release(Arc<(Mutex<bool>, Condvar)>);
@@ -841,6 +975,181 @@ mod tests {
         }
     }
 
+    fn staging_scope(
+        memory: u64,
+        directory: &std::path::Path,
+    ) -> (TemporaryStore, ResourceScope) {
+        let limits = ResourceLimits {
+            input_bytes: 64 << 20,
+            memory_bytes: memory,
+            ..ResourceLimits::default()
+        };
+        let scope = Arc::new(oncl_pki::resource::SharedBudget::new(limits.clone()).unwrap())
+            .begin(limits, Arc::new(Cancellation::new()))
+            .unwrap();
+        (TemporaryStore::new(directory).unwrap(), scope)
+    }
+
+    /// The disk is visited once per `IO_CHUNK_BYTES`, not once per piece of the network.
+    #[tokio::test]
+    async fn staging_writes_whole_chunks_and_the_rest_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut scope) = staging_scope(1 << 30, directory.path());
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        assert!(staging.flush().await.is_ok());
+        assert_eq!(
+            staging.writes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing buffered is not a hop"
+        );
+        let piece = [9u8; 16 * 1024];
+        let pieces = 1000;
+        for _ in 0..pieces {
+            staging.push(&piece).await.unwrap();
+        }
+        let total = (pieces * piece.len()) as u64;
+        let spool = staging.finish().await.unwrap();
+        assert_eq!(spool.len(), total);
+        let hops = staging.writes.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            hops as u64,
+            total.div_ceil(IO_CHUNK_BYTES as u64),
+            "one blocking write per full chunk plus the last"
+        );
+        // Pieces larger than the chunk (the rest of one carries over) keep the rule.
+        let big = vec![1u8; 3 * IO_CHUNK_BYTES + 5];
+        let (store, mut scope) = staging_scope(1 << 30, directory.path());
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        staging.push(&big).await.unwrap();
+        let spool = staging.finish().await.unwrap();
+        assert_eq!(spool.len(), big.len() as u64);
+        assert_eq!(staging.writes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// What is gathered when the server must wait for the client is in the spool before it
+    /// waits (and stays there when the idle timeout ends the wait); a ready frame is not a
+    /// wait and does not flush.
+    #[tokio::test]
+    async fn gathered_bytes_are_in_the_spool_when_the_server_waits_for_the_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut scope) = staging_scope(1 << 30, directory.path());
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        let first = Bytes::from(vec![1u8; 50 * 1024]);
+        let body = Body::from_stream(
+            futures_util::stream::iter([first.clone(), first.clone()].map(Ok::<_, io::Error>))
+                .chain(futures_util::stream::pending()),
+        );
+        let failure = Arc::new(Failure::default());
+        let wire = Arc::new(tokio::sync::Mutex::new(Wire {
+            body,
+            pace: UploadPace::new(PaceConfig {
+                idle: Duration::from_millis(200),
+                min_rate: 0,
+            }),
+            total: 0,
+            limit: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            scope: scope.shared_view(),
+            failure,
+            tail_ledger: None,
+            staging: Some(staging.clone()),
+        }));
+        let deadline = Deadline::after(Duration::from_secs(30)).unwrap();
+        let cancel = Arc::new(Cancellation::new());
+        for _ in 0..2 {
+            let data = frame(&wire, deadline, &cancel).await.unwrap().unwrap();
+            staging.push(&data).await.unwrap();
+        }
+        assert_eq!(
+            staging.writes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "ready frames are gathered, not written"
+        );
+        assert!(frame(&wire, deadline, &cancel).await.is_err());
+        assert_eq!(staging.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let spool = staging.finish().await.unwrap();
+        assert_eq!(spool.len(), 100 * 1024, "everything received was written");
+    }
+
+    /// Bytes gathered while the server is already waiting for the client are written during
+    /// that wait, not at its end.
+    #[tokio::test]
+    async fn bytes_gathered_during_a_wait_are_written_during_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut scope) = staging_scope(1 << 30, directory.path());
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        let wire = Arc::new(tokio::sync::Mutex::new(Wire {
+            body: Body::from_stream(futures_util::stream::pending::<Result<Bytes, io::Error>>()),
+            pace: UploadPace::new(PaceConfig {
+                idle: Duration::from_millis(600),
+                min_rate: 0,
+            }),
+            total: 0,
+            limit: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            scope: scope.shared_view(),
+            failure: Arc::new(Failure::default()),
+            tail_ledger: None,
+            staging: Some(staging.clone()),
+        }));
+        let deadline = Deadline::after(Duration::from_secs(30)).unwrap();
+        let waiting = tokio::spawn({
+            let wire = wire.clone();
+            async move { frame(&wire, deadline, &Arc::new(Cancellation::new())).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        staging.push(&[4u8; 1000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!waiting.is_finished(), "the client is still being waited for");
+        assert_eq!(
+            staging.state().spool.as_ref().map(InputSpool::len),
+            Some(1000),
+            "written while the wait goes on"
+        );
+        assert!(waiting.await.unwrap().is_err());
+    }
+
+    /// The buffer and the spool of a request that is gone (here: dropped between two
+    /// writes) release their memory charge and their file.
+    #[tokio::test]
+    async fn a_dropped_staging_releases_its_charge_and_its_file() {
+        const MEMORY: u64 = 8 << 20;
+        let directory = tempfile::tempdir().unwrap();
+        let (store, mut scope) = staging_scope(MEMORY, directory.path());
+        let charge = scope.reserve_memory(IO_CHUNK_BYTES as u64).unwrap();
+        assert!(scope.reserve_memory(MEMORY).is_err(), "the charge is held");
+        let staging = Staging::new();
+        staging
+            .begin(InputSpool::document(&store, &mut scope).unwrap())
+            .unwrap();
+        staging.push(&[1u8; 100 * 1024]).await.unwrap();
+        drop(staging);
+        drop(charge);
+        scope
+            .reserve_memory(MEMORY)
+            .expect("the whole budget is free again");
+        fn files(root: &std::path::Path) -> usize {
+            std::fs::read_dir(root)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() { files(&path) } else { 1 }
+                })
+                .sum()
+        }
+        assert_eq!(files(directory.path()), 0);
+    }
+
     #[test]
     fn repeated_bridges_retain_the_same_owned_io_cause() {
         let failure = Failure::default();
@@ -908,3 +1217,4 @@ mod tests {
         assert!(engine.admit(Arc::new(Cancellation::new())).is_ok());
     }
 }
+
