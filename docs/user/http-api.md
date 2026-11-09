@@ -220,9 +220,13 @@ before body intake. Receiving the body is a phase of its own with its own limit
 (`max_uploads`): a request takes an upload slot before its first body byte is read, and
 neither waiting for a slow client nor spooling the documents takes a `max_in_flight` slot, a
 native worker or an audit binding, so a stalled upload leaves every other request unaffected
-except for that one upload slot. `503 CapacityExceeded` means that no upload slot (before the
-body is read) or, once the whole body was accepted, no operation slot freed within the
-server's `admission_wait_ms`; nothing was applied. The original admission root starts before
+except for that one upload slot. `503 CapacityExceeded` means that no upload slot, or no
+operation slot (`max_in_flight`), freed within the server's `admission_wait_ms` before the
+body was read (the server checks both before it reads the first body byte, so a busy server
+refuses at once without taking the upload and an `Expect: 100-continue` client is never told
+to send), or, once the whole body was accepted, that no operation slot freed within
+`admission_wait_ms`; nothing was applied. The check before the body is best effort: a slot
+can be taken between it and the end of the body, which is then refused after the body. The original admission root starts before
 bounded metadata intake, then the host consumes that same root into an authorized operation
 context. Queueing, SDK work, response ownership and actual network writes retain
 the original deadline and shared budgets. Dropping a response does not make a

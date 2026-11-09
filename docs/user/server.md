@@ -382,21 +382,31 @@ native operation free: their actual final owners must still release them.
 `max_uploads` (unset: 8, or less when `total_temp` holds fewer spools, see below; 1 .. 256). A request that carries a body (`POST /v1/hash`,
 `/v1/operations`, `/v1/batch`) takes one upload slot after authentication and before it reads
 any byte of the body, and keeps it while it waits for the client, spools its documents to the
-scratch directory and, once the body is complete, waits for an `max_in_flight` slot. A client
+scratch directory and, once the body is complete, waits for a `max_in_flight` slot. A client
 that stalls mid-body therefore holds one upload slot, its spool and its temp and memory
 reservations, and **nothing else**: no `max_in_flight` slot, no `blocking_workers` worker, no
 audit binding. Requests without a body (`GET /health`, `GET /v1/openapi.json`) never take an
 upload slot, and a request that finds every upload slot taken waits up to `admission_wait_ms`
 (a free slot goes to the oldest waiter) and gets `503 CapacityExceeded`/`NotApplied` only if none
 freed in that time, before its body is read (Hyper sends `100 Continue` only when the body
-is first read, so an `Expect: 100-continue` client sees the refusal instead). Every exit of the
-phase frees the slot, the spool and its temp reservation at once: the end of the body, a client
-that disconnects, the idle timeout or minimum rate (below), the operation deadline, a
-cancellation, a shutdown and any refusal (such as `InputLimit`).
+is first read, so an `Expect: 100-continue` client sees the refusal instead). The same holds
+when every `max_in_flight` slot is busy: before it takes an upload slot the request checks that
+an operation slot is free, waits for one up to `admission_wait_ms` (the upload-slot wait takes
+the rest of that time, not a second one) and otherwise gets the same `503` without a body byte
+read, as it did before the upload phase existed. That check is best effort: a slot can be
+taken meanwhile, and the wait after the body (below) stays authoritative. Every exit of the
+phase frees the upload slot, the spool and its temp reservation: the end of the body when
+the operation has its `max_in_flight` slot (until then a queued operation keeps the upload slot,
+see below), a client that disconnects, the idle timeout or minimum rate (below), the operation
+deadline, a cancellation, a shutdown and any refusal (such as `InputLimit`).
 
 The phase takes a slot of its own, not one more native worker: waiting for the client is
-asynchronous. Writing a received piece to the spool (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB) is a short
-blocking section, one at a time per upload, on the runtime's blocking pool; that pool holds
+asynchronous. Received pieces (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB) are gathered
+into a 256 KiB buffer, charged to the operation's memory budget once per request, and written
+to the spool in one short blocking section per 256 KiB, one at a time per upload, on the runtime's
+blocking pool. What is gathered is written before the server waits for the client again (so a
+stalled client's bytes are in the spool, and the disk time is not charged to the client by the
+pace rules below), and at the end of each document. That pool holds
 `blocking_workers + max_uploads` threads so that a long operation cannot keep uploads from
 progressing. The hash route (`POST /v1/hash`) hashes each received piece where it arrives, on
 the runtime's own threads (a CPU section of one frame), without any spool; a hash upload that
@@ -430,8 +440,8 @@ yourself is only needed to go *below* the default or, with a larger `total_temp`
 once. A request whose body has been accepted waits up to `admission_wait_ms`, polling every
 10 ms with no order guarantee between waiters, for one of them, and gets `503
 CapacityExceeded`/`NotApplied` only if none freed in that time (nothing was applied, the
-spool is deleted). It keeps its upload slot and its spool while it waits, so operations
-queued here count against `max_uploads` too. The operation deadline starts at the
+spool is deleted). It keeps its upload slot and its spool until it has the `max_in_flight`
+slot, so operations queued here count against `max_uploads` too. The operation deadline starts at the
 request's admission to the upload phase and also covers the upload; `admission_wait_ms` is not
 part of it, but the deadline keeps running. An admitted operation waits for a free native
 worker for at most the same `admission_wait_ms`; with `blocking_workers >= max_in_flight` (the
@@ -468,8 +478,16 @@ than the idle timeout, is never stopped by them.
 workers or operation slots (other requests complete at once next to it), but it does hold
 one of the `max_uploads` slots until the idle timeout: with `max_uploads` authenticated clients
 stalled at once, every other body-carrying request waits `admission_wait_ms` and gets `503
-CapacityExceeded` until a stall ends, while `/health` and the operations that already run
-are not affected. Lower `upload_idle_timeout_ms` (never below the slowest legitimate link, see
+CapacityExceeded` until a stall ends, while `/health` stays up. The operations that already run
+are **not** isolated from the spools: they draw on the same `total_temp` and `total_memory`
+budgets. Stalled uploads hold their spools (up to `input_bytes + container_bytes` each) and a
+256 KiB gathering buffer each, so `max_uploads` stalled uploads can hold all of `total_temp`
+(8 x 2 GiB at the defaults) and a running operation that then needs temp space can be refused
+with `TempLimit`. There is no per-token upload limit: one token (one leaked token) can take
+every upload slot. A blocking spool write that is still running when its client disconnects
+finishes on its own and keeps its buffer (up to 256 KiB, charged until the request ends, so
+up to that much uncharged for the duration of one write); such writes can exceed `max_uploads`
+writers for that moment, bounded by the pool unless the disk stalls. Lower `upload_idle_timeout_ms` (never below the slowest legitimate link, see
 above) and raise `max_uploads` as far as the temp budget allows to widen the margin. A
 client that sends exactly the minimum rate holds an upload slot for the whole
 `operation_timeout_ms`; on a LAN raise `upload_min_bytes_per_second` to tens of KiB/s. The
@@ -603,14 +621,17 @@ the instrumentation scope is `oncl-server`; spans carry no events, links or exem
 
 Spans (`oncl.request` is the root; the others are its children in the same trace):
 `oncl.request` (route, outcome, error code, status, delivery), `oncl.admission`
-(request start to executor hand-off), `oncl.executor.wait`, `oncl.executor.run`,
+(request start to executor hand-off: for a request with a body this includes receiving the
+body, the wait for an upload slot and the wait for an operation slot, so it is dominated by
+the client's upload time, not by queueing), `oncl.executor.wait`, `oncl.executor.run`,
 `oncl.operation` (one per executed item: kind, family, outcome, error code, key
 applied state), `oncl.delivery` (response body delivery).
 
 Metrics: counters `oncl.requests`, `oncl.operations`, `oncl.key.uses` (counts of
 operations that applied or may have applied a private key; **no key identity**),
 `oncl.executor.rejected`, `oncl.telemetry.dropped`; histograms in seconds
-`oncl.request.duration`, `oncl.admission.duration`, `oncl.executor.duration`,
+`oncl.request.duration`, `oncl.admission.duration` (includes the upload, see above),
+`oncl.executor.duration`,
 `oncl.operation.duration`, `oncl.delivery.duration`, and `oncl.response.size` (bytes);
 gauges `oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued`.
 
