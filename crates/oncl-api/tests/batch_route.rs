@@ -475,7 +475,7 @@ async fn terminal_quota_stop_keeps_finished_artifacts_and_reports_the_rest_not_r
         // One spool of `input_bytes + container_bytes` must fit the temp budget.
         config.input_bytes = 210_000;
         config.container_bytes = 210_000;
-        config.max_uploads = 1;
+        config.max_uploads = Some(1);
     }))
     .await;
     let dir = tempfile::tempdir().unwrap();

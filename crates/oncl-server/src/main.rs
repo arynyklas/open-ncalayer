@@ -52,7 +52,13 @@ enum Command {
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(_) => {
+        Err(e) => {
+            if let Some(refused) = e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<oncl_server::config::MaxUploadsError>())
+            {
+                eprintln!("oncl-server: {refused}");
+            }
             eprintln!(
                 "oncl-server: startup or execution refused (check operator configuration and private mounts)"
             );
@@ -103,6 +109,12 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
             config.validate()?;
+            if let Some((default, bound)) = config.lowered_max_uploads() {
+                eprintln!(
+                    "oncl-server: `max_uploads` is not set; lowered from {} to {default} because total_temp holds {bound} spool(s) of input_bytes + container_bytes",
+                    oncl_server::config::DEFAULT_MAX_UPLOADS
+                );
+            }
             let tls = tls_configuration(&config)?;
             let host = ServiceHost::new(config.clone())?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -110,7 +122,7 @@ fn run() -> io::Result<()> {
                 // The executor runs at most `blocking_workers` native closures; the upload
                 // phase adds at most one short spool write per upload in progress, so a
                 // long operation never keeps an upload from making progress.
-                .max_blocking_threads(config.blocking_workers + config.max_uploads)
+                .max_blocking_threads(config.blocking_threads())
                 .enable_all()
                 .build()?;
             let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();

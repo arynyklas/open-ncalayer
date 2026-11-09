@@ -351,10 +351,12 @@ pub struct ServerConfig {
     /// Requests that may be receiving their body at once (the upload phase: waiting for the
     /// client and spooling the documents), a limit of its own. An upload takes no
     /// `max_in_flight` slot and no native worker while it waits for the client; it holds one
-    /// of these until its operation is admitted to run. 1 ..= 256, and at most
-    /// `total_temp / (input_bytes + container_bytes)`, so that every upload can reserve the
-    /// largest spool in the shared temp budget at once.
-    pub max_uploads: usize,
+    /// of these until its operation is admitted to run. When set it is 1 ..= 256 and at most
+    /// [`ServerConfig::upload_temp_bound`] (`total_temp / (input_bytes + container_bytes)`),
+    /// so that every upload can reserve the largest spool in the shared temp budget at once.
+    /// When unset the effective value is `min(8, max(1, that bound))`; read it with
+    /// [`ServerConfig::effective_max_uploads`].
+    pub max_uploads: Option<usize>,
     pub total_memory: u64,
     pub total_temp: u64,
     pub memory_per_operation: u64,
@@ -410,7 +412,7 @@ impl Default for ServerConfig {
             max_connections: 32,
             header_timeout_ms: 5000,
             max_in_flight: 2,
-            max_uploads: 8,
+            max_uploads: None,
             total_memory: 536_870_912,
             total_temp: 17_179_869_184,
             memory_per_operation: 268_435_456,
@@ -442,6 +444,25 @@ impl Default for ServerConfig {
 pub(crate) fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid service configuration")
 }
+/// A refused explicit `max_uploads`. Safe to show to the operator: it carries only the key
+/// name and the bound computed from `total_temp`, `input_bytes` and `container_bytes`.
+#[derive(Debug)]
+pub struct MaxUploadsError {
+    pub bound: u64,
+}
+impl std::fmt::Display for MaxUploadsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid service configuration: `max_uploads` must be 1..=256 and at most {} \
+             (total_temp / (input_bytes + container_bytes))",
+            self.bound
+        )
+    }
+}
+impl std::error::Error for MaxUploadsError {}
+/// The upload-phase limit when `max_uploads` is unset (before the temp budget lowers it).
+pub const DEFAULT_MAX_UPLOADS: usize = 8;
 impl ServerConfig {
     pub fn read(path: &Path) -> io::Result<Self> {
         let mount = SecretMount {
@@ -458,7 +479,48 @@ impl ServerConfig {
         config.validate()?;
         Ok(config)
     }
+    /// The most spools of `input_bytes + container_bytes` that the shared temp budget holds.
+    pub fn upload_temp_bound(&self) -> u64 {
+        self.total_temp / self.input_bytes.saturating_add(self.container_bytes).max(1)
+    }
+    /// The upload-phase limit in force: the explicit `max_uploads`, else
+    /// `min(8, max(1, upload_temp_bound))`.
+    pub fn effective_max_uploads(&self) -> usize {
+        self.max_uploads.unwrap_or_else(|| {
+            self.upload_temp_bound()
+                .clamp(1, DEFAULT_MAX_UPLOADS as u64) as usize
+        })
+    }
+    /// `Some((default, bound))` when `max_uploads` is unset and the temp budget lowered the
+    /// default below [`DEFAULT_MAX_UPLOADS`]; the server logs it once at start.
+    pub fn lowered_max_uploads(&self) -> Option<(usize, u64)> {
+        let effective = self.effective_max_uploads();
+        (self.max_uploads.is_none() && effective < DEFAULT_MAX_UPLOADS)
+            .then(|| (effective, self.upload_temp_bound()))
+    }
+    /// Size of the runtime's blocking pool: the executor's native closures plus one short
+    /// spool write per upload in progress, so a long operation never keeps an upload from
+    /// making progress. Every runtime builder uses this.
+    pub fn blocking_threads(&self) -> usize {
+        self.blocking_workers + self.effective_max_uploads()
+    }
+    /// Checks an explicit `max_uploads` (1 ..= 256 and at most [`Self::upload_temp_bound`]).
+    /// The error is a [`MaxUploadsError`]: it names the key and the bound, nothing else.
+    pub fn validate_max_uploads(&self) -> io::Result<()> {
+        let Some(n) = self.max_uploads else {
+            return Ok(());
+        };
+        let bound = self.upload_temp_bound();
+        if n == 0 || n > 256 || n as u64 > bound {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                MaxUploadsError { bound },
+            ));
+        }
+        Ok(())
+    }
     pub fn validate(&self) -> io::Result<()> {
+        self.validate_max_uploads()?;
         self.pki.validate_limits()?;
         self.telemetry.validate()?;
         if self.max_in_flight == 0
@@ -485,10 +547,6 @@ impl ServerConfig {
                 .and_then(|n| n.checked_add(65_536))
                 .is_none()
             || self.metadata_bytes < 32_768
-            || self.max_uploads == 0
-            || self.max_uploads > 256
-            || self.max_uploads as u64
-                > self.total_temp / self.input_bytes.saturating_add(self.container_bytes)
             || self.memory_per_operation < 65_536
             || self.total_memory < self.memory_per_operation
             || self.total_temp < self.temp_per_operation

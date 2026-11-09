@@ -127,9 +127,9 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
     let collector = Collector::start()?;
     let settings = ServerSettings {
         max_in_flight: 4,
-        // the two stalled uploads pin two blocking workers for the whole idle window (the intake
-        // runs on the worker); with only 2 workers nothing else could ever be admitted. Keep
-        // more workers than stallers so the storm still tests admitted work next to them.
+        // the two stalled uploads hold two upload slots (`max_uploads`), not workers: the body is
+        // received before an operation takes an in-flight slot or a worker. Keep more workers
+        // than stallers so the storm still tests admitted work next to them.
         blocking_workers: 4,
         queue_capacity: 2,
         // long enough that the first CPU wave outlives the abandoned uploads that hold slots when
@@ -145,6 +145,7 @@ fn body(case: &mut Case<'_>) -> anyhow::Result<()> {
         max_connections: 64,
         telemetry_endpoint: Some(collector.url.clone()),
         token_alias: None,
+        max_uploads: None,
     };
     case.server_settings = settings.clone();
     case.note(
@@ -631,6 +632,7 @@ fn token_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         max_connections: 64,
         telemetry_endpoint: None,
         token_alias: Some(alias),
+        max_uploads: None,
     };
     case.server_settings = settings;
     case.ensure_server()?;
@@ -905,6 +907,7 @@ fn slot_body(case: &mut Case<'_>) -> anyhow::Result<()> {
         max_connections: 64,
         telemetry_endpoint: None,
         token_alias: None,
+        max_uploads: None,
     };
     let _ = env;
     case.ensure_server()?;

@@ -196,6 +196,9 @@ pub struct ServerSettings {
     pub telemetry_endpoint: Option<String>,
     /// Keys are the two software cards of `token_host` (this alias) instead of file keys.
     pub token_alias: Option<String>,
+    /// The server's `max_uploads`; `None` leaves the key out (the server then lowers its
+    /// default of 8 to what `total_temp` holds).
+    pub max_uploads: Option<usize>,
 }
 
 impl ServerSettings {
@@ -217,6 +220,7 @@ impl ServerSettings {
             max_connections: 32,
             telemetry_endpoint: None,
             token_alias: None,
+            max_uploads: None,
         }
     }
 }
@@ -276,6 +280,9 @@ impl HttpServer {
             settings.temp_per_operation,
             settings.total_temp,
         );
+        if let Some(max_uploads) = settings.max_uploads {
+            config.push_str(&format!("max_uploads = {max_uploads}\n"));
+        }
         config.push_str(&format!(
             "\n[[tokens]]\nid = 'proof-client'\nverifier = '{verifier}'\nactions = ['hash', 'verify', 'extract', 'sign', 'extend']\nkeys = [{}]\n",
             if settings.token_alias.is_some() { "'card-a', 'card-b'" } else { "'rsa', 'gost'" }

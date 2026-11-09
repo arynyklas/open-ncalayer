@@ -141,8 +141,9 @@ the scratch before it is refused; this is bounded by `temp_per_operation`, `tota
 document at the limit holds about 3x `input_bytes`
 of scratch, and verifying a signed result about 2x. Rule of thumb:
 `temp_per_operation >= 3 * (input_bytes + container_bytes)`. The configuration does not check
-this rule, only that every upload can spool its largest input at once:
-`max_uploads <= total_temp / (input_bytes + container_bytes)`. A request declaring a length past the ceiling is refused at once with `InputLimit`; an
+this rule, only that an explicit `max_uploads` lets every upload spool its largest input at once:
+`max_uploads <= total_temp / (input_bytes + container_bytes)` (unset, `max_uploads` is
+`min(8, max(1, that bound))`). A request declaring a length past the ceiling is refused at once with `InputLimit`; an
 upload without a declared length is counted and refused with `FramingLimit` when the wire passes
 the ceiling. A sign or extend item takes at most 64 evidence references (more is
 `InvalidRequest`, before any part is read). `container_bytes` must be positive and

@@ -322,12 +322,13 @@ pub(super) async fn prepare(
         .get("content-type")
         .and_then(|h| h.to_str().ok())
         .ok_or_else(invalid_request)?;
-    // One retained Hyper read buffer, bounded by the actual standalone builder's
-    // max_buf_size(32768), plus parser header/data and decoded metadata working
-    // allocations. Wire chunks are not assumed to be Hyper frame boundaries.
+    // One retained Hyper read buffer plus the frame one read adds to it (a frame is not
+    // bounded by the builder's max_buf_size(32768), see `FRAME_RESERVE_BYTES`), plus parser
+    // header/data and decoded metadata working allocations. Wire chunks are not assumed to
+    // be Hyper frame boundaries.
     let transport = admission
         .resources()
-        .reserve_memory(32768)
+        .reserve_memory(crate::service::FRAME_RESERVE_BYTES)
         .map_err(processing_error)?;
     let parsed = admission
         .resources()

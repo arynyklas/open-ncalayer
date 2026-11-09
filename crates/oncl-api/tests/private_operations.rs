@@ -2281,7 +2281,7 @@ async fn later_item_abort_after_an_applied_item_is_a_failed_final_with_applied_r
         // One spool of `input_bytes + container_bytes` must fit the temp budget.
         config.input_bytes = 150_000;
         config.container_bytes = 150_000;
-        config.max_uploads = 1;
+        config.max_uploads = Some(1);
     }))
     .await;
     let small = vec![5u8; 20_000];

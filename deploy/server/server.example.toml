@@ -35,12 +35,16 @@ scratch_directory = "/var/lib/oncl-server/scratch"
 # Budgets. `total_memory` is the sum of the working memory of all admitted operations
 # (not the process RSS: the HTTP stack, runtime threads and framing are extra, so keep
 # the container/systemd memory limit about twice `total_memory`). The temp limits bound
-# the scratch directory: size its filesystem to `total_temp` or lower these values.
+# the scratch directory: size its filesystem to `total_temp` or lower these values; lowering
+# `total_temp` also lowers the default of `max_uploads` (below).
 #
 # Concurrency. Receiving a request body is a phase of its own: at most `max_uploads` bodies
-# are received at once (default 8, 1..256, and at most
-# `total_temp / (input_bytes + container_bytes)`, which the server checks at start: every upload
-# must be able to reserve its largest spool). A receiving request takes neither a
+# are received at once. Leave it unset: the default is 8, or fewer when `total_temp` holds
+# fewer spools, i.e. min(8, max(1, `total_temp / (input_bytes + container_bytes)`)), and the
+# server logs it once at start when it lowered it. An explicit value is 1..256 and the server
+# refuses to start when it is above `total_temp / (input_bytes + container_bytes)` (every
+# upload must be able to reserve its largest spool); the message names `max_uploads`. A
+# receiving request takes neither a
 # `max_in_flight` slot nor a native worker, so a client that stalls mid-body holds one upload
 # slot only. A request that finds every upload slot taken waits up to `admission_wait_ms` for
 # one and only then gets the typed `CapacityExceeded` refusal, before its body is read.
@@ -59,7 +63,7 @@ scratch_directory = "/var/lib/oncl-server/scratch"
 # below any real network (30 s of silence, 1 KiB/s); the operation timeout still bounds a
 # legitimate transfer, so raise it (not these) for a very large upload over a slow link.
 max_in_flight = 2
-max_uploads = 8
+# max_uploads = 8
 blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000

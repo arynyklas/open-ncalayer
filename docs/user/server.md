@@ -35,7 +35,7 @@ bind = "127.0.0.1:13579"
 audit_directory = "/private/oncl-audit"
 recover_audit = false
 max_in_flight = 2
-max_uploads = 8   # bodies being received at once; at most total_temp / (input_bytes + container_bytes)
+# max_uploads = 8   # unset: min(8, total_temp / (input_bytes + container_bytes)); an explicit value may not exceed that bound
 blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000
@@ -379,7 +379,7 @@ JSON error/status. Timers do not make retained Bytes clones/slices or a running
 native operation free: their actual final owners must still release them.
 
 **Uploads.** Receiving a request body is a phase of its own with its own limit,
-`max_uploads` (default 8, 1 .. 256). A request that carries a body (`POST /v1/hash`,
+`max_uploads` (unset: 8, or less when `total_temp` holds fewer spools, see below; 1 .. 256). A request that carries a body (`POST /v1/hash`,
 `/v1/operations`, `/v1/batch`) takes one upload slot after authentication and before it reads
 any byte of the body, and keeps it while it waits for the client, spools its documents to the
 scratch directory and, once the body is complete, waits for an `max_in_flight` slot. A client
@@ -395,20 +395,36 @@ that disconnects, the idle timeout or minimum rate (below), the operation deadli
 cancellation, a shutdown and any refusal (such as `InputLimit`).
 
 The phase takes a slot of its own, not one more native worker: waiting for the client is
-asynchronous. Writing a received piece to the spool (a Hyper frame, at most 32 KiB) is a short
+asynchronous. Writing a received piece to the spool (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB) is a short
 blocking section, one at a time per upload, on the runtime's blocking pool; that pool holds
 `blocking_workers + max_uploads` threads so that a long operation cannot keep uploads from
 progressing. The hash route (`POST /v1/hash`) hashes each received piece where it arrives, on
 the runtime's own threads (a CPU section of one frame), without any spool; a hash upload that
 stalls thus holds an upload slot and no worker either.
 
-`max_uploads` must be at least 1, at most 256 and at most
-`total_temp / (input_bytes + container_bytes)` (integer division; with the defaults 16 GiB /
-2 GiB = 8): every upload must be able to reserve the largest spool it may need (a signed
-input spools up to `input_bytes + container_bytes`) in the shared temp budget at the same
-time. The server refuses to start with a larger value; with a larger `input_bytes` or
-`container_bytes` lower `max_uploads` (or raise `total_temp`). The temp budget still bounds
-every spool: an upload that cannot reserve more is refused with `TempLimit` as before.
+`max_uploads` is 1 .. 256 and at most `total_temp / (input_bytes + container_bytes)` (integer
+division; with the defaults 16 GiB / 2 GiB = 8): every upload must be able to reserve the
+largest spool it may need (a signed input spools up to `input_bytes + container_bytes`) in the
+shared temp budget at the same time.
+
+* **Unset (the default).** The effective value is `min(8, max(1, total_temp / (input_bytes +
+  container_bytes)))`. When the budget lowers it below 8 the server says so once at start, on
+  stderr: ``oncl-server: `max_uploads` is not set; lowered from 8 to N because total_temp holds
+  M spool(s) of input_bytes + container_bytes``. A `total_temp` smaller than one spool is
+  allowed (effective value 1): a larger upload is then refused with `TempLimit`.
+* **Set explicitly.** A value of 0, above 256 or above the bound is refused at start, and the
+  message names the key and the bound (`` `max_uploads` must be 1..=256 and at most N ``).
+
+The temp budget still bounds every spool: an upload that cannot reserve more is refused with
+`TempLimit` as before.
+
+**Migration note (`max_uploads`).** Nothing breaks for an existing configuration: a
+`server.toml` that does not set `max_uploads` keeps starting whatever its `total_temp`,
+`input_bytes` and `container_bytes` are; the only difference is that the effective default can
+be lower than 8 when `total_temp` is small (for example 4 with `total_temp` 8 GiB and the default
+allowances), which the start-up line above reports. Before this change a body occupied a native
+worker while it arrived, so the upload phase had no limit of its own; setting `max_uploads`
+yourself is only needed to go *below* the default or, with a larger `total_temp`, above 8.
 
 **Waiting for an operation slot.** `max_in_flight` bounds the operations that run at
 once. A request whose body has been accepted waits up to `admission_wait_ms`, polling every
@@ -735,7 +751,7 @@ docker run -d --name oncl-server --read-only --cap-drop ALL --security-opt no-ne
   -p 127.0.0.1:13579:13579 oncl-server:<version>
 ```
 
-(Put a TLS key into the volume the same way: `… --entrypoint sh … -c 'umask 077 && mkdir -p /etc/oncl-server/tls && cat > /etc/oncl-server/tls/server.key' < server.key`, and read the token out with `--entrypoint cat`.) Inside the container `bind` must be `0.0.0.0:13579` with `hosts` equal to the authority clients use, and TLS or `trusted_proxy`; `-p 127.0.0.1:…` publishes it on the host's loopback only. With the example configuration the container prints `disabled: no listener` and exits 0. Never use `--privileged`. The image sets `STOPSIGNAL SIGINT`, so `docker stop` drains admitted operations (give it `--time` beyond `operation_timeout_ms`; the default Docker grace is 10 s). `--memory 1g` is the container budget for the example's `total_memory`; scratch space is bounded by `total_temp`, so size the `oncl-state` volume for it or lower `temp_per_operation` and `total_temp`. The image's `HEALTHCHECK` only tests that the port (`ONCL_HEALTH_PORT`, default 13579) accepts a TCP connection from inside the container: the authenticated `GET /health` needs a token, which the image must not hold, so probe it from your monitoring with a token that has the `hash` right.
+(Put a TLS key into the volume the same way: `… --entrypoint sh … -c 'umask 077 && mkdir -p /etc/oncl-server/tls && cat > /etc/oncl-server/tls/server.key' < server.key`, and read the token out with `--entrypoint cat`.) Inside the container `bind` must be `0.0.0.0:13579` with `hosts` equal to the authority clients use, and TLS or `trusted_proxy`; `-p 127.0.0.1:…` publishes it on the host's loopback only. With the example configuration the container prints `disabled: no listener` and exits 0. Never use `--privileged`. The image sets `STOPSIGNAL SIGINT`, so `docker stop` drains admitted operations (give it `--time` beyond `operation_timeout_ms`; the default Docker grace is 10 s). `--memory 1g` is the container budget for the example's `total_memory`; scratch space is bounded by `total_temp`, so size the `oncl-state` volume for it or lower `temp_per_operation` and `total_temp`. Lowering `total_temp` also lowers the number of bodies received at once: with `max_uploads` unset the server uses `min(8, total_temp / (input_bytes + container_bytes))` (at least 1) and logs the lowered value once at start, while an explicit `max_uploads` above that bound is refused at start (see "Uploads" above). The image's `HEALTHCHECK` only tests that the port (`ONCL_HEALTH_PORT`, default 13579) accepts a TCP connection from inside the container: the authenticated `GET /health` needs a token, which the image must not hold, so probe it from your monitoring with a token that has the `hash` right.
 
 ### Not done / not exercised here
 

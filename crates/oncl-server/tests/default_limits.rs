@@ -15,16 +15,21 @@ fn the_default_profile_guarantees_one_gibibyte_documents_inside_the_engine_ceili
 
 #[test]
 fn an_operator_may_raise_the_input_limit_above_the_default() {
-    // 16 GiB of temp hold 3 spools of 4 GiB + 1 GiB: `max_uploads` must come down with the
-    // allowance (the default 8 is refused, see `max_uploads_is_bounded_by_the_temp_budget_...`).
+    // 16 GiB of temp hold 3 spools of 4 GiB + 1 GiB: with `max_uploads` unset the default
+    // comes down from 8 to 3 by itself; an explicit value must respect the same bound.
     let config = ServerConfig {
         input_bytes: 4 * 1_073_741_824,
-        max_uploads: 3,
         ..ServerConfig::default()
     };
     config.validate().unwrap();
+    assert_eq!(config.effective_max_uploads(), 3);
+    let explicit = ServerConfig {
+        max_uploads: Some(3),
+        ..config.clone()
+    };
+    explicit.validate().unwrap();
     let too_many = ServerConfig {
-        max_uploads: 4,
+        max_uploads: Some(4),
         ..config
     };
     assert!(too_many.validate().is_err());
@@ -63,7 +68,7 @@ fn a_nonsensical_container_allowance_is_refused() {
     let config = ServerConfig {
         container_bytes: u64::MAX - defaults.input_bytes - defaults.framing_bytes - 65_536,
         total_temp: u64::MAX,
-        max_uploads: 1,
+        max_uploads: None,
         ..defaults
     };
     config.validate().unwrap();

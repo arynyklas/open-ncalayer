@@ -256,6 +256,36 @@ fn real_process_hash_auth_and_unknown_length() {
     process.stop();
 }
 
+/// A valid `/v1/hash` upload is never refused for the size of the frames Hyper hands over:
+/// against `max_buf_size(32768)` frames of 49,152 and 57,344 bytes were observed from a client
+/// that writes large blocks at once, and the route used to answer `400 InvalidRequest`.
+#[test]
+fn a_hash_upload_written_in_large_blocks_is_not_refused_for_its_frame_size() {
+    use std::io::{Read, Write};
+    let process = server_support::Process::start("");
+    const BLOCK: usize = 1 << 20;
+    const BLOCKS: usize = 16;
+    for _ in 0..3 {
+        let mut socket = std::net::TcpStream::connect(process.address).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+            .unwrap();
+        write!(socket,"POST /v1/hash HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",process.address,*process.token,BLOCK * BLOCKS).unwrap();
+        let block = vec![0x5a; BLOCK];
+        for _ in 0..BLOCKS {
+            socket.write_all(&block).unwrap();
+        }
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response.contains(&format!("\"bytes_in\":{}", BLOCK * BLOCKS)),
+            "{response}"
+        );
+    }
+    process.stop();
+}
+
 #[test]
 fn proxy_header_not_authority() {
     let process =

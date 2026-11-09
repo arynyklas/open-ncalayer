@@ -194,7 +194,7 @@ pub fn run(args: TokenHostArgs) -> anyhow::Result<()> {
     let host = oncl_server::service::ServiceHost::with_token_backend(config.clone(), backend)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .max_blocking_threads(config.blocking_workers)
+        .max_blocking_threads(config.blocking_threads())
         .enable_all()
         .build()?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();

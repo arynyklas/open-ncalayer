@@ -210,7 +210,7 @@ impl ServiceHost {
             plugin_policy,
             trust_bytes: config.pki.trust_bytes()?,
         });
-        let uploads = Arc::new(tokio::sync::Semaphore::new(config.max_uploads));
+        let uploads = Arc::new(tokio::sync::Semaphore::new(config.effective_max_uploads()));
         Ok(Arc::new(Self {
             engine,
             policy,
@@ -559,9 +559,41 @@ fn core_error(error: OperationError) -> ApiError {
         _ => ApiError::not_applied(ErrorCode::Internal),
     }
 }
+/// The most one received HTTP frame is charged for. The connection's parser buffer is
+/// `max_buf_size(32768)`, but a frame is whatever one socket read returned into the spare
+/// capacity of that buffer plus what was already buffered: 49,152 and 57,344 bytes were
+/// observed from a client that writes 64 KiB at once, so a frame is *not* at most 32 KiB.
+/// Two buffers' worth (the retained one plus one read) covers it.
+pub(crate) const FRAME_RESERVE_BYTES: u64 = 65_536;
+/// A digest state that runs on an async runtime thread, between two network waits. That is
+/// acceptable only for SHA-2 (measured per 32 KiB frame: SHA-256 12 us, SHA-512 37 us); the
+/// slower digests (Streebog-512 166 us, GOST R 34.11-94 802 us) starve every other request
+/// of the runtime's two threads, so the constructor refuses them and a future algorithm on
+/// an inline route has to take the worker path instead.
+pub(crate) struct InlineHash(HashStream);
+impl InlineHash {
+    pub(crate) const fn allows(algorithm: HashAlg) -> bool {
+        matches!(algorithm, HashAlg::Sha256 | HashAlg::Sha512)
+    }
+    pub(crate) fn new(algorithm: HashAlg, scope: &ResourceScope) -> Result<Self, ProcessingError> {
+        if !Self::allows(algorithm) {
+            return Err(ProcessingError::InvalidInput(
+                "inline hashing is limited to SHA-2",
+            ));
+        }
+        HashStream::new(algorithm, scope).map(Self)
+    }
+    fn update(&mut self, bytes: &[u8], scope: &ResourceScope) -> Result<(), ProcessingError> {
+        self.0.update(bytes, scope)
+    }
+    fn finish(self, scope: &ResourceScope) -> Result<DigestValue, ProcessingError> {
+        self.0.finish(scope)
+    }
+}
 /// Hashes a raw request body while it arrives. Every wait for the client is asynchronous
-/// and governed by the pace rules, the operation deadline and `cancel`; a piece is at most
-/// one Hyper frame (32 KiB) and is hashed where it arrives, so no thread is held while the
+/// and governed by the pace rules, the operation deadline and `cancel`; a piece is one
+/// Hyper frame (see [`FRAME_RESERVE_BYTES`]; `update` consumes it in as many input requests
+/// as the budget needs) and is hashed where it arrives, so no thread is held while the
 /// client is silent. Returns the SHA-256 and the number of bytes.
 async fn hash_body(
     mut body: Body,
@@ -572,7 +604,7 @@ async fn hash_body(
 ) -> Result<(DigestValue, u64), ApiError> {
     let invalid = || ApiError::not_applied(ErrorCode::InvalidRequest);
     let mut pace = UploadPace::new(pace);
-    let mut hasher = HashStream::new(HashAlg::Sha256, scope).map_err(processing_error)?;
+    let mut hasher = InlineHash::new(HashAlg::Sha256, scope).map_err(processing_error)?;
     let mut total = 0u64;
     loop {
         let frame = tokio::select! {
@@ -584,9 +616,6 @@ async fn hash_body(
             .map_err(|_| invalid())?
             .into_data()
             .map_err(|_| invalid())?;
-        if data.len() > 32_768 {
-            return Err(invalid());
-        }
         hasher.update(&data, scope).map_err(processing_error)?;
         total += data.len() as u64;
     }
@@ -649,7 +678,7 @@ impl ServiceHost {
                 .map_err(processing_error)?;
             let ingress = admission
                 .resources()
-                .reserve_memory(32_768)
+                .reserve_memory(FRAME_RESERVE_BYTES)
                 .map_err(processing_error)?;
             let (digest, bytes_in) =
                 hash_body(body, admission.resources(), deadline, pace, &cancel).await?;
@@ -662,6 +691,9 @@ impl ServiceHost {
             })
             .await?;
             drop(upload);
+            // `hash_unobserved` does not call `Engine::hash`: the digest is computed inline
+            // in `hash_body` and the operation is only begun here. Any per-hash logic added to
+            // `Engine::hash` later (new checks, accounting, telemetry) MUST be mirrored here.
             let ctx = engine
                 .begin_admitted(admission, grant, OperationPolicy::strict_online())
                 .map_err(core_error)?;
@@ -1102,4 +1134,45 @@ pub async fn serve<F: Future<Output = ()>>(
     let telemetry = host.telemetry.clone();
     let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oncl_pki::resource::ResourceLimits;
+
+    fn scope() -> ResourceScope {
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        budget
+            .begin_unslotted(
+                limits,
+                Arc::new(InvocationControl {
+                    cancel: Arc::new(Cancellation::new()),
+                    deadline: Deadline::after(Duration::from_secs(30)).unwrap(),
+                    progress: None,
+                }),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn inline_hashing_is_refused_for_every_algorithm_but_sha2() {
+        let scope = scope();
+        for algorithm in HashAlg::ALL {
+            let sha2 = matches!(algorithm, HashAlg::Sha256 | HashAlg::Sha512);
+            assert_eq!(InlineHash::allows(algorithm), sha2, "{algorithm:?}");
+            assert_eq!(
+                InlineHash::new(algorithm, &scope).is_ok(),
+                sha2,
+                "{algorithm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frame_reservation_covers_the_frames_hyper_delivers() {
+        // 49,152 and 57,344 byte frames were observed against `max_buf_size(32768)`.
+        const { assert!(FRAME_RESERVE_BYTES >= 57_344) };
+    }
 }

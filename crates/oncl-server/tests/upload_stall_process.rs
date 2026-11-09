@@ -521,72 +521,126 @@ fn the_upload_knobs_have_safe_defaults_and_bounded_ranges() {
     off.validate().expect("0 switches the rate rule off");
 }
 
-/// `max_uploads`: at least 1, at most 256, and every upload must be able to reserve its
-/// largest spool (`input_bytes + container_bytes`) in the shared temp budget at once, i.e.
-/// `max_uploads <= total_temp / (input_bytes + container_bytes)`.
+/// `max_uploads` unset: the effective default is `min(8, max(1, total_temp /
+/// (input_bytes + container_bytes)))` and every config that validated before still validates.
+/// An explicit value is 1 ..= 256 and at most that bound; the refusal names the key.
 #[test]
-fn max_uploads_is_bounded_by_the_temp_budget_and_a_fixed_range() {
-    use oncl_server::config::ServerConfig;
+fn max_uploads_defaults_to_what_the_temp_budget_holds_and_an_explicit_value_is_bounded() {
+    use oncl_server::config::{MaxUploadsError, ServerConfig};
     const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
     let defaults = ServerConfig::default();
-    // 16 GiB of temp / (1 GiB input + 1 GiB container) = 8.
-    assert_eq!(defaults.max_uploads, 8);
-    assert_eq!(
-        defaults.total_temp / (defaults.input_bytes + defaults.container_bytes),
-        8
-    );
-    defaults
-        .validate()
-        .expect("the default is accepted at the default config");
+    assert_eq!(defaults.max_uploads, None, "the key is unset by default");
+    assert_eq!(defaults.effective_max_uploads(), 8);
+    assert_eq!(defaults.lowered_max_uploads(), None, "nothing to log at 8");
+    defaults.validate().expect("the default config validates");
 
+    // (total_temp, temp_per_operation, effective default): the configs the proof harness and
+    // the operators use, all with the key unset and the default 1 GiB + 1 GiB allowances.
+    let table = [
+        (16 * GIB, 8 * GIB, 8),
+        (8 * GIB, 8 * GIB, 4),
+        (4 * GIB, 4 * GIB, 2),
+        (3 * GIB, 2 * GIB, 1),
+        (2 * GIB, GIB, 1),
+        (4 * GIB, GIB, 2),
+        (8 * GIB, 4 * GIB, 4),
+        (512 * MIB, 512 * MIB, 1),
+        (MIB, MIB, 1),
+    ];
+    for (total_temp, temp_per_operation, effective) in table {
+        let config = ServerConfig {
+            total_temp,
+            temp_per_operation,
+            ..Default::default()
+        };
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("{total_temp}/{temp_per_operation}: {e}"));
+        assert_eq!(
+            config.effective_max_uploads(),
+            effective,
+            "{total_temp}/{temp_per_operation}"
+        );
+        assert_eq!(config.lowered_max_uploads().is_some(), effective < 8);
+    }
+    let lowered = ServerConfig {
+        total_temp: 4 * GIB,
+        temp_per_operation: 4 * GIB,
+        ..Default::default()
+    };
+    assert_eq!(lowered.lowered_max_uploads(), Some((2, 2)));
+
+    // Explicit values: the bound is accepted, one more is refused with the key named.
     let with = |max_uploads: usize, tweak: &dyn Fn(&mut ServerConfig)| {
         let mut config = ServerConfig {
-            max_uploads,
+            max_uploads: Some(max_uploads),
             ..Default::default()
         };
         tweak(&mut config);
         config.validate()
     };
     let nothing = |_: &mut ServerConfig| {};
-    assert!(
-        with(0, &nothing).is_err(),
-        "0 uploads can never admit a client"
-    );
-    // The temp rule: one more than the budget allows is refused, the boundary is accepted.
-    assert!(
-        with(9, &nothing).is_err(),
-        "9 spools of 2 GiB do not fit 16 GiB"
-    );
+    let named = |result: std::io::Result<()>, bound: u64| {
+        let error = result.expect_err("refused");
+        let refusal = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<MaxUploadsError>())
+            .expect("a typed max_uploads refusal, not the generic one");
+        assert_eq!(refusal.bound, bound);
+        let text = error.to_string();
+        assert!(text.contains("`max_uploads`"), "{text}");
+        assert!(text.contains(&bound.to_string()), "{text}");
+    };
+    named(with(0, &nothing), 8);
+    named(with(9, &nothing), 8);
     assert!(with(8, &nothing).is_ok());
     assert!(with(1, &nothing).is_ok());
-    // A larger budget lifts the rule up to the fixed ceiling of 256.
     let large = |config: &mut ServerConfig| {
         config.total_temp = 1024 * GIB;
     };
-    assert!(
-        with(256, &large).is_ok(),
-        "256 spools fit 1024 GiB / 2 GiB = 512"
-    );
-    assert!(with(257, &large).is_err(), "257 is past the fixed ceiling");
-    // The divisor is input_bytes + container_bytes: a smaller document allowance admits more.
+    assert!(with(256, &large).is_ok(), "1024 GiB / 2 GiB = 512 >= 256");
+    named(with(257, &large), 512);
     let small_documents = |config: &mut ServerConfig| {
         config.input_bytes = GIB / 4;
         config.container_bytes = GIB / 4;
     };
     assert!(with(32, &small_documents).is_ok(), "16 GiB / 0.5 GiB = 32");
-    assert!(with(33, &small_documents).is_err());
-    // A budget below one spool admits no upload at all.
+    named(with(33, &small_documents), 32);
+    // An explicit value above a bound of 0 is refused (the default would be 1 there).
     let tiny = |config: &mut ServerConfig| {
         config.total_temp = GIB;
         config.temp_per_operation = GIB;
     };
-    assert!(
-        with(1, &tiny).is_err(),
-        "1 GiB of temp cannot hold one 2 GiB spool"
-    );
+    named(with(1, &tiny), 0);
     // The key is part of the documented TOML surface.
     let parsed: ServerConfig = toml::from_str("max_uploads = 3").expect("max_uploads is a key");
-    assert_eq!(parsed.max_uploads, 3);
+    assert_eq!(parsed.max_uploads, Some(3));
+    assert_eq!(parsed.effective_max_uploads(), 3);
+}
+
+/// One helper sizes the runtime's blocking pool for every runtime builder (the server binary
+/// and the proof harness's token host): the executor's workers plus one spool write per
+/// upload in progress. Workers only would queue the spool writes behind long operations.
+#[test]
+fn the_blocking_pool_holds_the_workers_and_the_effective_uploads() {
+    use oncl_server::config::ServerConfig;
+    const GIB: u64 = 1 << 30;
+    let defaults = ServerConfig::default();
+    assert_eq!(defaults.blocking_threads(), defaults.blocking_workers + 8);
+    let explicit = ServerConfig {
+        blocking_workers: 5,
+        max_uploads: Some(3),
+        ..Default::default()
+    };
+    assert_eq!(explicit.blocking_threads(), 8);
+    let lowered = ServerConfig {
+        blocking_workers: 4,
+        total_temp: 3 * GIB,
+        temp_per_operation: 2 * GIB,
+        ..Default::default()
+    };
+    assert_eq!(lowered.blocking_threads(), 5, "4 workers + the default 1");
 }
 
 /// A small `hash` request of the given body kind for `/v1/operations` or `/v1/batch`.

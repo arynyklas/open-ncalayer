@@ -191,7 +191,7 @@ async fn multipart_document_bytes_are_not_framing_but_epilogue_is_bounded() {
 async fn original_admission_holds_global_quota_during_first_metadata_and_deadline() {
     let service = Running::start_with(|c| {
         c.max_in_flight = 1;
-        c.max_uploads = 1;
+        c.max_uploads = Some(1);
         // Must outlast the first 503 probe on a loaded machine: the deadline is the
         // only thing that releases the held admission, so it is not a speed bound.
         c.operation_timeout_ms = 6_000;
