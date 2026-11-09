@@ -180,11 +180,24 @@ pub fn encode_gauge(name: &str, value: i64) -> Vec<u8> {
     request
 }
 
+/// The value of the SECOND export of `name` that was received after `after` (seconds on the
+/// collector clock). The first export after a state change may have been read from the server
+/// just before the change and delivered just after it; the second was read after the first was
+/// delivered, so it describes a state at or after the change. `None` until it has arrived.
+pub fn second_sample_after(samples: &[Sample], name: &str, after: f64) -> Option<f64> {
+    samples
+        .iter()
+        .filter(|s| s.name == name && s.at > after)
+        .nth(1)
+        .map(|s| s.value)
+}
+
 pub struct Collector {
     pub url: String,
     samples: Arc<Mutex<Vec<Sample>>>,
     error_tokens: Arc<Mutex<std::collections::BTreeSet<String>>>,
     stop: Arc<AtomicBool>,
+    origin: Instant,
     join: Option<thread::JoinHandle<()>>,
 }
 
@@ -218,6 +231,7 @@ impl Collector {
             samples,
             error_tokens,
             stop,
+            origin,
             join: Some(join),
         })
     }
@@ -246,6 +260,27 @@ impl Collector {
             .iter()
             .rev()
             .find(|s| s.name == name)
+            .map(|s| s.value)
+    }
+
+    /// Seconds on the clock that stamps [`Sample::at`].
+    pub fn elapsed(&self) -> f64 {
+        self.origin.elapsed().as_secs_f64()
+    }
+
+    /// See [`second_sample_after`].
+    pub fn second_after(&self, name: &str, after: f64) -> Option<f64> {
+        second_sample_after(&self.samples(), name, after)
+    }
+
+    /// The newest export of `name` that was received after `after`: for a state that, once
+    /// reached, holds (nothing is started meanwhile), so that any export from `after` on shows
+    /// it or a later poll will.
+    pub fn latest_after(&self, name: &str, after: f64) -> Option<f64> {
+        self.samples()
+            .iter()
+            .rev()
+            .find(|s| s.name == name && s.at > after)
             .map(|s| s.value)
     }
 }

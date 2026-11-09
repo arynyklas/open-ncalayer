@@ -199,6 +199,11 @@ pub struct ServerSettings {
     /// The server's `max_uploads`; `None` leaves the key out (the server then lowers its
     /// default of 8 to what `total_temp` holds).
     pub max_uploads: Option<usize>,
+    /// The server's `upload_idle_timeout_ms`; `None` leaves the key out (30 000 ms).
+    pub upload_idle_timeout_ms: Option<u64>,
+    /// The server's `metadata_bytes` (the shared budget of document structure: concurrent
+    /// XML/PDF signatures draw on it); `None` leaves the key out (64 MiB).
+    pub metadata_bytes: Option<u64>,
 }
 
 impl ServerSettings {
@@ -221,6 +226,8 @@ impl ServerSettings {
             telemetry_endpoint: None,
             token_alias: None,
             max_uploads: None,
+            upload_idle_timeout_ms: None,
+            metadata_bytes: None,
         }
     }
 }
@@ -282,6 +289,12 @@ impl HttpServer {
         );
         if let Some(max_uploads) = settings.max_uploads {
             config.push_str(&format!("max_uploads = {max_uploads}\n"));
+        }
+        if let Some(idle) = settings.upload_idle_timeout_ms {
+            config.push_str(&format!("upload_idle_timeout_ms = {idle}\n"));
+        }
+        if let Some(metadata) = settings.metadata_bytes {
+            config.push_str(&format!("metadata_bytes = {metadata}\n"));
         }
         config.push_str(&format!(
             "\n[[tokens]]\nid = 'proof-client'\nverifier = '{verifier}'\nactions = ['hash', 'verify', 'extract', 'sign', 'extend']\nkeys = [{}]\n",

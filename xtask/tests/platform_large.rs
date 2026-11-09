@@ -3,14 +3,14 @@
 //! that is the separate acceptance gate (docs/dev/platform-acceptance.md). The oracle test
 //! needs lxml, pyHanko and friends (`ONCL_PYHANKO_PYTHON`) and fails, never skips, without them.
 
-use std::{io::Read, path::Path};
+use std::{io::Read, path::Path, time::Duration};
 use xtask::platform::{
     generate::{
         self, blob,
         pdf::{self, PdfProfile},
         xml::{self, XmlKind},
     },
-    large::{http_raw, otlp},
+    large::{barrier, http_raw, otlp},
     measure::{self, Feed, RunOptions},
 };
 
@@ -392,4 +392,232 @@ fn a_multipart_mixed_answer_yields_its_final_record_and_artifact() {
     let (final_record, artifact) = http_raw::multipart_final(&reply).unwrap();
     assert_eq!(final_record["status"], "completed");
     assert_eq!(artifact, b"ABCDE");
+}
+
+#[test]
+fn a_barrier_returns_when_its_state_holds_and_names_what_never_happened() {
+    let mut polls = 0;
+    let value = barrier::wait_until("three polls", Duration::from_secs(5), || {
+        polls += 1;
+        (polls == 3).then_some(polls * 10)
+    })
+    .unwrap();
+    assert_eq!(value, 30);
+    let error = barrier::wait_until::<()>(
+        "a slot that is never freed",
+        Duration::from_millis(100),
+        || None,
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("timed out") && text.contains("a slot that is never freed"),
+        "{text}"
+    );
+}
+
+#[test]
+fn spool_and_flag_barriers_demand_the_whole_state() {
+    let mib = 1u64 << 20;
+    // five spools of 8 MiB: every file and (nearly) every byte, not either one
+    assert!(barrier::spools_hold(5, 40 * mib, 5, 8 * mib));
+    assert!(
+        barrier::spools_hold(5, 40 * mib - 5 * 64 * 1024, 5, 8 * mib),
+        "the parser's withheld tail is tolerated"
+    );
+    assert!(
+        !barrier::spools_hold(4, 40 * mib, 5, 8 * mib),
+        "a spool is missing"
+    );
+    assert!(
+        !barrier::spools_hold(5, 20 * mib, 5, 8 * mib),
+        "the spools are not written yet"
+    );
+    assert!(barrier::all_hold(&[true, true]));
+    assert!(!barrier::all_hold(&[true, false]));
+    assert!(
+        !barrier::all_hold(&[]),
+        "a barrier that waits for nobody must not pass"
+    );
+}
+
+#[test]
+fn the_gauge_read_for_a_barrier_is_the_second_export_after_the_change() {
+    let sample = |name: &str, value: f64, at: f64| otlp::Sample {
+        name: name.into(),
+        value,
+        at,
+    };
+    let samples = vec![
+        sample("oncl.requests.in_flight", 5.0, 1.0),
+        sample("oncl.executor.running", 9.0, 1.1),
+        sample("oncl.requests.in_flight", 5.0, 1.2),
+        // the change happened at 1.25: this export may have been read just before it
+        sample("oncl.requests.in_flight", 4.0, 1.4),
+        sample("oncl.requests.in_flight", 0.0, 1.6),
+        sample("oncl.requests.in_flight", 0.0, 1.8),
+    ];
+    let name = "oncl.requests.in_flight";
+    assert_eq!(otlp::second_sample_after(&samples, name, 1.25), Some(0.0));
+    assert_eq!(
+        otlp::second_sample_after(&samples, name, 1.7),
+        None,
+        "only one export has arrived since"
+    );
+    assert_eq!(otlp::second_sample_after(&samples, "missing", 0.0), None);
+}
+
+/// Reads a request head from `stream`.
+fn read_request_head(stream: &mut std::net::TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        assert_eq!(stream.read(&mut byte).unwrap(), 1, "closed in the head");
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap()
+}
+
+fn stalled_upload(document: usize, hold: Duration) -> http_raw::Upload {
+    http_raw::Upload {
+        path: "/v1/operations".into(),
+        metadata: "{}".into(),
+        document: http_raw::Source::Bytes(vec![7; document]),
+        chunked: true,
+        expect_continue: true,
+        bytes_per_second: None,
+        stall_after: Some((document as u64, hold)),
+        abort_after: None,
+    }
+}
+
+#[test]
+fn a_stalled_upload_is_parked_on_100_continue_and_let_go_by_the_harness() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let head = read_request_head(&mut stream);
+        assert!(head.to_ascii_lowercase().contains("expect: 100-continue"));
+        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+        // everything the client writes until it closes
+        let mut received = 0usize;
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return received,
+                Ok(n) => received += n,
+            }
+        }
+    });
+    let probe = http_raw::Probe::default();
+    assert!(!probe.continued() && !probe.stalled() && probe.answered().is_none());
+    let upload = stalled_upload(100_000, Duration::from_secs(60));
+    let reply = std::thread::scope(|s| {
+        let client = s.spawn(|| http_raw::send_probed(&address, "t", &upload, &probe));
+        barrier::wait_until("the client to be parked", Duration::from_secs(20), || {
+            (probe.continued() && probe.stalled()).then_some(())
+        })
+        .unwrap();
+        assert_eq!(probe.document_sent(), 100_000);
+        assert_eq!(probe.answered(), None, "nobody answered: it is a stall");
+        assert!(
+            !client.is_finished(),
+            "a stalled client waits until it is let go"
+        );
+        probe.release();
+        client.join().unwrap()
+    });
+    assert!(
+        reply
+            .transport_error
+            .as_deref()
+            .is_some_and(|e| e.contains("on purpose")),
+        "{:?}",
+        reply.transport_error
+    );
+    assert_eq!(reply.status, 0);
+    let received = server.join().unwrap();
+    assert!(received >= 100_000, "the server saw the bytes: {received}");
+}
+
+#[test]
+fn a_refusal_before_the_body_is_seen_without_a_100_continue() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request_head(&mut stream);
+        let body = r#"{"code":"CapacityExceeded","applied":"NotApplied"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let probe = http_raw::Probe::default();
+    let reply = http_raw::send_probed(
+        &address,
+        "t",
+        &stalled_upload(100_000, Duration::from_secs(60)),
+        &probe,
+    );
+    server.join().unwrap();
+    assert_eq!(reply.status, 503);
+    assert!(reply.refused_before_body);
+    assert_eq!(reply.sent_document_bytes, 0);
+    assert!(!probe.continued(), "no 100 Continue: no upload slot");
+    assert!(!probe.stalled());
+    assert_eq!(probe.answered(), Some(503));
+    assert_eq!(reply.json().unwrap()["code"], "CapacityExceeded");
+}
+
+#[test]
+fn a_stall_the_server_ends_is_answered_without_the_harness_letting_go() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request_head(&mut stream);
+        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+        // read until the client has gone silent (it is parked), then end the stall the way the
+        // idle rule does
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut received = 0usize;
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => panic!("the client closed"),
+                Ok(n) => received += n,
+                Err(_) => break,
+            }
+        }
+        assert!(received >= 10_000, "{received}");
+        let body = r#"{"code":"DeadlineExceeded","applied":"NotApplied"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let probe = http_raw::Probe::default();
+    let reply = http_raw::send_probed(
+        &address,
+        "t",
+        &stalled_upload(10_000, Duration::from_secs(60)),
+        &probe,
+    );
+    server.join().unwrap();
+    assert!(probe.continued() && probe.stalled());
+    assert_eq!(probe.answered(), Some(504));
+    assert_eq!(reply.status, 504);
+    assert_eq!(reply.json().unwrap()["code"], "DeadlineExceeded");
+    assert!(!reply.refused_before_body);
 }

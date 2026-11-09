@@ -1,11 +1,14 @@
 //! The matrix of the platform proof: data, reference validation, cases, report.
 
+pub mod barrier;
 mod cases;
+mod clients;
 mod env;
 mod exec;
 pub mod http_raw;
 pub mod otlp;
 mod overload;
+mod profile;
 
 use super::{
     ProofArgs, Surface,
@@ -374,7 +377,7 @@ fn plan() -> Vec<Case> {
         Case {
             id: "overload-profile",
             surfaces: &[Target::Http],
-            run: overload::run,
+            run: profile::run,
         },
         Case {
             id: "overload-token-apdu",
@@ -384,7 +387,7 @@ fn plan() -> Vec<Case> {
         Case {
             id: "overload-slot-release",
             surfaces: &[Target::Http],
-            run: overload::run_slot_repro,
+            run: overload::run_slot_release,
         },
         Case {
             id: "http-progress-frame-rate",

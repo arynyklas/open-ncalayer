@@ -7,6 +7,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     path::PathBuf,
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -83,6 +84,55 @@ pub struct Reply {
 impl Reply {
     pub fn json(&self) -> Option<serde_json::Value> {
         serde_json::from_slice(&self.body).ok()
+    }
+}
+
+/// What the harness can observe of one request while it is still running, and the one switch
+/// it can throw: the state barriers of the overload cases are built from these, never from
+/// sleeps. A `Probe` is shared (`&Probe` across threads) between the request's thread and the
+/// orchestrating thread.
+///
+/// `continued` is a statement about the SERVER: with `Expect: 100-continue` Hyper writes the
+/// interim `100 Continue` only when the handler first polls the request body, and the server
+/// polls it only after the request holds its upload slot (and has passed the busy-server
+/// check). A client that has seen `100 Continue` therefore holds an upload slot until it sends
+/// the end of its body, closes, or the server ends it.
+#[derive(Debug, Default)]
+pub struct Probe {
+    continued: AtomicBool,
+    document_sent: AtomicU64,
+    stalled: AtomicBool,
+    answered: AtomicU16,
+    release: AtomicBool,
+}
+
+impl Probe {
+    /// The server answered `100 Continue`: the request holds an upload slot.
+    pub fn continued(&self) -> bool {
+        self.continued.load(Ordering::SeqCst)
+    }
+
+    /// Document bytes written to the socket so far.
+    pub fn document_sent(&self) -> u64 {
+        self.document_sent.load(Ordering::SeqCst)
+    }
+
+    /// The client has written every byte it was told to and now only waits (`stall_after`).
+    pub fn stalled(&self) -> bool {
+        self.stalled.load(Ordering::SeqCst)
+    }
+
+    /// The status of the server's final answer once its head was read, else `None`.
+    pub fn answered(&self) -> Option<u16> {
+        match self.answered.load(Ordering::SeqCst) {
+            0 => None,
+            status => Some(status),
+        }
+    }
+
+    /// Ends a stall on the client's side by closing the connection (a disconnect).
+    pub fn release(&self) {
+        self.release.store(true, Ordering::SeqCst);
     }
 }
 
@@ -241,9 +291,14 @@ fn read_body(
 }
 
 pub fn send(address: &str, token: &str, up: &Upload) -> Reply {
+    send_probed(address, token, up, &Probe::default())
+}
+
+/// [`send`], publishing its progress to `probe` and obeying its `release` switch.
+pub fn send_probed(address: &str, token: &str, up: &Upload, probe: &Probe) -> Reply {
     let started = Instant::now();
     let mut reply = Reply::default();
-    let result = send_inner(address, token, up, &mut reply);
+    let result = send_inner(address, token, up, &mut reply, probe);
     if let Err(e) = result {
         reply.transport_error = Some(e.to_string());
     }
@@ -251,7 +306,13 @@ pub fn send(address: &str, token: &str, up: &Upload) -> Reply {
     reply
 }
 
-fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std::io::Result<()> {
+fn send_inner(
+    address: &str,
+    token: &str,
+    up: &Upload,
+    reply: &mut Reply,
+    probe: &Probe,
+) -> std::io::Result<()> {
     let mut stream = TcpStream::connect(address)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(3600)))?;
@@ -275,7 +336,10 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
     stream.write_all(request.as_bytes())?;
     if up.expect_continue {
         let (status, headers, _) = read_head(&mut stream)?;
-        if status != 100 {
+        if status == 100 {
+            probe.continued.store(true, Ordering::SeqCst);
+        } else {
+            probe.answered.store(status, Ordering::SeqCst);
             reply.status = status;
             reply.refused_before_body = true;
             reply.content_type = headers
@@ -315,6 +379,7 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
             wire.write(&buf[..n])?;
             sent += n as u64;
             reply.sent_document_bytes = sent;
+            probe.document_sent.store(sent, Ordering::SeqCst);
             if let Some(rate) = up.bytes_per_second {
                 let due = Duration::from_secs_f64(sent as f64 / rate as f64);
                 if let Some(wait) = due.checked_sub(paced.elapsed()) {
@@ -330,13 +395,18 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
         if let Some((limit, hold)) = up.stall_after
             && sent >= limit
         {
-            // stop sending; wait for the server to answer or close
+            // stop sending; wait for the server to answer or close, or for the harness to
+            // release the stall by disconnecting
+            probe.stalled.store(true, Ordering::SeqCst);
             let until = Instant::now() + hold;
             wire.stream.set_nodelay(true)?;
             let peek = stream.try_clone()?;
-            peek.set_read_timeout(Some(Duration::from_millis(500)))?;
+            peek.set_read_timeout(Some(Duration::from_millis(100)))?;
             let mut one = [0u8; 1];
             while Instant::now() < until {
+                if probe.release.load(Ordering::SeqCst) {
+                    return Ok(false);
+                }
                 match peek.peek(&mut one) {
                     Ok(_) => return Ok(true),
                     Err(e)
@@ -367,6 +437,7 @@ fn send_inner(address: &str, token: &str, up: &Upload, reply: &mut Reply) -> std
     }
     stream.set_read_timeout(Some(Duration::from_secs(3600)))?;
     let (status, headers, _) = read_head(&mut stream)?;
+    probe.answered.store(status, Ordering::SeqCst);
     reply.status = status;
     reply.content_type = headers
         .iter()
