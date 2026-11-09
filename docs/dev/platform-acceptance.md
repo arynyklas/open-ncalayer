@@ -35,8 +35,81 @@ A big run that was not done is **not** a pass.
    whole document, GOST, WSSE Body in the second half of the document, unknown-length XML, cancellation, temp quota, PDF
    (dense many-object and compact), PAdES-B, CAdES/PAdES/XAdES T→LT→LTA, output limit, key-application
    counts (SDK guard, server audit journal), scratch cleanup.
-7. `overload-profile` (real `oncl-server`, small shared budgets, OTLP gauges collected by the harness) and
-   `overload-token-apdu`.
+7. The overload family (real `oncl-server`, small shared budgets, OTLP gauges collected by the harness; see
+   "The overload cases" below): `overload-profile`, `overload-slot-release`, `overload-token-apdu`, and
+   the diagnostic `http-progress-frame-rate` (run only when named with `--only`).
+
+## The overload cases
+
+Since the upload phase (`docs/user/server.md`, "Uploads") a body is received under one of `max_uploads`
+upload slots, and only the completed body takes a `max_in_flight` slot and a native worker. The cases are
+therefore built on **observed server state, not on clocks**: a wave of clients starts when the previous wave has
+produced the state it was meant to produce (`xtask/src/platform/large/barrier.rs`). What the harness reads is
+one of three things:
+
+* what the server did to the client: with `Expect: 100-continue` Hyper writes `100 Continue` only when the
+  handler first polls the body, which the server does only after the request holds its upload slot, so the
+  receipt of `100 Continue` means "this client holds an upload slot" (`http_raw::Probe::continued`); an
+  answer or close (`Probe::answered`); a stalled client that the harness lets go by disconnecting
+  (`Probe::release`), so a stall lasts exactly as long as the plan wants;
+* what the server did to the disk: its spool files in the scratch directory (a spool holds what the SERVER
+  received, not what the client wrote into a socket);
+* what the server exported: its OTLP gauges, read as the second export after the change
+  (`otlp::second_sample_after`: the first may have been read just before the change).
+
+Every barrier has a time-out, and the time-out is a failure that names what never happened. Every client has a
+*plan* (`clients::Plan`): completes, refused `503 CapacityExceeded`/`NotApplied`, ends by its own disconnect, or is
+ended by the server (`504 DeadlineExceeded`/`NotApplied`); no wave puts more clients into the upload phase than
+`max_uploads` can hold, except the one probe that is meant to be refused, so the answer of every client is fixed
+by the plan and not by arrival order. `max_uploads` is explicit in the profiles (the default follows
+`total_temp / (input_bytes + container_bytes)`), and the budgets leave room for the concurrent signatures of a
+wave (`total_memory`, `metadata_bytes`). Measured on the first run of the redesign: with the default 64 MiB
+`metadata_bytes`, three of four concurrent signatures of the 8 MiB test document were aborted by the server
+at their start with `MetadataLimit` (the documented stream abort of a resource failure before any key use: the
+client sees only a lost response). That is the budget doing its work, but it would decide *which* client
+completes, so the profile raises `metadata_bytes` (512 MiB) and `total_memory` (1 GiB) and leaves the refusals to
+the upload slots, whose count is exact.
+
+* **`overload-profile`** (`max_in_flight 4`, `blocking_workers 4`, `max_uploads 6`, upload idle timeout and
+  operation deadline far beyond the run):
+  1. *Five stalled uploads* (one slot short; more than `max_in_flight` and `blocking_workers`): the exported gauges
+     show no running or queued operation; **(a)** a small request and a CPU-bound signature are admitted and
+     complete (the signature is checked by the independent oracle) while the stalls are still stalled.
+  2. *Every upload slot taken* (a sixth stall, after a CPU-bound signature was admitted): **(b)** a further
+     upload is refused `503 CapacityExceeded`/`NotApplied` before its body (no `100 Continue`, no byte sent)
+     after `admission_wait_ms`; `/health` is answered `200` throughout; the operation admitted earlier completes.
+  3. *Disconnect*: **(c)** every spool is deleted, the server sees no request in flight, and six new stalled
+     uploads each take a slot at once (a leaked slot would leave one of them unparked: the barrier fails).
+  4. *A storm*: a 1 GiB upload and a disconnecting upload in progress, four concurrent CPU-bound signatures and
+     three small requests next to them; all complete or end as planned, the 1 GiB digest is right.
+  5. *The idle rule*, on a second server (`upload_idle_timeout_ms 3000`, `max_uploads 2`): two stalled uploads
+     are ended by the server with `504 DeadlineExceeded`/`NotApplied` after about the idle timeout and never held
+     to the operation deadline; **(c)** both slots are free afterwards and the next request completes.
+  Over the whole run: every client got an end, no 500 or untyped close, a key never applied on a refusal, the
+  shared scratch empty, gauges exported, peak running within `blocking_workers` (and the signatures did run), peak
+  queued within `queue_capacity` (the queue stays empty by construction: `blocking_workers >= max_in_flight`, the
+  documented default shape, so no admitted signature waits for a worker), shared temp within `total_temp`,
+  `/health` answerable, a request after the storm with the right digest, graceful stop, a FINAL for every BEGIN,
+  empty scratch after the stop.
+* **`overload-slot-release`** (`max_in_flight 2`, `blocking_workers 2`, `max_uploads 4`, deadline 20 s, idle
+  timeout 120 s): two uploads stall against `max_in_flight = 2`; two CPU-bound signatures complete next to them (the
+  stalls hold no in-flight slot and no worker). Then two stalls that only the operation deadline ends: the server
+  ends them with `504 DeadlineExceeded` at about the deadline, all four upload slots are free again and the next
+  signature completes.
+* **`overload-token-apdu`**: sixteen concurrent signatures on two software cards, three times over, through the
+  service library with a counting card backend (not the standalone binary); APDU exchanges and card
+  transactions never overlap per reader, OpenSSL verifies the signatures, the audit has a FINAL for every
+  BEGIN. `max_uploads` is 8 (explicit; `total_temp` 16 GiB).
+* **`http-progress-frame-rate`**: one 1 GiB CPU-bound signature with a raw client that keeps the response;
+  records progress-frame traffic and checks that the entity completes without a transport abort. It is a single
+  request and does not depend on the upload phase.
+
+History: the first `overload-profile` assumed that a stalled upload holds a worker and an in-flight slot. Its
+retunes (workers 4, admission wait 8 s, uploads at 3 s, abandoned uploads aborted after 64 MiB) narrowed a
+timing race between the clients but could not remove it: under `--jobs 2` the abandoned uploads held their slots
+past `admission_wait_ms` and all CPU-bound clients were refused. After the upload phase the case failed outright
+(the default `max_uploads` of `3 GiB / 2 GiB = 1` was taken by a stalled upload and every other client was
+refused), and `overload-slot-release` passed on the strength of a late client only. Both were redesigned as above.
 
 ## Limits of the proof (state them in every report)
 
@@ -61,4 +134,4 @@ control-process memory budget stays 1 GiB. These are the ledger facts; no claim 
   * **D4** (dense PDF): the cross-reference budget; fixed by `a07d2832` (see "Dense PDFs" in `docs/dev/sdk.md`).
   * **D7** (server): a stalled or crawling upload held an admission slot; fixed (`902ed9f1`: `upload_idle_timeout_ms`, `upload_min_bytes_per_second`).
 * The 2 GiB rerun on `efc785ed` (history, before the scope change) passed PDF compact and dense, PAdES-B and levels, CAdES levels and XML far-reference / whole-document / WSSE; `cms-attached` had its OpenSSL oracle replaced above `INT_MAX` by a decomposition. Peak working set and private bytes were at or below about 20 MiB.
-* **The 1 GiB gate (`cargo xtask platform-proof` with the defaults above) has NOT been run.** No PASS is claimed. Not done at all: the `overload-profile` re-measure after D7, and encrypt/decrypt (G01/G02), which is externally blocked and has no case.
+* **The 1 GiB gate (`cargo xtask platform-proof` with the defaults above) has NOT been run.** No PASS is claimed. The overload family (see "The overload cases") was redesigned and run on its own at the full 1 GiB document size: each of the four cases passed three runs alone and three runs under artificial CPU and disk contention (35 busy processes: 32 CPU loops and three disk writers, with two different cases at once via `--jobs 2`; under it `overload-profile` took 69 s, 242 s and 81 s instead of about 41 s, and `http-progress-frame-rate` 1222 s, 1392 s and 1248 s instead of about 630 s). That is evidence for those cases, not a gate run. Not done at all: encrypt/decrypt (G01/G02), which is externally blocked and has no case.
