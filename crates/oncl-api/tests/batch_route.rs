@@ -472,6 +472,10 @@ async fn terminal_quota_stop_keeps_finished_artifacts_and_reports_the_rest_not_r
     let service = Running::start_with(service_config(&pki, |config| {
         config.temp_per_operation = 420_000;
         config.total_temp = 420_000;
+        // One spool of `input_bytes + container_bytes` must fit the temp budget.
+        config.input_bytes = 210_000;
+        config.container_bytes = 210_000;
+        config.max_uploads = 1;
     }))
     .await;
     let dir = tempfile::tempdir().unwrap();

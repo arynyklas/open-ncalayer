@@ -422,7 +422,11 @@ async fn a_stalled_sign_upload_takes_no_slot_or_worker_and_never_reaches_the_jou
         "the complete request must finish while the stalled upload is still pending: {:?}",
         started.elapsed()
     );
-    assert_eq!(begins(&service), 1, "only the complete request used its key");
+    assert_eq!(
+        begins(&service),
+        1,
+        "only the complete request used its key"
+    );
 
     assert_typed_deadline(&stalled.await.unwrap());
     assert_eq!(

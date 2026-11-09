@@ -661,9 +661,9 @@ impl Payload {
                     .map_err(|error| failure.recover(error))?;
                     loop {
                         if failure.stopped() {
-                            return Err(failure.recover(ProcessingError::InvalidInput(
-                                "intake stopped",
-                            )));
+                            return Err(
+                                failure.recover(ProcessingError::InvalidInput("intake stopped"))
+                            );
                         }
                         scope.checkpoint().map_err(|error| failure.recover(error))?;
                         let chunk = tokio::select! {

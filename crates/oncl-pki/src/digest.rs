@@ -1,9 +1,7 @@
 //! Fixed-size digests and streaming RustCrypto hash states. No document buffering.
 use crate::io::Source;
 use crate::key::HashAlg;
-use crate::resource::{
-    IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope,
-};
+use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope};
 use sha2::Digest;
 use std::io::Read;
 
@@ -204,7 +202,11 @@ impl HashStream {
         })
     }
     /// Hashes `bytes` after charging them to the operation.
-    pub fn update(&mut self, mut bytes: &[u8], scope: &ResourceScope) -> Result<(), ProcessingError> {
+    pub fn update(
+        &mut self,
+        mut bytes: &[u8],
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
         while !bytes.is_empty() {
             scope.checkpoint()?;
             let request = scope.input_request(bytes.len())?;

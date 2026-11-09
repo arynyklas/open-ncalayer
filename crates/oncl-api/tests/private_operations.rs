@@ -2278,6 +2278,10 @@ async fn later_item_abort_after_an_applied_item_is_a_failed_final_with_applied_r
     let service = Running::start_with(running_with_tsa(&pki, |config| {
         config.temp_per_operation = 300_000;
         config.total_temp = 300_000;
+        // One spool of `input_bytes + container_bytes` must fit the temp budget.
+        config.input_bytes = 150_000;
+        config.container_bytes = 150_000;
+        config.max_uploads = 1;
     }))
     .await;
     let small = vec![5u8; 20_000];
@@ -3661,11 +3665,10 @@ async fn split_request(service: &Running, body: &[u8], middle: impl FnOnce()) ->
     let cut = body.len() - 40;
     stream.write_all(&body[..cut]).await.unwrap();
     stream.flush().await.unwrap();
-    // The authorized native worker is provably inside intake, blocked on the unsent tail.
-    wait_for("worker blocked on the unsent body", || {
-        service.host.executor.running() == 1
-    })
-    .await;
+    // The body is held open mid-upload: the server is in its upload phase, waiting for the
+    // unsent tail without any native worker (and without an operation slot).
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(service.host.executor.running(), 0);
     middle();
     stream.write_all(&body[cut..]).await.unwrap();
     let mut response = Vec::new();

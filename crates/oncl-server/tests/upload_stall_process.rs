@@ -201,7 +201,11 @@ fn stalled_uploads_take_neither_an_admission_slot_nor_a_native_worker() {
             reply.elapsed
         );
         let reply = small_operation(&process, "/v1/operations");
-        assert_eq!(reply.status, 200, "operations round {round}: {}", reply.body);
+        assert_eq!(
+            reply.status, 200,
+            "operations round {round}: {}",
+            reply.body
+        );
         assert!(
             reply.elapsed < Duration::from_millis(550),
             "round {round}: an operation must not wait behind a stalled upload, took {:?}",
@@ -272,7 +276,8 @@ fn upload_cap_exhaustion_is_a_typed_503_after_the_admission_wait_and_frees_when_
     let refused = small_hash(&process);
     assert_typed_refusal(&refused, 503, "CapacityExceeded");
     assert!(
-        refused.elapsed >= Duration::from_millis(450) && refused.elapsed < Duration::from_millis(2500),
+        refused.elapsed >= Duration::from_millis(450)
+            && refused.elapsed < Duration::from_millis(2500),
         "a refusal must follow the admission wait, took {:?}",
         refused.elapsed
     );
@@ -358,12 +363,12 @@ fn a_disconnect_during_the_upload_releases_slot_spool_and_temp() {
         while walk(&scratch).is_empty() && started.elapsed() < Duration::from_secs(5) {
             sleep(Duration::from_millis(20));
         }
-        assert!(!walk(&scratch).is_empty(), "round {round}: the upload spools to scratch");
+        assert!(
+            !walk(&scratch).is_empty(),
+            "round {round}: the upload spools to scratch"
+        );
         // Hang up in the middle of the document.
-        upload
-            .stream
-            .shutdown(std::net::Shutdown::Both)
-            .unwrap();
+        upload.stream.shutdown(std::net::Shutdown::Both).unwrap();
         drop(upload.stream);
         let _ = upload.collector.join();
 
@@ -530,7 +535,9 @@ fn max_uploads_is_bounded_by_the_temp_budget_and_a_fixed_range() {
         defaults.total_temp / (defaults.input_bytes + defaults.container_bytes),
         8
     );
-    defaults.validate().expect("the default is accepted at the default config");
+    defaults
+        .validate()
+        .expect("the default is accepted at the default config");
 
     let with = |max_uploads: usize, tweak: &dyn Fn(&mut ServerConfig)| {
         let mut config = ServerConfig {
@@ -541,16 +548,25 @@ fn max_uploads_is_bounded_by_the_temp_budget_and_a_fixed_range() {
         config.validate()
     };
     let nothing = |_: &mut ServerConfig| {};
-    assert!(with(0, &nothing).is_err(), "0 uploads can never admit a client");
+    assert!(
+        with(0, &nothing).is_err(),
+        "0 uploads can never admit a client"
+    );
     // The temp rule: one more than the budget allows is refused, the boundary is accepted.
-    assert!(with(9, &nothing).is_err(), "9 spools of 2 GiB do not fit 16 GiB");
+    assert!(
+        with(9, &nothing).is_err(),
+        "9 spools of 2 GiB do not fit 16 GiB"
+    );
     assert!(with(8, &nothing).is_ok());
     assert!(with(1, &nothing).is_ok());
     // A larger budget lifts the rule up to the fixed ceiling of 256.
     let large = |config: &mut ServerConfig| {
         config.total_temp = 1024 * GIB;
     };
-    assert!(with(256, &large).is_ok(), "256 spools fit 1024 GiB / 2 GiB = 512");
+    assert!(
+        with(256, &large).is_ok(),
+        "256 spools fit 1024 GiB / 2 GiB = 512"
+    );
     assert!(with(257, &large).is_err(), "257 is past the fixed ceiling");
     // The divisor is input_bytes + container_bytes: a smaller document allowance admits more.
     let small_documents = |config: &mut ServerConfig| {
@@ -564,7 +580,10 @@ fn max_uploads_is_bounded_by_the_temp_budget_and_a_fixed_range() {
         config.total_temp = GIB;
         config.temp_per_operation = GIB;
     };
-    assert!(with(1, &tiny).is_err(), "1 GiB of temp cannot hold one 2 GiB spool");
+    assert!(
+        with(1, &tiny).is_err(),
+        "1 GiB of temp cannot hold one 2 GiB spool"
+    );
     // The key is part of the documented TOML surface.
     let parsed: ServerConfig = toml::from_str("max_uploads = 3").expect("max_uploads is a key");
     assert_eq!(parsed.max_uploads, 3);

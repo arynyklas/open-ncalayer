@@ -93,7 +93,13 @@ fn a_document_spool_holds_exactly_what_the_one_call_capture_holds_whatever_the_p
     let store = TemporaryStore::new(dir.path()).unwrap();
     // Larger than one IO chunk, and ragged.
     let data: Vec<u8> = (0..700_001u32).map(|i| (i % 251) as u8).collect();
-    for sizes in [&[1usize][..], &[7, 4096], &[32_768], &[300_000, 1], &[700_001]] {
+    for sizes in [
+        &[1usize][..],
+        &[7, 4096],
+        &[32_768],
+        &[300_000, 1],
+        &[700_001],
+    ] {
         let mut one = scope(1 << 20, 0);
         let mut reference = FrozenInput::capture(
             Source::sequential(&mut Cursor::new(data.clone()), None),
@@ -108,7 +114,10 @@ fn a_document_spool_holds_exactly_what_the_one_call_capture_holds_whatever_the_p
         }
         assert_eq!(spool.len(), data.len() as u64);
         let mut captured = spool.finish().unwrap();
-        assert!(!captured.is_wire(), "a plain document is an admitted snapshot");
+        assert!(
+            !captured.is_wire(),
+            "a plain document is an admitted snapshot"
+        );
         assert_eq!(captured.len(), reference.len());
         // The same accounting as the one-call capture.
         assert_eq!(s.progress().bytes_in, one.progress().bytes_in, "{sizes:?}");
@@ -151,7 +160,10 @@ fn a_document_spool_refuses_the_byte_past_the_allowance_like_the_capture_and_lea
     // A single piece that crosses the allowance is refused as a whole.
     let mut s = scope(10, 0);
     let mut spool = InputSpool::document(&store, &mut s).unwrap();
-    assert!(matches!(spool.push(&[1u8; 64]), Err(ProcessingError::InputLimit)));
+    assert!(matches!(
+        spool.push(&[1u8; 64]),
+        Err(ProcessingError::InputLimit)
+    ));
     drop(spool);
     // A refused or dropped spool deletes its file and frees its temp reservation.
     assert_eq!(files(dir.path()), 0);
@@ -168,7 +180,11 @@ fn a_wire_spool_has_the_allowance_of_the_one_call_wire_capture_and_charges_no_in
     let mut captured = spool.finish().unwrap();
     assert!(captured.is_wire());
     assert_eq!(captured.len(), 7);
-    assert_eq!(s.input_remaining(), 4, "nothing is charged before the engine reads it");
+    assert_eq!(
+        s.input_remaining(),
+        4,
+        "nothing is charged before the engine reads it"
+    );
     assert_eq!(s.progress().bytes_in, 0);
     assert_eq!(read_back(&mut captured, &s), b"docSIG!");
     drop(captured);
@@ -203,7 +219,10 @@ fn a_cancelled_or_expired_operation_stops_the_spool_and_releases_it() {
     spool.push(b"first").unwrap();
     assert_eq!(files(dir.path()), 1);
     control.0.store(true, Ordering::SeqCst);
-    assert!(matches!(spool.push(b"more"), Err(ProcessingError::Cancelled)));
+    assert!(matches!(
+        spool.push(b"more"),
+        Err(ProcessingError::Cancelled)
+    ));
     assert!(matches!(spool.finish(), Err(ProcessingError::Cancelled)));
     assert_eq!(files(dir.path()), 0, "a stopped spool leaves no file");
     // The temp reservation is back: a new operation can reserve the whole budget again.
@@ -239,11 +258,17 @@ fn a_hash_stream_refuses_the_byte_past_the_allowance_and_a_cancelled_operation()
     let s = scope(10, 0);
     let mut stream = HashStream::new(HashAlg::Sha256, &s).unwrap();
     stream.update(&[1u8; 10], &s).unwrap();
-    assert!(matches!(stream.update(&[1], &s), Err(ProcessingError::InputLimit)));
+    assert!(matches!(
+        stream.update(&[1], &s),
+        Err(ProcessingError::InputLimit)
+    ));
     // A single piece across the allowance is refused, and the input stays terminal.
     let s = scope(10, 0);
     let mut stream = HashStream::new(HashAlg::Sha256, &s).unwrap();
-    assert!(matches!(stream.update(&[1u8; 64], &s), Err(ProcessingError::InputLimit)));
+    assert!(matches!(
+        stream.update(&[1u8; 64], &s),
+        Err(ProcessingError::InputLimit)
+    ));
     assert!(matches!(
         HashStream::new(HashAlg::Sha256, &s),
         Err(ProcessingError::InputLimit)
@@ -255,7 +280,10 @@ fn a_hash_stream_refuses_the_byte_past_the_allowance_and_a_cancelled_operation()
         .unwrap();
     let mut stream = HashStream::new(HashAlg::Sha256, &s).unwrap();
     control.0.store(true, Ordering::SeqCst);
-    assert!(matches!(stream.update(b"x", &s), Err(ProcessingError::Cancelled)));
+    assert!(matches!(
+        stream.update(b"x", &s),
+        Err(ProcessingError::Cancelled)
+    ));
 }
 
 #[test]

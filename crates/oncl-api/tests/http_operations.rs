@@ -191,6 +191,7 @@ async fn multipart_document_bytes_are_not_framing_but_epilogue_is_bounded() {
 async fn original_admission_holds_global_quota_during_first_metadata_and_deadline() {
     let service = Running::start_with(|c| {
         c.max_in_flight = 1;
+        c.max_uploads = 1;
         // Must outlast the first 503 probe on a loaded machine: the deadline is the
         // only thing that releases the held admission, so it is not a speed bound.
         c.operation_timeout_ms = 6_000;
@@ -219,32 +220,25 @@ async fn original_admission_holds_global_quota_during_first_metadata_and_deadlin
     // The first admission is observable through the actual shared root bound,
     // not a timing assertion about cryptographic throughput.
     let body=br#"{"metadata":{"items":[{"id":"x","operation":{"kind":"hash","algorithm":"sha256","input":"d"}}],"parts":[{"name":"d","item_id":"x","role":"document"}]},"documents":{"d":"abc"}}"#;
-    // Wait until the slow first request owns the only original admission. Observe the
-    // root bound directly (no HTTP probe): a probe in flight would itself take the
-    // only admission and make the first request, still being scheduled under load,
-    // answer 503. The deadline above is the only thing that releases it.
+    // The slow first request owns the only upload slot (it holds no in-flight slot: the
+    // bound is the upload phase's own). Probe until a probe is refused with the typed 503;
+    // a probe that came first completes at once and frees the slot again.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let waiting = std::time::Instant::now();
-    while service
-        .host
-        .engine
-        .admit(std::sync::Arc::new(
-            oncl_server::executor::Cancellation::new(),
-        ))
-        .is_ok()
-    {
+    loop {
+        let (status, _) = service
+            .request("application/json", body, &service.token)
+            .await;
+        if status == 503 {
+            break;
+        }
+        assert_eq!(status, 200);
         assert!(
             waiting.elapsed() < Duration::from_secs(4),
-            "slow first metadata must own the only original admission"
+            "slow first metadata must own the only upload slot"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let (status, _) = service
-        .request("application/json", body, &service.token)
-        .await;
-    assert_eq!(
-        status, 503,
-        "slow first metadata must own the only original admission"
-    );
     let mut response = Vec::new();
     tokio::time::timeout(Duration::from_secs(30), first.read_to_end(&mut response))
         .await
