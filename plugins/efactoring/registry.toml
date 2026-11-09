@@ -32,4 +32,4 @@ ru = "Подпись элемента (sign_element) содержит в Transfo
 ru = "Запрос binary без upload_url и запрос text, у которого data не строка: оригинал не показывал окон и не отвечал, соединение молчало дальше; порт закрывает соединение, ничего не показав."
 
 [[differences]]
-ru = "Окно ручных инструментов: объявлено операций — 5 (sign-text-attached-timestamp, sign-text-attached, sign-text-detached-timestamp, sign-text-detached, sign-xml); каждая применяет ключ один раз и запрашивает подтверждение. Методы, не вошедшие в этот список, в окне не предлагаются."
+ru = "Окно ручных инструментов: объявлено операций — 6 (sign-text-attached-timestamp, sign-text-attached, sign-text-detached-timestamp, sign-text-detached, sign-xml, sign-xml-element); каждая применяет ключ один раз и запрашивает подтверждение. В sign-xml-element оба XPath (sign_element и signature_parent_element) вводятся пользователем и показываются в подтверждении; пустой или не абсолютный XPath окно отклоняет до вызова модуля, а parent, совпадающий с элементом, модуль отвергает до применения ключа (ответ CANCEL: окна повтора в ручном окне нет). Методы, не вошедшие в этот список, в окне не предлагаются."

@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-qiwi"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
 ]

@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.qiwi"
-version = "1.0.0-beta.1"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.2"
+min_core = "0.1.0-alpha.7"
 modules = ["kz.qiwi.osgi.SecurityUtils"]
 
 [name]
@@ -19,3 +19,59 @@ version = "1.3"
 
 [capabilities]
 keys = true
+
+[[operations]]
+name = "sign-xml-rsa"
+module = "kz.qiwi.osgi.SecurityUtils"
+manual = true
+request = '{"module":"kz.qiwi.osgi.SecurityUtils","method":"signXml","args":["1","{xml}"]}'
+label = { ru = "Подписать XML-документ (ключ RSA-SHA256)", kk = "XML құжатына қол қою (RSA-SHA256 кілті)", en = "Sign an XML document (RSA-SHA256 key)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_xml_ex", "xml_verify"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml_ex"
+content = "param:xml"
+
+[operations.uses.key.profile]
+placement = "first_child_of_document"
+signature_method = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+digest_method = "http://www.w3.org/2001/04/xmlenc#sha256"
+c14n = "inclusive"
+transforms = ["enveloped", { c14n = "inclusive_with_comments" }]
+output = { serialize = { declaration = true, standalone_no = true, trim = false } }
+
+[[operations]]
+name = "sign-xml-gost2004"
+module = "kz.qiwi.osgi.SecurityUtils"
+manual = true
+request = '{"module":"kz.qiwi.osgi.SecurityUtils","method":"signXml","args":["1","{xml}"]}'
+label = { ru = "Подписать XML-документ (ключ ГОСТ 2004)", kk = "XML құжатына қол қою (ГОСТ 2004 кілті)", en = "Sign an XML document (GOST 2004 key)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[operations.uses]
+imports = ["keys_select", "keys_release", "random", "cert_info", "now", "keys_sign_xml_ex", "xml_verify"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml_ex"
+content = "param:xml"
+
+[operations.uses.key.profile]
+placement = "first_child_of_document"
+signature_method = "http://www.w3.org/2001/04/xmldsig-more#gost34310-gost34311"
+digest_method = "http://www.w3.org/2001/04/xmldsig-more#gost34311"
+c14n = "inclusive"
+transforms = ["enveloped", { c14n = "inclusive_with_comments" }]
+output = { serialize = { declaration = true, standalone_no = true, trim = false } }

@@ -14,7 +14,7 @@
 mod ports;
 
 // Ports with declared operations: rating1c (wave 1), fhs and esf-osdkz (wave 2), energy, eproc,
-// efactoring, market, dogovor24 (wave 3); qiwi has none (inventory W3-1, probe only).
+// efactoring, market, dogovor24, qiwi (wave 3).
 #[path = "plugin_ports_manual/esf_osdkz.rs"]
 mod esf_osdkz;
 #[path = "plugin_ports_manual/fhs.rs"]
@@ -28,7 +28,7 @@ mod limits;
 #[path = "plugin_ports_manual/network.rs"]
 mod network;
 
-// Wave 3: energy, eproc, efactoring, market, dogovor24, qiwi (undeclared: the inventory's correction).
+// Wave 3: energy, eproc, efactoring, market, dogovor24, qiwi.
 #[path = "plugin_ports_manual/dogovor24.rs"]
 mod dogovor24;
 #[path = "plugin_ports_manual/efactoring.rs"]

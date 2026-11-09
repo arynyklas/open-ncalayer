@@ -136,3 +136,45 @@ placement = "document_element"
 strip_whitespace = true
 base64_line_breaks = false
 output = { serialize = { declaration = false, standalone_no = false, trim = true } }
+
+[[operations]]
+name = "sign-xml-element"
+module = "EFactoringSign"
+manual = true
+request = '{"module":"EFactoringSign","type":"xml","data":"{xml}","sign_element":"{element}","signature_parent_element":"{parent}"}'
+label = { ru = "Подписать элемент XML (XPath) (без окна повтора)", kk = "XML элементіне қол қою (XPath) (қайталаусыз)", en = "Sign an XML element (XPath) (no retry window)" }
+
+[[operations.params]]
+name = "xml"
+kind = "text"
+max_chars = 65536
+
+[[operations.params]]
+name = "element"
+kind = "text"
+max_chars = 256
+
+[[operations.params]]
+name = "parent"
+kind = "text"
+max_chars = 256
+
+[operations.uses]
+imports = ["keys_choose", "keys_release", "random", "keys_sign_xml_ex"]
+network = "pki"
+
+[[operations.uses.key]]
+kind = "xml_ex"
+content = "param:xml"
+
+[operations.uses.key.profile]
+element = "param:element"
+parent = "param:parent"
+placement = "parent"
+namespaces = [{ prefix = "SOAP-ENV", uri = "http://schemas.xmlsoap.org/soap/envelope/" }]
+other_prefix_uri = "http://www.w3.org/2000/09/xmldsig#"
+c14n = "exclusive"
+strip_whitespace = true
+base64_line_breaks = false
+output = { serialize = { declaration = false, standalone_no = false, trim = true } }
+transforms = ["enveloped", { c14n = "inclusive_with_comments" }]

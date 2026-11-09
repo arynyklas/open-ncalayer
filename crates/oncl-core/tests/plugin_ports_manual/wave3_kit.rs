@@ -67,9 +67,21 @@ pub fn cms_tamper(
 
 /// Every tampered declaration is refused with `options-mismatch` before the key is applied.
 pub fn assert_tampers_refused(tampers: &[(String, String, String)], run: Runner) {
+    assert_tampers_refused_with_keys(tampers, &|_| None, run);
+}
+
+/// [`assert_tampers_refused`] for operations that each want their own key fixture:
+/// `key_of(operation)` (`None`: the default RSA key).
+pub fn assert_tampers_refused_with_keys(
+    tampers: &[(String, String, String)],
+    key_of: &dyn Fn(&str) -> Option<&'static str>,
+    run: Runner,
+) {
     assert!(!tampers.is_empty());
     for (operation, from, to) in tampers {
-        let run = run(operation, &tampered(operation, from, to));
+        let mut options = tampered(operation, from, to);
+        options.key = key_of(operation);
+        let run = run(operation, &options);
         assert_refused_before_the_key(&run);
         assert_eq!(run.call.refusals(), [TicketRefusal::Options], "{operation}");
         assert_eq!(
@@ -84,6 +96,17 @@ pub fn assert_tampers_refused(tampers: &[(String, String, String)], run: Runner)
 /// or the call does not succeed (`Denied`, even after the key use for `keys_release`). `skip`
 /// names imports a test proves another way.
 pub fn assert_every_import_needed(port: &str, operations: &[String], skip: &[&str], run: Runner) {
+    assert_every_import_needed_with_keys(port, operations, skip, &|_| None, run);
+}
+
+/// [`assert_every_import_needed`] for operations that each want their own key fixture.
+pub fn assert_every_import_needed_with_keys(
+    port: &str,
+    operations: &[String],
+    skip: &[&str],
+    key_of: &dyn Fn(&str) -> Option<&'static str>,
+    run: Runner,
+) {
     let manifest = oncl_plugin::Manifest::from_toml(&manifest_text(port)).unwrap();
     for operation in operations {
         let op = manifest
@@ -115,6 +138,7 @@ pub fn assert_every_import_needed(port: &str, operations: &[String], skip: &[&st
             };
             let options = RunOptions {
                 tamper: Some(Box::new(tamper)),
+                key: key_of(operation),
                 ..RunOptions::default()
             };
             let outcome =
@@ -157,43 +181,4 @@ pub fn without_signature(signed: &str) -> String {
     let start = signed.find("<ds:Signature").expect("a ds:Signature");
     let end = signed.find("</ds:Signature>").unwrap() + "</ds:Signature>".len();
     format!("{}{}", &signed[..start], &signed[end..])
-}
-
-/// A declaration the module's real call cannot satisfy: it is added to the manifest by the
-/// tamper (the port declares nothing for it), the call is run, and Core refuses it before the
-/// key is applied. Returns the run for the caller's assertions.
-pub fn probe(
-    port: &str,
-    operation: &str,
-    section: &str,
-    params: &[(&str, oncl_core::plugins::PluginParam<'_>)],
-) -> PortRun {
-    let section = section.to_owned();
-    let options = RunOptions {
-        tamper: Some(Box::new(move |text| {
-            format!("{}\n{section}", with_min_core(text, "0.1.0-alpha.7"))
-        })),
-        ..RunOptions::default()
-    };
-    run_port_operation(port, operation, params, &options)
-}
-
-/// The probe's refusal: the module's `transforms` cannot be said by any profile, so Core
-/// denies the key use (`PermissionDenied`, no typed ticket refusal) before the key is applied.
-/// The declared whole-document `sign-xml` of the same port (which passes no `transforms`) is
-/// the control: it signs.
-pub fn assert_denied_for_transforms(run: &PortRun) {
-    assert_eq!(
-        run.call.applied(),
-        AppliedState::NotApplied,
-        "{:?}",
-        run.call
-    );
-    assert_eq!(run.applications, 0);
-    assert!(run.call.refusals().is_empty(), "{:?}", run.call.refusals());
-    assert!(
-        matches!(run.call.error(), Some(e) if e.code() == oncl_core::ErrorCode::PermissionDenied),
-        "{:?}",
-        run.call
-    );
 }
