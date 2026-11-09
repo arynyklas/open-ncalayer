@@ -111,11 +111,17 @@ pub enum ProfileFact {
     XmlStripWhitespace,
     /// The base64 of the signature has (`true`) or lacks line breaks.
     XmlBase64LineBreaks(bool),
-    /// The output is re-serialised by the core.
-    XmlSerialized,
-    /// The reference's transforms, in order, by the core's names for them (the signed bytes
-    /// are the element after these).
-    XmlTransforms(Vec<String>),
+    /// The output is re-serialised by the core, with these choices.
+    XmlSerialized {
+        /// An XML declaration is written.
+        declaration: bool,
+        /// With `standalone="no"`.
+        standalone_no: bool,
+        /// No whitespace at either end.
+        trim: bool,
+    },
+    /// The reference's transforms, in order (the signed bytes are the element after these).
+    XmlTransforms(Vec<TransformKind>),
     /// CMS: the content is signed as it is, even if it is a CMS itself (`cosign = never`).
     ContentAsIs,
     /// CMS: the output is not DER.
@@ -138,6 +144,17 @@ pub enum CmsAttribute {
     ContentType,
     MessageDigest,
     SigningCertificate,
+}
+
+/// A transform of the signed reference, by the core's own name for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransformKind {
+    /// enveloped-signature.
+    Enveloped,
+    Inclusive,
+    InclusiveWithComments,
+    Exclusive,
+    ExclusiveWithComments,
 }
 
 /// Where an XML signature goes, when not at the end of the document element.
@@ -184,6 +201,10 @@ pub struct OperationConsent {
     /// The XPaths its profile names (elements to sign, where the signature goes): free text
     /// of the manifest, untrusted, shown in the plugin's frame only.
     pub xpaths: Vec<String>,
+    /// The namespace bindings of its XPaths (`prefix = URI`; `* = URI` binds every other
+    /// prefix): the prefix a typed XPath uses decides which elements it selects. Free text
+    /// of the manifest, untrusted, shown in the plugin's frame only.
+    pub bindings: Vec<String>,
 }
 
 /// Whether `name` is an operation identifier: `^[a-z][a-z0-9-]{0,31}$`. Checked at parse and
@@ -309,8 +330,31 @@ fn fact_text(fact: &ProfileFact, l: Locale) -> String {
         ProfileFact::XmlStripWhitespace => o.xml_strip.to_owned(),
         ProfileFact::XmlBase64LineBreaks(true) => o.b64_breaks_on.to_owned(),
         ProfileFact::XmlBase64LineBreaks(false) => o.b64_breaks_off.to_owned(),
-        ProfileFact::XmlSerialized => o.xml_serialized.to_owned(),
-        ProfileFact::XmlTransforms(names) => o.xml_transforms.replace("{0}", &names.join(", ")),
+        ProfileFact::XmlSerialized {
+            declaration,
+            standalone_no,
+            trim,
+        } => {
+            let word = |on: &bool| if *on { o.yes } else { o.no };
+            o.xml_serialized
+                .replace("{0}", word(declaration))
+                .replace("{1}", word(standalone_no))
+                .replace("{2}", word(trim))
+        }
+        ProfileFact::XmlTransforms(kinds) => o.xml_transforms.replace(
+            "{0}",
+            &kinds
+                .iter()
+                .map(|k| match k {
+                    TransformKind::Enveloped => o.tr_enveloped,
+                    TransformKind::Inclusive => o.tr_inclusive,
+                    TransformKind::InclusiveWithComments => o.tr_inclusive_c,
+                    TransformKind::Exclusive => o.tr_exclusive,
+                    TransformKind::ExclusiveWithComments => o.tr_exclusive_c,
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
         ProfileFact::ContentAsIs => o.content_as_is.to_owned(),
         ProfileFact::CmsOutput(OutputForm::Base64) => o.out_base64.to_owned(),
         ProfileFact::CmsOutput(OutputForm::Pem) => o.out_pem.to_owned(),
@@ -363,7 +407,15 @@ struct OpTexts {
     xml_strip: &'static str,
     b64_breaks_on: &'static str,
     b64_breaks_off: &'static str,
+    /// `{0}`, `{1}`, `{2}`: yes or no for the declaration, `standalone="no"`, the trimming.
     xml_serialized: &'static str,
+    yes: &'static str,
+    no: &'static str,
+    tr_enveloped: &'static str,
+    tr_inclusive: &'static str,
+    tr_inclusive_c: &'static str,
+    tr_exclusive: &'static str,
+    tr_exclusive_c: &'static str,
     /// `{0}`: the transforms, in order.
     xml_transforms: &'static str,
     content_as_is: &'static str,
@@ -427,7 +479,14 @@ impl OpTexts {
                 xml_strip: "бос орындар алынып тасталады",
                 b64_breaks_on: "base64 жол үзілістерімен",
                 b64_breaks_off: "base64 жол үзілістерісіз",
-                xml_serialized: "нәтижені өзек қайта сериализациялайды",
+                xml_serialized: "нәтижені өзек қайта сериализациялайды (XML декларациясы: {0}; standalone=\"no\": {1}; шеттердегі бос орындар алынады: {2})",
+                yes: "иә",
+                no: "жоқ",
+                tr_enveloped: "енгізілген қолтаңба (enveloped-signature)",
+                tr_inclusive: "inclusive канонизациясы",
+                tr_inclusive_c: "түсініктемелері бар inclusive канонизациясы",
+                tr_exclusive: "exclusive канонизациясы",
+                tr_exclusive_c: "түсініктемелері бар exclusive канонизациясы",
                 xml_transforms: "қол қойылатын сілтеменің түрлендірулері: {0}",
                 content_as_is: "мазмұнға CMS болса да, сол күйінде қол қойылады",
                 out_base64: "нәтиже DER емес, base64 түрінде",
@@ -483,7 +542,14 @@ impl OpTexts {
                 xml_strip: "пробельные символы убираются",
                 b64_breaks_on: "base64 с переносами строк",
                 b64_breaks_off: "base64 без переносов строк",
-                xml_serialized: "результат заново сериализует ядро",
+                xml_serialized: "результат заново сериализует ядро (объявление XML: {0}; standalone=\"no\": {1}; пробелы по краям убираются: {2})",
+                yes: "да",
+                no: "нет",
+                tr_enveloped: "вложенная подпись (enveloped-signature)",
+                tr_inclusive: "каноникализация inclusive",
+                tr_inclusive_c: "каноникализация inclusive с комментариями",
+                tr_exclusive: "каноникализация exclusive",
+                tr_exclusive_c: "каноникализация exclusive с комментариями",
                 xml_transforms: "преобразования подписываемой ссылки: {0}",
                 content_as_is: "содержимое подписывается как есть, даже если это CMS",
                 out_base64: "результат не DER, а base64",
@@ -539,7 +605,14 @@ impl OpTexts {
                 xml_strip: "whitespace is stripped",
                 b64_breaks_on: "base64 with line breaks",
                 b64_breaks_off: "base64 without line breaks",
-                xml_serialized: "the output is re-serialised by the core",
+                xml_serialized: "the output is re-serialised by the core (XML declaration: {0}; standalone=\"no\": {1}; whitespace at both ends trimmed: {2})",
+                yes: "yes",
+                no: "no",
+                tr_enveloped: "enveloped signature",
+                tr_inclusive: "inclusive canonicalisation",
+                tr_inclusive_c: "inclusive canonicalisation with comments",
+                tr_exclusive: "exclusive canonicalisation",
+                tr_exclusive_c: "exclusive canonicalisation with comments",
                 xml_transforms: "transforms of the signed reference: {0}",
                 content_as_is: "the content is signed as it is, even if it is a CMS",
                 out_base64: "the output is base64, not DER",
@@ -728,8 +801,15 @@ mod tests {
                 ProfileFact::XmlStripWhitespace,
                 ProfileFact::XmlBase64LineBreaks(true),
                 ProfileFact::XmlBase64LineBreaks(false),
-                ProfileFact::XmlSerialized,
-                ProfileFact::XmlTransforms(vec!["X1".to_owned(), "X2".to_owned()]),
+                ProfileFact::XmlSerialized {
+                    declaration: true,
+                    standalone_no: false,
+                    trim: true,
+                },
+                ProfileFact::XmlTransforms(vec![
+                    TransformKind::Enveloped,
+                    TransformKind::ExclusiveWithComments,
+                ]),
                 ProfileFact::ContentAsIs,
                 ProfileFact::CmsOutput(OutputForm::Base64),
                 ProfileFact::CmsOutput(OutputForm::Pem),
@@ -803,25 +883,94 @@ mod tests {
 
     #[test]
     fn transforms_are_said_in_host_words_in_every_locale() {
-        let line = CapabilityLine::KeyProfile(vec![ProfileFact::XmlTransforms(vec![
-            "enveloped signature".to_owned(),
-            "inclusive canonicalisation with comments".to_owned(),
-        ])]);
+        use TransformKind::*;
+        let say = |kinds: Vec<TransformKind>, l| {
+            capability_text(
+                &CapabilityLine::KeyProfile(vec![ProfileFact::XmlTransforms(kinds)]),
+                l,
+            )
+        };
+        // Every name, in every language; ru and kk keep only the identifiers
+        // (`enveloped-signature`, `inclusive`, `exclusive`) that have no word.
+        let table = [
+            (
+                Enveloped,
+                "enveloped signature",
+                "вложенная подпись (enveloped-signature)",
+                "енгізілген қолтаңба (enveloped-signature)",
+            ),
+            (
+                Inclusive,
+                "inclusive canonicalisation",
+                "каноникализация inclusive",
+                "inclusive канонизациясы",
+            ),
+            (
+                InclusiveWithComments,
+                "inclusive canonicalisation with comments",
+                "каноникализация inclusive с комментариями",
+                "түсініктемелері бар inclusive канонизациясы",
+            ),
+            (
+                Exclusive,
+                "exclusive canonicalisation",
+                "каноникализация exclusive",
+                "exclusive канонизациясы",
+            ),
+            (
+                ExclusiveWithComments,
+                "exclusive canonicalisation with comments",
+                "каноникализация exclusive с комментариями",
+                "түсініктемелері бар exclusive канонизациясы",
+            ),
+        ];
+        for (kind, en, ru, kk) in table {
+            assert_eq!(
+                say(vec![kind], Locale::En),
+                format!(
+                    "signature form (fixed by the core): transforms of the signed reference: {en}"
+                )
+            );
+            assert_eq!(
+                say(vec![kind], Locale::Ru),
+                format!("вид подписи (задаёт ядро): преобразования подписываемой ссылки: {ru}")
+            );
+            assert_eq!(
+                say(vec![kind], Locale::Kk),
+                format!(
+                    "қолтаңба түрі (өзек белгілейді): қол қойылатын сілтеменің түрлендірулері: {kk}"
+                )
+            );
+        }
+        // Two transforms are joined in order.
         assert_eq!(
-            capability_text(&line, Locale::En),
+            say(vec![Enveloped, ExclusiveWithComments], Locale::En),
             "signature form (fixed by the core): transforms of the signed reference: \
-             enveloped signature, inclusive canonicalisation with comments"
+             enveloped signature, exclusive canonicalisation with comments"
         );
-        assert_eq!(
-            capability_text(&line, Locale::Ru),
-            "вид подписи (задаёт ядро): преобразования подписываемой ссылки: \
-             enveloped signature, inclusive canonicalisation with comments"
-        );
-        assert_eq!(
-            capability_text(&line, Locale::Kk),
-            "қолтаңба түрі (өзек белгілейді): қол қойылатын сілтеменің түрлендірулері: \
-             enveloped signature, inclusive canonicalisation with comments"
-        );
+    }
+
+    #[test]
+    fn the_serialised_output_says_its_choices_in_every_locale() {
+        let say = |declaration, standalone_no, trim, l| {
+            capability_text(
+                &CapabilityLine::KeyProfile(vec![ProfileFact::XmlSerialized {
+                    declaration,
+                    standalone_no,
+                    trim,
+                }]),
+                l,
+            )
+        };
+        assert!(say(true, false, true, Locale::En).ends_with(
+            "(XML declaration: yes; standalone=\"no\": no; whitespace at both ends trimmed: yes)"
+        ));
+        assert!(say(false, true, false, Locale::Ru).ends_with(
+            "(объявление XML: нет; standalone=\"no\": да; пробелы по краям убираются: нет)"
+        ));
+        assert!(say(true, true, true, Locale::Kk).ends_with(
+            "(XML декларациясы: иә; standalone=\"no\": иә; шеттердегі бос орындар алынады: иә)"
+        ));
     }
 
     #[test]
@@ -850,6 +999,7 @@ mod tests {
             lines: Vec::new(),
             label: ["ру".to_owned(), "кк".to_owned(), "en".to_owned()],
             xpaths: Vec::new(),
+            bindings: Vec::new(),
         };
         assert_eq!(consent.label(Locale::Ru), "ру");
         assert_eq!(consent.label(Locale::Kk), "кк");

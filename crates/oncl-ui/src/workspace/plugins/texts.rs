@@ -152,6 +152,10 @@ texts! {
     /// `{0}` the value's number, `{1}` the plugin's name for that field (quoted; in the
     /// plugin's frame, never among the host's lines).
     c_input_name,
+    /// `{0}`: the number of the value that is the XPath of the element to sign.
+    c_role_element,
+    /// `{0}`: the number of the value that is the XPath of the element the signature goes into.
+    c_role_parent,
     /// `{0}` the parameter's name, `{1}` the choice (quoted).
     c_choice_line,
     no_reason,
@@ -347,6 +351,8 @@ static EN: Texts = Texts {
     c_inputs: "Values you entered, passed to the plugin as they are (not part of what is approved):",
     c_input_line: "Value {0} = {1}",
     c_input_name: "Value {0} is the plugin's field {1}",
+    c_role_element: "Value {0} is the XPath of the element that is signed.",
+    c_role_parent: "Value {0} is the XPath of the element the signature is put into.",
     c_choice_line: "Choice {0}, one of those the plugin offers: {1}",
     no_reason: "no reason was reported",
     row_code: "Code: {0}",
@@ -512,6 +518,8 @@ static RU: Texts = Texts {
     c_inputs: "Введённые вами значения, передаются плагину как есть (в то, что разрешается, не входят):",
     c_input_line: "Значение {0} = {1}",
     c_input_name: "Значение {0} — поле плагина {1}",
+    c_role_element: "Значение {0} — XPath подписываемого элемента.",
+    c_role_parent: "Значение {0} — XPath элемента, в который кладётся подпись.",
     c_choice_line: "Выбор {0}, один из предложенных плагином: {1}",
     no_reason: "причина не сообщена",
     row_code: "Код: {0}",
@@ -677,6 +685,8 @@ static KK: Texts = Texts {
     c_inputs: "Сіз енгізген мәндер, плагинге сол күйінде беріледі (рұқсат етілетін нәрсеге кірмейді):",
     c_input_line: "{0}-мән = {1}",
     c_input_name: "{0}-мән — плагиннің {1} өрісі",
+    c_role_element: "{0}-мән — қол қойылатын элементтің XPath-ы.",
+    c_role_parent: "{0}-мән — қолтаңба салынатын элементтің XPath-ы.",
     c_choice_line: "{0} таңдауы, плагин ұсынғандардың бірі: {1}",
     no_reason: "себебі хабарланбады",
     row_code: "Коды: {0}",

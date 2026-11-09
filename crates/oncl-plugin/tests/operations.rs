@@ -2170,6 +2170,77 @@ mod consent {
         assert!(facts.contains(&ProfileFact::CmsOutput(OutputForm::Base64)));
     }
 
+    /// Every transform name and every legal list length reaches the consent facts exactly:
+    /// one transform alone, `enveloped` plus each canonicalisation (a third is refused).
+    #[test]
+    fn every_transform_and_list_length_is_shown_exactly() {
+        use oncl_flows::capabilities::TransformKind as K;
+        let env = "\"enveloped\"";
+        let c = |m: &str| format!("{{ c14n = \"{m}\" }}");
+        let cases: Vec<(Vec<String>, Vec<K>)> = vec![
+            (vec![env.into()], vec![K::Enveloped]),
+            (vec![c("inclusive")], vec![K::Inclusive]),
+            (
+                vec![c("inclusive_with_comments")],
+                vec![K::InclusiveWithComments],
+            ),
+            (vec![c("exclusive")], vec![K::Exclusive]),
+            (
+                vec![c("exclusive_with_comments")],
+                vec![K::ExclusiveWithComments],
+            ),
+            (
+                vec![env.into(), c("inclusive")],
+                vec![K::Enveloped, K::Inclusive],
+            ),
+            (
+                vec![env.into(), c("inclusive_with_comments")],
+                vec![K::Enveloped, K::InclusiveWithComments],
+            ),
+            (
+                vec![env.into(), c("exclusive")],
+                vec![K::Enveloped, K::Exclusive],
+            ),
+            (
+                vec![env.into(), c("exclusive_with_comments")],
+                vec![K::Enveloped, K::ExclusiveWithComments],
+            ),
+        ];
+        for (list, names) in cases {
+            let profile = format!(
+                "element = \"/a/b\"\nparent = \"/a\"\nplacement = \"parent\"\ntransforms = [{}]",
+                list.join(", ")
+            );
+            let facts = facts_of(&op_of("xml_ex", "keys_sign_xml_ex", "\"pki\"", &profile));
+            let said = ProfileFact::XmlTransforms(names.clone());
+            assert_eq!(facts.last(), Some(&said), "{list:?}: {facts:?}");
+        }
+        // Three transforms are no list: refused before any fact exists.
+        let three = "element = \"/a/b\"\nparent = \"/a\"\nplacement = \"parent\"\ntransforms = [\"enveloped\", { c14n = \"inclusive\" }, { c14n = \"exclusive\" }]";
+        assert!(parse(&op_of("xml_ex", "keys_sign_xml_ex", "\"pki\"", three)).is_err());
+    }
+
+    /// The prefix a typed XPath uses decides what it selects: the bindings the profile fixes
+    /// are in the consent (the plugin's own text, in its frame), `*` for every other prefix.
+    #[test]
+    fn the_namespace_bindings_of_a_profile_are_in_the_consent() {
+        let text = op_of(
+            "xml_ex",
+            "keys_sign_xml_ex",
+            "\"pki\"",
+            "namespaces = [{ prefix = \"S\", uri = \"urn:s\" }, { prefix = \"T\", uri = \"urn:t\" }]\nother_prefix_uri = \"urn:o\"",
+        );
+        let consent = parse(&text).unwrap().operations()[0].consent(None);
+        assert_eq!(consent.bindings, ["S = urn:s", "T = urn:t", "* = urn:o"]);
+        let none = op_of("xml_ex", "keys_sign_xml_ex", "\"pki\"", "");
+        assert!(
+            parse(&none).unwrap().operations()[0]
+                .consent(None)
+                .bindings
+                .is_empty()
+        );
+    }
+
     #[test]
     fn every_xml_ex_field_is_shown_or_default() {
         assert_eq!(
@@ -2198,7 +2269,11 @@ mod consent {
                 ProfileFact::C14n("exclusive".to_owned()),
                 ProfileFact::XmlStripWhitespace,
                 ProfileFact::XmlBase64LineBreaks(false),
-                ProfileFact::XmlSerialized,
+                ProfileFact::XmlSerialized {
+                    declaration: true,
+                    standalone_no: false,
+                    trim: true,
+                },
             ]
         );
         let facts = facts_of(&op_of(
@@ -2212,8 +2287,8 @@ mod consent {
             [
                 ProfileFact::XmlWholeDocument,
                 ProfileFact::XmlTransforms(vec![
-                    "enveloped signature".to_owned(),
-                    "inclusive canonicalisation with comments".to_owned()
+                    oncl_flows::capabilities::TransformKind::Enveloped,
+                    oncl_flows::capabilities::TransformKind::InclusiveWithComments
                 ]),
             ]
         );

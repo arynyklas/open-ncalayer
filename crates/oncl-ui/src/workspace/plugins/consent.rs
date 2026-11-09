@@ -20,12 +20,14 @@ use oncl_core::plugins::{ConsentNetwork, ConsentSummary, PackageHash, UserConfir
 use oncl_flows::Locale;
 use oncl_flows::capabilities::{CapabilityLine, KeyUseKind, capability_text, is_operation_name};
 use oncl_pki::key::HashAlg;
-use oncl_plugin::operations::{KeyKind, Operation, Profile, Source};
+use oncl_plugin::operations::{KeyKind, Operation, Profile, Source, XmlExProfile, XmlProfile};
 
 use super::form::Frozen;
 use super::offer::OfferedOperation;
 use super::texts::Texts;
-use crate::install_plugin::{frame_caption, frame_xpath, untrusted_label, untrusted_xpath};
+use crate::install_plugin::{
+    frame_binding, frame_caption, frame_xpath, untrusted_label, untrusted_xpath,
+};
 
 /// Everything [`compose`] needs.
 pub(super) struct ConsentInput<'a> {
@@ -164,32 +166,60 @@ fn plain(text: &str) -> String {
     crate::view::display_text(text)
 }
 
-/// The text parameters a profile reads as an XPath, with the value the user typed for each
-/// and what Core resolved into the summary's profile: they must be the same text.
+/// What Core resolved into the summary's profile must be exactly the declared profile with
+/// each `param:` source filled in by the text the user typed for it: every field (the
+/// transforms, the placement, the algorithms, the output form, ...), not only the XPaths.
 fn typed_sources_agree(
     declared: &Profile,
     resolved: &Profile,
     entered: &[(String, Frozen)],
 ) -> bool {
-    let sources = |p: &Profile| -> Vec<Option<Source>> {
-        match p {
-            Profile::Xml(x) => vec![x.element.clone(), x.parent.clone()],
-            Profile::XmlEx(x) => vec![x.element.clone(), x.parent.clone()],
-            _ => Vec::new(),
+    let typed = |source: &Option<Source>| -> Option<Option<Source>> {
+        match source {
+            Some(Source::Param(name)) => entered.iter().find_map(|(n, v)| match v {
+                Frozen::Text(text) if n == name => Some(Some(Source::Fixed(text.clone()))),
+                _ => None,
+            }),
+            other => Some(other.clone()),
         }
     };
-    let (declared, resolved) = (sources(declared), sources(resolved));
-    if declared.len() != resolved.len() {
-        return false;
-    }
-    declared.iter().zip(&resolved).all(|(d, r)| match (d, r) {
-        (Some(Source::Param(name)), Some(Source::Fixed(text))) => entered
+    let expected = match declared {
+        Profile::Xml(x) => match (typed(&x.element), typed(&x.parent)) {
+            (Some(element), Some(parent)) => Profile::Xml(XmlProfile { element, parent }),
+            _ => return false,
+        },
+        Profile::XmlEx(x) => match (typed(&x.element), typed(&x.parent)) {
+            (Some(element), Some(parent)) => Profile::XmlEx(XmlExProfile {
+                element,
+                parent,
+                ..x.clone()
+            }),
+            _ => return false,
+        },
+        other => other.clone(),
+    };
+    expected == *resolved
+}
+
+/// The numbers of the values the profile reads as the element to sign and as the element the
+/// signature goes into (`param:` sources only), by the order the page numbers its inputs.
+fn xpath_roles(
+    declared: &Profile,
+    numbers: &[(String, String)],
+) -> (Option<String>, Option<String>) {
+    let (element, parent) = match declared {
+        Profile::Xml(x) => (&x.element, &x.parent),
+        Profile::XmlEx(x) => (&x.element, &x.parent),
+        _ => return (None, None),
+    };
+    let number = |source: &Option<Source>| match source {
+        Some(Source::Param(name)) => numbers
             .iter()
-            .any(|(n, v)| n == name && matches!(v, Frozen::Text(t) if t == text)),
-        (Some(Source::Fixed(a)), Some(Source::Fixed(b))) => a == b,
-        (None, None) => true,
-        _ => false,
-    })
+            .find(|(n, _)| n == name)
+            .map(|(_, k)| k.clone()),
+        _ => None,
+    };
+    (number(element), number(parent))
 }
 
 /// `text` in double quotes with the characters that would be invisible or break the line
@@ -332,6 +362,8 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
     // A choice is the plugin's own string: it is in the plugin's frame, quoted.
     let mut choices: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
+    // Which value is which parameter, to say which value is the element and which the parent.
+    let mut numbers: Vec<(String, String)> = Vec::new();
     let mut signed_number = String::new();
     for (name, value) in entered.iter() {
         let shown = match value {
@@ -356,6 +388,7 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
                 .replace("{0}", &number)
                 .replace("{1}", &shown),
         );
+        numbers.push((name.clone(), number.clone()));
         names.push(
             t.c_input_name
                 .replace("{0}", &number)
@@ -364,6 +397,14 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
         if *name == summary.content.param {
             signed_number = number;
         }
+    }
+
+    let (element_number, parent_number) = xpath_roles(declared_use.profile(), &numbers);
+    if let Some(n) = element_number {
+        trusted.push(t.c_role_element.replace("{0}", &n));
+    }
+    if let Some(n) = parent_number {
+        trusted.push(t.c_role_parent.replace("{0}", &n));
     }
 
     Ok(ConsentView {
@@ -418,6 +459,13 @@ pub(super) fn compose(input: &ConsentInput<'_>) -> Result<ConsentView, ConsentEr
                         .iter()
                         .map(|x| frame_xpath(l).replace("{0}", &untrusted_xpath(x))),
                 )
+                .chain(
+                    declared
+                        .consent(None)
+                        .bindings
+                        .iter()
+                        .map(|b| frame_binding(l).replace("{0}", &untrusted_xpath(b))),
+                )
                 .collect(),
         },
         confirm_label: t.confirm_label.replace("{0}", &summary.operation),
@@ -447,7 +495,6 @@ mod tests {
     use super::*;
     use oncl_core::plugins::{ConsentContent, ConsentKey, PluginIdentity, PrehashedDigest};
     use oncl_plugin::Manifest;
-    use oncl_plugin::operations::XmlProfile;
     use std::path::Path;
 
     const ALL: [Locale; 3] = [Locale::Ru, Locale::Kk, Locale::En];
@@ -703,7 +750,6 @@ element = "param:path"
     /// every language, and the XPath the user typed stays in the inputs, quoted.
     #[test]
     fn the_transforms_of_the_profile_are_said_on_the_page_in_every_language() {
-        use oncl_plugin::operations::XmlExProfile;
         let text = manifest_source()
             .replace("kind = \"xml\"", "kind = \"xml_ex\"")
             .replace("keys_sign_xml\"", "keys_sign_xml_ex\"")
@@ -727,16 +773,8 @@ element = "param:path"
         typed_entered[1] = ("path".to_owned(), Frozen::Text(typed.clone()));
         for l in ALL {
             let v = view_with(&m, &s, &typed_entered, l).unwrap();
-            let profile = v
-                .trusted
-                .iter()
-                .find(|line| line.contains("enveloped signature"))
-                .unwrap_or_else(|| panic!("{l:?}: no transforms line in {:?}", v.trusted));
-            assert!(
-                profile.contains("inclusive canonicalisation with comments"),
-                "{l:?}: {profile}"
-            );
-            // The fact's own sentence is the one the install window uses.
+            // The fact's own sentence is the one the install window uses, with the transforms
+            // in the language of the page.
             let declared = capability_text(
                 m.operations()[0]
                     .consent(None)
@@ -746,12 +784,180 @@ element = "param:path"
                     .unwrap(),
                 l,
             );
-            assert_eq!(*profile, declared, "{l:?}");
+            let profile = v
+                .trusted
+                .iter()
+                .find(|line| **line == declared)
+                .unwrap_or_else(|| panic!("{l:?}: no profile line {declared} in {:?}", v.trusted));
+            let words = match l {
+                Locale::En => [
+                    "enveloped signature",
+                    "inclusive canonicalisation with comments",
+                ],
+                Locale::Ru => [
+                    "вложенная подпись",
+                    "каноникализация inclusive с комментариями",
+                ],
+                Locale::Kk => [
+                    "енгізілген қолтаңба",
+                    "түсініктемелері бар inclusive канонизациясы",
+                ],
+            };
+            for word in words {
+                assert!(profile.contains(word), "{l:?}: {profile}");
+            }
             // The typed XPath is listed, quoted.
             assert!(
                 v.inputs.iter().any(|i| i.contains(&format!("\"{typed}\""))),
                 "{l:?}: {:?}",
                 v.inputs
+            );
+        }
+    }
+
+    fn xml_ex_manifest() -> Manifest {
+        let text = manifest_source()
+            .replace("kind = \"xml\"", "kind = \"xml_ex\"")
+            .replace("keys_sign_xml\"", "keys_sign_xml_ex\"")
+            .replace("\"{mode}\"]", "\"{mode}\",\"{where}\"]")
+            .replace(
+                "[[operations.params]]\nname = \"mode\"",
+                "[[operations.params]]\nname = \"where\"\nkind = \"text\"\nmax_chars = 64\n[[operations.params]]\nname = \"mode\"",
+            )
+            .replace(
+                "element = \"param:path\"",
+                "element = \"param:path\"\nparent = \"param:where\"\nplacement = \"parent\"\n\
+                 namespaces = [{ prefix = \"SOAP-ENV\", uri = \"urn:soap\" }]\nother_prefix_uri = \"urn:dsig\"\n\
+                 transforms = [\"enveloped\", { c14n = \"inclusive_with_comments\" }]\n\
+                 output = { serialize = { declaration = false, standalone_no = false, trim = true } }",
+            );
+        Manifest::from_toml(&text).unwrap()
+    }
+
+    fn xml_ex_entered() -> Vec<(String, Frozen)> {
+        let mut e = entered();
+        e[1] = ("path".to_owned(), Frozen::Text("/r/zz:data".to_owned()));
+        e.push(("where".to_owned(), Frozen::Text("/r/s".to_owned())));
+        e
+    }
+
+    /// The declared profile of `m` with the typed texts in place of its `param:` sources.
+    fn resolved_xml_ex(m: &Manifest) -> XmlExProfile {
+        let Profile::XmlEx(x) = m.operations()[0].uses().keys()[0].profile() else {
+            panic!("xml_ex")
+        };
+        XmlExProfile {
+            element: Some(Source::Fixed("/r/zz:data".to_owned())),
+            parent: Some(Source::Fixed("/r/s".to_owned())),
+            ..x.clone()
+        }
+    }
+
+    /// The page says which value is the element and which the parent, and the frame shows the
+    /// bindings that decide what a prefix in them selects (`zz` is bound by `*`).
+    #[test]
+    fn the_page_names_the_element_and_the_parent_and_shows_the_bindings() {
+        let m = xml_ex_manifest();
+        let mut s = summary();
+        s.kind = KeyKind::XmlEx;
+        s.profile = Profile::XmlEx(resolved_xml_ex(&m));
+        for l in ALL {
+            let v = view_with(&m, &s, &xml_ex_entered(), l).unwrap();
+            let t = Texts::of(l);
+            // Values: 1 the path (element), 2 the parent text (`where`); the document has none.
+            let (element, parent) = (
+                t.c_role_element.replace("{0}", "1"),
+                t.c_role_parent.replace("{0}", "2"),
+            );
+            assert!(v.trusted.contains(&element), "{l:?}: {:?}", v.trusted);
+            assert!(v.trusted.contains(&parent), "{l:?}: {:?}", v.trusted);
+            let frame = v.frame.lines.join("\n");
+            assert!(frame.contains("SOAP-ENV = urn:soap"), "{l:?}: {frame}");
+            assert!(frame.contains("* = urn:dsig"), "{l:?}: {frame}");
+            // The binding texts are the plugin's: never in a host line.
+            assert!(!v.trusted.iter().any(|x| x.contains("urn:dsig")), "{l:?}");
+            // The serialisation choices are the host's words on the page.
+            assert!(v.trusted.iter().any(|x| x.contains("standalone")), "{l:?}");
+        }
+    }
+
+    /// Core's resolved profile must be the declared one with the typed texts: a difference in
+    /// any single field, not only in the XPaths, is no page.
+    #[test]
+    fn a_resolved_profile_that_differs_in_any_field_is_refused() {
+        use oncl_pdk::abi::Placement;
+        use oncl_plugin::operations::{Namespace, XmlOutputProfile};
+        let m = xml_ex_manifest();
+        let good = resolved_xml_ex(&m);
+        let mut s = summary();
+        s.kind = KeyKind::XmlEx;
+        s.profile = Profile::XmlEx(good.clone());
+        assert!(view_with(&m, &s, &xml_ex_entered(), Locale::En).is_ok());
+        type Change = Box<dyn Fn(&mut XmlExProfile)>;
+        let changes: Vec<(&str, Change)> = vec![
+            (
+                "element",
+                Box::new(|p| p.element = Some(Source::Fixed("/r/other".into()))),
+            ),
+            (
+                "parent",
+                Box::new(|p| p.parent = Some(Source::Fixed("/r".into()))),
+            ),
+            (
+                "placement",
+                Box::new(|p| p.placement = Placement::DocumentElement),
+            ),
+            (
+                "namespaces",
+                Box::new(|p| {
+                    p.namespaces = vec![Namespace {
+                        prefix: "x".into(),
+                        uri: "urn:x".into(),
+                    }]
+                }),
+            ),
+            (
+                "other_prefix_uri",
+                Box::new(|p| p.other_prefix_uri = Some("urn:evil".into())),
+            ),
+            (
+                "signature_method",
+                Box::new(|p| p.signature_method = Some("m".into())),
+            ),
+            (
+                "digest_method",
+                Box::new(|p| p.digest_method = Some("m".into())),
+            ),
+            (
+                "c14n",
+                Box::new(|p| p.c14n = Some(oncl_pdk::abi::C14n::Exclusive)),
+            ),
+            (
+                "strip_whitespace",
+                Box::new(|p| p.strip_whitespace = !p.strip_whitespace),
+            ),
+            (
+                "base64_line_breaks",
+                Box::new(|p| p.base64_line_breaks = Some(true)),
+            ),
+            ("output", Box::new(|p| p.output = XmlOutputProfile::AsIs)),
+            (
+                "transforms",
+                Box::new(|p| p.transforms = Some(vec![oncl_pdk::abi::Transform::Enveloped])),
+            ),
+            ("transforms dropped", Box::new(|p| p.transforms = None)),
+        ];
+        for (what, change) in changes {
+            let mut bad = good.clone();
+            change(&mut bad);
+            assert_ne!(bad, good, "{what}: the change changes nothing");
+            s.profile = Profile::XmlEx(bad);
+            assert!(
+                matches!(
+                    view_with(&m, &s, &xml_ex_entered(), Locale::En),
+                    Err(ConsentError::Mismatch)
+                ),
+                "{what}"
             );
         }
     }

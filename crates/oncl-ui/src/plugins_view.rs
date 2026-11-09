@@ -1134,6 +1134,7 @@ mod tests {
             ],
             label: ["а".to_owned(), "ә".to_owned(), "a".to_owned()],
             xpaths: Vec::new(),
+            bindings: Vec::new(),
         };
         let update = shown.installed[0].pending_update.as_mut().unwrap();
         update
@@ -1198,6 +1199,7 @@ mod tests {
             lines: Vec::new(),
             label: ["а".to_owned(), "ә".to_owned(), "a".to_owned()],
             xpaths: Vec::new(),
+            bindings: Vec::new(),
         }];
         let o = opened_with(Locale::En, shown);
         o.open.ui.invoke_confirm_update(0);

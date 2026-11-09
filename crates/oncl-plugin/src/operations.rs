@@ -18,7 +18,7 @@ use crate::manifest::{HttpPrefix, Localized};
 use crate::{Capabilities, runtime};
 use oncl_flows::capabilities::{
     AddedLine, CapabilityLine, CmsAttribute, KeyUseKind, NetworkLine, OperationConsent, OutputForm,
-    PlacementKind, ProfileFact, TsaFamily, XadesLevelKind,
+    PlacementKind, ProfileFact, TransformKind, TsaFamily, XadesLevelKind,
 };
 use oncl_pdk::abi::{C14n, CmsOutput, Import, Placement, Transform, XadesLevel};
 use semver::{BuildMetadata, Prerelease, Version};
@@ -268,6 +268,7 @@ impl Operation {
     pub fn consent(&self, added: Option<&AddedOperation>) -> OperationConsent {
         let mut lines = Vec::new();
         let mut xpaths = Vec::new();
+        let mut bindings = Vec::new();
         if let Some(added) = added {
             for reason in &added.reasons {
                 lines.push(CapabilityLine::Added(match reason {
@@ -294,11 +295,12 @@ impl Operation {
                 KeyKind::XmlEx => KeyUseKind::XmlEx,
                 KeyKind::Xades => KeyUseKind::Xades,
             }));
-            let (facts, texts) = key.profile.view();
+            let (facts, texts, bound) = key.profile.view();
             if !facts.is_empty() {
                 lines.push(CapabilityLine::KeyProfile(facts));
             }
             xpaths.extend(texts);
+            bindings.extend(bound);
         }
         lines.push(CapabilityLine::OperationNetwork(match &self.uses.network {
             Network::None => NetworkLine::None,
@@ -317,6 +319,7 @@ impl Operation {
                 self.label.en.clone(),
             ],
             xpaths,
+            bindings,
         }
     }
 
@@ -642,7 +645,8 @@ impl KeyUse {
 
     /// The canonical encoding of the options of this use: the input of `options_sha256` of
     /// the `PluginUse` ticket. Every field of the kind's profile is written, defaults
-    /// included, so an unset field and its explicit default encode alike. A field that
+    /// included, so an unset field and its explicit default encode alike; the one exception
+    /// is `xml_ex` field 12 (`transforms`), written only when set. A field that
     /// names a parameter (`param:<name>`) is written as the value `values` gives for it,
     /// as if fixed; `None` if `values` has none.
     ///
@@ -651,8 +655,11 @@ impl KeyUse {
     /// profile struct, each as `field-id u8` and a self-delimiting value: `bool` one byte
     /// 0/1; an enum one byte (its position in the struct's documentation); a string `u32`
     /// length and its UTF-8 bytes; an optional `0` or `1` and the value; a list `u32`
-    /// count and its items; a source `0` none, `1` fixed text. The set and order of fields
-    /// are fixed per kind, so no two different profiles encode alike.
+    /// count and its items; a source `0` none, `1` fixed text. The fields before field 12 are
+    /// a deterministic prefix of fixed set and order, and field 12 is the last, tagged and
+    /// length-prefixed, so it cannot be mistaken for anything before it and no two different
+    /// profiles encode alike (a `Some` list is never empty: `None` and `Some([])` cannot
+    /// meet).
     pub fn options_canonical(&self, values: ParamValues<'_>) -> Option<Vec<u8>> {
         self.profile.encode(self.kind, Some(values))
     }
@@ -1027,7 +1034,7 @@ impl Profile {
     /// without `..`: a field added to one breaks this build until it is shown or declared
     /// default. Shown: the essentials always, any other field only when it differs from the
     /// core's default; `cosign` has the one value `never`, said with every `cms_ex`.
-    fn view(&self) -> (Vec<ProfileFact>, Vec<String>) {
+    fn view(&self) -> (Vec<ProfileFact>, Vec<String>, Vec<String>) {
         let timestamp = |t: Timestamp| match t {
             Timestamp::None => ProfileFact::NoTimestamp,
             Timestamp::Basics => ProfileFact::Timestamp(TsaFamily::Basics),
@@ -1042,6 +1049,7 @@ impl Profile {
         };
         let mut facts = Vec::new();
         let mut xpaths = Vec::new();
+        let mut bindings = Vec::new();
         // The element to sign, or where the signature goes.
         let mut source = |facts: &mut Vec<ProfileFact>, s: &Source, fixed, param| match s {
             Source::Fixed(xpath) => {
@@ -1158,9 +1166,15 @@ impl Profile {
                 }
                 if !namespaces.is_empty() {
                     facts.push(ProfileFact::XmlNamespaces(namespaces.len()));
+                    bindings.extend(
+                        namespaces
+                            .iter()
+                            .map(|n| format!("{} = {}", n.prefix, n.uri)),
+                    );
                 }
-                if other_prefix_uri.is_some() {
+                if let Some(uri) = other_prefix_uri {
                     facts.push(ProfileFact::XmlOtherPrefixUri);
+                    bindings.push(format!("* = {uri}"));
                 }
                 if let Some(m) = signature_method {
                     facts.push(ProfileFact::SignatureMethod(m.clone()));
@@ -1187,11 +1201,19 @@ impl Profile {
                 }
                 match output {
                     XmlOutputProfile::AsIs => {}
-                    XmlOutputProfile::Serialize { .. } => facts.push(ProfileFact::XmlSerialized),
+                    XmlOutputProfile::Serialize {
+                        declaration,
+                        standalone_no,
+                        trim,
+                    } => facts.push(ProfileFact::XmlSerialized {
+                        declaration: *declaration,
+                        standalone_no: *standalone_no,
+                        trim: *trim,
+                    }),
                 }
                 if let Some(transforms) = transforms {
                     facts.push(ProfileFact::XmlTransforms(
-                        transforms.iter().map(transform_name).collect(),
+                        transforms.iter().map(transform_kind).collect(),
                     ));
                 }
             }
@@ -1227,7 +1249,7 @@ impl Profile {
                 }
             }
         }
-        (facts, xpaths)
+        (facts, xpaths, bindings)
     }
 
     /// The canonical options encoding of `self` as a `kind` use (the format of
@@ -2350,18 +2372,14 @@ impl RawKeyUse {
     }
 }
 
-/// The core's name of a transform, as the consent states it.
-fn transform_name(t: &Transform) -> String {
+/// The consent's kind of a transform (the words are the consent's, per language).
+fn transform_kind(t: &Transform) -> TransformKind {
     match t {
-        Transform::Enveloped => "enveloped signature".to_owned(),
-        Transform::C14n(C14n::Inclusive) => "inclusive canonicalisation".to_owned(),
-        Transform::C14n(C14n::InclusiveWithComments) => {
-            "inclusive canonicalisation with comments".to_owned()
-        }
-        Transform::C14n(C14n::Exclusive) => "exclusive canonicalisation".to_owned(),
-        Transform::C14n(C14n::ExclusiveWithComments) => {
-            "exclusive canonicalisation with comments".to_owned()
-        }
+        Transform::Enveloped => TransformKind::Enveloped,
+        Transform::C14n(C14n::Inclusive) => TransformKind::Inclusive,
+        Transform::C14n(C14n::InclusiveWithComments) => TransformKind::InclusiveWithComments,
+        Transform::C14n(C14n::Exclusive) => TransformKind::Exclusive,
+        Transform::C14n(C14n::ExclusiveWithComments) => TransformKind::ExclusiveWithComments,
     }
 }
 

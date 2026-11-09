@@ -42,8 +42,9 @@ pub const INSTALL_DELAY: Duration = Duration::from_millis(1500);
 /// allows 80, the frame a little less so that it stays a note, not a paragraph.
 pub const MAX_UNTRUSTED_LABEL: usize = 60;
 
-/// The most characters of a plugin's own XPath the frame shows (then `…`): the manifest's own
-/// limit, so a valid XPath is never shown cut. An XPath is part of what the user's signature
+/// The most characters of a plugin's own XPath the frame shows (then `…`). The manifest's
+/// limit is in bytes (`MAX_XPATH`); a character is at least one byte, so a valid XPath is
+/// never shown cut. An XPath is part of what the user's signature
 /// covers (it picks the signed element and where the signature goes), so a tail beyond a
 /// shorter cut could change what is signed without being read.
 pub const MAX_UNTRUSTED_XPATH: usize = oncl_plugin::operations::MAX_XPATH;
@@ -340,6 +341,12 @@ fn block(operation: &OperationConsent, l: Locale) -> BlockTexts {
             .xpaths
             .iter()
             .map(|x| t.xpath.replace("{0}", &untrusted_xpath(x)))
+            .chain(
+                operation
+                    .bindings
+                    .iter()
+                    .map(|b| t.binding.replace("{0}", &untrusted_xpath(b))),
+            )
             .collect(),
     }
 }
@@ -443,6 +450,12 @@ pub(crate) fn frame_xpath(l: Locale) -> &'static str {
     Texts::of(l).xpath
 }
 
+/// The caption of a plugin's own namespace binding in the frame, in `l`; `{0}` is the
+/// binding.
+pub(crate) fn frame_binding(l: Locale) -> &'static str {
+    Texts::of(l).binding
+}
+
 /// The texts of the window, in one language.
 struct Texts {
     /// `{0}`: the page's origin.
@@ -464,6 +477,8 @@ struct Texts {
     operation_invalid: &'static str,
     /// `{0}`: the plugin's XPath.
     xpath: &'static str,
+    /// `{0}`: `prefix = URI`, or `* = URI` for every other prefix.
+    binding: &'static str,
     /// The frame of the plugin's own label.
     calls: &'static str,
     /// `{version}`, `{source}`: [`Texts::installed_local`] or [`Texts::installed_catalog`].
@@ -493,6 +508,7 @@ impl Texts {
                 operation: "Әрекет {name}",
                 operation_invalid: "Атауы жарамсыз әрекет",
                 xpath: "Плагиннің XPath мәтіні: {0}",
+                binding: "Плагиннің XPath үшін аттар кеңістігі байланысы (* — кез келген басқа префикс): {0}",
                 calls: "Плагин оны былай атайды (плагиннің өз сөзі, тексерілмеген):",
                 replacing: "Орнатылған {version} нұсқасын ({source}) алмастырады",
                 installed_local: "жергілікті, файлдан",
@@ -515,6 +531,7 @@ impl Texts {
                 operation: "Действие {name}",
                 operation_invalid: "Действие с недопустимым именем",
                 xpath: "XPath от плагина: {0}",
+                binding: "Привязка пространства имён для XPath от плагина (* — любой другой префикс): {0}",
                 calls: "Плагин называет его так (слова самого плагина, не проверены):",
                 replacing: "Заменит установленную версию {version} ({source})",
                 installed_local: "локальную, из файла",
@@ -537,6 +554,7 @@ impl Texts {
                 operation: "Operation {name}",
                 operation_invalid: "An operation with an invalid name",
                 xpath: "The plugin's XPath: {0}",
+                binding: "The plugin's namespace binding for XPaths (* is every other prefix): {0}",
                 calls: "The plugin calls it (the plugin's own words, not checked):",
                 replacing: "Replaces the installed version {version} ({source})",
                 installed_local: "local, from a file",
@@ -581,6 +599,7 @@ mod tests {
             ],
             label: [label.to_owned(), label.to_owned(), label.to_owned()],
             xpaths: Vec::new(),
+            bindings: Vec::new(),
         }
     }
 
@@ -1022,6 +1041,39 @@ mod tests {
             assert!(b.plugin_lines[0].contains("Core verified"));
             assert!(b.plugin_lines[0].contains(&crafted), "{l:?}: cut");
             assert!(!b.plugin_lines[0].ends_with('…'));
+        }
+    }
+
+    /// The transforms line (every kind, each in the language of the dialog) and the plugin's
+    /// namespace bindings reach the install dialog: the line as the host's own words, the
+    /// bindings in the plugin's frame.
+    #[test]
+    fn transforms_and_bindings_reach_the_install_dialog() {
+        use oncl_flows::capabilities::TransformKind as K;
+        let facts = vec![
+            ProfileFact::XmlTransforms(vec![K::Enveloped, K::ExclusiveWithComments]),
+            ProfileFact::XmlTransforms(vec![K::Inclusive]),
+            ProfileFact::XmlTransforms(vec![K::InclusiveWithComments]),
+            ProfileFact::XmlTransforms(vec![K::Exclusive]),
+        ];
+        let mut op = operation("sign-xml", "Sign");
+        op.lines = facts
+            .iter()
+            .map(|f| CapabilityLine::KeyProfile(vec![f.clone()]))
+            .collect();
+        op.bindings = vec!["SOAP-ENV = urn:soap".to_owned(), "* = urn:dsig".to_owned()];
+        let request = with_operations(vec![op], false);
+        for l in ALL {
+            let b = &texts(&request, l).operations[0];
+            for f in &facts {
+                let line = capability_text(&CapabilityLine::KeyProfile(vec![f.clone()]), l);
+                assert!(b.lines.contains(&line), "{l:?}: {line}");
+            }
+            assert_eq!(b.plugin_lines.len(), 2, "{l:?}");
+            assert!(b.plugin_lines[0].contains("SOAP-ENV = urn:soap"), "{l:?}");
+            assert!(b.plugin_lines[1].contains("* = urn:dsig"), "{l:?}");
+            let host = b.lines.join("\n");
+            assert!(!host.contains("urn:dsig"), "{l:?}");
         }
     }
 
