@@ -47,7 +47,7 @@ param(
   [Parameter(Mandatory)][string]$OldVersion,
   [Parameter(Mandatory)][ValidateSet('standard', 'admin_non_elevated')][string]$Account,
   [Parameter(Mandatory)][string]$OutFile,
-  [string]$Repository = 'arynyklas/open-ncalayer',
+  [string]$Repository = 'arynyklas/OpenNCALayer',
   [string]$OtherAdminProfile = '',
   [string]$SelfUpdateTargetVersion = '',
   [int]$SelfUpdateWaitMinutes = 15,

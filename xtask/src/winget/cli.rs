@@ -21,7 +21,7 @@ pub enum WingetCommand {
     /// built from a published stable release and the bytes of its two installers, and has no
     /// Apps & Features mapping yet. Not for submission.
     Candidate {
-        /// The release object of the GitHub API (`gh api repos/arynyklas/open-ncalayer/releases/tags/v<version>`).
+        /// The release object of the GitHub API (`gh api repos/arynyklas/OpenNCALayer/releases/tags/v<version>`).
         #[arg(long)]
         release_json: PathBuf,
         /// The directory to write (new or empty).

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use super::Arch;
 
 /// The GitHub repository the assets are published in.
-pub const REPOSITORY: &str = "arynyklas/open-ncalayer";
+pub const REPOSITORY: &str = "arynyklas/OpenNCALayer";
 
 /// A release as the GitHub API reports it (only the fields the manifests depend on).
 #[derive(Clone, Debug, Deserialize)]

@@ -120,7 +120,7 @@ fn asset_name(version: &str, arch: Arch) -> String {
 
 fn asset_path(version: &str, arch: Arch) -> String {
     format!(
-        "/arynyklas/open-ncalayer/releases/download/v{version}/{}",
+        "/arynyklas/OpenNCALayer/releases/download/v{version}/{}",
         asset_name(version, arch)
     )
 }
@@ -159,7 +159,7 @@ fn release_value(published: &Published) -> Value {
                 "size": published.bytes(*arch).len(),
                 "digest": format!("sha256:{}", sha256(published.bytes(*arch))),
                 "browser_download_url": format!(
-                    "https://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{name}"
+                    "https://github.com/arynyklas/OpenNCALayer/releases/download/v{VERSION}/{name}"
                 ),
             })
         })
@@ -200,7 +200,7 @@ fn cell(
         "installer": {
             "asset_name": asset_name(VERSION, arch),
             "url": format!(
-                "https://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{}",
+                "https://github.com/arynyklas/OpenNCALayer/releases/download/v{VERSION}/{}",
                 asset_name(VERSION, arch)
             ),
             "arch": arch.to_string(),
@@ -580,7 +580,7 @@ fn prerelease_and_draft_rejected() {
 fn mutable_latest_urls_and_foreign_assets_are_rejected_before_any_download() {
     let published = Published::new();
     let latest = format!(
-        "https://github.com/arynyklas/open-ncalayer/releases/latest/download/{}",
+        "https://github.com/arynyklas/OpenNCALayer/releases/latest/download/{}",
         asset_name(VERSION, Arch::X64)
     );
     let cases: Vec<(&str, Mutation)> = vec![
@@ -601,7 +601,7 @@ fn mutable_latest_urls_and_foreign_assets_are_rejected_before_any_download() {
             "plain http",
             Box::new(|r| {
                 r["assets"][0]["browser_download_url"] = json!(format!(
-                    "http://github.com/arynyklas/open-ncalayer/releases/download/v{VERSION}/{}",
+                    "http://github.com/arynyklas/OpenNCALayer/releases/download/v{VERSION}/{}",
                     asset_name(VERSION, Arch::X64)
                 ));
             }),
@@ -610,7 +610,7 @@ fn mutable_latest_urls_and_foreign_assets_are_rejected_before_any_download() {
             "another tag's URL",
             Box::new(|r| {
                 r["assets"][0]["browser_download_url"] = json!(format!(
-                    "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0/{}",
+                    "https://github.com/arynyklas/OpenNCALayer/releases/download/v0.2.0/{}",
                     asset_name(VERSION, Arch::X64)
                 ));
             }),
@@ -2080,7 +2080,7 @@ fn a_byte_order_mark_is_read_and_a_fixture_header_is_not_believed_by_check() {
 fn redirects_leave_github_only_over_https() {
     use xtask::winget::download::github_hop;
     for good in [
-        "https://github.com/arynyklas/open-ncalayer/releases/download/v1.0.0/a.exe",
+        "https://github.com/arynyklas/OpenNCALayer/releases/download/v1.0.0/a.exe",
         "https://release-assets.githubusercontent.com/github-production-release-asset/1?x=y",
         "https://objects.githubusercontent.com/a",
     ] {
