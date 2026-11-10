@@ -1767,6 +1767,7 @@ mod scripts {
             "Invoke-WingetProbe.ps1",
             "Invoke-WingetFinalProbe.ps1",
             "Merge-ProbeCells.ps1",
+            "Invoke-WingetHold.ps1",
         ] {
             let output = powershell()
                 .env("ONCL_SCRIPT", script(name))
