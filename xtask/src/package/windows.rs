@@ -105,8 +105,8 @@ pub fn winget_setup_name(version: &Version, flavor: &WindowsFlavor) -> String {
 ///
 /// The flavor is a Windows 7 one; a file cannot be read or written; `entry` or `setup` is
 /// not a program of the flavor's architecture, `entry` already carries a payload or a
-/// signature, or either needs the Visual C++ Redistributable; the file written does not
-/// read back as the payload.
+/// signature or no `asInvoker` manifest, or either needs the Visual C++ Redistributable; the
+/// file written does not read back as the payload.
 pub fn winget_setup(
     entry: &Path,
     setup: &Path,
@@ -132,6 +132,15 @@ pub fn winget_setup(
     // Redistributable, which a clean Windows 10 or 11 does not have.
     no_redistributable([entry.to_path_buf(), setup.to_path_buf()])?;
     let entry_bytes = fs::read(entry).with_context(|| format!("reading {}", entry.display()))?;
+    // Without an `asInvoker` manifest Windows takes "setup" in the file name for a legacy
+    // installer and asks for elevation before the entry starts (finding F1).
+    if !oncl_winget_setup::manifest::is_as_invoker(&entry_bytes) {
+        bail!(
+            "{} has no application manifest asking for `asInvoker`: Windows would show a UAC \
+             prompt for the installer (crates/oncl-winget-setup/build.rs embeds it)",
+            entry.display()
+        );
+    }
     let setup_bytes = fs::read(setup).with_context(|| format!("reading {}", setup.display()))?;
     let image = payload::append(&entry_bytes, &setup_bytes, version, arch)
         .with_context(|| format!("making the WinGet installer of {}", flavor.name))?;

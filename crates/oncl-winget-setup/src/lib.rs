@@ -29,6 +29,7 @@
 
 pub mod install;
 pub mod maintenance;
+pub mod manifest;
 pub mod payload;
 #[cfg(windows)]
 pub mod processes;
