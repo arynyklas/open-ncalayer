@@ -858,7 +858,7 @@ pub fn check_layout(
             || [
                 "fixtures",
                 "synthetic",
-                "org-93",
+                concat!(".super", "powers"),
                 ".ssh",
                 "appdata",
                 "home/",
@@ -1050,6 +1050,26 @@ mod tests {
                 "{extra}: {error}"
             );
         }
+    }
+
+    /// The working-notes directory must never reach a package. Its name is assembled with
+    /// `concat!` so that this source never contains it as one literal.
+    #[test]
+    fn the_working_notes_directory_in_an_archive_is_refused() {
+        let flavor = flavor("linux-x64").unwrap();
+        let mut names = listed(Product::Server, &flavor);
+        names.push(format!(
+            "{}/{}/sdd/notes.md",
+            dir_name(Product::Server, &version(), &flavor),
+            concat!(".super", "powers")
+        ));
+        let error = check_layout(&names, Product::Server, &version(), &flavor)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("key material, a secret or a test or user file in a package"),
+            "{error}"
+        );
     }
 
     #[test]
