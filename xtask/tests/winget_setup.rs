@@ -1,9 +1,10 @@
 //! The WinGet installer entry as `cargo xtask package winget-setup` makes it: real programs
-//! (this test's own executable stands for both the entry and `Setup.exe`), read back the way
-//! the installer reads its payload.
+//! (this test's own executable stands for both the entry and `Setup.exe`; `build.rs` gives it
+//! the entry's `asInvoker` manifest), read back the way the installer reads its payload.
 #![cfg(windows)]
 
 use oncl_update::Version;
+use oncl_winget_setup::manifest;
 use oncl_winget_setup::payload::{self, Arch};
 use xtask::package::windows::{flavor, winget_setup, winget_setup_name};
 
@@ -60,4 +61,35 @@ fn windows_7_flavors_and_the_other_architecture_get_none() {
         dir.path().read_dir().unwrap().next().is_none(),
         "nothing is written for a refusal"
     );
+}
+
+/// This test executable with its resource table cut off: a real PE without a manifest.
+fn without_manifest(exe: &std::path::Path, to: &std::path::Path) {
+    let mut image = std::fs::read(exe).unwrap();
+    let pe_at = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
+    let optional = pe_at + 24;
+    let directories = optional + if image[optional + 1] == 0x01 { 96 } else { 112 };
+    image[directories + 16..directories + 24].fill(0);
+    std::fs::write(to, image).unwrap();
+}
+
+#[test]
+fn the_stand_in_entry_really_carries_the_manifest() {
+    let exe = std::env::current_exe().unwrap();
+    assert!(manifest::is_as_invoker(&std::fs::read(exe).unwrap()));
+}
+
+#[test]
+fn an_entry_without_an_as_invoker_manifest_is_refused_and_nothing_is_written() {
+    let exe = std::env::current_exe().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("entry.exe");
+    without_manifest(&exe, &entry);
+    assert!(!manifest::is_as_invoker(&std::fs::read(&entry).unwrap()));
+    let out = dir.path().join("dist");
+    let version = Version::parse("0.2.0-alpha.1").unwrap();
+    let flavor = flavor(this_flavor()).unwrap();
+    let err = winget_setup(&entry, &exe, &version, &flavor, &out).unwrap_err();
+    assert!(err.to_string().contains("asInvoker"), "{err}");
+    assert!(!out.exists(), "nothing is written for a refusal");
 }
