@@ -1486,12 +1486,6 @@ mod telemetry {
                 .filter(|n| n.starts_with("oncl-otlp") || n.starts_with("OpenTelemetry"))
                 .collect()
         };
-        assert_eq!(exporters(&absent), Vec::<String>::new());
-        assert_eq!(
-            exporters(&off),
-            Vec::<String>::new(),
-            "disabled starts no thread"
-        );
         // Linux keeps 15 bytes of a thread name (`TASK_COMM_LEN`): what /proc reports.
         let reported = |name: &str| -> String {
             if cfg!(target_os = "linux") {
@@ -1500,20 +1494,50 @@ mod telemetry {
                 name.to_owned()
             }
         };
-        assert_eq!(
-            exporters(&on),
-            [
+        // A freshly spawned thread has not named itself yet: the names that MUST appear
+        // are polled for (bounded), then asserted strictly with the observed list shown.
+        let expect_threads = |process: &Proc, expected: &[String], what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let seen = exporters(process);
+                if seen == expected || Instant::now() >= deadline {
+                    let all = process.threads();
+                    assert_eq!(seen, expected, "{what}; all comm: {all:?}");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        expect_threads(
+            &on,
+            &[
                 reported("OpenTelemetry.Metrics.PeriodicReader"),
-                reported("oncl-otlp-traces")
+                reported("oncl-otlp-traces"),
             ],
-            "enabled: one metric reader and one span worker"
+            "enabled: one metric reader and one span worker",
         );
         for (extra, name) in [
             ("traces = false\n", "OpenTelemetry.Metrics.PeriodicReader"),
             ("metrics = false\n", "oncl-otlp-traces"),
         ] {
             let single = Proc::start(&table(&collector, extra), false);
-            assert_eq!(exporters(&single), [reported(name)], "single-signal export");
+            expect_threads(&single, &[reported(name)], "single-signal export");
+        }
+        // "Must not exist": never polled to a pass; sampled over a window instead, so a
+        // late-appearing exporter thread is caught. By now the enabled processes (same
+        // binary, same startup) have shown their threads.
+        let window = Instant::now() + Duration::from_millis(500);
+        loop {
+            assert_eq!(exporters(&absent), Vec::<String>::new());
+            assert_eq!(
+                exporters(&off),
+                Vec::<String>::new(),
+                "disabled starts no thread"
+            );
+            if Instant::now() >= window {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
         runtime.block_on(async {
             for process in [&absent, &off] {
