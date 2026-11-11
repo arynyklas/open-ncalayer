@@ -134,13 +134,15 @@ jobs:
           cargo xtask fetch-fixtures
           # The built-in modules' benchmarks (`bench_*`) run in release, in the `bench` job.
           # Ignored tests this job does not run: the two that write more than 4 GiB of real
-          # bytes (run by hand, release probes), and two developer tools that need their own
-          # input (`ONCL_DENSE_PDF`, `LOOPBACK_PKI_DIR`). Every other ignored test runs here,
-          # fixtures and oracles included: the parity tests of oncl-ui run the `oncl` binary
-          # that this very `cargo test` builds (target/debug/oncl). A missing oracle fails them.
+          # bytes (run by hand, release probes), and four developer tools that need their own
+          # input or program (`ONCL_DENSE_PDF`, `LOOPBACK_PKI_DIR`, `ONCL_SMOKE_DIR`, `winget`
+          # on PATH). Every other ignored test runs here, fixtures and oracles included: the
+          # parity tests of oncl-ui run the `oncl` binary that this very `cargo test` builds
+          # (target/debug/oncl). A missing oracle fails them.
           cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ --skip bench_ \
             --skip offset_over_4gib --skip common_region_replay_crosses_four_gib \
             --skip external_dense_pdf_signs_and_verifies --skip serve_a_synthetic_authority_until_stdin_closes \
+            --skip smoke_data_dir --skip real_winget_validates_the_emitted_manifests \
             "${skip[@]}"
       # The built-in modules' tests again with no markers for the long strings of a request
       # (the modules read them as the tests sent them): the same tests pass both ways.
