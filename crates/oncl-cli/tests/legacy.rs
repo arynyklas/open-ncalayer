@@ -5,13 +5,8 @@ use der::Encode;
 use std::{path::Path, process::Command};
 use support::*;
 
-fn python() -> Option<&'static str> {
-    ["python", "python3", "py"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .args(["-c", "import lxml, cryptography"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
+fn python() -> Option<String> {
+    python_with("lxml, cryptography")
 }
 /// Independent XML-DSig verification of `signed` against the RSA leaf.
 fn oracle(w: &World, signed: &Path) -> Option<String> {

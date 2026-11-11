@@ -5,13 +5,8 @@ use der::Encode;
 use std::{path::Path, process::Command};
 use support::*;
 
-fn python() -> Option<&'static str> {
-    ["python", "python3", "py"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .args(["-c", "import lxml"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
+fn python() -> Option<String> {
+    python_with("lxml")
 }
 fn inspect(w: &World, signed: &Path) -> serde_json::Value {
     let python = python().expect("python with lxml is required for the WSSE structural oracle");

@@ -5,13 +5,8 @@ use der::Encode;
 use std::{path::Path, process::Command};
 use support::*;
 
-fn python() -> Option<&'static str> {
-    ["python", "python3", "py"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .args(["-c", "import lxml, cryptography"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
+fn python() -> Option<String> {
+    python_with("lxml, cryptography")
 }
 fn trust(w: &World) -> Vec<&str> {
     vec![
@@ -324,7 +319,7 @@ fn xades_lt_with_a_multi_megabyte_crl_is_verified_not_refused() {
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     let oracle = |file: &Path| -> Option<String> {
-        let python = python?;
+        let python = python.as_deref()?;
         let script = w.dir.path().join("crl_oracle.py");
         std::fs::write(
             &script,

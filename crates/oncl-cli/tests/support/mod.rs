@@ -557,3 +557,20 @@ pub fn openssl_command() -> String {
         })
         .expect("OpenSSL oracle unavailable: install OpenSSL or set ONCL_OPENSSL to its executable")
 }
+
+/// Locates a Python that imports `modules` (for example `"lxml, cryptography"`) for the XML
+/// oracles: `ONCL_PYHANKO_PYTHON` first (the oracle virtualenv of CI and of `xtask`), then
+/// `python`, `python3` and `py` on `PATH`, which on a CI runner have no lxml.
+pub fn python_with(modules: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(explicit) = std::env::var("ONCL_PYHANKO_PYTHON") {
+        candidates.push(explicit);
+    }
+    candidates.extend(["python", "python3", "py"].map(str::to_owned));
+    candidates.into_iter().find(|c| {
+        std::process::Command::new(c)
+            .args(["-c", &format!("import {modules}")])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}

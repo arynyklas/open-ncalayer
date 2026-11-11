@@ -1010,7 +1010,7 @@ fn xml_oracle(xml: &[u8], dir: &Path) -> serde_json::Value {
     let file = dir.join("signed.xml");
     std::fs::write(&file, xml).unwrap();
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracles/xml_verify.py");
-    let out = std::process::Command::new("python")
+    let out = std::process::Command::new(oracle_python())
         .arg(script)
         .arg(&file)
         .output()

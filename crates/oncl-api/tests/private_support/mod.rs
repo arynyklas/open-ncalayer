@@ -662,6 +662,20 @@ pub fn artifact<'a>(parts: &'a [(String, Option<String>, Vec<u8>)], id: &str) ->
         .expect("artifact part")
 }
 
+/// The Python of the independent oracles (pyHanko, lxml, cryptography): the interpreter that
+/// `ONCL_PYHANKO_PYTHON` names, never whichever `python` is first on the PATH (it has no
+/// lxml on a CI runner). Its absence fails the test; nothing is skipped.
+pub fn oracle_python() -> PathBuf {
+    std::env::var_os("ONCL_PYHANKO_PYTHON")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .expect(
+            "oracle Python unavailable: create a Python environment with `pip install -r \
+             xtask/assets/oracle/requirements.txt` and set ONCL_PYHANKO_PYTHON to that \
+             environment's python executable",
+        )
+}
+
 /// Independent oracle: OpenSSL CMS signature verification (embedded signer cert,
 /// no chain: the synthetic chain uses GOST CAs OpenSSL cannot validate).
 pub fn openssl_cms_verify(signature: &[u8], content: Option<&[u8]>, dir: &Path) -> Option<Vec<u8>> {
