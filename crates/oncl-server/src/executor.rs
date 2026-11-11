@@ -329,16 +329,11 @@ impl BoundedExecutor {
             // the real closure, never merely inside a cancellable async waiter.
             tokio::task::spawn_blocking(move || {
                 let _scope = scope;
-                let _active = active;
-                let _worker = worker;
-                let _running = running;
-                // The worker's share of the request is released before the permits above: the
-                // executor is idle (and a shutdown may flush telemetry) only when `_active` is
-                // gone, and a request whose last owner is this thread ends its span and
-                // metrics when it lets go. A closure's own capture would be dropped after every
-                // local, so the request would end after the executor was seen idle.
+                let active = active;
+                let worker = worker;
+                let running = running;
                 let observer = observer;
-                let _entered = observer.enter_worker();
+                let entered = observer.enter_worker();
                 let (run, run_time) = (Instant::now(), SystemTime::now());
                 let result = work();
                 observer.executor_stage(
@@ -347,7 +342,23 @@ impl BoundedExecutor {
                     run_time,
                     result.as_ref().err().map(crate::service::processing_code),
                 );
+                // The end, in the order its parts need. The native call is over, so its worker
+                // count and permit go before the result is delivered: `send` wakes the
+                // receiver, which runs at once on another thread, and whoever sees the result
+                // (the response frame of a staged artifact, say) must not see a native worker
+                // still running for it. Releasing after `send` is a race the receiver can win.
+                drop(running);
+                drop(worker);
                 let _ = sender.send(result);
+                // This thread's share of the request goes before the slot. The executor is
+                // idle (and a shutdown may flush telemetry) only when `active` is gone, and a
+                // request whose last owner is this thread ends its span and metrics when it
+                // lets go: the other order exports a service's last request too late. A
+                // closure's own capture would be dropped after every local, so the request
+                // would end after the executor was seen idle.
+                drop(entered);
+                drop(observer);
+                drop(active);
             });
         });
         Ok(WorkHandle {
@@ -429,5 +440,99 @@ mod tests {
             }
         }
         assert_eq!(late, 0, "rounds whose request outlived the idle executor");
+    }
+
+    /// The load of the executor at the moment a result becomes observable. The receiver's
+    /// wake-up runs inside `send` (the channel calls the waker after the value is stored, and
+    /// before `send` returns), so that moment is a point of the worker's own thread.
+    struct LoadAtDelivery {
+        executor: BoundedExecutor,
+        seen: std::sync::Mutex<Option<(usize, usize)>>,
+    }
+    impl std::task::Wake for LoadAtDelivery {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            *self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                self.executor.running(),
+                self.executor.shared.workers.available_permits(),
+            ));
+        }
+    }
+
+    /// `running()` and the worker permit account for the native call, which is over when its
+    /// result exists: both are released before the result is delivered, so whoever sees the
+    /// result (the response frame of a staged artifact, say) never sees a native worker still
+    /// running for it. Not a race to be sampled: the result's receiver is woken inside `send`,
+    /// on the worker's thread, and records the load there, so a worker that delivers first and
+    /// releases after is seen on every run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_native_worker_is_released_before_its_result_is_delivered() {
+        use std::{
+            future::Future,
+            pin::Pin,
+            task::{Context, Poll, Waker},
+        };
+        let executor = BoundedExecutor::new(ExecutorConfig {
+            blocking_workers: 1,
+            queue_capacity: 1,
+            admission_wait: Duration::from_secs(1),
+        })
+        .unwrap();
+        let (open, held) = std::sync::mpsc::channel::<()>();
+        let mut handle = executor
+            .launch(scope(), move || {
+                held.recv().expect("the test opens the gate");
+                Ok(7u8)
+            })
+            .await
+            .unwrap();
+        let load = Arc::new(LoadAtDelivery {
+            executor: executor.clone(),
+            seen: std::sync::Mutex::new(None),
+        });
+        let waker = Waker::from(load.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            Pin::new(&mut handle.receiver).poll(&mut cx).is_pending(),
+            "the worker is held at the gate"
+        );
+        let began = Instant::now();
+        while executor.running() != 1 {
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "the worker starts"
+            );
+            tokio::task::yield_now().await;
+        }
+        open.send(()).unwrap();
+        let seen = loop {
+            if let Some(seen) = *load
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                break seen;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "the result is delivered"
+            );
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(
+            seen,
+            (0, 1),
+            "(running, free native workers) when the result became observable"
+        );
+        assert!(matches!(
+            Pin::new(&mut handle.receiver).poll(&mut cx),
+            Poll::Ready(Ok(Ok(7)))
+        ));
+        executor.idle().await;
     }
 }
