@@ -846,7 +846,15 @@ fn a_long_unbreakable_origin_is_wrapped_in_the_storage_dialog_too() {
         open(&ui, (480.0, 520.0));
         ui.get_origin_lines()
     };
-    assert!(content(&host) >= content("https://a.test") + 20.0);
+    // `origin_lines` is a fixed part plus one line height per line (60.75 px for one line and
+    // 81.75 px for the wrapped one with the fonts of Windows). The original margin of 20 px
+    // meant "one more line"; a line is at least 10 px in any font, and the font's own line
+    // height is what differs on macOS, so the proof is the sign of one line, not 20 px.
+    let (short, long) = (content("https://a.test"), content(&host));
+    assert!(
+        long >= short + 10.0,
+        "wrapped by at least one line: long {long}, short {short}"
+    );
 }
 
 #[test]
