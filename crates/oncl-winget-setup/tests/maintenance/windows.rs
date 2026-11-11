@@ -863,6 +863,18 @@ fn an_elevated_entry_writes_nothing() {
 
 // ------------------------------------------------------------------ the shipped program
 
+/// Whether this process runs with an elevated token, by an oracle that does not share code
+/// with the predicate the installer uses: Windows' own report of this process's integrity
+/// level (High, S-1-16-12288, is an elevated token). CI runners are elevated administrators.
+fn this_process_is_elevated() -> bool {
+    // The Windows one by absolute path: Git for Windows' `usr/bin` has a `whoami` of its own
+    // that does not take `/groups` and may come first on PATH.
+    let whoami = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32/whoami.exe");
+    let groups = Command::new(whoami).arg("/groups").output().unwrap();
+    assert!(groups.status.success(), "{groups:?}");
+    String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288")
+}
+
 #[test]
 fn the_shipped_installer_says_what_it_is_missing_and_never_installs_without_a_payload() {
     // Without `--silent` it does not guess what to do.
@@ -872,13 +884,31 @@ fn the_shipped_installer_says_what_it_is_missing_and_never_installs_without_a_pa
     nonsense.args(["--silent", "--nonsense"]);
     let output = output_within(nonsense, SHORT);
     assert_eq!(output.status.code(), Some(Exit::Usage as i32));
-    // This build carries no payload: it refuses before it asks anything or writes anything.
     let mut silent = Command::new(ENTRY);
     silent.arg("--silent");
     let output = output_within(silent, SHORT);
-    assert_eq!(output.status.code(), Some(Exit::PayloadInvalid as i32));
     let message = String::from_utf8_lossy(&output.stderr);
-    assert!(message.contains("payload"), "{message}");
+    if this_process_is_elevated() {
+        // The shipped program has no test hook: under an elevated token (a CI runner is an
+        // administrator) its first check, before the payload is even looked at, refuses
+        // (docs/dev/winget-installer.md, step 1). The payload refusal below is then reached
+        // only by a run that is not elevated.
+        assert_eq!(
+            output.status.code(),
+            Some(Exit::Elevated as i32),
+            "{message}"
+        );
+        assert!(message.contains("elevated"), "{message}");
+    } else {
+        // This build carries no payload: it refuses before it asks anything or writes
+        // anything.
+        assert_eq!(
+            output.status.code(),
+            Some(Exit::PayloadInvalid as i32),
+            "{message}"
+        );
+        assert!(message.contains("payload"), "{message}");
+    }
 }
 
 // ----------------------------------------------------------- elevation and a late program
@@ -888,10 +918,7 @@ fn elevation_is_asked_of_the_real_token() {
     // The predicate the shipped installer uses, on this process's real token: not elevated
     // means the entry goes on, elevated means it refuses before it writes anything.
     let mut fx = Fixture::new();
-    // An oracle that does not share code with the predicate: Windows' own report of this
-    // process's integrity level (High, S-1-16-12288, is an elevated token).
-    let groups = Command::new("whoami").arg("/groups").output().unwrap();
-    let elevated = String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288");
+    let elevated = this_process_is_elevated();
     assert_eq!(oncl_winget_setup::is_elevated().unwrap(), elevated);
     let (code, message) =
         fx.run_entry("0.2.0", 0, &[("REAL_ELEVATION", "1"), ("SETUP", "install")]);
