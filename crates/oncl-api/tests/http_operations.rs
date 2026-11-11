@@ -71,11 +71,7 @@ impl Running {
         );
         stream.write_all(headers.as_bytes()).await.unwrap();
         stream.write_all(body).await.unwrap();
-        let mut result = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut result))
-            .await
-            .unwrap()
-            .unwrap();
+        let result = read_response(&mut stream).await;
         let status = std::str::from_utf8(&result[..12]).unwrap()[9..12]
             .parse()
             .unwrap();
@@ -99,11 +95,7 @@ impl Running {
             stream.write_all(b"\r\n").await.unwrap();
         }
         stream.write_all(b"0\r\n\r\n").await.unwrap();
-        let mut result = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut result))
-            .await
-            .unwrap()
-            .unwrap();
+        let result = read_response(&mut stream).await;
         let status = std::str::from_utf8(&result[..12]).unwrap()[9..12]
             .parse()
             .unwrap();
@@ -1128,5 +1120,24 @@ async fn real_multipart_pending_progress_and_final_frames_recheck_original_deadl
         );
         drop(slice);
         service.stop().await;
+    }
+}
+
+/// Reads the whole response (the server closes the connection after it). The bound is not a
+/// speed claim: a request of many tiny chunks is processed after the client finished
+/// writing, and a loaded CI runner needs far longer than a quiet machine (2.5 s here).
+/// A stall fails with what had arrived, not with a bare `Elapsed`.
+async fn read_response(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut result = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut result)).await {
+        Ok(read) => {
+            read.unwrap();
+            result
+        }
+        Err(_) => panic!(
+            "no complete response within 60 s of the request being written; received {} bytes: {:?}",
+            result.len(),
+            String::from_utf8_lossy(&result[..result.len().min(300)])
+        ),
     }
 }
