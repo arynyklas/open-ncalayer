@@ -181,10 +181,26 @@ mod telemetry {
         ) -> (u16, Vec<u8>) {
             collector::post(self.address, token, path, body, content_type).await
         }
-        async fn stop(self) -> Arc<ServiceHost> {
+        /// The stopped service's host, with its directory: the audit log is read after the
+        /// stop, and where an open file can be deleted (Unix, unlike Windows) dropping the
+        /// directory first would remove the very log that is read.
+        async fn stop(self) -> Stopped {
             let _ = self.stop.send(());
             self.task.await.unwrap().unwrap();
-            self.host
+            Stopped {
+                host: self.host,
+                _directory: self._directory,
+            }
+        }
+    }
+    struct Stopped {
+        host: Arc<ServiceHost>,
+        _directory: tempfile::TempDir,
+    }
+    impl std::ops::Deref for Stopped {
+        type Target = ServiceHost;
+        fn deref(&self) -> &ServiceHost {
+            &self.host
         }
     }
 
@@ -1085,7 +1101,7 @@ mod telemetry {
         names.sort();
         names
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn thread_names(pid: u32) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/task"))
             .unwrap()
@@ -1214,6 +1230,7 @@ mod telemetry {
                 _pki: pki,
             }
         }
+        #[cfg(any(windows, target_os = "linux"))]
         fn threads(&self) -> Vec<String> {
             thread_names(self.child.id())
         }
@@ -1440,6 +1457,7 @@ mod telemetry {
     /// Disabled (absent table or `enabled = false` with an endpoint present): the real
     /// server opens no connection to the collector and starts no export thread, and
     /// still signs. The enabled control proves the receiver and probes can see both.
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn off_has_no_export_connection() {
         let collector = Collector::start();
@@ -1469,9 +1487,20 @@ mod telemetry {
             Vec::<String>::new(),
             "disabled starts no thread"
         );
+        // Linux keeps 15 bytes of a thread name (`TASK_COMM_LEN`): what /proc reports.
+        let reported = |name: &str| -> String {
+            if cfg!(target_os = "linux") {
+                name.chars().take(15).collect()
+            } else {
+                name.to_owned()
+            }
+        };
         assert_eq!(
             exporters(&on),
-            ["OpenTelemetry.Metrics.PeriodicReader", "oncl-otlp-traces"],
+            [
+                reported("OpenTelemetry.Metrics.PeriodicReader"),
+                reported("oncl-otlp-traces")
+            ],
             "enabled: one metric reader and one span worker"
         );
         for (extra, name) in [
@@ -1479,7 +1508,7 @@ mod telemetry {
             ("metrics = false\n", "oncl-otlp-traces"),
         ] {
             let single = Proc::start(&table(&collector, extra), false);
-            assert_eq!(exporters(&single), [name], "single-signal export");
+            assert_eq!(exporters(&single), [reported(name)], "single-signal export");
         }
         runtime.block_on(async {
             for process in [&absent, &off] {
