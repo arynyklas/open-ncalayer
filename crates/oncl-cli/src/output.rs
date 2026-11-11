@@ -10,6 +10,36 @@ use std::{
     path::Path,
 };
 
+/// The process's standard output, whose write errors are all reported.
+///
+/// `std::io::Stdout` treats `EBADF` as success on Unix (it discards what is written to a
+/// closed or read-only descriptor), which would report a result that went nowhere as
+/// delivered. Here, as everywhere in this program, a result that was not written is a failure.
+#[cfg(unix)]
+fn stdout() -> impl Write {
+    use std::{
+        fs::File,
+        mem::ManuallyDrop,
+        os::fd::{FromRawFd, RawFd},
+    };
+    struct Descriptor(ManuallyDrop<File>);
+    impl Write for Descriptor {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            (&*self.0).write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    const STDOUT: RawFd = 1;
+    // SAFETY: descriptor 1 is only borrowed: `ManuallyDrop` never closes it.
+    Descriptor(ManuallyDrop::new(unsafe { File::from_raw_fd(STDOUT) }))
+}
+#[cfg(not(unix))]
+fn stdout() -> impl Write {
+    io::stdout().lock()
+}
+
 struct BoundedReport {
     bytes: Vec<u8>,
     memory: ResourceReservation,
@@ -82,7 +112,7 @@ pub fn terminal<T: Serialize>(cli: &Cli, value: &T, human: &str) -> Result<(), O
         file.write_all(&buffer.0).map_err(ProcessingError::from)?;
         file.sync_all().map_err(ProcessingError::from)?;
     } else {
-        let mut stdout = io::stdout().lock();
+        let mut stdout = stdout();
         stdout.write_all(&buffer.0).map_err(ProcessingError::from)?;
         stdout.flush().map_err(ProcessingError::from)?;
     }
@@ -135,7 +165,7 @@ impl PreparedReport {
     pub fn send(self) -> Result<(), OperationError> {
         match self.destination {
             ReportDestination::File(publication) => publication.commit()?,
-            ReportDestination::Stdout(buffer) => send_buffer(buffer, &mut io::stdout().lock())?,
+            ReportDestination::Stdout(buffer) => send_buffer(buffer, &mut stdout())?,
             ReportDestination::Stderr(buffer) => send_buffer(buffer, &mut io::stderr().lock())?,
         }
         Ok(())
@@ -171,7 +201,7 @@ pub fn store(cli: &Cli, destination: &str) -> Result<TemporaryStore, OperationEr
 }
 pub fn deliver(stage: StagedArtifact, destination: &str) -> Result<(), OperationError> {
     if destination == "-" {
-        stage.copy_to(&mut io::stdout().lock())?;
+        stage.copy_to(&mut stdout())?;
     } else {
         stage.commit(Path::new(destination))?;
     }
