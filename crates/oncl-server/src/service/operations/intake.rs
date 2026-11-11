@@ -1201,11 +1201,16 @@ mod tests {
             payload,
         }
     }
+    /// The files below `root`. A directory or file that the write task removes while this
+    /// walks is simply gone (not an error): the count is of what is left.
     fn files_under(root: &std::path::Path) -> usize {
-        std::fs::read_dir(root)
-            .unwrap()
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
             .map(|entry| {
-                let path = entry.unwrap().path();
+                let path = entry.path();
                 if path.is_dir() { files_under(&path) } else { 1 }
             })
             .sum()
@@ -1241,10 +1246,24 @@ mod tests {
                 progress: None,
             }))
             .unwrap();
-        let all = fresh
-            .resources()
-            .reserve_memory(MEMORY)
-            .expect("every byte of the memory budget is free again");
+        // The write task unlinks the file and only then lets go of the spool's reservations
+        // (`StagedArtifact::drop` runs before its fields are dropped), so the file being gone
+        // does not yet mean the charge is: the budget is polled until it is whole again.
+        let began = std::time::Instant::now();
+        let all = loop {
+            match fresh.resources().reserve_memory(MEMORY) {
+                Ok(all) => break all,
+                Err(error) => {
+                    assert!(
+                        began.elapsed() < Duration::from_secs(10),
+                        "every byte of the memory budget is free again: still {error:?} {:.3} s \
+                         after the spool file was gone (budget {MEMORY} bytes)",
+                        began.elapsed().as_secs_f64()
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
         assert!(
             fresh.resources().reserve_memory(1).is_err(),
             "released once: not a byte beyond the budget"
