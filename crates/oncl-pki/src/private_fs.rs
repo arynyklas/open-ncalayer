@@ -179,7 +179,10 @@ mod platform {
             }
             // SAFETY: fstatat succeeded and initialized output.
             let current = unsafe { current.assume_init() };
-            if current.st_ino != original.ino() || current.st_dev != original.dev() {
+            // `MetadataExt::dev()` is `st_dev as u64`; `libc::stat.st_dev` is `i32` on macOS.
+            #[allow(clippy::unnecessary_cast)]
+            let same_device = current.st_dev as u64 == original.dev();
+            if current.st_ino != original.ino() || !same_device {
                 return Err(denied());
             }
             // SAFETY: unlinkat never follows the final component. Namespace is
