@@ -727,18 +727,69 @@ fn namespace_floods_are_refused_quickly() {
 
 #[test]
 fn many_namespaces_in_scope_still_sign_and_verify() {
-    // 8 192 namespaces on the root are rendered once, not looked at for each element.
+    // 8 192 namespaces on the root are rendered once, not looked at for each element. The
+    // property is checked on what the work produces (deterministic) and on what it costs
+    // relative to the same work with one namespace (calibrated on this machine); no wall
+    // clock constant: a loaded debug runner is 10 times slower than a desktop here.
+    const DECLARATIONS: usize = 8_192;
+    const CHILDREN: usize = 20_000;
     let [(signer, _), ..] = signers();
-    let xml = namespace_heavy(8_192, 20_000);
-    let started = Instant::now();
+    let xml = namespace_heavy(DECLARATIONS, CHILDREN);
+
+    // Inclusive: every declaration once on the root, nothing on the children.
     let canonical = canonicalize(xml.as_bytes(), C14n::Inclusive, None).unwrap();
+    let declarations: usize = (0..DECLARATIONS)
+        .map(|i| format!(" xmlns:n{i}=\"u{i}\"").len())
+        .sum();
+    assert_eq!(
+        canonical.len(),
+        "<r>".len() + declarations + CHILDREN * "<c></c>".len() + "</r>".len()
+    );
     assert!(canonical.ends_with(b"<c></c></r>"));
+    // Exclusive: no namespace is visibly used, so none is rendered.
     let exclusive = canonicalize(xml.as_bytes(), C14n::Exclusive, None).unwrap();
-    assert!(exclusive.starts_with(b"<r><c></c>"));
+    assert_eq!(
+        exclusive,
+        format!("<r>{}</r>", "<c></c>".repeat(CHILDREN)).as_bytes()
+    );
+
+    // The cost, relative to the parse of this very document (which already pays the bounded
+    // lookup of each element's name among the 8 192 namespaces): canonicalizing it is that
+    // parse plus a linear render. A walk over the namespaces in scope for each element would
+    // add 8 192 · 20 000 = 164 M steps to it (measured in debug: 17 times the parse for the
+    // inclusive form), so the bound is 6 times. Each side is the best of three runs taken in
+    // turns, so a load that comes and goes cannot hit one side only; the absolute allowance
+    // covers timer granularity where both take a few milliseconds. `verify` of a document
+    // with no signature stops after parsing it.
+    let timed = |work: &dyn Fn()| {
+        let started = Instant::now();
+        work();
+        started.elapsed()
+    };
+    let parse = || assert_eq!(verify(xml.as_bytes()), Err(XmlError::NoSignature));
+    let inclusive_once = || {
+        canonicalize(xml.as_bytes(), C14n::Inclusive, None).unwrap();
+    };
+    let exclusive_once = || {
+        canonicalize(xml.as_bytes(), C14n::Exclusive, None).unwrap();
+    };
+    let (mut parsed, mut inclusive_best, mut exclusive_best) =
+        (Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        parsed = parsed.min(timed(&parse));
+        inclusive_best = inclusive_best.min(timed(&inclusive_once));
+        exclusive_best = exclusive_best.min(timed(&exclusive_once));
+    }
+    let allowed = parsed * 6 + Duration::from_millis(50);
+    assert!(
+        inclusive_best < allowed && exclusive_best < allowed,
+        "canonicalizing took {inclusive_best:?} (inclusive) and {exclusive_best:?} (exclusive) \
+         against {parsed:?} to parse the document"
+    );
+
+    // And the document still signs and verifies.
     let signed = enveloped(xml.as_bytes(), &signer);
     assert_eq!(algs(&verify(&signed).unwrap()), [SigAlg::Gost2015_512]);
-    let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 }
 
 #[test]
