@@ -220,12 +220,60 @@ mod acl {
             }
         }
     }
+    /// What an occupied destination holds.
+    const OCCUPIED: &[u8] = b"already here";
+    /// Whether denying this account new files in a directory stops it from linking a file
+    /// into it, which is how the product publishes (a no-clobber hard link). On an elevated
+    /// administrator's token, the hosted CI runners', it does not: the link is made anyway,
+    /// so there is no refusal to observe, and the refusal is made another way for it.
+    fn denial_holds(scratch: &std::path::Path) -> bool {
+        let source = scratch.join("probe-source");
+        std::fs::write(&source, b"probe").unwrap();
+        let sealed = scratch.join("probe-sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        let _restore = Restore(sealed.clone());
+        deny_new_files(&sealed);
+        std::fs::hard_link(&source, sealed.join("probe-link")).is_err()
+    }
+    /// Makes the publication to `destination` fail from now on. With `denial` (the account's
+    /// denial holds, [`denial_holds`]) the directory takes no new file and the destination
+    /// stays absent. Without it the destination is occupied, which a no-clobber publication
+    /// refuses to replace; the occupant's bytes are returned.
+    fn refuse_publication(
+        dir: &std::path::Path,
+        destination: &std::path::Path,
+        denial: bool,
+    ) -> Option<&'static [u8]> {
+        if denial {
+            deny_new_files(dir);
+            None
+        } else {
+            std::fs::write(destination, OCCUPIED).unwrap();
+            Some(OCCUPIED)
+        }
+    }
+    /// A refused publication leaves the destination as `refuse_publication` made it: absent,
+    /// or still holding what occupied it.
+    fn assert_unpublished(destination: &std::path::Path, occupied: Option<&'static [u8]>) {
+        match occupied {
+            None => assert!(
+                !destination.exists(),
+                "a refused publication leaves no destination"
+            ),
+            Some(bytes) => assert_eq!(
+                std::fs::read(destination).unwrap(),
+                bytes,
+                "a refused publication never replaces what is there"
+            ),
+        }
+    }
     #[test]
     fn publication_refused_by_the_filesystem_after_private_use_publishes_nothing() {
         let w = world();
         let input = w.dir.path().join("doc.bin");
         std::fs::write(&input, b"abc").unwrap();
         let sealed = w.dir.path().join("sealed");
+        let denial = denial_holds(w.dir.path());
         std::fs::create_dir(&sealed).unwrap();
         let destination = sealed.join("out.der");
         // The GOST signer's OCSP status is held, so the process sits before its
@@ -243,7 +291,7 @@ mod acl {
             std::thread::sleep(Duration::from_millis(5));
         }
         let _restore = Restore(sealed.clone());
-        deny_new_files(&sealed);
+        let occupied = refuse_publication(&sealed, &destination, denial);
         w.server.release();
         let result = child.wait_with_output().unwrap();
         assert_no_secret(&result);
@@ -253,12 +301,15 @@ mod acl {
         assert!(text.contains("applied=Applied succeeded=true"), "{text}");
         assert!(text.contains("; applied=Applied"), "{text}");
         assert!(!text.contains("Completed"), "{text}");
-        assert!(
-            !destination.exists(),
-            "a refused publication leaves no destination"
-        );
-        allow_again(&sealed);
-        let leftovers: Vec<_> = std::fs::read_dir(&sealed).unwrap().collect();
+        assert_unpublished(&destination, occupied);
+        if denial {
+            allow_again(&sealed);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&sealed)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| *path != destination)
+            .collect();
         assert!(
             leftovers.is_empty(),
             "staged bytes were not published or left behind: {leftovers:?}"
@@ -278,6 +329,7 @@ mod acl {
         let sealed = w.dir.path().join("sealed");
         std::fs::create_dir(&sealed).unwrap();
         let (out_a, out_b) = (w.dir.path().join("a.der"), sealed.join("b.der"));
+        let denial = denial_holds(w.dir.path());
         // Item 2 (verification of a GOST signature) holds on OCSP while the
         // directory of item 3's output is sealed.
         let sig_c = w.dir.path().join("c.der");
@@ -321,7 +373,7 @@ mod acl {
             std::thread::sleep(Duration::from_millis(5));
         }
         let _restore = Restore(sealed.clone());
-        deny_new_files(&sealed);
+        let occupied = refuse_publication(&sealed, &out_b, denial);
         w.server.release();
         let result = child.wait_with_output().unwrap();
         assert_no_secret(&result);
@@ -342,7 +394,7 @@ mod acl {
         assert_eq!(row("three")["status"], "Failed", "{report}");
         assert_eq!(row("three")["applied"], "Applied", "{report}");
         assert_eq!(row("three")["published"], false);
-        assert!(!out_b.exists());
+        assert_unpublished(&out_b, occupied);
         // Item one's file is intact and independently verifiable.
         let verify = run(
             &[
