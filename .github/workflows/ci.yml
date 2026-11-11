@@ -72,7 +72,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Test, then the built-in modules again without markers, plus the build: the first run
+    # that went through every test binary (`--no-fail-fast`) needed 50 to 60 minutes for the
+    # Test step alone, and 60 minutes cancelled the windows-2025 job in the middle of it.
+    timeout-minutes: 120
     env:
       # Line tables keep file:line in backtraces; full debug info makes linking the test
       # binaries (above all on Windows) and the cache much slower.
