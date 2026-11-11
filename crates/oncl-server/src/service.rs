@@ -1059,6 +1059,41 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for DeliveryIo<S> {
         Pin::new(&mut this.stream).poll_shutdown(cx)
     }
 }
+/// How long a connection that has been answered stays open for what the client is still
+/// sending before the server closes it (the staged close of `serve_connection`).
+pub const LINGER: Duration = Duration::from_secs(1);
+/// The most the staged close of `serve_connection` reads and discards.
+pub const LINGER_BYTES: u64 = 8 << 20;
+/// Closes an answered connection in stages (RFC 9112 section 9.6). A server that answers
+/// before it has read the whole request body (a refusal decided from the metadata part,
+/// before the documents) and then closes the socket resets the connection as soon as the
+/// rest of the body arrives, and the reset can erase the answer from the client's receive
+/// queue: the client sees a broken pipe or a reset instead of the typed refusal. So the
+/// sending side is shut down first, which lets the client read the answer to its end, and
+/// what the client still sends is read and discarded until it closes: at most
+/// [`LINGER_BYTES`], for at most [`LINGER`], and never past the connection's own bound. A
+/// client that sends on beyond that is reset, as it was before.
+async fn linger<S>(mut stream: S, connection_deadline: tokio::time::Instant)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let until = (tokio::time::Instant::now() + LINGER).min(connection_deadline);
+    let drain = async {
+        if stream.shutdown().await.is_err() {
+            return;
+        }
+        let mut discard = [0u8; 8192];
+        let mut left = LINGER_BYTES;
+        while left > 0 {
+            match stream.read(&mut discard).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => left = left.saturating_sub(n as u64),
+            }
+        }
+    };
+    let _ = tokio::time::timeout_at(until, drain).await;
+}
 /// Serve one accepted transport (plain/TLS/wrapped I/O). The trusted acceptor
 /// supplies the ACTUAL peer and finite accept/header bounds, never request data.
 /// A response's original invocation bound can only shorten these outer bounds.
@@ -1076,7 +1111,7 @@ where
         return Err(invalid());
     }
     let delivery = Arc::new(ConnectionDelivery::default());
-    let _disconnect = ConnectionDisconnect(delivery.clone());
+    let disconnect = ConnectionDisconnect(delivery.clone());
     let service_delivery = delivery.clone();
     let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
         request.extensions_mut().insert(ConnectInfo(peer));
@@ -1099,20 +1134,33 @@ where
         .max_buf_size(32_768)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(header_timeout);
-    let connection = builder.serve_connection(
-        hyper_util::rt::TokioIo::new(DeliveryIo {
-            stream,
-            delivery: delivery.clone(),
-        }),
-        service,
-    );
+    // Hyper does not close the transport itself: the connection ends in `linger`, once its
+    // answer is out.
+    let connection = builder
+        .serve_connection(
+            hyper_util::rt::TokioIo::new(DeliveryIo {
+                stream,
+                delivery: delivery.clone(),
+            }),
+            service,
+        )
+        .without_shutdown();
     tokio::pin!(connection);
-    tokio::select! {
+    let parts = tokio::select! {
         biased;
-        error=delivery.stopped()=>Err(delivery_io_error(error)),
-        _=tokio::time::sleep_until(connection_deadline)=>Err(io::Error::new(io::ErrorKind::TimedOut,"connection time bound exceeded")),
-        result=&mut connection=>result.map_err(|_|io::Error::new(io::ErrorKind::ConnectionAborted,"HTTP connection closed")),
-    }
+        error=delivery.stopped()=>return Err(delivery_io_error(error)),
+        _=tokio::time::sleep_until(connection_deadline)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"connection time bound exceeded")),
+        result=&mut connection=>result.map_err(|_|io::Error::new(io::ErrorKind::ConnectionAborted,"HTTP connection closed"))?,
+    };
+    // The answer is out: what the connection holds for its operation (the cancellation and
+    // the resource root the response keeps, see `ResponseDelivery`) is released now, not
+    // after the wait for the client, which only keeps the socket open.
+    let DeliveryIo { stream, .. } = parts.io.into_inner();
+    drop(parts.service);
+    drop(disconnect);
+    drop(delivery);
+    linger(stream, connection_deadline).await;
+    Ok(())
 }
 trait NetworkStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkStream for T {}
