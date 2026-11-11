@@ -24,8 +24,10 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       # `--all` would also format the local path dependencies, i.e. the vendored crates under
-      # `vendor/` (kept byte-for-byte as their upstream, see vendor/*/README). Check the
-      # workspace members only.
+      # `vendor/`. Those are patched copies of upstream crates (provenance: the root NOTICE,
+      # and `.omp-upstream.json` / `upstream-provenance.json` where present); they keep
+      # upstream formatting so diffs against upstream stay reviewable. Check the workspace
+      # members only.
       - name: cargo fmt (workspace members)
         run: |
           packages=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
