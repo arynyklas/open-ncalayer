@@ -903,7 +903,8 @@ cargo xtask win7 --arch all   # → target/win7/x64/, target/win7/x86/
 Перед отправкой изменений:
 
 ```sh
-cargo fmt --all --check
+# не `--all`: он форматирует и подключённые по path крейты `vendor/`, оставленные как в оригинале
+cargo fmt --check $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "-p", .name')
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo deny check
 cargo xtask licenses --check   # сторонние лицензии окна «О программе» свежие

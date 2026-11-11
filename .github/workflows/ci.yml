@@ -23,9 +23,21 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - run: cargo fmt --all --check
+      # `--all` would also format the local path dependencies, i.e. the vendored crates under
+      # `vendor/` (kept byte-for-byte as their upstream, see vendor/*/README). Check the
+      # workspace members only.
+      - name: cargo fmt (workspace members)
+        run: |
+          packages=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          cargo fmt --check $packages
       - run: cargo fmt --manifest-path crates/oncl-pdk/example/Cargo.toml --check
-      - run: cargo fmt --manifest-path plugins/Cargo.toml --all --check
+      # The plugin ports' workspace path-depends on the same vendored crates: members only.
+      - name: cargo fmt (plugin ports)
+        run: |
+          packages=$(cargo metadata --manifest-path plugins/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          cargo fmt --manifest-path plugins/Cargo.toml --check $packages
 
   clippy:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
