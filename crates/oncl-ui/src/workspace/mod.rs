@@ -459,10 +459,29 @@ mod parity;
 #[cfg(test)]
 type Delivery = Box<dyn FnOnce() + Send>;
 
-/// Deliveries by the thread they are for: tests run in parallel, each with its own page.
+/// What the workers delivered, by the thread they are for (tests run in parallel, each with its
+/// own page): `ready` runs on the next [`pump`]; what is delivered for a thread that holds
+/// ([`Held`]) waits in `held` instead.
 #[cfg(test)]
-static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
-    std::sync::Mutex::new(Vec::new());
+struct Deliveries {
+    ready: Vec<(std::thread::ThreadId, Delivery)>,
+    held: Vec<(std::thread::ThreadId, Delivery)>,
+    holding: Vec<std::thread::ThreadId>,
+}
+
+#[cfg(test)]
+static DELIVERIES: std::sync::Mutex<Deliveries> = std::sync::Mutex::new(Deliveries {
+    ready: Vec::new(),
+    held: Vec::new(),
+    holding: Vec::new(),
+});
+
+#[cfg(test)]
+fn deliveries() -> std::sync::MutexGuard<'static, Deliveries> {
+    DELIVERIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -475,39 +494,59 @@ pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
     let target = WORKER_FOR
         .with(Cell::get)
         .expect("deliver is called by a worker");
-    DELIVERIES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push((target, Box::new(f)));
+    let mut all = deliveries();
+    if all.holding.contains(&target) {
+        all.held.push((target, Box::new(f)));
+    } else {
+        all.ready.push((target, Box::new(f)));
+    }
 }
 
-/// This thread's pending deliveries, held back; they go back to the queue when this is dropped,
-/// whichever way the test ends. Other pages' deliveries are never touched.
+/// A silent worker for this thread's page, for as long as this lives: what the page's worker
+/// has delivered so far and everything it delivers from now on is held back, however late the
+/// worker answers. It all goes back to the queue, in order, when this is dropped, whichever way
+/// the test ends. Other pages' deliveries are never touched.
 #[cfg(test)]
-pub(crate) struct Held(Vec<(std::thread::ThreadId, Delivery)>);
+pub(crate) struct Held(std::thread::ThreadId);
 
 #[cfg(test)]
 impl Held {
     pub(crate) fn take_mine() -> Held {
         let me = std::thread::current().id();
-        let mut all = DELIVERIES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mine, rest) = std::mem::take(&mut *all)
+        let mut all = deliveries();
+        assert!(
+            !all.holding.contains(&me),
+            "a page holds its worker's word once"
+        );
+        all.holding.push(me);
+        let (mine, rest) = std::mem::take(&mut all.ready)
             .into_iter()
             .partition::<Vec<_>, _>(|(t, _)| *t == me);
-        *all = rest;
-        Held(mine)
+        all.ready = rest;
+        all.held.extend(mine);
+        Held(me)
+    }
+
+    /// How many deliveries wait for the page: (to run on the next pump, held back).
+    pub(crate) fn waiting() -> (usize, usize) {
+        let me = std::thread::current().id();
+        let all = deliveries();
+        let of_mine =
+            |q: &[(std::thread::ThreadId, Delivery)]| q.iter().filter(|(t, _)| *t == me).count();
+        (of_mine(&all.ready), of_mine(&all.held))
     }
 }
 
 #[cfg(test)]
 impl Drop for Held {
     fn drop(&mut self) {
-        DELIVERIES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .append(&mut self.0);
+        let mut all = deliveries();
+        all.holding.retain(|t| *t != self.0);
+        let (mine, rest) = std::mem::take(&mut all.held)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(t, _)| *t == self.0);
+        all.held = rest;
+        all.ready.extend(mine);
     }
 }
 
@@ -516,13 +555,11 @@ impl Drop for Held {
 pub(crate) fn pump() -> usize {
     let me = std::thread::current().id();
     let mine: Vec<Delivery> = {
-        let mut all = DELIVERIES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mine, rest) = std::mem::take(&mut *all)
+        let mut all = deliveries();
+        let (mine, rest) = std::mem::take(&mut all.ready)
             .into_iter()
             .partition::<Vec<_>, _>(|(t, _)| *t == me);
-        *all = rest;
+        all.ready = rest;
         mine.into_iter().map(|(_, f)| f).collect()
     };
     let n = mine.len();
@@ -1273,6 +1310,27 @@ fn report(t: &Texts, out: &InspectOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The silent worker of the signing tests answers after the hold was taken, not before it:
+    /// a hold that only kept what was already delivered let the real answer through at its own
+    /// pace, and a quick worker (macOS) ended the operation before the test had seen it run.
+    #[test]
+    fn a_hold_keeps_back_what_the_worker_delivers_after_it() {
+        let ui_thread = std::thread::current().id();
+        let held = Held::take_mine();
+        std::thread::spawn(move || {
+            WORKER_FOR.with(|c| c.set(Some(ui_thread)));
+            deliver(|| {});
+            deliver(|| {});
+        })
+        .join()
+        .unwrap();
+        assert_eq!(Held::waiting(), (0, 2), "both are held");
+        assert_eq!(pump(), 0, "a held answer is not run by a pump");
+        drop(held);
+        assert_eq!(Held::waiting(), (2, 0));
+        assert_eq!(pump(), 2, "back in the queue once the hold ends");
+    }
 
     /// Every error the page can show maps to some text in every language: an action never
     /// ends in a silent blank status.

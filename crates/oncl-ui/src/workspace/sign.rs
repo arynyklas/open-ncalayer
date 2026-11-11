@@ -1422,17 +1422,28 @@ mod tests {
         }
     }
 
-    fn until(what: &str, mut ready: impl FnMut() -> bool) {
+    fn until(what: &str, ready: impl FnMut() -> bool) {
+        until_showing(what, ready, String::new);
+    }
+
+    /// [`until`] whose failure also says `state()`: what a run that nobody can watch (CI on
+    /// another platform) shows of where the page and its worker stood when the wait ran out.
+    fn until_showing(what: &str, mut ready: impl FnMut() -> bool, state: impl Fn() -> String) {
         let start = Instant::now();
         loop {
             pump();
             if ready() {
                 return;
             }
-            assert!(
-                start.elapsed() < Duration::from_secs(20),
-                "timed out: {what}"
-            );
+            if start.elapsed() >= Duration::from_secs(20) {
+                let state = state();
+                let state = if state.is_empty() {
+                    state
+                } else {
+                    format!(" ({state})")
+                };
+                panic!("timed out: {what}{state}");
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1692,14 +1703,31 @@ mod tests {
         arm(&p);
         ui(&p).invoke_confirm();
         assert_eq!(step(&p), Step::Running);
+        // Every word of the worker from here on is held back: it stays silent whatever the
+        // platform's pace, so the wait below sees the operation running and cannot be beaten by
+        // a quick worker that ends it first.
         let held = crate::workspace::Held::take_mine();
-        // The worker runs concurrently: wait until it has passed its key gate.
-        until("the worker passes its key gate", || {
+        // `None`: no operation runs; otherwise whether it has passed its key gate.
+        let gate = || {
             p.ws.controller
                 .borrow()
                 .running()
-                .is_some_and(|(_, c)| c.key_gate_passed())
-        });
+                .map(|(_, c)| c.key_gate_passed())
+        };
+        // The worker runs concurrently: wait until it has passed its key gate.
+        until_showing(
+            "the worker passes its key gate",
+            || gate() == Some(true),
+            || {
+                let (ready, held_back) = crate::workspace::Held::waiting();
+                format!(
+                    "sign step {:?}, key gate of the running operation (none: no operation \
+                     runs): {:?}, deliveries for the page: {ready} ready and {held_back} held back",
+                    step(&p),
+                    gate(),
+                )
+            },
+        );
         // Running: closing is refused and says why.
         assert!(closing_is_blocked_for(&p.ws));
         assert!(p.ws.ui.get_status_text().contains("A signing is running"));
