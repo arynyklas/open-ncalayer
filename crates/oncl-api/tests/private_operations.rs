@@ -4158,6 +4158,8 @@ async fn memory_sweep(
         r#"{{"items":[{{"id":"s1","operation":{{"kind":"sign","profile":"pades_lta","input":"doc","evidence":[{refs}],"keys":[{{"source":"inline","container":"p12","password":"pw"}}]}}}}],"parts":[{{"name":"p12","item_id":"s1","role":"secret"}},{{"name":"pw","item_id":"s1","role":"secret"}},{{"name":"doc","item_id":"s1","role":"document"}}{ev_parts}]}}"#
     );
     let mut outcomes = Vec::new();
+    let sweep_started = std::time::Instant::now();
+    let mut served_before = pki.requests.load(std::sync::atomic::Ordering::SeqCst);
     for mib in steps {
         let service = Running::start_with(|config, dir| {
             inline_service_config(pki)(config, dir);
@@ -4210,17 +4212,125 @@ async fn memory_sweep(
                     .unwrap_or("")
             );
         }
+        // What the loopback PKI served for this request tells a failed validation (a fetch that
+        // did not happen, or happened and failed) from one that never reached the network.
+        let served = pki.requests.load(std::sync::atomic::Ordering::SeqCst);
+        let fetched = served - std::mem::replace(&mut served_before, served);
         if !completed && !refused {
-            let tail = text
-                .lines()
-                .find(|l| l.contains("\"type\":\"final\""))
-                .unwrap_or("");
-            eprintln!("SWEEP {mib} MiB not completed: status {status} ...{tail}");
+            eprintln!(
+                "SWEEP {mib} MiB not completed: {}; audit {}; loopback PKI served {fetched} requests; {:.1} s after the sweep started",
+                describe_outcome(status, &text),
+                describe_audit(&service),
+                sweep_started.elapsed().as_secs_f64()
+            );
+        } else {
+            eprintln!(
+                "SWEEP {mib} MiB {}: loopback PKI served {fetched} requests",
+                if completed { "completed" } else { "refused" }
+            );
         }
         outcomes.push((mib, completed));
         service.stop().await;
     }
     outcomes
+}
+/// Everything a non-complete answer says about itself, for the log of a failing sweep: the HTTP
+/// status, the status of the final record, its error (the code, the applied state and, when the
+/// service sent them, the subcode and the message) and, per item, the applied state and the
+/// error or the kind of result.
+fn describe_outcome(status: impl std::fmt::Display, response: &str) -> String {
+    let Some(line) = response
+        .lines()
+        .find(|line| line.contains("\"type\":\"final\""))
+    else {
+        return format!("HTTP {status}, no final record in {} bytes", response.len());
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+        return format!("HTTP {status}, a final record that is not JSON: {line}");
+    };
+    let show = |value: Option<&serde_json::Value>| {
+        value.map_or_else(|| "none".to_owned(), serde_json::Value::to_string)
+    };
+    let items: Vec<String> = record
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} applied {} error {} result {}",
+                        show(item.get("item_id")),
+                        show(item.get("applied")),
+                        show(item.get("error")),
+                        show(item.pointer("/result/kind"))
+                    )
+                })
+                .collect()
+        });
+    format!(
+        "HTTP {status}, final status {}, error code {} applied {} subcode {} message {}, {} items [{}]",
+        show(record.get("status")),
+        show(record.pointer("/error/code")),
+        show(record.pointer("/error/applied")),
+        show(record.pointer("/error/subcode")),
+        show(record.pointer("/error/message")),
+        items.len(),
+        items.join("; ")
+    )
+}
+/// What the audit journal of a service holds for the sweep log: the BEGIN records (a private key
+/// use started) and the FINAL ones with their applied state.
+fn describe_audit(service: &Running) -> String {
+    match service.host.audit.records() {
+        Ok(records) => {
+            let begins = records
+                .iter()
+                .filter(|record| record.kind == RecordKind::Begin)
+                .count();
+            let finals: Vec<String> = records
+                .iter()
+                .filter(|record| record.kind == RecordKind::Final)
+                .map(|record| {
+                    format!(
+                        "applied {:?} succeeded {}",
+                        record.applied, record.succeeded
+                    )
+                })
+                .collect();
+            format!(
+                "{begins} BEGIN, {} FINAL [{}]",
+                finals.len(),
+                finals.join(", ")
+            )
+        }
+        Err(error) => format!("unreadable: {error}"),
+    }
+}
+/// The log of a failing sweep must name the code, the subcode and the applied state of the
+/// final record: the record the macOS run printed when a profile of the sweep failed (code
+/// `ValidationFailed`, `NotApplied`, no subcode), here with a subcode to see it shown.
+#[test]
+fn the_sweep_log_names_the_error_of_a_failed_final_record() {
+    let response = concat!(
+        "--b\r\n",
+        r#"{"type":"final","operation_id":339,"status":"failed","results":[],"error":{"code":"ValidationFailed","applied":"NotApplied","subcode":"not-granted"}}"#,
+        "\r\n--b--\r\n"
+    );
+    let described = describe_outcome(200, response);
+    for part in [
+        "HTTP 200",
+        "final status \"failed\"",
+        "error code \"ValidationFailed\"",
+        "applied \"NotApplied\"",
+        "subcode \"not-granted\"",
+        "message none",
+        "0 items",
+    ] {
+        assert!(described.contains(part), "{part}: {described}");
+    }
+    let without = describe_outcome(502, "upstream gone");
+    assert!(without.contains("no final record in 13 bytes"), "{without}");
 }
 /// Coarse sweep, then a 1 MiB sweep over the whole band below the first completion:
 /// under-refusal can only live between the preflight threshold and the real one.
