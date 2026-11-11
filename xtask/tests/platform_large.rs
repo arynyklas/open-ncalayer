@@ -271,10 +271,13 @@ fn peaks_criterion_is_the_stricter_of_working_set_and_private_bytes() {
 #[test]
 fn a_real_process_is_measured_by_the_operating_system() {
     let dir = scratch();
+    // Windows asks the OS after the process exits. Elsewhere the peak is sampled while it
+    // runs (`/proc/<pid>/status`, every 100 ms), so the process must outlive a sample: one
+    // that exits at once (`echo`) is gone before the first one.
     let (program, args): (&str, &[&str]) = if cfg!(windows) {
         ("cmd", &["/C", "echo", "measured"])
     } else {
-        ("sh", &["-c", "echo measured"])
+        ("sh", &["-c", "echo measured; sleep 1"])
     };
     let mut command = std::process::Command::new(program);
     command.args(args);
@@ -288,6 +291,8 @@ fn a_real_process_is_measured_by_the_operating_system() {
     .unwrap();
     assert!(m.success, "{:?}", m.exit);
     assert!(m.stdout_text().contains("measured"));
+    // macOS has no /proc: the proof's measurement exists for Windows and Linux only.
+    #[cfg(any(windows, target_os = "linux"))]
     assert!(
         m.peaks.peak_working_set > 0,
         "the OS reports a peak working set: {:?}",
