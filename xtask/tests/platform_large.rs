@@ -311,11 +311,19 @@ fn a_real_process_is_measured_by_the_operating_system() {
 fn a_fed_stdin_with_no_declared_length_reaches_the_child() {
     let dir = scratch();
     let path = dir.path().join("in.bin");
-    std::fs::write(&path, vec![b'x'; 300_000]).unwrap();
-    let (program, args): (&str, &[&str]) = if cfg!(windows) {
-        ("cmd", &["/C", "find", "/c", "/v", ""])
+    // 100 000 lines of `x\r\n`, 300 000 bytes: more than a pipe holds, so the child reads
+    // while it is fed. (Windows' `find` splits lines at CRLF only.)
+    std::fs::write(&path, b"x\r\n".repeat(100_000)).unwrap();
+    // Windows' `find` counts lines, named by its full path: under Git Bash (the shell of the
+    // CI steps) a bare `find` is GNU find, which takes `/c` for the system drive and walks it.
+    let (program, args, expected): (std::path::PathBuf, &[&str], &str) = if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").expect("SystemRoot is set on Windows");
+        let find = std::path::Path::new(&root)
+            .join("System32")
+            .join("find.exe");
+        (find, &["/c", "/v", ""], "100000")
     } else {
-        ("sh", &["-c", "wc -c"])
+        ("sh".into(), &["-c", "wc -c"], "300000")
     };
     let mut command = std::process::Command::new(program);
     command.args(args);
@@ -333,7 +341,7 @@ fn a_fed_stdin_with_no_declared_length_reaches_the_child() {
         .chars()
         .filter(char::is_ascii_digit)
         .collect();
-    assert!(!counted.is_empty());
+    assert_eq!(counted, expected, "{}", m.stdout_text());
 }
 
 #[test]
