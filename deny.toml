@@ -10,6 +10,8 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
+    # Unmaintained (upstream archived 2026-10-01, no vulnerability) in Slint's skia renderer.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils: transitive via spin_on (i-slint-renderer-skia, slint-build, slint-macros), unmaintained only, no safe upgrade available" },
 ]
 
 [licenses]
