@@ -89,7 +89,7 @@ impl Signals {
         // the mask; sigaction copies these stack values before returning.
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = signal as usize;
+        action.sa_sigaction = signal as *const () as libc::sighandler_t;
         action.sa_flags = 0;
         if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0
             || unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0
