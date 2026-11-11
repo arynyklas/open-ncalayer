@@ -366,8 +366,13 @@ its audit binding and a native worker: worker/queue slots are acquired before
 `spawn_blocking`, and no more than `blocking_workers` native closures run. Queued
 owned contexts retain the initial scope/deadline; queue expiry is explicit.
 Disconnect/cancel stops waiting and cooperative intake, but a native call's slot
-and resources remain owned until that actual call returns. Response bytes retain
-the original context/reservation until their network ownership ends. The whole
+and resources remain owned until that actual call returns. The native worker itself
+(its permit and the executor's running count, the `oncl.executor.running` gauge) is free
+when the call returns, before its result is handed over: whoever sees the result, such
+as the response frame of a staged artifact, never sees a worker still running for it.
+The slot follows the result, after the worker's share of the request telemetry is
+released, so that an idle executor has also exported its last request. Response bytes
+retain the original context/reservation until their network ownership ends. The whole
 operation has one finite deadline, not a new timeout at each stage.
 The same original early deadline/control and disconnect owner continue through
 the real response body and transport. Deferred first polling refuses expired
