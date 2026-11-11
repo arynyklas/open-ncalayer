@@ -4497,6 +4497,31 @@ async fn pades_preflight_accounts_for_prior_signatures_and_large_evidence() {
     assert_monotonic(&outcomes);
 }
 
+/// The loopback PKI answers a CRL request with the CRL it signed once (`pki.crls`), byte for
+/// byte: rebuilding and GOST-signing a 20 000-entry CRL per request takes seconds in a debug
+/// build (more on a loaded runner), close to the 5 s fetch timeout of the validation, whose
+/// expiry fails a sweep size with `ValidationFailed` after only some of its PKI requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_pki_serves_the_crl_it_signed_once() {
+    use std::io::{Read, Write};
+    let pki = Pki::start_with_revoked(2_000);
+    for (path, expected) in [("/inter.crl", &pki.crls[1]), ("/root.crl", &pki.crls[0])] {
+        for _ in 0..2 {
+            let mut stream = std::net::TcpStream::connect(pki.address).unwrap();
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            let split = reply.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            assert!(reply.starts_with(b"HTTP/1.1 200"), "{path}");
+            assert_eq!(&reply[split..], expected.as_slice(), "{path}: signed anew");
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unreadable_pdf_for_a_pades_high_level_is_refused_before_any_key_use() {
     let pki = Pki::start();

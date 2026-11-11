@@ -196,11 +196,9 @@ impl Pki {
             &origin,
             "root",
         )));
-        let root = Arc::new(
-            MockCrl::new(raw("root-gost2015.key"))
-                .with_this_update(now - time::Duration::MINUTE)
-                .next_update(Some(now + time::Duration::days(1))),
-        );
+        let root = MockCrl::new(raw("root-gost2015.key"))
+            .with_this_update(now - time::Duration::MINUTE)
+            .next_update(Some(now + time::Duration::days(1)));
         let mut inter_builder = MockCrl::new(inter.clone())
             .with_this_update(now - time::Duration::MINUTE)
             .next_update(Some(now + time::Duration::days(1)));
@@ -208,8 +206,11 @@ impl Pki {
             let serial = (n as u64 + 1_000_000).to_be_bytes();
             inter_builder = inter_builder.revoke(&serial, now - time::Duration::HOUR);
         }
-        let inter_crl = Arc::new(inter_builder);
-        let crls = vec![root.der(), inter_crl.der()];
+        let crls = vec![root.der(), inter_builder.der()];
+        // Signed once: `MockCrl::send` would rebuild and GOST-sign the whole CRL (20 000
+        // entries in the big-evidence tests, seconds in a debug build on a loaded runner) for
+        // every request, against the 5 s fetch timeout of the validation under test.
+        let served_crls = Arc::new((crls[0].clone(), crls[1].clone()));
         let tsa_gate = Arc::new(TsaGate::default());
         let gate = tsa_gate.clone();
         let delay = ();
@@ -226,8 +227,7 @@ impl Pki {
                         continue;
                     }
                 };
-                let (ocsp, root, inter_crl, tsa) =
-                    (ocsp.clone(), root.clone(), inter_crl.clone(), tsa.clone());
+                let (ocsp, served_crls, tsa) = (ocsp.clone(), served_crls.clone(), tsa.clone());
                 let (url_origin, counted, delay, gate) =
                     (url_origin.clone(), counted.clone(), delay, gate.clone());
                 std::thread::spawn(move || {
@@ -290,10 +290,18 @@ impl Pki {
                             &bytes[end..end + length],
                             GetOptions::default(),
                         ))
-                    } else if path.contains("root") {
-                        root.send(&HttpRequest::get(&url, GetOptions::default()))
                     } else {
-                        inter_crl.send(&HttpRequest::get(&url, GetOptions::default()))
+                        let body = if path.contains("root") {
+                            &served_crls.0
+                        } else {
+                            &served_crls.1
+                        };
+                        Ok(oncl_pki::http::HttpReply {
+                            status: 200,
+                            content_type: Some("application/pkix-crl".to_owned()),
+                            location: None,
+                            body: body.clone(),
+                        })
                     };
                     if let Ok(reply) = reply {
                         let _ = write!(
