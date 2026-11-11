@@ -1068,11 +1068,12 @@ pub const LINGER_BYTES: u64 = 8 << 20;
 /// before it has read the whole request body (a refusal decided from the metadata part,
 /// before the documents) and then closes the socket resets the connection as soon as the
 /// rest of the body arrives, and the reset can erase the answer from the client's receive
-/// queue: the client sees a broken pipe or a reset instead of the typed refusal. So the
-/// sending side is shut down first, which lets the client read the answer to its end, and
-/// what the client still sends is read and discarded until it closes: at most
-/// [`LINGER_BYTES`], for at most [`LINGER`], and never past the connection's own bound. A
-/// client that sends on beyond that is reset, as it was before.
+/// queue: the client sees a broken pipe or a reset instead of the typed refusal. So hyper,
+/// which is lent the transport, flushes the answer and shuts the sending side down itself
+/// (that lets the client read the answer to its end), and the transport is dropped, which
+/// closes it, only after this has read and discarded what the client still sends until it
+/// closes: at most [`LINGER_BYTES`], for at most [`LINGER`], and never past the connection's
+/// own bound. A client that sends on beyond that is reset, as it was before.
 async fn linger<S>(mut stream: S, connection_deadline: tokio::time::Instant)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1182,6 +1183,8 @@ pub async fn serve<F: Future<Output = ()>>(
         let connection_timeout =
             Duration::from_millis(host.config.header_timeout_ms + host.config.operation_timeout_ms);
         tasks.spawn(async move {
+            // Held through the staged close (`linger`) as well: an answered client that
+            // keeps its socket open holds the connection permit for at most `LINGER`.
             let _permit = permit;
             let connection_deadline = tokio::time::Instant::now() + connection_timeout;
             let stream: Box<dyn NetworkStream> = if let Some(tls) = tls {

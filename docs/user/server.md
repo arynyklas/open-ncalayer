@@ -543,6 +543,11 @@ There are also finite pre-auth connection/header/TLS-handshake limits. HTTP/1
 header count is capped at 64 and a connection's parser buffer at 32 KiB. These
 network buffers/runtime overhead are separate from Core's aggregate document
 working-memory accounting; resource counters are not a claim about total RSS.
+A connection that has been answered keeps its `max_connections` permit, and nothing of its
+operation, until the client closes its side or the staged close ends, at most one second
+after the answer (see [the HTTP contract](http-api.md)): with `max_connections` clients that
+keep their sockets open after an answer, the next connection is not accepted for up to that
+second.
 The server stack is optional/server-only: minimal SDK crates and desktop/Win7
 build closures do not depend on Axum/Hyper, and static CRT/toolchain policy is
 unchanged. This Windows-host acceptance is not a Linux/macOS/Win7 runtime result

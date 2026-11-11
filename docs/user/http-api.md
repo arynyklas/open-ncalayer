@@ -234,7 +234,12 @@ instead of the typed answer if the server closed at once: closing a socket whose
 sending resets the connection, which can erase the response in transit (on Windows too). The
 server therefore closes in stages (RFC 9112 section 9.6): it ends its side after the answer,
 then reads and discards what the client still sends until the client closes, for at most one
-second and 8 MiB (`LINGER` and `LINGER_BYTES` of `oncl_server::service`), and only then closes.
+second and about 8 MiB, and only then closes (both bounds are fixed, not configurable). The
+server reads about 8 MiB of it; a client that sends faster can have pushed more into the
+kernel buffers by the time it is reset. While it waits, the connection holds its
+`max_connections` permit and nothing of its operation (the `max_in_flight` slot, the scratch
+and the budgets are released when the answer is out): with `max_connections` clients that keep
+their sockets open after an answer, the next connection is not accepted for up to that second.
 A client that finishes a body within that bound reads the typed refusal; one that sends more
 is reset, as it would be without the staged close. A client SHOULD read the response while it
 sends, or send `Expect: 100-continue` and wait for the answer before it sends the body (the
