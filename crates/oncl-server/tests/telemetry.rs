@@ -560,7 +560,12 @@ mod telemetry {
             3,
             "hash + named + inline sign"
         );
-        assert_eq!(requests("operations", "failed"), 1, "unreachable TSA");
+        assert_eq!(
+            requests("operations", "failed"),
+            1,
+            "unreachable TSA: {:?}",
+            facts.spans
+        );
         // Blocked policy + bad bearer both end as a rejected 403 with a stable code.
         let denied: Vec<_> = facts
             .spans_named("oncl.request")

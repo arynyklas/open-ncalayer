@@ -301,6 +301,7 @@ impl BoundedExecutor {
                             drop(waiting);
                             drop(work);
                             drop(scope);
+                            drop(observer);
                             drop(active);
                             let _ = sender.send(Err(error));
                             return;
@@ -317,6 +318,7 @@ impl BoundedExecutor {
                 drop(work);
                 drop(scope);
                 drop(worker);
+                drop(observer);
                 drop(active);
                 let _ = sender.send(Err(error));
                 return;
@@ -330,6 +332,12 @@ impl BoundedExecutor {
                 let _active = active;
                 let _worker = worker;
                 let _running = running;
+                // The worker's share of the request is released before the permits above: the
+                // executor is idle (and a shutdown may flush telemetry) only when `_active` is
+                // gone, and a request whose last owner is this thread ends its span and
+                // metrics when it lets go. A closure's own capture would be dropped after every
+                // local, so the request would end after the executor was seen idle.
+                let observer = observer;
                 let _entered = observer.enter_worker();
                 let (run, run_time) = (Instant::now(), SystemTime::now());
                 let result = work();
@@ -347,5 +355,79 @@ impl BoundedExecutor {
             abandoned,
             deadline,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::{Route, Telemetry, TelemetryConfig};
+    use oncl_pki::resource::{ResourceLimits, SharedBudget};
+
+    fn scope() -> ResourceScope {
+        let limits = ResourceLimits::default();
+        Arc::new(SharedBudget::new(limits.clone()).unwrap())
+            .begin_unslotted(limits, Arc::new(Cancellation::new()))
+            .unwrap()
+    }
+
+    /// A request ends (its span and metrics are made) when its last owner lets go, and a
+    /// shutdown flushes once the executor is idle: so the worker must let go of the request
+    /// before it frees the permit that makes the executor idle, or the last request of a
+    /// service that is stopped right after its answer is missing from the exported telemetry.
+    /// The worker's release is a few instructions behind the permit, so a round is a race and
+    /// the rounds are many, with the permit watched by a spin.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_executor_is_idle_only_after_its_worker_let_go_of_the_request() {
+        let telemetry = Telemetry::start(&TelemetryConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:9".into(),
+            shutdown_timeout_ms: 100,
+            ..TelemetryConfig::default()
+        })
+        .unwrap();
+        let executor = BoundedExecutor::new(ExecutorConfig {
+            blocking_workers: 2,
+            queue_capacity: 2,
+            admission_wait: Duration::from_secs(1),
+        })
+        .unwrap();
+        let mut late = 0;
+        for _ in 0..10_000 {
+            let served = executor.clone();
+            let response = telemetry
+                .begin(Route::Hash)
+                .observe(Box::pin(async move {
+                    served
+                        .launch(scope(), || Ok(()))
+                        .await
+                        .unwrap()
+                        .wait()
+                        .await
+                        .unwrap();
+                    Ok(axum::response::Response::new(axum::body::Body::empty()))
+                }))
+                .await
+                .unwrap();
+            // What the client has read: the response is gone, only a worker may still hold on.
+            drop(response);
+            // The executor's own test of idleness, watched without a wake-up in between: the
+            // moment the permit is free is the moment a shutdown may go on to flush.
+            let full =
+                executor.shared.config.blocking_workers + executor.shared.config.queue_capacity;
+            let began = Instant::now();
+            while executor.shared.slots.available_permits() != full {
+                assert!(began.elapsed() < Duration::from_secs(5), "the worker ends");
+                std::hint::spin_loop();
+            }
+            if telemetry.requests_in_flight() != 0 {
+                late += 1;
+            }
+            // Whatever the race did, the next round starts from nothing in flight.
+            while telemetry.requests_in_flight() != 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(late, 0, "rounds whose request outlived the idle executor");
     }
 }

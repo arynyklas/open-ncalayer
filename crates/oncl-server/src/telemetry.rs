@@ -569,6 +569,13 @@ impl Telemetry {
             },
         }
     }
+    /// Observed requests that have not ended yet: ended is when the last owner let go.
+    #[cfg(test)]
+    pub(crate) fn requests_in_flight(&self) -> i64 {
+        self.shared
+            .as_ref()
+            .map_or(0, |s| s.in_flight.load(Ordering::Relaxed))
+    }
     /// Final bounded flush. Never blocks longer than `shutdown_timeout_ms`; returns
     /// whether every exporter finished inside the bound. Idempotent.
     pub fn shutdown(&self) -> bool {
