@@ -93,9 +93,11 @@ jobs:
         run: rustup toolchain install
       - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # Every platform's packages: the licences test (`committed_licenses_are_fresh`) reads
-      # their licence files offline. Its result does not depend on the host, so it runs on
-      # Linux alone, where the fetch takes seconds (close to a minute on Windows).
+      # Every platform's packages: the licences tests (`committed_licenses_are_fresh`,
+      # `committed_plugin_licenses_are_fresh`) and the SDK's inventory test
+      # (`committed_inventory_is_current_and_a_stale_copy_is_detected`, `cargo tree --target`
+      # of every platform) read them offline. Their result does not depend on the host, so
+      # they run on Linux alone, where the fetch takes seconds (close to a minute on Windows).
       - name: Fetch packages
         if: runner.os == 'Linux'
         run: |
@@ -132,7 +134,8 @@ jobs:
         run: |
           skip=()
           if [ "$RUNNER_OS" != Linux ]; then
-            skip=(--skip committed_licenses_are_fresh --skip committed_plugin_licenses_are_fresh)
+            skip=(--skip committed_licenses_are_fresh --skip committed_plugin_licenses_are_fresh
+              --skip committed_inventory_is_current_and_a_stale_copy_is_detected)
           fi
           cargo xtask fetch-fixtures
           # The built-in modules' benchmarks (`bench_*`) run in release, in the `bench` job.
