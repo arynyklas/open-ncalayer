@@ -1,3 +1,9 @@
+# Plugin manifests are packed and hashed byte for byte (`cargo xtask plugin pack`, the built-in
+# modules' SHA256SUMS) and the port tests edit their text line by line: LF in every checkout.
+# Without this, a Windows checkout with `core.autocrlf=true` (the CI runners' default) has CRLF
+# manifests and nine port tests fail with `no operation <name>`.
+plugins/*/plugin.toml text eol=lf
+crates/oncl-builtin-*/plugin.toml text eol=lf
 # Fixtures are compared byte for byte (`cargo xtask gen-fixtures --check`, sha256 sums,
 # DER parsers): no end-of-line conversion.
 fixtures/** -text
