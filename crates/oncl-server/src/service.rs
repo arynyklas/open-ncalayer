@@ -1077,12 +1077,9 @@ async fn linger<S>(mut stream: S, connection_deadline: tokio::time::Instant)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
     let until = (tokio::time::Instant::now() + LINGER).min(connection_deadline);
     let drain = async {
-        if stream.shutdown().await.is_err() {
-            return;
-        }
         let mut discard = [0u8; 8192];
         let mut left = LINGER_BYTES;
         while left > 0 {
@@ -1098,7 +1095,7 @@ where
 /// supplies the ACTUAL peer and finite accept/header bounds, never request data.
 /// A response's original invocation bound can only shorten these outer bounds.
 pub async fn serve_connection<S>(
-    stream: S,
+    mut stream: S,
     peer: SocketAddr,
     router: axum::Router,
     header_timeout: Duration,
@@ -1134,29 +1131,27 @@ where
         .max_buf_size(32_768)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(header_timeout);
-    // Hyper does not close the transport itself: the connection ends in `linger`, once its
-    // answer is out.
-    let connection = builder
-        .serve_connection(
+    // Hyper is lent the transport, so it flushes the answer and shuts the sending side down
+    // itself; the connection is closed only in `linger`, after the answer is out.
+    {
+        let connection = builder.serve_connection(
             hyper_util::rt::TokioIo::new(DeliveryIo {
-                stream,
+                stream: &mut stream,
                 delivery: delivery.clone(),
             }),
             service,
-        )
-        .without_shutdown();
-    tokio::pin!(connection);
-    let parts = tokio::select! {
-        biased;
-        error=delivery.stopped()=>return Err(delivery_io_error(error)),
-        _=tokio::time::sleep_until(connection_deadline)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"connection time bound exceeded")),
-        result=&mut connection=>result.map_err(|_|io::Error::new(io::ErrorKind::ConnectionAborted,"HTTP connection closed"))?,
-    };
+        );
+        tokio::pin!(connection);
+        tokio::select! {
+            biased;
+            error=delivery.stopped()=>return Err(delivery_io_error(error)),
+            _=tokio::time::sleep_until(connection_deadline)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"connection time bound exceeded")),
+            result=&mut connection=>result.map_err(|_|io::Error::new(io::ErrorKind::ConnectionAborted,"HTTP connection closed"))?,
+        }
+    }
     // The answer is out: what the connection holds for its operation (the cancellation and
     // the resource root the response keeps, see `ResponseDelivery`) is released now, not
     // after the wait for the client, which only keeps the socket open.
-    let DeliveryIo { stream, .. } = parts.io.into_inner();
-    drop(parts.service);
     drop(disconnect);
     drop(delivery);
     linger(stream, connection_deadline).await;

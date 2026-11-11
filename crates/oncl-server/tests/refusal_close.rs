@@ -134,3 +134,35 @@ async fn a_client_that_closes_after_the_answer_does_not_hold_the_connection() {
         started.elapsed()
     );
 }
+
+/// An answer larger than the socket buffers, to a request whose body is never read, arrives
+/// whole: the staged close must flush the answer before it shuts the sending side down.
+#[tokio::test]
+async fn a_large_answer_to_an_unread_body_arrives_whole() {
+    const ANSWER: usize = 32 << 20;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (socket, peer) = listener.accept().await.unwrap();
+    let router = Router::new().route("/", post(|| async { vec![b'y'; ANSWER] }));
+    let server = tokio::spawn(serve_connection(
+        socket,
+        peer,
+        router,
+        Duration::from_secs(5),
+        Instant::now() + Duration::from_secs(120),
+    ));
+    let mut start = head(1 << 30);
+    start.extend(std::iter::repeat_n(b'x', 4096));
+    client.write_all(&start).await.unwrap();
+    let mut answer = Vec::new();
+    timeout(STUCK, client.read_to_end(&mut answer))
+        .await
+        .expect("the answer ends")
+        .expect("the answer is read, not reset");
+    let split = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert_eq!(answer.len() - split, ANSWER, "the answer arrived whole");
+    drop(client);
+    let _ = timeout(STUCK, server).await;
+}
