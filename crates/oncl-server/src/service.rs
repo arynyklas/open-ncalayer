@@ -1061,9 +1061,9 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for DeliveryIo<S> {
 }
 /// How long a connection that has been answered stays open for what the client is still
 /// sending before the server closes it (the staged close of `serve_connection`).
-pub const LINGER: Duration = Duration::from_secs(1);
+const LINGER: Duration = Duration::from_secs(1);
 /// The most the staged close of `serve_connection` reads and discards.
-pub const LINGER_BYTES: u64 = 8 << 20;
+const LINGER_BYTES: u64 = 8 << 20;
 /// Closes an answered connection in stages (RFC 9112 section 9.6). A server that answers
 /// before it has read the whole request body (a refusal decided from the metadata part,
 /// before the documents) and then closes the socket resets the connection as soon as the

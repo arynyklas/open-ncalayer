@@ -172,8 +172,15 @@ fn sign_verify_extract_round_trip_with_client_files_and_a_different_server_direc
     assert_eq!(exit(&result), 0, "{}", text(&result.stderr));
     assert_eq!(std::fs::read(&extracted).unwrap(), content);
     assert_eq!(json(&result)["verified"], false);
-    // No client path or client byte stayed on the server beyond the operation.
-    assert!(files(&remote.scratch()).is_empty(), "scratch must be empty");
+    // No client path or client byte stayed on the server beyond the operation. The server
+    // removes a request's scratch when it lets go of the request, which can be a moment after
+    // the client has read the answer and exited: wait for it, bounded, then assert strictly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !files(&remote.scratch()).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let left = files(&remote.scratch());
+    assert!(left.is_empty(), "scratch must be empty: {left:?}");
 }
 
 mod remote {
