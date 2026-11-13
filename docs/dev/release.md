@@ -12,7 +12,7 @@
 - [`vm-matrix-runbook.md`](vm-matrix-runbook.md) — матрица ВМ WinGet и Win7 smoke;
 - [`manual-checks-runbook.md`](manual-checks-runbook.md) — ручные проверки (настоящая подпись, масштаб 200 %, список smoke);
 - [`kk-review-instructions.md`](kk-review-instructions.md) — лист для проверяющего казахских текстов;
-- [`release-blockers-alpha7.md`](release-blockers-alpha7.md) — открытые пункты и блокеры.
+- [`release-alpha7-status.md`](release-alpha7-status.md) — итог выпуска alpha.7 и открытые пункты.
 
 ## 1. Ключи подписи индекса (один раз)
 
@@ -53,7 +53,7 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
 
 ## 3. Выпуск версии
 
-1. Поднять версию в `[workspace.package]` файла `Cargo.toml` вместе с одиннадцатью пинами `version = "=<версия>"` у SDK-цепочки (`oncl-flows`, `oncl-gost`, `oncl-pki`, `oncl-pdf`, `oncl-pdk`, `oncl-plugin`, `oncl-protocol`, `oncl-registry`, `oncl-token`, `oncl-update`, `oncl-xml` в `[workspace.dependencies]`; без этого workspace не разрешается), четырьмя `plugin.toml` встроенных модулей и lock-файлами (подробно — [`sdk.md`](sdk.md), раздел 6), обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» README и закоммитить.
+1. Поднять версию в `[workspace.package]` файла `Cargo.toml` вместе с одиннадцатью пинами `version = "=<версия>"` у SDK-цепочки (`oncl-flows`, `oncl-gost`, `oncl-pki`, `oncl-pdf`, `oncl-pdk`, `oncl-plugin`, `oncl-protocol`, `oncl-registry`, `oncl-token`, `oncl-update`, `oncl-xml` в `[workspace.dependencies]`; без этого workspace не разрешается), четырьмя `plugin.toml` встроенных модулей и lock-файлами (подробно — [`sdk.md`](sdk.md), раздел 6), обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» в [`development.md`](development.md) и закоммитить.
 2. Поставить подписанный тег, проверить подпись и запушить его:
 
    ```sh

@@ -1,82 +1,84 @@
 # oncl-core
 
-The embeddable Rust SDK of [OpenNCALayer](https://github.com/arynyklas/OpenNCALayer): typed,
-streaming signing, verification, validation, inspection and time-stamping operations over files
-and byte streams, with explicit host-owned trust, keys, clock, network, audit and resource
-limits. It has no UI, daemon, listener, installer or self-update, and needs no display session.
+Встраиваемый Rust SDK проекта [OpenNCALayer](https://github.com/arynyklas/OpenNCALayer):
+типизированные потоковые операции подписи, проверки, валидации, инспекции и меток времени над
+файлами и потоками байт. Доверие, ключи, часы, сеть, аудит и лимиты ресурсов задаёт хозяин
+приложения. У SDK нет интерфейса, демона, слушающего порта, установщика и самообновления, ему
+не нужна графическая сессия.
 
-Status: **pre-1.0 (`0.1.0-alpha.*`)**. Breaking changes are allowed between alphas and are listed
-in the migration notes of [`docs/dev/sdk.md`](../../docs/dev/sdk.md). The crates are **not
-published to crates.io**: depend on them by git or path (below), never by `cargo add` of a
-registry version. Whether the `oncl-*` names are available or owned on crates.io has not been
-verified.
+Статус: **до 1.0 (`0.1.0-alpha.*`)**. Между альфа-версиями возможны несовместимые изменения; они
+перечислены в заметках о миграции [`docs/dev/sdk.md`](../../docs/dev/sdk.md). Крейты **не
+опубликованы в crates.io**: подключайте их по git или по path (ниже), а не через `cargo add` версии
+из реестра. Свободны ли имена `oncl-*` в crates.io и принадлежат ли они кому-то, не проверялось.
 
-## Using it before a registry release
+## Использование до выпуска в реестр
 
-By path, from a checkout of the repository at a tag or commit you have reviewed:
+По path, из рабочей копии репозитория на проверенном вами теге или коммите:
 
 ```toml
 [dependencies]
 oncl-core = { path = "OpenNCALayer/crates/oncl-core", features = ["full"] }
 oncl-pki = { path = "OpenNCALayer/crates/oncl-pki" }
 
-# The SDK is built against locally modified `streebog` and `hmac` (additive secret-input
-# variants): a consumer outside the workspace must carry the same patch.
+# SDK собран с локально изменёнными `streebog` и `hmac` (добавлены варианты с секретным
+# входом): потребитель вне workspace должен нести тот же патч.
 [patch.crates-io]
 streebog = { path = "OpenNCALayer/vendor/streebog" }
 hmac = { path = "OpenNCALayer/vendor/hmac" }
 ```
 
-or by git, pinned to a commit (the patch section then points at the same repository):
+или по git, закреплённому на коммите (секция патча указывает на тот же репозиторий):
 
 ```toml
 [dependencies]
-oncl-core = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>", features = ["full"] }
+oncl-core = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<коммит>", features = ["full"] }
 
 [patch.crates-io]
-streebog = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>" }
-hmac = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<commit>" }
+streebog = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<коммит>" }
+hmac = { git = "https://github.com/arynyklas/OpenNCALayer", rev = "<коммит>" }
 ```
 
-The minimal SDK is `default-features = false` (the same as the default): CMS/CAdES, hashing,
-PKI validation, file/inline PKCS#12 and JKS key sources, host-named keys, batches and
-inspection. Optional features:
+Минимальный SDK — `default-features = false` (то же, что по умолчанию): CMS/CAdES, хеширование,
+PKI-валидация, файловые и встроенные ключи PKCS#12 и JKS, ключи, названные хозяином, пакеты
+операций и инспекция. Дополнительные features:
 
-| feature   | adds                                                                    |
-|-----------|-------------------------------------------------------------------------|
-| `tokens`  | hardware tokens and ID cards as key sources (`oncl-token`)              |
-| `xml`     | XMLDSig / XAdES / WS-Security sign, add, verify (`oncl-xml`)            |
-| `pdf`     | PAdES sign and verify (`oncl-pdf`)                                      |
-| `jose`    | JWS / JWT create, add, verify                                           |
-| `plugins` | headless WebAssembly plugin host (implies `xml`)                        |
-| `full`    | all of the above; still no UI, desktop, updater, server or async runtime |
+| feature   | добавляет                                                                  |
+|-----------|----------------------------------------------------------------------------|
+| `tokens`  | аппаратные токены и удостоверения личности как источники ключей (`oncl-token`) |
+| `xml`     | подпись, добавление подписи и проверка XMLDSig / XAdES / WS-Security (`oncl-xml`) |
+| `pdf`     | подпись и проверка PAdES (`oncl-pdf`)                                      |
+| `jose`    | создание, добавление и проверка JWS / JWT                                  |
+| `plugins` | безголовый хост плагинов WebAssembly (включает `xml`)                      |
+| `full`    | всё перечисленное; по-прежнему без интерфейса, desktop, апдейтера, сервера и асинхронного рантайма |
 
-## Examples
+## Примеры
 
-Each example really runs (`cargo run -p oncl-core --example <name>`); they issue a throwaway RSA
-PKI at run time and need no network:
+Каждый пример действительно запускается (`cargo run -p oncl-core --example <имя>`); они выпускают
+одноразовую RSA PKI во время запуска и не ходят в сеть:
 
-- `sign_file [WORKDIR [FILE]]` — detached CMS signature of a file with a PKCS#12 key under strict
-  validation; the key use is audited by a host `KeyUseGuard`.
-- `verify_file WORKDIR FILE` — verifies it; exits non-zero unless the verdict is `Valid`.
-- `custom_transport` — a host-written `HttpTransport` plugged into validation; with the "network"
-  down, strict signing fails closed before the private key is applied.
+- `sign_file [КАТАЛОГ [ФАЙЛ]]` — отсоединённая подпись CMS файла ключом PKCS#12 по строгой
+  валидации; применение ключа записывается аудитом хозяина (`KeyUseGuard`).
+- `verify_file КАТАЛОГ ФАЙЛ` — проверяет её; завершается ненулевым кодом, если вердикт не `Valid`.
+- `custom_transport` — транспорт `HttpTransport`, написанный хозяином, подключённый к
+  валидации; без «сети» строгая подпись отклоняется до применения закрытого ключа.
 
-The older `sdk_probe` example is an acceptance probe with oracle comparisons, not an embedding
-guide.
+Более старый пример `sdk_probe` — приёмочная проба со сверкой с независимыми оракулами, а не
+руководство по встраиванию.
 
-## Contract in one page
+## Контракт на одной странице
 
-- `Engine` is built from `EngineServices` (host services) and admits operations with
-  `Engine::begin(ExecutionGrant, OperationPolicy, control)`. Grants come from trusted host code,
-  never from a request on the wire.
-- Private-key use goes through `KeyUseGuard`: `before_use` must durably record the use before the
-  key is applied, and a failure refuses it. Errors carry `AppliedState` (`NotApplied`, `Applied`,
-  `Unknown`); the SDK never promises rollback or exactly-once.
-- Reports separate signature integrity, anchored chain, validity, revocation, timestamp proof and
-  claimed time (`Verdict`); missing evidence is never reported as valid.
-- Limits: 1 GiB of document bytes and 1 GiB of accounted live buffers per operation by
-  default; a document above 1 GiB is refused (accounting limits, not RSS measurements); see `docs/dev/sdk.md` for the full list,
-  the semver and error-stability stance, and the publication-readiness status.
+- `Engine` строится из `EngineServices` (службы хозяина) и допускает операции через
+  `Engine::begin(ExecutionGrant, OperationPolicy, control)`. Права выдаёт доверенный код хозяина,
+  а не запрос по сети.
+- Закрытый ключ применяется через `KeyUseGuard`: `before_use` должен надёжно записать
+  применение до применения ключа, а его отказ запрещает применение. Ошибки несут `AppliedState`
+  (`NotApplied`, `Applied`, `Unknown`); SDK не обещает ни отката, ни ровно одного применения.
+- Отчёты разделяют целостность подписи, привязанную цепочку, срок действия, отзыв, доказательство
+  метки времени и заявленное время (`Verdict`); отсутствие доказательств никогда не выдаётся за
+  действительность.
+- Лимиты: по умолчанию 1 ГиБ байт документа и 1 ГиБ учтённых живых буферов на операцию;
+  документ больше 1 ГиБ отклоняется (это учётные лимиты, а не измерение RSS). Полный список,
+  позиция по semver и стабильности ошибок и состояние готовности к публикации — в
+  [`docs/dev/sdk.md`](../../docs/dev/sdk.md).
 
-Apache-2.0; see `LICENSE` and `NOTICE`.
+Apache-2.0; см. `LICENSE` и `NOTICE`.

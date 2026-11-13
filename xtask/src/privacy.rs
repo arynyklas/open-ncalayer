@@ -41,8 +41,7 @@ pub const TEST_CA_DIR: &str = "fixtures/nca/test";
 /// follow "<drive>:")`, as written in the file (a doubled backslash stays doubled). Anything
 /// else after a drive letter in these files, and any drive letter elsewhere, is a finding.
 pub const MACHINE_PATH_EXCEPTIONS: &[(&str, char, &[&str])] = &[
-    ("README.en.md", 'C', &[r"\…"]),
-    ("README.md", 'C', &[r"\…"]),
+    ("docs/user/compatibility.md", 'C', &[r"\…"]),
     (
         "crates/oncl-basics/src/page_file.rs",
         'C',

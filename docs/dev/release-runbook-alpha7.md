@@ -2,11 +2,13 @@
 
 Пошаговая инструкция для владельца проекта. Всё публичное делает **владелец**: слияние в `main`, подписанные теги `v0.1.0-alpha.7` и `plugins-ГГГГММДД`, публикация черновика релиза, подпись индексов обновлений его ключом, статус `vm-smoke`. Ассистент готовит всё до подписи и сам ничего не публикует. Документ дополняет [`release.md`](release.md) (оно описывает устройство выпуска, здесь — порядок действий именно для alpha.7) и не заменяет его: если расходится с `release.md`, прав `release.md`, а расхождение надо исправить.
 
+**Статус: alpha.7 выпущена (2026-11-13).** Разделы 1–11 остаются порядком выпуска для следующих версий; что фактически произошло и что осталось открытым — в [`release-alpha7-status.md`](release-alpha7-status.md), поправки к порядку по итогам выпуска — в разделе 12.
+
 Условные обозначения: `<…>` — подставить; команды `cargo`, `git`, `gh` даны для Git Bash в корне рабочего дерева; PowerShell отмечен явно. Пометка **[не проверено]** означает, что команду нельзя безопасно выполнить без публичного действия или без вашего ключа; причина указана рядом.
 
 Решения владельца, на которых построен порядок (не пересматриваются в этом документе):
 
-1. alpha.7 **заблокирован** до тех пор, пока не пройдены все ручные проверки и матрица ВМ (см. [`release-blockers-alpha7.md`](release-blockers-alpha7.md)).
+1. alpha.7 была заблокирована до тех пор, пока не пройдены ручные проверки и матрица ВМ; выпущена с открытыми пунктами, итог по каждому — в [`release-alpha7-status.md`](release-alpha7-status.md).
 2. Ядро и плагины выходят вместе: у девяти плагинов `min_core = "0.1.0-alpha.7"`.
 3. Шифрование/расшифрование (G01/G02) в alpha.7 **не входит**, документировано как BLOCKED.
 4. Гарантия размера документа — **1 ГиБ** (контракт); статус доказательства ведётся в ledger, а не здесь.
@@ -17,24 +19,24 @@
 | Что | Значение | Источник |
 |---|---|---|
 | Версия рабочего дерева | `0.1.0-alpha.7` | `Cargo.toml`, `[workspace.package]` |
-| Последний тег ядра | `v0.1.0-alpha.6` | `release.md`, `sdk.md` §6 |
+| Тег ядра | `v0.1.0-alpha.7` (до выпуска последним был `v0.1.0-alpha.6`) | `git tag`, `release.md` |
 | Открытый ключ обновлений в дереве | `crates/oncl-update/keys/current.pub` (идентификатор minisign `465A2F38D51A8BB6`); `next.pub` нет | файл |
-| Каталога `updates/` нет ни в дереве, ни на `origin/main` | значит, **индекс не публиковался ни разу**: alpha.7 даёт первый `beta.json` | `ls` корня; `index-check.yml`: без `updates/v1` проверяются только ключи |
+| Каталог `updates/` | До выпуска его не было ни в дереве, ни на `origin/main`: alpha.7 дала первый `beta.json` (PR #8, затем плагины в PR #9) | `index-check.yml`: без `updates/v1` проверяются только ключи |
 | Репозиторий | `origin` = `git@github.com:arynyklas/OpenNCALayer.git`; на `origin/main` лежит коммит `70424e67` «Rename repository to OpenNCALayer» | `.git/config`, `git log origin/main` |
 | Адрес в текстах этой ветки | `arynyklas/OpenNCALayer` (`release.md`, `scripts/winget/*.ps1`, `xtask winget`, README, документация SDK) | файлы |
 
-Адрес `arynyklas/OpenNCALayer` одинаков в `release.md`, сборке, скриптах WinGet (`-Repository` по умолчанию), `xtask winget` (константа `REPOSITORY`) и ссылках README; в командах ниже `<репозиторий>` = `arynyklas/OpenNCALayer`. Проверка URL в `xtask winget` и в `index check` сравнивает адреса буквально, старое имя `open-ncalayer` она не принимает. **Остаётся вам, на стороне GitHub:** проверить, что старое имя репозитория продолжает перенаправляться (для ссылок из уже выпущенных сборок и закладок) и что новое имя в нужном регистре открывается; это в репозитории не проверяется.
+Адрес `arynyklas/OpenNCALayer` одинаков в `release.md`, сборке, скриптах WinGet (`-Repository` по умолчанию), `xtask winget` (константа `REPOSITORY`) и ссылках README и `docs/`; в командах ниже `<репозиторий>` = `arynyklas/OpenNCALayer`. Проверка URL в `xtask winget` и в `index check` сравнивает адреса буквально, старое имя `open-ncalayer` она не принимает. **Остаётся вам, на стороне GitHub:** проверить, что старое имя репозитория продолжает перенаправляться (для ссылок из уже выпущенных сборок и закладок) и что новое имя в нужном регистре открывается; это в репозитории не проверяется.
 
 ## 1. Предусловия: что должно быть зелёным
 
-Выпуск не начинается, пока каждая строка не закрыта. Статус каждой — в [`release-blockers-alpha7.md`](release-blockers-alpha7.md).
+Выпуск не начинается, пока каждая строка не закрыта. Итог по этим строкам для alpha.7 — в [`release-alpha7-status.md`](release-alpha7-status.md).
 
 | # | Предусловие | Как проверить | Кто |
 |---|---|---|---|
-| 1 | Ворота на одном неизменном коммите: `cargo test --workspace --no-fail-fast`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`, `cargo deny check`, `cargo xtask privacy`, `cargo xtask licenses --check`, `cargo xtask plugin-ops-check --require-wasm`, `cargo xtask plugin-version-check`, `cargo xtask check-release-features`, `cargo xtask sdk closure` | Выполнить на финальном коммите, без параллельных сборок; сверить с `progress.md` (ledger). Набор команд — раздел «Перед отправкой изменений» README и шаги job `test` в `.github/workflows/ci.yml` | ассистент |
+| 1 | Ворота на одном неизменном коммите: `cargo test --workspace --no-fail-fast`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`, `cargo deny check`, `cargo xtask privacy`, `cargo xtask licenses --check`, `cargo xtask plugin-ops-check --require-wasm`, `cargo xtask plugin-version-check`, `cargo xtask check-release-features`, `cargo xtask sdk closure` | Выполнить на финальном коммите, без параллельных сборок; сверить с `progress.md` (ledger). Набор команд — раздел «Перед отправкой изменений» в [`development.md`](development.md) и шаги job `test` в `.github/workflows/ci.yml` | ассистент |
 | 2 | Доказательство 1 ГиБ (`cargo xtask platform-proof`, параметры — [`platform-acceptance.md`](platform-acceptance.md)) | Итоговый прогон на финальном дереве (по ledger — переделанный `overload-profile` и полный прогон `--jobs 1`); пока не пройден, поставка с контрактом 1 ГиБ не подтверждена | ассистент; вы принимаете результат |
 | 3 | Матрица взаимодействия с NCANode ([`platform-interop.md`](platform-interop.md), [`interop-ncanode.md`](interop-ncanode.md)) | По ledger: 221 PASS, 12 BLOCKED (нет внешней проверки ГОСТ). Прогнать повторно после последних изменений движка (CAdES, приём загрузки) | ассистент |
-| 4 | Ветка отправлена и **CI зелёный на всех ногах**, включая macOS и Linux (они ещё ни разу не запускались) | раздел 2 ниже | вы / ассистент |
+| 4 | Ветка отправлена и **CI зелёный на всех ногах**, включая macOS и Linux | раздел 2 ниже | вы / ассистент |
 | 5 | Матрица ВМ и Win7 пройдены | [`vm-matrix-runbook.md`](vm-matrix-runbook.md) | вы / ассистент при доступе к ВМ |
 | 6 | Ручные проверки: одна настоящая подпись через окно плагинов, фокус при 200 %, список непройденных пунктов smoke | [`manual-checks-runbook.md`](manual-checks-runbook.md) | вы |
 | 7 | Казахские тексты прочитаны носителем и правки внесены (или принято решение выпускать с пометкой «не вычитано») | [`kk-review-instructions.md`](kk-review-instructions.md) | вы выбираете носителя |
@@ -45,7 +47,7 @@
 
 Это делает ассистент, вы принимаете результат.
 
-1. Переписать четыре коммита с автором `m01@example.invalid` на `aryn@sek.su` (список — в [`release-blockers-alpha7.md`](release-blockers-alpha7.md)), перебазировать ветку на `origin/main` (на нём один коммит `70424e67`; пересекаются пять файлов: `Cargo.toml`, `README.md`, `README.en.md`, `docs/design/roadmap.md`, `docs/dev/release.md`), заново прогнать ворота из строки 1 таблицы.
+1. Переписать коммиты с чужим автором на `aryn@sek.su` (проверка: `git log --format='%h %ae|%ce %G?' origin/main..HEAD`), перебазировать ветку на `origin/main` и заново прогнать ворота из строки 1 таблицы.
 2. Отправить ветку **без PR**, чтобы запустить CI: `git push origin feat/platform-sdk-apps` [не проверено: публичное действие]. На обычный пуш ветки запускаются `ci.yml` и `privacy.yml`; `index-check.yml`, `release.yml`, `plugins.yml` не запускаются (триггеры — раздел 7 ниже). Последующие пуши — обычные (без `--force`).
 3. Дождаться зелёного `ci.yml` на всех ногах: `test` (ubuntu-24.04, windows-2025, macos-15), `win7` (x64, x86), `windows-package`, `macos-universal`, `linux-appimage`, `builtins-x86`, `ext-e2e`, `tokens-vpcd`, `actionlint`, `fmt`, `clippy`, `deny`, `site`, `extension`. Ноги `live` и `bench` на пуш не запускаются (по расписанию или вручную). Любой красный результат — стоп: исправление и снова ворота.
 4. Проверить, что privacy дошла до конца: `privacy.yml` без секрета `PRIVACY_DENYLIST` пишет notice и проходит; структура проверяется всегда. Ваш приватный список проверяет хук `pre-push` вашего checkout (`release.md`, §9).
@@ -169,7 +171,7 @@ cargo xtask index check updates/v1 --base origin/main --vm-smoke --conformance
    cargo xtask plugin pending --channel beta
    ```
 
-   **Важная находка (проверено по `git ls-tree origin/main`):** на `origin/main` нет каталога `updates/`, то есть реального подписанного индекса ещё не существует (ветки `updates/plugins-2026…` в репозитории есть, но не слиты). `cargo xtask plugin pending` при отсутствии индекса считает ожидающими **все** порты (`xtask/src/plugin.rs`, `pending`: без файла индекса `published` пуст); портов с `plugin.toml` в дереве 34. Значит, до слияния индекса ядра и после него (в индексе будет только ядро) команда напечатает все 34 порта, а `plugins.yml` соберёт и опубликует их все. Меняются в alpha.7 девять (`dogovor24` 1.0.0-beta.2, `efactoring` 1.0.0-beta.4, `energy` 1.0.0-beta.2, `eproc` 1.0.0-beta.2, `esf-osdkz` 1.0.0-beta.3, `fhs` 1.0.0-beta.5, `market` 1.0.0-beta.4, `qiwi` 1.0.0-beta.2, `rating1c` 1.0.0-beta.4; версии проверены по `plugin.toml`). **Решение владельца нужно до тега** (вопрос в [`release-blockers-alpha7.md`](release-blockers-alpha7.md)): выпускать все 34 как первую запись индекса или сначала внести в индекс уже опубликованные пакеты прошлых тегов `plugins-20261031`, `plugins-20261031.1`, `plugins-20261101` командой `cargo xtask index add-plugin --channel beta --tag <тег> --package <файл.onclp>…` (она читает `id`, версию, `min_core` из пакета), после чего `pending` покажет только девять. Второй путь требует скачать пакеты тех релизов **[не проверено: существуют ли эти релизы на GitHub и сколько в них пакетов]**. `cargo xtask plugin-version-check` сравнивает рабочее дерево с последним тегом `plugins-*` и сообщает порт, у которого изменился код, а версия нет.
+   **Находка (по `git ls-tree origin/main` до выпуска):** пока в индексе нет плагинов, `cargo xtask plugin pending` считает ожидающими **все** порты (`xtask/src/plugin.rs`, `pending`: без записей `published` пуст); портов с `plugin.toml` в дереве 34, и `plugins.yml` соберёт и опубликует их все. Для alpha.7 владелец выбрал выпуск всех 34 одним тегом (изменились девять: `dogovor24`, `efactoring`, `energy`, `eproc`, `esf-osdkz`, `fhs`, `market`, `qiwi`, `rating1c`). Альтернатива — сначала внести в индекс пакеты прошлых релизов командой `cargo xtask index add-plugin --channel beta --tag <тег> --package <файл.onclp>…`, но она требует релиза с пакетами на GitHub: у тега `plugins-20261031` релиза нет (есть только `plugins-20261031.1` и `plugins-20261101`). `cargo xtask plugin-version-check` сравнивает рабочее дерево с последним тегом `plugins-*` и сообщает порт, у которого изменился код, а версия нет.
 2. Тег на `main`:
 
    ```sh
@@ -236,10 +238,23 @@ cargo xtask index check updates/v1 --base origin/main --vm-smoke --conformance
 - `gh attestation verify <файл> --repo <репозиторий>` для файлов релиза.
 - Индекс опубликован (команда `curl` в разделе 6.6).
 - Продление индекса: каждый индекс, не менявшийся 30 дней, надо продлить и подписать заново (`cargo xtask index refresh --channel beta`, подпись, PR); `stable.json` для alpha.7 не создаётся (`release.md`, §5).
-- Обновить [`release-blockers-alpha7.md`](release-blockers-alpha7.md): закрытые строки — «закрыто» с датой.
+- Обновить [`release-alpha7-status.md`](release-alpha7-status.md) (или итоговый документ следующего выпуска): закрытые строки — «закрыто» с датой.
 
 ## 11. Чего в этом документе нет
 
 - Публикации в WinGet (stable-релиз и отдельная команда владельца; `winget.md`).
 - Шифрования и расшифрования (G01/G02): BLOCKED.
 - Автоматизации матрицы ВМ: описана в [`vm-matrix-runbook.md`](vm-matrix-runbook.md), раздел «Что автоматизирует ассистент».
+
+## 12. Как прошёл выпуск alpha.7: поправки к порядку
+
+Проверено на выпуске 2026-11-13; всё остальное в разделах 1–11 не опровергнуто, но и не проверялось отдельно.
+
+1. **Слияние в `main`.** Правило ветки требует проверку `check` (`index-check.yml`). Порядок, который сработал: открыть PR `feat/...` → `main` только ради этой проверки и, когда `check` зелёный, отправить тот же коммит в `main` обычным пушем без `--force` (`git push origin <sha>:refs/heads/main`). До завершения `check` правило отвечает «Required status check "check" is in progress» и пуш не принимает. Остальные джобы `ci.yml` на PR слиянию не мешали, но их надо дождаться: PR #10 был слит до их окончания, и это был риск; полный CI на `main` после слияния прошёл зелёным.
+2. **Тег.** `git tag -s`, затем `git tag -v` (должно быть `Good "git" signature` и ваш отпечаток) и только потом `git push origin <тег>`. `release.yml` собрал черновик за ~1 ч (44 файла на момент проверки); job `index` сам открыл PR `updates/v0.1.0-alpha.7` с неподписанным индексом.
+3. **`xtask index check` локально** читает токен только из переменной окружения `GITHUB_TOKEN`; без неё запрос статуса коммита уходит анонимно и GitHub отвечает `403 Forbidden`. Достаточно задать её на время сессии, например `GITHUB_TOKEN=$(gh auth token)`.
+4. **Порядок трёх публичных шагов:** статус `vm-smoke` на коммит тега → публикация черновика (`gh release edit <тег> --draft=false`) → подпись индекса в PR. `index check` проверяет, что ссылки на файлы релиза отвечают 200, а у черновика они не открываются.
+5. **Подпись индекса** на ветке PR: `cargo xtask sign updates/v1/beta.json --key <каталог>/oncl-index.key`, затем `cargo xtask index check updates/v1 --base origin/main` (локально для ядра с `--vm-smoke`), коммит `beta.json` и `beta.json.minisig` подписанным коммитом, пуш и слияние PR после зелёного `check`. Страница Pages обновляется через несколько минут после слияния.
+6. **Плагины.** Второй тег за день — `plugins-ГГГГММДД.1`. Каждый тег `plugins-*` открывает свой PR индекса. Неслитые PR старых тегов (`plugins-20261031.1`, `plugins-20261101`) закрыты как устаревшие после слияния индекса, перекрывающего их пакеты (сверено по списку пакетов в теле PR); конфликт `seq` в них не проверялся.
+7. **Отказ слияния PR индекса.** Если `gh pr merge` отвечает «base branch policy prohibits the merge», проверка `check` ещё не закончилась: повторить после зелёного результата, `--admin` не использовать.
+8. **Что осталось неподтверждённым даже после выпуска:** обновление уже установленной копии по индексу (клиент ставит версию из `beta.json`) на ВМ не проверялось.

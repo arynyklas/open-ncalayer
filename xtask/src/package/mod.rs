@@ -40,7 +40,7 @@ pub const PACK_ID: &str = "OpenNCALayer";
 const PACK_TITLE: &str = "OpenNCALayer";
 const PACK_AUTHORS: &str = "OpenNCALayer contributors";
 /// The documents shipped next to the programs.
-const DOCS: [&str; 4] = ["README.md", "README.en.md", "LICENSE", "NOTICE"];
+const DOCS: [&str; 3] = ["README.md", "LICENSE", "NOTICE"];
 /// The tray icon, also the icon of the installers and the AppImage: 32×32 RGBA PNG.
 const ICON: &str = "crates/oncl-ui/assets/tray-ok.png";
 

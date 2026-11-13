@@ -833,4 +833,4 @@ docker run -d --name oncl-server --read-only --cap-drop ALL --security-opt no-ne
 ### Not done / not exercised here
 
 * The programs and archives are not signed (no Authenticode, no notarization) and nothing is published to a registry, release or browser store: the release workflow builds the archives as workflow artifacts only.
-* The macOS packaging path (universal check, tar.gz) and the CycloneDX SBOM job were not executed; Windows 7 packages were import-gated and started on Windows 10, not on Windows 7 itself.
+* The `platform` jobs (macOS universal packaging, tar.gz, the CycloneDX SBOM job `platform-sbom`) ran green in the `v0.1.0-alpha.7` release workflow (run `43413094628`); what they check is the unpacked programs starting without a GUI, not a user installation. Windows 7 packages were import-gated and started on Windows 10, not on Windows 7 itself.
