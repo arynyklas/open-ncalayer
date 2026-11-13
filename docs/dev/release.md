@@ -53,7 +53,7 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
 
 ## 3. Выпуск версии
 
-1. Поднять версию в `[workspace.package]` файла `Cargo.toml` вместе с одиннадцатью пинами `version = "=<версия>"` у SDK-цепочки (`oncl-flows`, `oncl-gost`, `oncl-pki`, `oncl-pdf`, `oncl-pdk`, `oncl-plugin`, `oncl-protocol`, `oncl-registry`, `oncl-token`, `oncl-update`, `oncl-xml` в `[workspace.dependencies]`; без этого workspace не разрешается), четырьмя `plugin.toml` встроенных модулей и lock-файлами (подробно — [`sdk.md`](sdk.md), раздел 6), обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» README и закоммитить.
+1. Поднять версию в `[workspace.package]` файла `Cargo.toml` вместе с одиннадцатью пинами `version = "=<версия>"` у SDK-цепочки (`oncl-flows`, `oncl-gost`, `oncl-pki`, `oncl-pdf`, `oncl-pdk`, `oncl-plugin`, `oncl-protocol`, `oncl-registry`, `oncl-token`, `oncl-update`, `oncl-xml` в `[workspace.dependencies]`; без этого workspace не разрешается), четырьмя `plugin.toml` встроенных модулей и lock-файлами (подробно — [`sdk.md`](sdk.md), раздел 6), обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» в [`development.md`](development.md) и закоммитить.
 2. Поставить подписанный тег, проверить подпись и запушить его:
 
    ```sh
