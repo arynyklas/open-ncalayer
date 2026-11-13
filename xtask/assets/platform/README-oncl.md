@@ -1,14 +1,14 @@
 # oncl {{VERSION}} ({{FLAVOR}})
 
-`oncl` is the standalone OpenNCALayer command line: hash, sign, verify, extract, inspect,
-extend, timestamp, JWS/JWT, plugin calls and batches. It is **independent of the desktop
-application**: it starts no daemon, no HTTP server and no browser session, installs
-nothing and writes nothing outside the paths you name. This archive is a plain program, not
-an installer; it is separate from the OpenNCALayer desktop package and from `oncl-server`.
+`oncl` — самостоятельная командная строка OpenNCALayer: хеширование, подпись, проверка,
+извлечение, инспекция, продление, метки времени, JWS/JWT, вызовы плагинов и пакеты операций.
+Она **не зависит от настольной программы**: не запускает ни демон, ни HTTP-сервер, ни сеанс
+браузера, ничего не устанавливает и ничего не пишет вне указанных вами путей. Этот архив — просто
+программа, а не установщик; он отделён от настольного пакета OpenNCALayer и от `oncl-server`.
 
-## Quickstart
+## Быстрый старт
 
-Unpack the archive anywhere and run the program from that folder:
+Распакуйте архив куда угодно и запускайте программу из этой папки:
 
 ```sh
 oncl --version
@@ -17,24 +17,24 @@ printf abc | oncl hash --algorithm sha256 --input -
 oncl verify --profile cms --input signature.p7s --root nca-root.der
 ```
 
-There is no implicit trust store: pass the roots you trust with `--root`. Private keys
-come from PKCS#12/JKS files or a smart-card reader you name, passwords only from an
-owner-only secret file or the terminal, never from arguments. Signing needs
-`--authorize`, the explicit confirmation of the exact operation.
+Неявного хранилища доверия нет: доверенные корни передайте через `--root`. Закрытые ключи берутся
+из файлов PKCS#12/JKS или из названного вами считывателя смарт-карт, пароли — только из файла
+секрета с доступом владельца или с терминала, но не из аргументов. Для подписи нужен
+`--authorize` — явное подтверждение именно этой операции.
 
-With `--endpoint https://host:13579 --token-file client.token --ca-file ca.pem` the same
-commands are a client of an `oncl-server` (a separate package).
+С `--endpoint https://host:13579 --token-file client.token --ca-file ca.pem` те же команды
+работают как клиент `oncl-server` (отдельный пакет).
 
-Full reference: `docs/cli.md` in this archive.
+Полное описание: `docs/cli.md` в этом архиве (на английском).
 
-## Contents
+## Состав
 
-| File | What it is |
+| Файл | Что это |
 |---|---|
-| `{{EXE}}` | the program |
-| `docs/cli.md` | commands, exit codes, remote mode |
-| `THIRD-PARTY.txt` | licences of the third-party code in this build |
-| `LICENSE`, `NOTICE` | Apache-2.0 and notices |
+| `{{EXE}}` | программа |
+| `docs/cli.md` | команды, коды выхода, удалённый режим |
+| `THIRD-PARTY.txt` | лицензии сторонних компонентов этой сборки |
+| `LICENSE`, `NOTICE` | Apache-2.0 и уведомления |
 
-Not included, by design: no certificate, key, token or test file, and no encryption /
-decryption command (it needs the Kazakhstani GOST backend, which does not exist yet).
+Намеренно не входят: сертификаты, ключи, токены и тестовые файлы, а также команды шифрования и
+расшифрования (им нужна казахстанская ГОСТ-часть, которой пока нет).

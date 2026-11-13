@@ -1,42 +1,41 @@
 # oncl-server {{VERSION}} ({{FLAVOR}})
 
-`oncl-server` is the standalone OpenNCALayer HTTP service. It is **independent of the
-desktop application** and ships as its own package; this archive holds the program, an
-example configuration and the operations files. **Nothing here opens a socket by
-itself:** the HTTP API is disabled until the operator writes a private configuration and
-enables it explicitly (`enabled = true` or `serve --enable-api`), and the service never
-installs trust, autostart or an updater.
+`oncl-server` — самостоятельный HTTP-сервис OpenNCALayer. Он **не зависит от настольной
+программы** и поставляется отдельным пакетом; в этом архиве — программа, пример конфигурации и
+файлы для эксплуатации. **Сам по себе ничто здесь не открывает сокет:** HTTP API выключен, пока
+оператор не напишет закрытую конфигурацию и явно не включит его (`enabled = true` или
+`serve --enable-api`); сервис никогда не устанавливает доверие, автозапуск или апдейтер.
 
-## Quickstart (first run, nothing is listening)
+## Быстрый старт (первый запуск, ничего не слушает)
 
 ```sh
 oncl-server --version
 oncl-server serve --config /etc/oncl-server/server.toml
-# disabled: no listener      <- with the example configuration (`enabled = false`)
+# disabled: no listener      <- с примером конфигурации (`enabled = false`)
 ```
 
-`server.example.toml` is the starting point: copy it into the owner-only operator
-directory, then follow `docs/server.md`: create a token
+Начните с `server.example.toml`: скопируйте его в закрытый каталог оператора, затем следуйте
+`docs/server.md` (на английском): создайте токен
 
 ```sh
 oncl-server token-create --directory /etc/oncl-server --name client.token
-# prints verifier=<64 hex characters>; put it under [[tokens]] in server.toml
+# печатает verifier=<64 шестнадцатеричных знака>; поместите его в [[tokens]] файла server.toml
 ```
 
-and enable the API on loopback (`oncl-server serve --config ... --enable-api`). A client
-is `oncl --endpoint http://127.0.0.1:13579 --token-file client.token ...` from the `oncl`
-package. LAN exposure needs TLS or a trusted reverse proxy, configured explicitly.
+и включите API на loopback (`oncl-server serve --config ... --enable-api`). Клиент —
+`oncl --endpoint http://127.0.0.1:13579 --token-file client.token ...` из пакета `oncl`.
+Для доступа из локальной сети нужны TLS или доверенный обратный прокси, настроенные явно.
 
-{{WINDOWS_PROVISIONING}}## Contents
+{{WINDOWS_PROVISIONING}}## Состав
 
-| File | What it is |
+| Файл | Что это |
 |---|---|
-| `{{EXE}}` | the program |
-| `server.example.toml` | example configuration, API disabled, no secret in it |
-{{DEPLOY_ROWS}}| `docs/server.md`, `docs/http-api.md` | operation, TLS, tokens, the HTTP contract |
-| `THIRD-PARTY.txt` | licences of the third-party code in this build |
-| `LICENSE`, `NOTICE` | Apache-2.0 and notices |
+| `{{EXE}}` | программа |
+| `server.example.toml` | пример конфигурации: API выключен, секретов нет |
+{{DEPLOY_ROWS}}| `docs/server.md`, `docs/http-api.md` | эксплуатация, TLS, токены, контракт HTTP (на английском) |
+| `THIRD-PARTY.txt` | лицензии сторонних компонентов этой сборки |
+| `LICENSE`, `NOTICE` | Apache-2.0 и уведомления |
 
-Not included, by design: no certificate, key, password, token or test file.
-Encryption / decryption routes do not exist (they need the Kazakhstani GOST backend).
-Updating is replacing the program and restarting the service; it never updates itself.
+Намеренно не входят: сертификаты, ключи, пароли, токены и тестовые файлы. Маршрутов шифрования и
+расшифрования нет (им нужна казахстанская ГОСТ-часть). Обновление — замена программы и перезапуск
+сервиса; сам он себя не обновляет.

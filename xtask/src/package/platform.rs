@@ -492,24 +492,25 @@ fn stage_product(
     )
     .context("reading the README template")?;
     let deploy_rows = if product == Product::Server && flavor.os == Os::Linux {
-        "| `deploy/openncalayer-server.service` | hardened systemd unit (not enabled by copying it) |\n\
-         | `deploy/Dockerfile` | container image built from this archive (non-root) |\n"
+        "| `deploy/openncalayer-server.service` | усиленный юнит systemd (простое копирование его не включает) |\n\
+         | `deploy/Dockerfile` | образ контейнера, собираемый из этого архива (без root) |\n"
     } else {
         ""
     };
     let windows_provisioning = if product == Product::Server && flavor.os == Os::Windows {
-        "## Windows: putting files in place\n\n\
-         The server only reads files that its own private-file API created (a protected ACL with\n\
-         one entry); `icacls` and `Set-Acl` cannot make them. Use the program:\n\n\
+        "## Windows: раскладка файлов\n\n\
+         Сервер читает только файлы, созданные его собственным API закрытых файлов (защищённый\n\
+         ACL с одной записью); `icacls` и `Set-Acl` такие файлы создать не могут. Используйте\n\
+         программу:\n\n\
          ```bat\n\
          oncl-server install-file --directory %ProgramData%\\oncl-operator --name server.toml --input server.toml\n\
          oncl-server install-file --directory %ProgramData%\\oncl-operator --name corporate.p12 --input corporate.p12\n\
          oncl-server token-create --directory %ProgramData%\\oncl-operator --name accounting.token\n\
          oncl-server serve --config %ProgramData%\\oncl-operator\\server.toml --enable-api\n\
          ```\n\n\
-         Paths in `server.toml` are Windows paths (use `'%ProgramData%\\oncl-operator\\audit'` literal strings).\n\
-         Delete the plain source files afterwards. The Linux sections of the documentation\n\
-         (systemd, container) do not apply.\n\n"
+         Пути в `server.toml` — пути Windows (пишите их буквальными строками, например\n\
+         `'%ProgramData%\\oncl-operator\\audit'`). Затем удалите исходные открытые файлы.\n\
+         Разделы документации про Linux (systemd, контейнер) к Windows не относятся.\n\n"
     } else {
         ""
     };
