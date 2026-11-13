@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "channel": "beta",
-  "seq": 2,
-  "generated": "2026-11-13T14:08:08Z",
-  "expires": "2026-12-13T14:08:08Z",
+  "seq": 3,
+  "generated": "2026-11-13T17:24:59Z",
+  "expires": "2026-12-13T17:24:59Z",
   "core": [
     {
       "version": "0.1.0-alpha.7",
@@ -836,6 +836,50 @@
         "ru": "xdox.kz Signer (порт OpenNCALayer)",
         "kk": "xdox.kz Signer (OpenNCALayer порты)",
         "en": "xdox.kz Signer (OpenNCALayer port)"
+      },
+      "rollout": 100,
+      "revoked": false
+    },
+    {
+      "id": "io.github.arynyklas.openncalayer.port.ezsigner",
+      "version": "1.0.0-beta.3",
+      "url": "https://github.com/arynyklas/OpenNCALayer/releases/download/plugins-20261113.1/io.github.arynyklas.openncalayer.port.ezsigner-1.0.0-beta.3.onclp",
+      "sha256": "0ecc7de060b22278aecdcc679eed5d86028e0a54be2c1b49481e2645edbf5de6",
+      "size": 164832,
+      "min_core": "0.1.0-alpha.4",
+      "modules": [
+        "kz.gov.pki.cms.CMSSignUtil"
+      ],
+      "replaces": {
+        "symname": "kz.gov.pki.cms.NLDocSignerModule",
+        "version": "1.2.2"
+      },
+      "name": {
+        "ru": "ezSigner (порт OpenNCALayer)",
+        "kk": "ezSigner (OpenNCALayer порты)",
+        "en": "ezSigner (OpenNCALayer port)"
+      },
+      "rollout": 100,
+      "revoked": false
+    },
+    {
+      "id": "io.github.arynyklas.openncalayer.port.simourg",
+      "version": "1.0.0-beta.3",
+      "url": "https://github.com/arynyklas/OpenNCALayer/releases/download/plugins-20261113.1/io.github.arynyklas.openncalayer.port.simourg-1.0.0-beta.3.onclp",
+      "sha256": "8aec6ccd724da5917923807c4e1e584c5c40ba670b39ca85317ddfa9b325e61e",
+      "size": 204937,
+      "min_core": "0.1.0-alpha.4",
+      "modules": [
+        "kz.Simourg.SimBASEModule"
+      ],
+      "replaces": {
+        "symname": "kz.Simourg.SimBASE",
+        "version": "2.4"
+      },
+      "name": {
+        "ru": "Simourg SimBASE (порт OpenNCALayer)",
+        "kk": "Simourg SimBASE (OpenNCALayer порты)",
+        "en": "Simourg SimBASE (OpenNCALayer port)"
       },
       "rollout": 100,
       "revoked": false
