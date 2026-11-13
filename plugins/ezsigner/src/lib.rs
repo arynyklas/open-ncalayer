@@ -1,4 +1,4 @@
-//! The OpenNCALayer port of `kz.gov.pki.cms.NLDocSignerModule` 1.2.1 (ezSigner), the module
+//! The OpenNCALayer port of `kz.gov.pki.cms.NLDocSignerModule` 1.2.2 (ezSigner), the module
 //! `kz.gov.pki.cms.CMSSignUtil`: the reflective dispatcher's variant with the page's `lang`
 //! over `kz.gov.pki.cms.CMSSignUtil` — file and folder choosers, and a time-stamped CAdES of
 //! a local file the page names, written next to it.
