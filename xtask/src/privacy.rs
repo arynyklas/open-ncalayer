@@ -43,6 +43,7 @@ pub const TEST_CA_DIR: &str = "fixtures/nca/test";
 pub const MACHINE_PATH_EXCEPTIONS: &[(&str, char, &[&str])] = &[
     ("README.en.md", 'C', &[r"\…"]),
     ("README.md", 'C', &[r"\…"]),
+    ("docs/user/compatibility.md", 'C', &[r"\…"]),
     (
         "crates/oncl-basics/src/page_file.rs",
         'C',
