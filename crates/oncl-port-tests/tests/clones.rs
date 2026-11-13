@@ -1023,7 +1023,7 @@ fn eot_bad_base64_java_text() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ezSigner (NLDoc 1.2.1)
+// ezSigner (NLDoc 1.2.1 and 1.2.2)
 
 const EZ: &str = "ezsigner";
 

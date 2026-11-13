@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-ezsigner"
 description = "The OpenNCALayer port of ezSigner (kz.gov.pki.cms.NLDocSignerModule): CAdES of local files the page names"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

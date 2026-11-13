@@ -3,12 +3,12 @@ modules = ["kz.Simourg.SimBASEModule"]
 
 [original]
 symname = "kz.Simourg.SimBASE"
-version = "2.2"
+version = "2.4"
 vendor = "ТОО «Simourg»"
 
 [port]
 status = "partial"
-conformance = "confirmed"
+conformance = "computed"
 
 [[differences]]
 ru = "Окна выбора файла и ключа — общие окна OpenNCALayer; после выбора ключа окно «Подписать / Выбрать другие ключи / Отменить»."

@@ -1,5 +1,5 @@
 id = "io.github.arynyklas.openncalayer.port.ezsigner"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 min_core = "0.1.0-alpha.4"
 modules = ["kz.gov.pki.cms.CMSSignUtil"]
 
@@ -15,7 +15,7 @@ en = "Time-stamped CMS signatures of local files for ezsigner.kz"
 
 [replaces]
 symname = "kz.gov.pki.cms.NLDocSignerModule"
-version = "1.2.1"
+version = "1.2.2"
 
 [capabilities]
 keys = true
