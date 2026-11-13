@@ -12,7 +12,7 @@
 - [`vm-matrix-runbook.md`](vm-matrix-runbook.md) — матрица ВМ WinGet и Win7 smoke;
 - [`manual-checks-runbook.md`](manual-checks-runbook.md) — ручные проверки (настоящая подпись, масштаб 200 %, список smoke);
 - [`kk-review-instructions.md`](kk-review-instructions.md) — лист для проверяющего казахских текстов;
-- [`release-blockers-alpha7.md`](release-blockers-alpha7.md) — открытые пункты и блокеры.
+- [`release-alpha7-status.md`](release-alpha7-status.md) — итог выпуска alpha.7 и открытые пункты.
 
 ## 1. Ключи подписи индекса (один раз)
 
