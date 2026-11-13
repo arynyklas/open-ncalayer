@@ -183,4 +183,4 @@ pwsh scripts/uia-secret-probe.ps1 -Exe .\target\debug\examples\uia_secret_probe.
 | 12 | Сужение мышью | | | |
 | 13 | Положительная ветка Valid | | | |
 
-«Не выполнено» — не PASS и не FAIL: так и записывать. По решению владельца alpha.7 заблокирован, пока не выполнены все ручные проверки; какие из пунктов (c) блокируют, а какие принимаются как известное ограничение, решает владелец (строки — в [`release-blockers-alpha7.md`](release-blockers-alpha7.md)).
+«Не выполнено» — не PASS и не FAIL: так и записывать. alpha.7 выпущена с открытыми пунктами этого списка; итог по каждому — в [`release-alpha7-status.md`](release-alpha7-status.md).
