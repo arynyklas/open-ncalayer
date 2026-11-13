@@ -94,23 +94,62 @@ fn seen(response: &[u8]) -> Seen {
 /// A `metadata_bytes` value at which the hash batch is admitted and then aborted by the
 /// metadata budget (the D10 cause). The window is narrow and its place moves with every
 /// fixed reservation of the service, so it is found, not hard-coded: bisect the smallest
-/// value that completes, then step down until the stream is aborted.
+/// value that completes, then stand `MARGIN` bytes below it.
+///
+/// Not the value next to the edge, and not the middle of the window. The frames of the
+/// stream hold metadata until the socket has taken them, so how much of the budget is
+/// held at a given moment depends on how fast the client and the server run:
+/// - the smallest budget that completes moves by some tens of bytes under load, in both
+///   directions, so a value a few bytes below the edge found by one run completes in
+///   the next;
+/// - the budget can also run out earlier, before the first item (`item=none`), and under
+///   load that was seen across the lower part of the window, down to ~450 bytes below
+///   the edge. The window is over a thousand bytes wide, but the band that is free of
+///   both is about 350 bytes wide, from ~70 to ~420 bytes below the edge.
+/// `MARGIN` is the middle of that band.
+///
+/// The bisect has the same jitter: one stray abort of a value above the edge (seen under
+/// load, about one run in forty a few dozen bytes above it) would send it up to the next
+/// value that completes, hundreds of bytes too high. A value therefore completes if any
+/// of `TRIES` runs completes; the runs that complete are cheap, as the first one ends it.
+const MARGIN: u64 = 224;
+const TRIES: usize = 3;
+fn completes(metadata_bytes: u64) -> bool {
+    (0..TRIES).any(|_| seen(&run(metadata_bytes).0) == Seen::Completed)
+}
 static ABORTING: LazyLock<u64> = LazyLock::new(|| {
     let (mut refused, mut completed) = (1_000_000u64, 4_000_000u64);
-    assert_eq!(seen(&run(completed).0), Seen::Completed);
+    assert!(completes(completed));
     while completed - refused > 64 {
         let middle = refused + (completed - refused) / 2;
-        if seen(&run(middle).0) == Seen::Completed {
+        if completes(middle) {
             completed = middle;
         } else {
             refused = middle;
         }
     }
-    (1..=64)
-        .map(|step| completed - 64 * step)
-        .find(|bytes| seen(&run(*bytes).0) == Seen::Aborted)
-        .expect("no metadata budget aborts the stream after it started")
+    completed - MARGIN
 });
+
+/// One request at the aborting budget: its response and the server's stderr.
+///
+/// The budget is aimed at a band, not at a point (see `MARGIN`), and some runs under load
+/// still land on the other side of the moving edge: the stream then completed, with its
+/// terminal record, and there is no abort to look at. That run is not an answer to the
+/// question of these tests and is made again, a few times. Any other outcome is the
+/// answer: an abort is judged by what it logged, a refusal or a lost log line is a
+/// failure, never made again.
+fn aborted_run() -> (Vec<u8>, String) {
+    let mut last = run(*ABORTING);
+    for _ in 1..ATTEMPTS {
+        if seen(&last.0) != Seen::Completed {
+            break;
+        }
+        last = run(*ABORTING);
+    }
+    last
+}
+const ATTEMPTS: usize = 5;
 
 fn fields(line: &str) -> std::collections::BTreeMap<&str, &str> {
     line.split(' ')
@@ -123,7 +162,7 @@ fn fields(line: &str) -> std::collections::BTreeMap<&str, &str> {
 /// and no cause.
 #[test]
 fn an_aborted_stream_is_logged_with_its_typed_cause() {
-    let (response, stderr) = run(*ABORTING);
+    let (response, stderr) = aborted_run();
     assert_eq!(seen(&response), Seen::Aborted, "{response:?}");
     let lines: Vec<&str> = stderr.lines().collect();
     assert_eq!(
@@ -157,7 +196,7 @@ fn an_aborted_stream_is_logged_with_its_typed_cause() {
 /// never reaches the log.
 #[test]
 fn the_abort_log_line_carries_no_user_data() {
-    let (response, stderr) = run(*ABORTING);
+    let (response, stderr) = aborted_run();
     assert_eq!(seen(&response), Seen::Aborted, "{response:?}");
     assert!(!stderr.is_empty(), "the abort must be logged at all");
     for canary in [
