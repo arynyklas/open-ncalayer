@@ -213,7 +213,7 @@
 
 ## Для оператора: сервер и CLI
 
-Операции плагина, объявленные в манифесте, можно выдать серверу (`[[plugins.permissions]]`, `plugin_bytes = true`) и CLI (`oncl plugin call --plugin-bytes`) только если операция объявляет `server = true`. **Ни одна из 30 поставляемых операций этого не объявляет**, поэтому сейчас серверу и CLI выдавать нечего: сервер пропускает такой грант с ошибкой в журнале, CLI отказывает с кодом `not-declared`. Плагины без объявлений работают с серверами и CLI по меткам оператора, как раньше. Подробности, поля аудита и замечание об откате журнала — в [server.md](server.md#plugins) и [cli.md](cli.md#plugins-oncl-plugin).
+Операции плагина, объявленные в манифесте, можно выдать серверу (`[[plugins.permissions]]`, `plugin_bytes = true`) и CLI (`oncl plugin call --plugin-bytes`) только если операция объявляет `server = true`. **Ни одна из 30 поставляемых операций этого не объявляет**, поэтому сейчас серверу и CLI выдавать нечего: сервер пропускает такой грант с ошибкой в журнале, CLI отказывает с кодом `not-declared`. Плагины без объявлений работают с серверами и CLI по меткам оператора, как раньше. Подробности, поля аудита и замечание об откате журнала — в [server.md](server.md#плагины) и [cli.md](cli.md#плагины-oncl-plugin).
 
 ## Подробнее
 
@@ -222,4 +222,4 @@
 - Что не сделано: [docs/dev/manual-plugins-status.md](../dev/manual-plugins-status.md).
 - Для встраивания: «Manual window» в [docs/dev/sdk.md](../dev/sdk.md).
 
-The confirmation shows exactly the characters that are signed: a text parameter is refused if it holds control, direction or invisible characters. Look-alike characters that Core accepts (a non-breaking or other unusual space, homoglyphs of another alphabet) are drawn as they are, so they can look like ordinary ones: compare the SHA-256 on the page with the one you expect.
+Окно подтверждения показывает ровно те символы, которые подписываются: текстовый параметр, содержащий управляющие, направляющие или невидимые символы, отклоняется. Похожие символы, которые ядро принимает (неразрывный и другие необычные пробелы, омоглифы другого алфавита), рисуются как есть и могут выглядеть как обычные: сверяйте SHA-256 на странице с ожидаемым.

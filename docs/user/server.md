@@ -1,33 +1,35 @@
-# Standalone HTTP service
+# Автономный HTTP-сервис
 
-`oncl-server` is independent of desktop settings, dialogs, OS vaults, trust-store
-installation and autostart. Starting it without a subcommand does not open a
-socket. `serve` requires an explicit private configuration file; HTTP is disabled
-unless `enabled = true` or the operator supplies `--enable-api`.
+`oncl-server` не зависит от настроек десктопа, его диалогов, хранилищ секретов ОС, установки
+доверия и автозапуска. Запуск без подкоманды не открывает сокет. `serve` требует явный
+закрытый файл конфигурации; HTTP выключен, пока не задано `enabled = true` или оператор не
+передал `--enable-api`.
 
-## Private operator namespace and tokens
+## Закрытый каталог оператора и токены
 
-Create a dedicated directory owned only by the service account. The existing
-private-filesystem policy verifies owner-only permissions/ACLs, refuses links and
-foreign files, and never repairs permissions of existing objects. The config,
-API-token file and key/PIN mount files must be private regular single-link files
-in such a directory. Do not use a desktop data directory.
+Создайте отдельный каталог, которым владеет только учётная запись сервиса. Существующая
+политика закрытой файловой системы проверяет, что права/ACL оставляют доступ одному владельцу,
+отказывает при ссылках и чужих файлах и никогда не исправляет права существующих объектов.
+Конфигурация, файл API-токена и файлы-монтирования с ключами/PIN должны быть закрытыми
+обычными файлами с одной жёсткой ссылкой в таком каталоге. Каталог данных десктопа для этого
+не используйте.
 
 ```text
 oncl-server token-create --directory /private/oncl-operator --name client.token
 ```
 
-The command creates the private directory if absent, writes a new OS-CSPRNG
-256-bit token exclusively to `client.token`, synchronizes it, and prints **only**
-its verifier. It refuses to overwrite an existing token file. Treat the token
-file as a password; supply its content to the client's secret-input facility,
-not command-line arguments or logs. The verifier is HMAC-SHA-256 with a fixed
-versioned domain key; verification uses ring's constant-time fixed-size MAC
-verification. Config persists only token ID, verifier and ACL, never plaintext
-tokens. Neither tokens nor key/PIN/password-bearing types implement open Debug.
+Команда создаёт закрытый каталог, если его нет, записывает в `client.token` (с исключительным
+созданием) новый 256-битный токен из CSPRNG ОС, синхронизирует его и печатает **только**
+верификатор. Существующий файл токена она не перезаписывает. Относитесь к файлу токена как к
+паролю: передавайте его содержимое через средство секретного ввода клиента, а не через
+аргументы командной строки или журналы. Верификатор — HMAC-SHA-256 с фиксированным
+версионированным доменным ключом; проверка использует константную по времени проверку MAC
+фиксированного размера из ring. В конфигурации сохраняются только идентификатор токена,
+верификатор и ACL, но не сам токен. Ни токены, ни типы с ключами/PIN/паролями не реализуют
+открытый Debug.
 
-Write `server.toml` in the private operator directory (replace the verifier and
-absolute journal directory):
+Запишите `server.toml` в закрытый каталог оператора (подставьте свой верификатор и абсолютный
+каталог журнала):
 
 ```toml
 enabled = false
@@ -35,7 +37,7 @@ bind = "127.0.0.1:13579"
 audit_directory = "/private/oncl-audit"
 recover_audit = false
 max_in_flight = 2
-# max_uploads = 8   # unset: min(8, total_temp / (input_bytes + container_bytes)); an explicit value may not exceed that bound
+# max_uploads = 8   # не задано: min(8, total_temp / (input_bytes + container_bytes)); явное значение не может превышать эту границу
 blocking_workers = 2
 queue_capacity = 2
 admission_wait_ms = 1000
@@ -45,87 +47,95 @@ upload_min_bytes_per_second = 1024
 max_connections = 32
 header_timeout_ms = 5000
 input_bytes = 1073741824
-container_bytes = 1073741824   # signature/envelope surcharge of a signed `input`; lower it with input_bytes, see http-api.md
+container_bytes = 1073741824   # надбавка на подпись/конверт у подписанного `input`; уменьшайте вместе с input_bytes, см. http-api.md
 memory_per_operation = 268435456
 total_memory = 536870912
 temp_per_operation = 8589934592
 total_temp = 17179869184
 framing_bytes = 67108864
-metadata_bytes = 67108864   # default 64 MiB; raise for batches of XML/PDF signatures
-# Optional, required for multipart public-document snapshots:
+metadata_bytes = 67108864   # по умолчанию 64 МиБ; увеличьте для пакетов подписей XML/PDF
+# Необязательно, нужно для multipart-снимков публичных документов:
 # scratch_directory = "/private/oncl-scratch"
 inline_pkcs12 = false
 
 [[tokens]]
 id = "accounting-service"
-verifier = "<64 lowercase hexadecimal verifier characters>"
-actions = ["hash"]   # also: "batch" is the separate right for POST /v1/batch
+verifier = "<64 строчных шестнадцатеричных знака верификатора>"
+actions = ["hash"]   # все права: "hash", "verify", "extract", "inspect", "extend", "stamp", "verify_stamp", "sign", "sign_digest"; "batch" — отдельное право на POST /v1/batch
 keys = []
 ```
+
+В примере не показаны ещё два ключа аудита: `audit_segment_bytes` (по умолчанию 1 048 576) и
+`audit_quota_bytes` (по умолчанию 67 108 864, больше 64 МиБ нельзя). Файл конфигурации не
+больше 64 КиБ. Основные границы значений: `max_in_flight` 1..256, `blocking_workers` 1..64,
+`queue_capacity` не больше 256, `max_connections` 1..1024, `operation_timeout_ms` 1..86 400 000;
+`admission_wait_ms` и `header_timeout_ms` не больше `operation_timeout_ms`; `metadata_bytes` не
+меньше 32 КиБ; не больше 256 токенов, 64 ключей, 16 плагинов, 32 записей `hosts`.
 
 ```text
 oncl-server serve --config /private/oncl-operator/server.toml --enable-api
 ```
 
-Without explicit hosts, a loopback listener accepts exactly its bound socket
-address as the HTTP `Host` authority, including the actual port. Configure
-`hosts = ["localhost:13579"]` if clients use that name. There are no implicit
-wildcards or `Origin`-based privileges. IPv6 loopback requires an explicit IPv6
-bind. Configuration is strict: unknown fields and unsafe limits are rejected.
-`enabled = false` exits without opening the journal, TLS keys, or a listener.
+Без явных `hosts` loopback-слушатель принимает в качестве HTTP-авторитета `Host` ровно свой
+адрес сокета, включая фактический порт. Если клиенты ходят по имени, задайте
+`hosts = ["localhost:13579"]`. Неявных шаблонов (wildcard) и привилегий по `Origin` нет.
+IPv6 loopback требует явного IPv6-адреса в `bind`. Конфигурация строгая: неизвестные поля и
+небезопасные пределы отвергаются. При `enabled = false` процесс завершается, не открывая
+журнал, TLS-ключи и слушатель.
 
-Ctrl-C requests graceful shutdown. For a supervisor-owned pipe,
-`--shutdown-stdin` explicitly enables one operator-control reader: newline or EOF
-stops the listener, cancels connections and waits for actual admitted workers to
-return. This pipe is not a network admin API. No unrelated listener/service is
-stopped; persistent audit files are retained, not deleted at shutdown.
+Без `--shutdown-stdin` корректную остановку запрашивает Ctrl-C (SIGINT). Для канала,
+которым владеет супервизор, `--shutdown-stdin` явно включает один читатель управляющего
+канала оператора: перевод строки или EOF останавливает слушатель, отменяет соединения и
+ждёт возврата реально допущенных worker-ов; Ctrl-C при этом флаге не обрабатывается. Этот
+канал — не сетевой API администрирования. Посторонние слушатели/сервисы не останавливаются;
+постоянные файлы аудита сохраняются, а не удаляются при остановке.
 
-## Actual API
+## Фактический API
 
-Only these routes exist:
+Существуют только эти маршруты:
 
-* `POST /v1/hash`: raw binary request body, SHA-256, authenticated hash ACL.
-* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing,
-  verification, signing and binary streaming extraction; see [the HTTP contract](http-api.md).
-* `POST /v1/batch`: ordered batch of operations; needs the separate `batch` right.
-* `GET /v1/openapi.json`: the published contract; authenticated like `/health`.
-* `GET /health`: authenticated hash ACL; reports the actual local audit health.
+* `POST /v1/hash`: сырое двоичное тело запроса, SHA-256, проверяется ACL хеширования.
+* `POST /v1/operations`: типизированное хеширование, проверка, подпись и потоковое извлечение
+  в форме JSON-small или multipart с метаданными вперёд; см. [контракт HTTP](http-api.md).
+* `POST /v1/batch`: упорядоченный пакет операций; нужно отдельное право `batch`.
+* `GET /v1/openapi.json`: опубликованный контракт; требует действительный токен, а права `hash`
+  (в отличие от `/health`) не проверяет.
+* `GET /health`: ACL хеширования; сообщает фактическое состояние локального аудита.
 
-Send `Authorization: Bearer <token-file-content>`, the configured `Host`, and the
-document as a streaming body. A successful hash of the three bytes `abc` is:
+Отправляйте `Authorization: Bearer <содержимое файла токена>`, настроенный `Host` и документ
+потоковым телом. Успешный хеш трёх байт `abc`:
 
 ```json
 {"operation_id":1,"algorithm":"sha256","digest":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","bytes_in":3}
 ```
 
-The operation ID varies. Content-Length is optional; unknown-length chunked input
-is counted by the original Core resource scope, including the N+1 oversize probe.
-No document-sized body collection or spool is used for hashing. Malformed or
-truncated framing never yields a successful hash. Query parameters, key selectors,
-method-override headers, mismatched `X-Oncl-Operation` and request trailers are
-rejected; the route never dispatches another operation named by a payload.
-Request targets must be exact origin-form paths, without a URI scheme or
-authority. Absolute-form URLs are rejected even when their authority matches the
-Host header. Methods are exact: POST for hash and GET for health; HEAD is not a
-GET alias. Application path/method rejections retain HTTP 404/405 and use the
-`InvalidRequest`/`NotApplied` envelope. HTTP syntax that Hyper cannot parse may
-be rejected at the transport layer without an application JSON envelope.
+Идентификатор операции меняется. Content-Length необязателен; ввод неизвестной длины
+(chunked) считается исходной областью ресурсов Core, включая проверочный N+1-й байт сверх
+предела. Тело размером с документ для хеширования не собирается и не сбрасывается в spool.
+Искажённое или усечённое обрамление никогда не даёт успешный хеш. Параметры запроса (query),
+селекторы ключей, заголовки подмены метода, несовпадающий `X-Oncl-Operation` и трейлеры
+запроса отвергаются; маршрут никогда не выполняет другую операцию, названную в полезной
+нагрузке. Цель запроса должна быть точным путём в origin-form, без схемы URI и авторитета.
+Абсолютные URL отвергаются, даже если их авторитет совпадает с заголовком Host. Методы
+точные: POST для хеша и GET для health; HEAD — не псевдоним GET. Отказы приложения по пути и
+методу сохраняют HTTP 404/405 и используют конверт `InvalidRequest`/`NotApplied`. HTTP-синтаксис,
+который Hyper не умеет разобрать, может быть отвергнут на транспортном уровне без
+прикладного JSON-конверта.
 
 
-Errors contain a stable `code` and `applied`. This hash endpoint always reports
-`NotApplied` (no private key is used): bad authorization is HTTP 403, malformed
-requests HTTP 400, resource byte limits HTTP 413, exhausted admission/queue
-`CapacityExceeded` HTTP 503, and `DeadlineExceeded` HTTP 504. There is no hidden
-retry or durable document queue. The HTTP contract also has signing and extension
-routes (`POST /v1/operations`, `POST /v1/batch`; see [the HTTP contract](http-api.md)),
-which need the token's `sign`/`extend`/`batch` right and a named operator key. There
-are no encryption/decryption routes (they wait for the Kazakhstani GOST backend) and no
-admin endpoints.
+Ошибки содержат стабильные `code` и `applied`. Эта конечная точка хеширования всегда
+сообщает `NotApplied` (закрытый ключ не используется): неверная авторизация — HTTP 403,
+искажённые запросы — HTTP 400, пределы ресурсов по байтам — HTTP 413, исчерпанные
+допуск/очередь `CapacityExceeded` — HTTP 503, `DeadlineExceeded` — HTTP 504. Скрытых повторов и
+долговременной очереди документов нет. В HTTP-контракте есть также маршруты подписи и
+расширения (`POST /v1/operations`, `POST /v1/batch`; см. [контракт HTTP](http-api.md)); им нужно
+право токена `sign`/`extend`/`batch` и именованный ключ оператора. Маршрутов шифрования и
+расшифрования нет (они ждут казахстанский ГОСТ-бэкенд), административных конечных точек нет.
 
-## Explicit LAN exposure
+## Явный доступ из локальной сети
 
-Non-loopback binds require an explicit exposure mode and exact allowed hosts.
-There are two distinct choices:
+Не-loopback привязка (bind) требует явного режима экспозиции и точных разрешённых хостов.
+Есть два разных варианта:
 
 ```toml
 bind = "0.0.0.0:13579"
@@ -133,11 +143,11 @@ hosts = ["signing.internal:13579"]
 exposure = { mode = "tls", certificate = "/operator/server.crt", private_key = { directory = "/private/oncl-operator", name = "server.key" } }
 ```
 
-This is real rustls TLS using an operator-supplied PEM certificate chain and
-owner-only PEM private-key mount. It neither creates nor installs a CA. Configure
-client trust explicitly; do not disable certificate verification.
+Это настоящий TLS на rustls с PEM-цепочкой сертификатов от оператора и закрытым PEM-ключом
+в монтировании только для владельца. Он не создаёт и не устанавливает CA. Доверие клиентов
+настраивайте явно; проверку сертификата не отключайте.
 
-Alternatively, use a TLS-terminating reverse proxy on a protected backend network:
+Либо используйте TLS-терминирующий обратный прокси в защищённой сети бэкенда:
 
 ```toml
 bind = "0.0.0.0:13579"
@@ -145,33 +155,33 @@ hosts = ["signing.internal"]
 exposure = { mode = "trusted_proxy", peers = ["192.0.2.10"] }
 ```
 
-Only an allowlisted **actual socket peer IP** can use that backend listener.
-`Forwarded`, `X-Forwarded-For`, `Origin`, URL fields and roles never establish
-proxy trust or replace the individual API token. Protect the proxy-to-service
-network with host/network policy; trusted-proxy mode is not TLS on that hop. A
-nonallowlisted peer is refused even if it supplies a forged forwarding chain.
-Configured and actual IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalize to
-the same IPv4 peer. Native and IPv4-compatible IPv6 remain distinct; normalization
-does not widen a loopback bind or trust a nearby address. Unspecified peers,
-including mapped unspecified IPv4, cannot be allowlist entries.
+Этим бэкенд-слушателем может пользоваться только **фактический IP-адрес пира сокета** из
+списка разрешённых. `Forwarded`, `X-Forwarded-For`, `Origin`, поля URL и роли никогда не
+устанавливают доверие к прокси и не заменяют индивидуальный API-токен. Защитите сеть между
+прокси и сервисом политикой хоста/сети: режим trusted-proxy не даёт TLS на этом участке.
+Пир вне списка отвергается, даже если он подставляет поддельную цепочку пересылки.
+Настроенные и фактические IPv4-mapped IPv6-адреса (`::ffff:a.b.c.d`) нормализуются к одному
+и тому же IPv4-пиру. Нативный IPv6 и IPv4-совместимый IPv6 остаются различными; нормализация
+не расширяет loopback-привязку и не доверяет соседнему адресу. Неопределённые адреса (unspecified),
+включая mapped unspecified IPv4, не могут быть записями списка.
 
 
-## Named operator keys and audit
+## Именованные ключи оператора и аудит
 
-The service composes one Engine, one aggregate SharedBudget, one bounded executor,
-real `KeySources`, a physical-reader TokenGateRegistry and the accepted durable
-ONCLAU02 audit guard. Operator configuration can bind file-backed PKCS#12/JKS or
-supported tokens to opaque names; client DTOs cannot contain server paths.
+Сервис собирает один Engine, один агрегатный SharedBudget, один ограниченный исполнитель,
+настоящие `KeySources`, физический TokenGateRegistry по считывателям и принятый долговременный
+страж аудита ONCLAU02. Конфигурация оператора может привязать к непрозрачным именам
+файловые PKCS#12/JKS или поддерживаемые токены; клиентские DTO не могут содержать серверные пути.
 
 ```toml
 [[keys]]
 source = "file"
 name = "corporate-signing"
 path = "/operator/corporate.p12"
-# alias = "signing" # omit only for a single-entry container
+# alias = "signing" # опускайте только для контейнера с одной записью
 secret = { directory = "/private/oncl-operator", name = "container.password" }
 
-# Token alternative (exact existing storage kind and actual PC/SC reader):
+# Вариант с токеном (точный существующий вид хранилища и фактический считыватель PC/SC):
 # [[keys]]
 # source = "token"
 # name = "card-signing"
@@ -181,105 +191,112 @@ secret = { directory = "/private/oncl-operator", name = "container.password" }
 # secret = { directory = "/private/oncl-operator", name = "card.pin" }
 ```
 
-These are the SDK/provider bindings behind the HTTP signing routes. A private-operation
-caller must hold the action and exact named-key ACL and bind
-its authenticated principal to the original operation before private use. The
-durable guard synchronizes BEGIN before the actual key call. A FINAL failure after
-private use remains Applied/Unknown and blocks further private work; output is not
-published as success. No allow-all guard or second audit journal is installed.
-Strict server policy remains strict. Public verification defaults to an empty
-trust set and denied PKI network, not a fabricated trusted verdict. Private (signing)
-operations are separate routes with their own rights, never reachable through a public
-verification request.
+Это привязки SDK/провайдеров за HTTP-маршрутами подписи. Вызывающий закрытую операцию
+должен иметь действие и точное право ACL на именованный ключ и привязать свой
+аутентифицированный субъект к исходной операции до использования закрытого ключа.
+Долговременный страж синхронизирует BEGIN до фактического обращения к ключу. Сбой FINAL
+после использования закрытого ключа остаётся Applied/Unknown и блокирует дальнейшую
+закрытую работу; результат не публикуется как успех. Страж «разрешить всё» и второй журнал
+аудита не устанавливаются. Строгая политика сервера остаётся строгой. Публичная проверка по
+умолчанию работает с пустым набором доверия и запрещённой сетью PKI, а не с выдуманным
+доверенным вердиктом. Закрытые (подписывающие) операции — отдельные маршруты со своими
+правами, и через запрос публичной проверки они недостижимы.
 
-A newly created journal starts healthy. An existing journal requires an explicit
-operator `recover_audit = true` restart; recovery rejects complete corruption,
-foreign/old journal formats and live ownership. It does not silently migrate or
-repair another journal. Audit identity/lock/rotation/quota and opaque actor/key
-labels retain the audit library's existing semantics.
+Новый журнал начинается здоровым. Существующий журнал требует явного перезапуска оператором с
+`recover_audit = true`; восстановление отвергает полностью повреждённые, чужие/старые форматы
+журнала и живое владение. Оно не мигрирует и не чинит чужой журнал молча. Идентичность
+аудита, блокировка, ротация, квота и непрозрачные метки субъектов/ключей сохраняют прежнюю
+семантику библиотеки аудита.
 
-### Plugin records in the audit journal
+### Записи плагинов в журнале аудита
 
-The journal format stays `ONCLAU02`, 160-byte checksummed frames, and a journal that contains no
-plugin ticket is **byte-identical** to what earlier versions wrote. The same version reads every
-journal an earlier version wrote (tested with a journal produced by the previous code). Plugin
-operations that declare their key uses (`[[operations]]` in the manifest, "declared") add two
-frame kinds, which **an earlier version cannot read** (it reports the journal as damaged and asks
-for operator inspection): do not run an older server over a journal that holds them.
+Формат журнала остаётся `ONCLAU02`, кадры по 160 байт с контрольной суммой, а журнал без
+билета плагина **побайтно идентичен** тому, что писали прежние версии. Эта версия читает любой
+журнал, записанный прежней версией (проверено на журнале, созданном прежним кодом). Операции
+плагинов, объявляющие применения ключей (`[[operations]]` в манифесте, «объявленные»),
+добавляют два вида кадров, **которые прежняя версия прочитать не может** (она сообщает о
+повреждении журнала и просит осмотра оператором): не запускайте более старый сервер над журналом,
+который их содержит.
 
-* **Use (authorised).** Before the `BEGIN` of the key use, one to a few `PluginDetail` frames
-  carry: plugin id, package hash (kind `1` file / `2` loose, and SHA-256), version, operation
-  name, the ticket digest, the SHA-256 of the approval nonce when a user approved (never the nonce),
-  the content SHA-256 and length, whether the content was a prehashed digest, the options SHA-256,
-  the caller kind (`browser` / `local-operator` / `service-client`), `declared`, and the operator
-  grant that covered it. They are written in the same single write and sync as the `BEGIN`, so a
-  crash between them leaves details with no `BEGIN`: the use never began, the key was not applied.
-  Key id and principal are the journal's existing opaque labels on the `BEGIN`. The `FINAL` is the
-  existing one: `Applied`, `NotApplied` or `Unknown` honestly; no `FINAL` is `Unknown`.
-* **Refusal.** A ticketed key use that is refused writes the same `PluginDetail` frames and a
-  `PluginRefusal` frame, carrying the stable subcode id (for example `content-mismatch`,
-  `not-granted`, `no-consent-guard`). It writes **no `BEGIN`**: the key was not applied. At most
-  four refusals per operation are journaled (a plugin that keeps asking cannot push earlier
-  records out); all are also logged as `warn` events (target `oncl::plugin_audit`). The caller
-  receives `PermissionDenied`; the subcode is for the operator and, where the HTTP contract
-  exposes it, the API client, never the plugin.
+* **Применение (разрешённое).** Перед `BEGIN` применения ключа от одного до нескольких кадров
+  `PluginDetail` несут: идентификатор плагина, хеш пакета (вид `1` файл / `2` loose и SHA-256),
+  версию, имя операции, дайджест билета, SHA-256 одноразового значения (nonce) одобрения, если
+  одобрил пользователь (само nonce — никогда), SHA-256 и длину содержимого, было ли содержимое
+  заранее вычисленным дайджестом, SHA-256 параметров, вид вызывающего (`browser` /
+  `local-operator` / `service-client`), `declared` и грант оператора, который это покрыл. Они
+  пишутся одной записью и одной синхронизацией вместе с `BEGIN`, поэтому сбой между ними оставляет
+  детали без `BEGIN`: применение не началось, ключ не применялся. Идентификатор ключа и субъект —
+  существующие непрозрачные метки журнала на `BEGIN`. `FINAL` — существующий: честно `Applied`,
+  `NotApplied` или `Unknown`; отсутствие `FINAL` — `Unknown`.
+* **Отказ.** Отклонённое применение ключа по билету пишет те же кадры `PluginDetail` и кадр
+  `PluginRefusal` со стабильным идентификатором подкода (например, `content-mismatch`,
+  `not-granted`, `no-consent-guard`). **`BEGIN` оно не пишет**: ключ не применялся. В журнал
+  попадает не более четырёх отказов на операцию (плагин, который продолжает просить, не
+  вытеснит прежние записи); все они также пишутся как события `warn` (target
+  `oncl::plugin_audit`). Вызывающий получает `PermissionDenied`; подкод предназначен оператору и,
+  где HTTP-контракт его раскрывает, клиенту API, но никогда не плагину.
 
-Plugins without declarations are unchanged: no ticket, no plugin record (the absence of one is
-`declared=false`). No document bytes, parameters, secrets or nonces are ever journaled.
-`DurableAuditGuard::plugin_records()` reads these records back for tools.
+Плагины без объявлений не меняются: ни билета, ни записи плагина (отсутствие записи —
+`declared=false`). Ни байты документов, ни параметры, секреты или nonce в журнал не попадают.
+`DurableAuditGuard::plugin_records()` читает эти записи обратно для инструментов.
 
-Things an operator should know:
+Что должен знать оператор:
 
-* **Refusal journaling is best-effort.** It is skipped (the refusal is only logged) when the
-  journal is not healthy, when a key use is pending and the segment is full, at the quota, when
-  the operation is not bound (unauthenticated or unauthorised requests never write), after the
-  fourth refusal of one operation, or when the facts cannot be encoded. It never blocks or
-  changes the answer. A use whose facts cannot be journaled (a plugin version or grant id over
-  255 bytes) is refused as `audit-fact-too-long` with the key not applied, before the journal is
-  touched, and does not affect audit health. Manifest versions are limited to 64 characters;
-  a plugin id, a grant's token and its operation to 64 bytes each (so on the server the
-  `audit-fact-too-long` check is in practice a defensive one).
-* **The content digest is new in the journal.** Earlier journals held only opaque labels; a
-  plugin record holds the SHA-256 of the signed content and its length (the design requires it).
-  It identifies a document to anyone who can read the journal and guess it; protect the audit
-  directory like the keys' secrets directory. It is logged only at `debug` level.
-* **Torn multi-frame writes.** A use is several frames written at once; on power loss the
-  filesystem may persist later frames without earlier ones. That leaves a hole in the journal,
-  which is damage: `open` itself fails and the server does not start (`recover_audit` is not even reached), never a misread `BEGIN`. A cleanly cut tail (a crash before the last write finished) is not a hole: it is repaired by `recover_audit = true` and `plugin_records()` stays readable afterwards.
-* **Rolling back.** An older server over a journal that holds plugin frames ends in
-  `fatal_corruption` and will not start. Before rolling back, archive or rotate the journal (move
-  the whole audit directory away; keep it for inspection) so the older server begins a new one.
-* **Format rule for future readers.** Frame kinds `0x80` and above are reserved for records a
-  reader that does not know them may skip (the sequence number still counts). Kinds `0x00..0x7f`
-  must be understood or the journal is damaged, as today. Nothing uses `0x80` yet, and
-  `ONCLAU02` is not bumped; this does not help binaries that are already shipped, and the
-  current reader implements no skipping: it treats every kind it does not know as damage.
-* **Subcode ids differ from design 4.8** by design: `NotDeclared`, `PackageChanged`,
-  `OptionsMismatch`, `ApprovalExpired` are `not-declared`, `package-changed`, `options-mismatch`,
-  `approval-expired`; `KeyUseNotApproved` is split into `approval-missing`, `ticket-missing`,
-  `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`, `kind-mismatch`,
-  `action-mismatch`, `content-mismatch`, `caller-mismatch`, `operation-id-mismatch`,
-  `certificate-changed`, `approval-replayed`, `busy`; `manual=false` is `not-manual`; new are
-  `not-granted`, `no-consent-guard`, `audit-fact-too-long`, `unknown-plugin`, `derived-unsupported`
-  and the request/prepare ids (the prepare ids include `resource-budget` and `no-temporary-store`, raised by the
-  manual window's budget check before any key is opened; 49 ids in all). `PlanUnavailable`, `PreviewTooLarge` and `ImportNotDeclared` are not
-  implemented (no code path yet).
+* **Запись отказов — по возможности.** Она пропускается (отказ лишь логируется), когда журнал
+  нездоров, когда применение ключа ожидает завершения и сегмент заполнен, при достижении квоты,
+  когда операция не привязана (неаутентифицированные или неразрешённые запросы не пишут никогда),
+  после четвёртого отказа одной операции или когда факты невозможно закодировать. Она никогда
+  не блокирует и не меняет ответ. Применение, факты которого нельзя записать (версия плагина
+  или id гранта длиннее 255 байт), отклоняется как `audit-fact-too-long` без применения ключа,
+  до обращения к журналу, и на здоровье аудита не влияет. Версии в манифесте ограничены 64
+  знаками; id плагина, токен гранта и его операция — 64 байтами каждый (поэтому на сервере проверка
+  `audit-fact-too-long` на практике оборонительная).
+* **Дайджест содержимого в журнале новый.** Прежние журналы хранили только непрозрачные метки;
+  запись плагина хранит SHA-256 подписываемого содержимого и его длину (этого требует дизайн).
+  Он опознаёт документ тому, кто может читать журнал и угадать содержимое; защищайте каталог
+  аудита так же, как каталог секретов ключей. В лог он попадает только на уровне `debug`.
+* **Разорванные многокадровые записи.** Применение — это несколько кадров, записанных сразу; при
+  потере питания файловая система может сохранить более поздние кадры без более ранних. Это
+  оставляет в журнале дыру, то есть повреждение: сам `open` завершается ошибкой, сервер не
+  запускается (до `recover_audit` дело даже не доходит), но никогда не прочитает `BEGIN` неверно.
+  Чисто обрезанный хвост (сбой до завершения последней записи) дырой не является: его чинит
+  `recover_audit = true`, и `plugin_records()` после этого остаётся читаемой.
+* **Откат.** Более старый сервер над журналом, содержащим кадры плагинов, заканчивает
+  `fatal_corruption` и не запустится. Перед откатом заархивируйте или ротируйте журнал
+  (переместите весь каталог аудита, сохранив его для осмотра), чтобы старый сервер начал новый.
+* **Правило формата для будущих читателей.** Виды кадров `0x80` и выше зарезервированы для
+  записей, которые читатель, их не знающий, может пропустить (порядковый номер всё равно
+  учитывается). Виды `0x00..0x7f` должны быть понятны, иначе журнал повреждён, как и сегодня.
+  `0x80` пока никто не использует, а `ONCLAU02` не повышается; это не помогает уже
+  поставленным бинарным файлам, а текущий читатель пропуск не реализует: любой неизвестный вид
+  он считает повреждением.
+* **Идентификаторы подкодов отличаются от дизайна 4.8** намеренно: `NotDeclared`,
+  `PackageChanged`, `OptionsMismatch`, `ApprovalExpired` — это `not-declared`, `package-changed`,
+  `options-mismatch`, `approval-expired`; `KeyUseNotApproved` разбит на `approval-missing`,
+  `ticket-missing`, `ticket-uses`, `key-use-spent`, `key-mismatch`, `operation-mismatch`,
+  `kind-mismatch`, `action-mismatch`, `content-mismatch`, `caller-mismatch`,
+  `operation-id-mismatch`, `certificate-changed`, `approval-replayed`, `busy`; `manual=false` —
+  `not-manual`; новые — `not-granted`, `no-consent-guard`, `audit-fact-too-long`,
+  `unknown-plugin`, `derived-unsupported` и идентификаторы запроса/подготовки (идентификаторы
+  подготовки включают `resource-budget` и `no-temporary-store`, которые поднимает проверка бюджета
+  ручного окна до открытия любого ключа; всего 49 идентификаторов). `PlanUnavailable`,
+  `PreviewTooLarge` и `ImportNotDeclared` не реализованы (пути кода пока нет).
 
-Inline PKCS#12 keys are available over HTTP only with a double opt-in: the global
-`inline_pkcs12 = true` and the token's own `inline_pkcs12 = true` right (both off
-by default; see [the HTTP contract](http-api.md), "Keys and secret roles"). The host
-grants only the exact immutable inline selector identity computed from the received
-container and alias (`AccessPolicy::authorize_inline`), which cannot authorize a File/Token
-selector; no wildcard/source identity from a client becomes a grant. The Core
-provider accounts secret containers in bounded memory, never document scratch.
-`KeySelector::is_inline` exposes classification only, not secret bytes or paths.
+Встроенные (inline) ключи PKCS#12 доступны по HTTP только при двойном согласии: глобальное
+`inline_pkcs12 = true` и собственное право токена `inline_pkcs12 = true` (оба по умолчанию
+выключены; см. [контракт HTTP](http-api.md), «Ключи и роли секретов»). Хост выдаёт только
+точную неизменяемую идентичность inline-селектора, вычисленную из полученных контейнера и
+alias (`AccessPolicy::authorize_inline`), которая не может разрешить селектор File/Token;
+никакая шаблонная/исходная идентичность от клиента грантом не становится. Провайдер Core учитывает
+секретные контейнеры в ограниченной памяти, никогда не в scratch документа.
+`KeySelector::is_inline` раскрывает только классификацию, не секретные байты и не пути.
 
-## Plugins
+## Плагины
 
-A WASM plugin is installed by the operator (`[[plugins]]`: code availability only) and is
-reached through one exact `[[plugins.permissions]]` grant per (token, operation); the caller
-identity is the token. The full reference is in [the HTTP contract](http-api.md), "Plugin
-configuration reference"; the sample is in `deploy/server/server.example.toml`.
+WASM-плагин устанавливает оператор (`[[plugins]]`: только доступность кода), а доступ к нему
+даёт ровно один `[[plugins.permissions]]` на пару (токен, операция); идентичность
+вызывающего — токен. Полный справочник — в [контракте HTTP](http-api.md), «Справочник по
+настройке плагинов»; образец — в `deploy/server/server.example.toml`.
 
 ```toml
 [[plugins]]
@@ -289,280 +306,303 @@ wasm = "/private/plugins/sign.wasm"
 
 [[plugins.permissions]]
 token = "accounting-service"
-operation = "sign-file"            # a declared operation with `server = true`
-imports = ["keys_sign_cms_ex"]     # ⊆ the declared imports; empty = all declared
-keys = ["corporate-signing"]       # operator-named keys, also in the token's keys
-plugin_bytes = true                # the plugin / its client chooses what the key signs
+operation = "sign-file"            # объявленная операция с `server = true`
+imports = ["keys_sign_cms_ex"]     # ⊆ объявленных импортов; пусто = все объявленные
+keys = ["corporate-signing"]       # именованные ключи оператора, они же в `keys` токена
+plugin_bytes = true                # плагин / его клиент выбирает, что подписывает ключ
 ```
 
-* **Plugins that declare their operations** (`[[operations]]` in `plugin.toml`): the grant
-  must stay within the declaration (an operation with `server = true`, imports among the declared
-  ones, keys only for a declared key use, `pki_endpoints` only for `network = "pki"`); a wider
-  grant is **skipped with an `oncl-server: error:` line** and the rest of the server runs. Core
-  forces the declared signature options on every call. Because the server cannot tie the signed
-  bytes to a document, **any key use needs `plugin_bytes = true`** in the grant; without it the
-  use is refused before any `BEGIN` and before the key; a refusal record may be written (`PermissionDenied`, subcode
-  `not-granted`, `NotApplied`). A grant with keys but without `plugin_bytes` starts with a
-  warning that every key use will be refused; so does a `plugin_bytes` grant of an operation whose key profile names a `param:`. Every start-up skip and warning line is also a `tracing` event (target `oncl::plugin_grants`), and one summary line says how many grants were skipped. With `plugin_bytes = true` on any grant, `audit_segment_bytes` must be at least 4640 (29 frames of 160 bytes: one plugin use writes its detail chunks, its `BEGIN` and reserves its `FINAL`s in one segment); a smaller value is a configuration error. A single use that still does not fit its segment is refused as `audit-fact-too-long` before the journal is touched (the key is not applied and audit health stays healthy). One request (one operation id) can use a key once; a second plugin item or signature in it fails `key-use-spent`. The use is spent only once the audit journal has accepted it: a use the journal refuses (a closed binding, a full or failed journal) does not spend it, and the plugin's retry is decided again. Operations whose profile names a `param:` cannot use keys on the server (`options-mismatch`).
-* **Plugins without declarations** (all packages before their manifests carry declarations, and
-  third-party ones): nothing changes. The grant is the operator's labels, the options are **not**
-  enforced, the audit says `declared=false`, and each such grant logs
-  `oncl-server: warning: grant without declaration ...` at start-up. `plugin_bytes` is
-  accepted there and has no effect (warned).
-* `plugin_bytes = true` without `keys` is refused by configuration validation.
-* The audit record of a declared key use (plugin id, package hash, version, operation, ticket
-  digest, content and options hashes, `declared`, the grant) and of a refused one is described
-  above under "Plugin records in the audit journal"; the `grant` is
-  `<token>:<plugin>:<operation>`. Refusals reach the client as the `subcode` of the error
-  answer ([error subcodes](http-api.md)).
+* **Плагины, объявляющие операции** (`[[operations]]` в `plugin.toml`): грант должен укладываться
+  в объявление (операция с `server = true`, импорты из числа объявленных, ключи только для
+  объявленного применения ключа, `pki_endpoints` только для `network = "pki"`); более широкий
+  грант **пропускается строкой `oncl-server: error:`**, остальной сервер работает. Core
+  принудительно задаёт объявленные параметры подписи на каждом вызове. Поскольку сервер не может
+  связать подписываемые байты с документом, **любое применение ключа требует `plugin_bytes = true`**
+  в гранте; без него применение отклоняется до любого `BEGIN` и до ключа; может быть записана
+  запись об отказе (`PermissionDenied`, подкод `not-granted`, `NotApplied`). Грант с ключами,
+  но без `plugin_bytes`, стартует с предупреждением, что каждое применение ключа будет отклонено;
+  так же стартует грант `plugin_bytes` операции, чей профиль ключа называет `param:`. Каждая
+  пропущенная при старте строка и предупреждение — также событие `tracing` (target
+  `oncl::plugin_grants`), а одна итоговая строка сообщает, сколько грантов пропущено. Если
+  `plugin_bytes = true` есть хотя бы у одного гранта, `audit_segment_bytes` должен быть не
+  меньше 4640 (29 кадров по 160 байт: одно применение плагина пишет свои кадры деталей,
+  `BEGIN` и резервирует `FINAL` в одном сегменте); меньшее значение — ошибка конфигурации.
+  Единичное применение, которое всё же не помещается в сегмент, отклоняется как
+  `audit-fact-too-long` до обращения к журналу (ключ не применён, здоровье аудита остаётся
+  здоровым). Один запрос (один идентификатор операции) может использовать ключ один раз; второй
+  элемент плагина или подпись в нём падает с `key-use-spent`. Применение считается потраченным
+  только после того, как журнал его принял: применение, которое журнал отклонил (закрытая
+  привязка, полный или сбойный журнал), его не тратит, и повтор плагина решается заново.
+  Операции, чей профиль называет `param:`, не могут использовать ключи на сервере
+  (`options-mismatch`).
+* **Плагины без объявлений** (все пакеты до того, как их манифесты получили объявления, и
+  сторонние): ничего не меняется. Грант — метки оператора, параметры **не** принудительны,
+  аудит пишет `declared=false`, и каждый такой грант при старте логирует
+  `oncl-server: warning: grant without declaration ...`. `plugin_bytes` там принимается и не
+  действует (с предупреждением).
+* `plugin_bytes = true` без `keys` отвергается проверкой конфигурации.
+* Запись аудита объявленного применения ключа (идентификатор плагина, хеш пакета, версия,
+  операция, дайджест билета, хеши содержимого и параметров, `declared`, грант) и отклонённого
+  описана выше в «Записи плагинов в журнале аудита»; `grant` имеет вид
+  `<токен>:<плагин>:<операция>`. Отказы доходят до клиента как `subcode` ответа об ошибке
+  ([подкоды ошибок](http-api.md)).
 
-### Operator guidance for plugin grants
+### Рекомендации оператору по грантам плагинов
 
-* **Today there is nothing to grant.** The shipped plugins declare 30 operations in total, all
-  `manual = true` and none `server = true` (see [the manual-window guide](manual-plugins.md)); a
-  server grant for them is skipped with an `oncl-server: error:` line. Grants apply to
-  third-party plugins that declare `server = true`, and to plugins without declarations.
-* **What `plugin_bytes = true` means.** You accept that the client (and the plugin) chooses the
-  bytes that the named key signs: the server cannot bind the content to a document. The
-  declared profile is still forced (kind, options, one use per request), the caller must be the
-  granted token, the key one of the grant's `keys`, and the package the one installed. The request itself must also pass the token's rights: a `plugin` item that names keys needs the token's `sign` right and every named key in the token's `keys`, in addition to the exact operator grant (otherwise 403, nothing runs). Give
-  `plugin_bytes` only to a token whose client you trust with that key.
-* **Read the start-up log.** A skipped grant (`oncl-server: error: ... grant skipped: ...`), a
-  grant with keys but no `plugin_bytes` (every key use will be refused) and a grant of a plugin
-  without declarations (`warning: grant without declaration ...`: options are not enforced)
-  each print one line. A skipped grant does not stop the server; check the log after every
-  configuration or plugin change.
-* **Audit fields of a key use.** Per plugin key use the journal holds: plugin id, package hash
-  (kind `1` package file or `2` loose manifest+module, and SHA-256), version, operation, the
-  ticket digest, the SHA-256 of the approval nonce (absent for an operator grant), the content
-  SHA-256 and length, whether the content was a prehashed digest, the options SHA-256, the caller
-  kind, `declared`, and the grant (`<token>:<plugin>:<operation>`); then the usual `BEGIN` and
-  `FINAL`. No `FINAL` means `Unknown`: treat the key as possibly used. A refusal holds the same
-  facts plus the subcode and no `BEGIN` (best effort, at most four per operation).
-  `DurableAuditGuard::plugin_records()` reads them back.
-* **The desktop manual window is not in this journal.** The window writes no `ONCLAU02` file; the
-  key uses and refusals of the manual window go to the `tracing` target `oncl::plugin_audit`.
-* **Rolling back the server.** Before running an older server again, move the whole audit
-  directory away (see "Rolling back" above): a journal that holds plugin frames makes the older
-  server stop with `fatal_corruption`.
-* **Limits of the configuration** (at most 16 plugins, 256 grants per plugin, 8 keys and 16 PKI
-  endpoints per grant, ids of 64 bytes; defaults `max_memory` 1 MiB and `max_transfer` 256 KiB)
-  are listed in [the HTTP contract](http-api.md).
+* **Сегодня выдавать нечего.** Поставляемые плагины объявляют в сумме 30 операций, все
+  `manual = true` и ни одна не `server = true` (см. [руководство по ручному окну](manual-plugins.md));
+  серверный грант на них пропускается строкой `oncl-server: error:`. Гранты относятся к
+  сторонним плагинам, объявляющим `server = true`, и к плагинам без объявлений.
+* **Что значит `plugin_bytes = true`.** Вы принимаете, что клиент (и плагин) выбирает байты,
+  которые подписывает именованный ключ: сервер не может связать содержимое с документом.
+  Объявленный профиль всё равно принудителен (вид, параметры, одно применение на запрос),
+  вызывающим должен быть токен гранта, ключ — один из `keys` гранта, а пакет — установленный.
+  Сам запрос тоже должен пройти права токена: элемент `plugin`, называющий ключи, требует права
+  токена `sign` и каждого названного ключа в `keys` токена — в дополнение к точному гранту
+  оператора (иначе 403, ничего не запускается). Давайте `plugin_bytes` только токену, чьему
+  клиенту вы доверяете этот ключ.
+* **Читайте журнал старта.** Пропущенный грант (`oncl-server: error: ... grant skipped: ...`),
+  грант с ключами без `plugin_bytes` (каждое применение ключа будет отклонено) и грант плагина
+  без объявлений (`warning: grant without declaration ...`: параметры не принудительны) — каждый
+  печатает по одной строке. Пропущенный грант сервер не останавливает; проверяйте журнал после
+  каждого изменения конфигурации или плагина.
+* **Поля аудита применения ключа.** На каждое применение ключа плагином журнал хранит:
+  идентификатор плагина, хеш пакета (вид `1` файл пакета или `2` loose manifest+module и
+  SHA-256), версию, операцию, дайджест билета, SHA-256 nonce одобрения (для гранта оператора
+  отсутствует), SHA-256 и длину содержимого, было ли содержимое заранее вычисленным дайджестом,
+  SHA-256 параметров, вид вызывающего, `declared` и грант (`<токен>:<плагин>:<операция>`); затем
+  обычные `BEGIN` и `FINAL`. Нет `FINAL` — значит `Unknown`: считайте ключ возможно
+  использованным. Запись об отказе содержит те же факты плюс подкод и не содержит `BEGIN` (по
+  возможности, не более четырёх на операцию). `DurableAuditGuard::plugin_records()` читает их обратно.
+* **Ручное окно десктопа в этом журнале отсутствует.** Окно не пишет файл `ONCLAU02`; применения
+  ключей и отказы ручного окна идут в target `tracing` `oncl::plugin_audit`.
+* **Откат сервера.** Прежде чем снова запускать более старый сервер, уберите весь каталог
+  аудита (см. «Откат» выше): журнал с кадрами плагинов останавливает старый сервер с
+  `fatal_corruption`.
+* **Пределы конфигурации** (не более 16 плагинов, 256 грантов на плагин, 8 ключей и 16
+  PKI-адресов на грант, идентификаторы по 64 байта; по умолчанию `max_memory` 1 МиБ и
+  `max_transfer` 256 КиБ) перечислены в [контракте HTTP](http-api.md).
 
-## Revocation and bounds
+## Отзыв прав и пределы
 
-A standalone config/ACL change takes effect by graceful restart. Embedding trusted
-hosts can revoke identities through `AccessPolicy::revoke` or atomically replace
-the checked ACL through `AccessPolicy::replace`; no network request can invoke
-either method. A generation change invalidates all previously authenticated Principal
-objects for minting *new* grants. Already admitted work retains its original
-immutable grant and truthful outcome; revocation does not claim rollback.
+Изменение конфигурации/ACL автономного сервиса вступает в силу при корректном перезапуске.
+Доверенные встраивающие хосты могут отзывать идентичности через `AccessPolicy::revoke` или
+атомарно заменять проверенный ACL через `AccessPolicy::replace`; сетевой запрос не может
+вызвать ни тот, ни другой метод. Смена поколения делает недействительными все ранее
+аутентифицированные объекты Principal для выдачи *новых* грантов. Уже допущенная работа
+сохраняет свой исходный неизменяемый грант и правдивый исход; отзыв не обещает отката.
 
-Admission precedes body reading, in two steps. A request that carries a body first takes one
-of the `max_uploads` upload slots (below) and is then received: waiting for the client and
-spooling the documents run without a `max_in_flight` slot and without a native worker.
-Only when the whole body has been accepted does the operation take its `max_in_flight` slot,
-its audit binding and a native worker: worker/queue slots are acquired before
-`spawn_blocking`, and no more than `blocking_workers` native closures run. Queued
-owned contexts retain the initial scope/deadline; queue expiry is explicit.
-Disconnect/cancel stops waiting and cooperative intake, but a native call's slot
-and resources remain owned until that actual call returns. The native worker itself
-(its permit and the executor's running count, the `oncl.executor.running` gauge) is free
-when the call returns, before its result is handed over: whoever sees the result, such
-as the response frame of a staged artifact, never sees a worker still running for it.
-The slot follows the result, after the worker's share of the request telemetry is
-released, so that an idle executor has also exported its last request. Response bytes
-retain the original context/reservation until their network ownership ends. The whole
-operation has one finite deadline, not a new timeout at each stage.
-The same original early deadline/control and disconnect owner continue through
-the real response body and transport. Deferred first polling refuses expired
-success bytes; an original-deadline timer aborts pending transport output, and
-actual write/flush checkpoints also refuse expired bytes already buffered by
-Hyper. Accept/header bounds may shorten, never extend, the operation deadline.
-After headers have been sent, expiry is a transport abort, not a promised new
-JSON error/status. Timers do not make retained Bytes clones/slices or a running
-native operation free: their actual final owners must still release them.
+Допуск предшествует чтению тела и идёт в два шага. Запрос с телом сначала занимает один из
+слотов загрузки `max_uploads` (ниже) и только потом принимается: ожидание клиента и запись
+документов в spool идут без слота `max_in_flight` и без нативного worker-а. Только когда тело
+принято целиком, операция занимает слот `max_in_flight`, привязку аудита и нативный worker:
+слоты worker-а/очереди берутся до `spawn_blocking`, и не более `blocking_workers` нативных
+замыканий выполняются одновременно. Поставленные в очередь собственные контексты сохраняют
+исходные область/срок; истечение в очереди явное. Отключение/отмена прекращают ожидание и
+кооперативный приём, но слот и ресурсы нативного вызова остаются во владении, пока этот
+фактический вызов не вернётся. Сам нативный worker (его разрешение и счётчик выполняющихся в
+исполнителе, датчик `oncl.executor.running`) освобождается при возврате вызова, до передачи его
+результата: тот, кто видит результат, например кадр ответа подготовленного артефакта, никогда не
+видит worker, всё ещё работающий на него. Слот следует за результатом, после того как доля
+worker-а в телеметрии запроса освобождена, чтобы простаивающий исполнитель уже экспортировал и
+свой последний запрос. Байты ответа сохраняют исходные контекст/резервирование, пока не
+закончится их сетевое владение. У всей операции один конечный срок, а не новый таймаут на
+каждой стадии. Тот же исходный ранний срок/управление и владелец отключения продолжаются через
+настоящее тело ответа и транспорт. Отложенный первый опрос отказывается выдавать просроченные
+байты успеха; таймер исходного срока обрывает ожидающий транспортный вывод, а фактические
+контрольные точки записи/сброса тоже отказываются выдавать просроченные байты, уже
+буферизованные Hyper. Границы приёма/заголовков могут сокращать срок операции, но не
+продлевать. После отправки заголовков истечение — это обрыв транспорта, а не обещанный новый
+JSON-ответ об ошибке/статус. Таймеры не освобождают удерживаемые клоны/срезы Bytes и
+выполняющуюся нативную операцию: их фактические конечные владельцы всё равно должны их отпустить.
 
-**Aborted response streams.** When a failure ends a response stream that has started (the
-server decided `200` and began streaming; how much of the head and the first frames reached
-the client varies), the server cuts the response without a terminal record, because no JSON
-error can follow. Which failures: a resource, deadline or cancellation failure of the first
-operation that applied no key (`MetadataLimit`, `OutputLimit`, `MemoryLimit`, `TempLimit`,
-`CapacityExceeded`, ...), one the stream itself observes between frames, and a failure while
-building the stream's own frames or terminal record. The client sees only a lost response
-(`ResponseLost`) and cannot tell these apart; **the cause is visible only on the server**,
-and the protocol and the clients are unchanged. For every such stream the server writes
-exactly one line to stderr (and the same facts as a `tracing` event, target
-`oncl::stream_abort`, level `error`; the standalone binary installs no `tracing`
-subscriber, so there the stderr line is the log):
+**Прерванные потоки ответов.** Когда сбой обрывает поток ответа, который уже начался (сервер
+решил `200` и начал передачу; сколько заголовков и первых кадров дошло до клиента, зависит от
+случая), сервер обрезает ответ без завершающей записи, потому что JSON-ошибка уже не может
+последовать. Какие сбои: сбой ресурса, срока или отмены первой операции, не применившей ключ
+(`MetadataLimit`, `OutputLimit`, `MemoryLimit`, `TempLimit`, `CapacityExceeded`, ...), сбой,
+который сам поток замечает между кадрами, и сбой при построении собственных кадров потока
+или завершающей записи. Клиент видит только потерянный ответ (`ResponseLost`) и не может их
+различить; **причина видна только на сервере**, а протокол и клиенты не меняются. На каждый
+такой поток сервер пишет ровно одну строку в stderr (и те же факты как событие `tracing`,
+target `oncl::stream_abort`, уровень `error`; автономный бинарный файл не устанавливает
+подписчика `tracing`, поэтому там журналом служит строка stderr):
 
 ```
 oncl-server: stream aborted: operation=1 route=operations item=0 kind=sign code=metadata_limit cause=MetadataLimit applied=not_applied elapsed_ms=6 bytes_in=0 bytes_out=218
 ```
 
-| Field | Meaning |
+| Поле | Значение |
 |---|---|
-| `operation` | the operation id (the `operation_id` of the progress frames and, for a private operation, of the audit journal's records) |
-| `route` | `operations` or `batch` |
-| `item`, `kind` | manifest index and operation kind (the closed `oncl.operation.kind` values) of the item that was running; `none` before the first item |
-| `code` | the closed `oncl.error.code` value of the typed cause (`metadata_limit`, `output_limit`, `memory_limit`, `temp_limit`, `capacity_exceeded`, `deadline_exceeded`, `cancelled`, `invalid_request`, …) |
-| `cause` | the name of the typed failure variant (`MetadataLimit`, `OutputLimit`, …); never its message |
-| `applied` | `not_applied`, `applied` or `unknown`: the key-application state of the items that finished before the abort |
-| `elapsed_ms` | milliseconds from the start of the response stream |
-| `bytes_in`, `bytes_out` | the byte counts of the latest progress snapshot |
+| `operation` | идентификатор операции (`operation_id` кадров прогресса и, для закрытой операции, записей журнала аудита) |
+| `route` | `operations` или `batch` |
+| `item`, `kind` | индекс в манифесте и вид операции (закрытые значения `oncl.operation.kind`) выполнявшегося элемента; `none` до первого элемента |
+| `code` | закрытое значение `oncl.error.code` типизированной причины (`metadata_limit`, `output_limit`, `memory_limit`, `temp_limit`, `capacity_exceeded`, `deadline_exceeded`, `cancelled`, `invalid_request`, …) |
+| `cause` | имя варианта типизированного сбоя (`MetadataLimit`, `OutputLimit`, …); никогда не его текст |
+| `applied` | `not_applied`, `applied` или `unknown`: состояние применения ключа у элементов, завершившихся до обрыва |
+| `elapsed_ms` | миллисекунды от начала потока ответа |
+| `bytes_in`, `bytes_out` | счётчики байт последнего снимка прогресса |
 
-Every value is a number or a closed name. No error text, item id, part or file name,
-document content, key, password, token, URL or path is ever written (tests assert this
-with recognisable values in the request). The same abort increments the counter
-`oncl.stream.aborted`. Not covered: a client that disconnects, and a transport abort by the
-connection's own deadline timer, which end the body without a typed failure of the
-stream. The audit journal is not changed by an abort. A `BEGIN` exists only for a private
-key use and the failures of the first kind above come before any key is applied, so there is
-no `BEGIN` to finalise; a stream-level failure after a key use leaves the `BEGIN` and the
-`FINAL` that the key use itself wrote (`applied`, `succeeded`), and the log line says
-`applied=applied`. A `FINAL` has no field for an error code and the frame format is not
-changed for this, so the journal never names the abort cause; the log line does, and its
-`operation` is the journal's `operation_id`.
+Каждое значение — число или закрытое имя. Никогда не пишутся текст ошибки, идентификатор
+элемента, имя части или файла, содержимое документа, ключ, пароль, токен, URL или путь (тесты
+проверяют это узнаваемыми значениями в запросе). Тот же обрыв увеличивает счётчик
+`oncl.stream.aborted`. Не охвачены: клиент, который отключился, и транспортный обрыв по
+собственному таймеру срока соединения: они заканчивают тело без типизированного сбоя потока.
+Журнал аудита обрыв не меняет. `BEGIN` существует только для применения закрытого ключа, а
+сбои первого вида выше происходят до применения любого ключа, так что завершать нечего; сбой
+на уровне потока после применения ключа оставляет `BEGIN` и `FINAL`, которые записало само
+применение ключа (`applied`, `succeeded`), и строка лога говорит `applied=applied`. В `FINAL`
+нет поля для кода ошибки, а формат кадров для этого не меняли, поэтому журнал никогда не
+называет причину обрыва; строка лога называет, и её `operation` — это `operation_id` журнала.
 
-**Uploads.** Receiving a request body is a phase of its own with its own limit,
-`max_uploads` (unset: 8, or less when `total_temp` holds fewer spools, see below; 1 .. 256). A request that carries a body (`POST /v1/hash`,
-`/v1/operations`, `/v1/batch`) takes one upload slot after authentication and before it reads
-any byte of the body, and keeps it while it waits for the client, spools its documents to the
-scratch directory and, once the body is complete, waits for a `max_in_flight` slot. A client
-that stalls mid-body therefore holds one upload slot, its spool and its temp and memory
-reservations, and **nothing else**: no `max_in_flight` slot, no `blocking_workers` worker, no
-audit binding. Requests without a body (`GET /health`, `GET /v1/openapi.json`) never take an
-upload slot, and a request that finds every upload slot taken waits up to `admission_wait_ms`
-(a free slot goes to the oldest waiter) and gets `503 CapacityExceeded`/`NotApplied` only if none
-freed in that time, before its body is read (Hyper sends `100 Continue` only when the body
-is first read, so an `Expect: 100-continue` client sees the refusal instead). The same holds
-when every `max_in_flight` slot is busy: before it takes an upload slot the request checks that
-an operation slot is free, waits for one up to `admission_wait_ms` (the upload-slot wait takes
-the rest of that time, not a second one) and otherwise gets the same `503` without a body byte
-read, as it did before the upload phase existed. That check is best effort: a slot can be
-taken meanwhile, and the wait after the body (below) stays authoritative. Every exit of the
-phase frees the upload slot, the spool and its temp reservation: the end of the body when
-the operation has its `max_in_flight` slot (until then a queued operation keeps the upload slot,
-see below), a client that disconnects, the idle timeout or minimum rate (below), the operation
-deadline, a cancellation, a shutdown and any refusal (such as `InputLimit`).
+**Загрузки.** Приём тела запроса — отдельная фаза со своим пределом `max_uploads` (не задан: 8,
+или меньше, когда в `total_temp` помещается меньше spool-ов, см. ниже; 1 .. 256). Запрос с
+телом (`POST /v1/hash`, `/v1/operations`, `/v1/batch`) занимает один слот загрузки после
+аутентификации и до чтения любого байта тела и держит его, пока ждёт клиента, пишет
+документы в каталог scratch и, когда тело получено целиком, ждёт слот `max_in_flight`. Клиент,
+застрявший посреди тела, поэтому держит один слот загрузки, свой spool и свои резервы temp и
+памяти, **и ничего больше**: ни слота `max_in_flight`, ни worker-а `blocking_workers`, ни привязки
+аудита. Запросы без тела (`GET /health`, `GET /v1/openapi.json`) слот загрузки не занимают никогда,
+а запрос, обнаруживший все слоты загрузки занятыми, ждёт до `admission_wait_ms` (свободный
+слот достаётся самому старому ожидающему) и получает `503 CapacityExceeded`/`NotApplied`, только
+если за это время ничего не освободилось, до чтения тела (Hyper отправляет `100 Continue`
+только при первом чтении тела, поэтому клиент с `Expect: 100-continue` видит отказ). То же
+верно, когда заняты все слоты `max_in_flight`: прежде чем занять слот загрузки, запрос
+проверяет, что слот операции свободен, ждёт его до `admission_wait_ms` (ожидание слота загрузки
+берёт остаток этого времени, а не второе такое же) и иначе получает тот же `503` без прочитанного
+байта тела, как получил бы без фазы загрузки. Эта проверка — по возможности: слот могут занять
+тем временем, а ожидание после тела (ниже) остаётся решающим. Каждый выход из фазы освобождает
+слот загрузки, spool и его резерв temp: конец тела, когда у операции есть слот `max_in_flight`
+(до этого операция в очереди держит слот загрузки, см. ниже), отключение клиента, таймаут
+простоя или минимальная скорость (ниже), срок операции, отмена, остановка и любой отказ
+(например, `InputLimit`).
 
-The phase takes a slot of its own, not one more native worker: waiting for the client is
-asynchronous. Received pieces (one Hyper frame: not bounded by the 32 KiB parser buffer, 49,152 and 57,344 bytes were observed, and charged as 64 KiB: a nominal charge, not a measured guarantee; Hyper's read-buffer growth stops at 65,536 bytes, and a larger frame would be under-charged silently) are gathered
-into a 256 KiB buffer, charged to the operation's memory budget once per request, and written
-to the spool in one short blocking section per 256 KiB, one at a time per upload, on the runtime's
-blocking pool. What is gathered is written before the server waits for the client again (so
-what the server has received from a stalled client is in the spool, and the disk time is not
-charged to the client by the pace rules below), and at the end of each document. "Received"
-is what the multipart parser has handed over: it withholds up to the boundary length minus 1
-trailing bytes of a document while they could begin a boundary (when they contain `\r`), so
-the last few bytes of what a client sent may not be in the spool yet. That pool holds
-`blocking_workers + max_uploads` threads so that a long operation cannot keep uploads from
-progressing. The hash route (`POST /v1/hash`) hashes each received piece where it arrives, on
-the runtime's own threads (a CPU section of one frame), without any spool; a hash upload that
-stalls thus holds an upload slot and no worker either.
+Фаза занимает собственный слот, а не ещё один нативный worker: ожидание клиента асинхронно.
+Принятые части (один кадр Hyper: он не ограничен 32-КиБ буфером разбора, наблюдались 49 152 и
+57 344 байта, и списываются как 64 КиБ: номинальное списание, а не измеренная гарантия; рост
+буфера чтения Hyper останавливается на 65 536 байтах, а больший кадр был бы молча недосписан)
+собираются в буфер 256 КиБ, списываемый с бюджета памяти операции один раз на запрос, и
+записываются в spool одной короткой блокирующей секцией на каждые 256 КиБ, по одной за раз
+на загрузку, в блокирующем пуле рантайма. Накопленное записывается до того, как сервер снова
+начнёт ждать клиента (так что принятое от застрявшего клиента уже в spool, а время диска не
+ставится клиенту в вину правилами темпа ниже), и в конце каждого документа. «Принятое» — это
+то, что отдал multipart-разборщик: он удерживает до длины границы минус 1 хвостовых байтов
+документа, пока они могут начинать границу (когда содержат `\r`), так что последние байты
+отправленного клиентом могут ещё не быть в spool. Этот пул содержит `blocking_workers +
+max_uploads` потоков, чтобы долгая операция не мешала загрузкам продвигаться. Маршрут хеширования
+(`POST /v1/hash`) хеширует каждую принятую часть там, где она пришла, на собственных потоках
+рантайма (процессорная секция одного кадра), без какого-либо spool; зависшая загрузка хеша
+тоже держит слот загрузки и никакого worker-а.
 
-`max_uploads` is 1 .. 256 and at most `total_temp / (input_bytes + container_bytes)` (integer
-division; with the defaults 16 GiB / 2 GiB = 8): every upload must be able to reserve the
-largest spool it may need (a signed input spools up to `input_bytes + container_bytes`) in the
-shared temp budget at the same time.
+`max_uploads` лежит в 1 .. 256 и не превышает `total_temp / (input_bytes + container_bytes)`
+(целочисленное деление; при значениях по умолчанию 16 ГиБ / 2 ГиБ = 8): каждая загрузка должна
+уметь одновременно зарезервировать в общем бюджете temp самый большой spool, который ей может
+понадобиться (подписанный ввод занимает в spool до `input_bytes + container_bytes`).
 
-* **Unset (the default).** The effective value is `min(8, max(1, total_temp / (input_bytes +
-  container_bytes)))`. When the budget lowers it below 8 the server says so once at start, on
-  stderr: ``oncl-server: `max_uploads` is not set; lowered from 8 to N because total_temp holds
-  M spool(s) of input_bytes + container_bytes``. A `total_temp` smaller than one spool is
-  allowed (effective value 1): a larger upload is then refused with `TempLimit`.
-* **Set explicitly.** A value of 0, above 256 or above the bound is refused at start, and the
-  message names the key and the bound (`` `max_uploads` must be 1..=256 and at most N ``).
+* **Не задан (по умолчанию).** Действующее значение — `min(8, max(1, total_temp / (input_bytes +
+  container_bytes)))`. Когда бюджет снижает его ниже 8, сервер сообщает об этом один раз при
+  старте в stderr: ``oncl-server: `max_uploads` is not set; lowered from 8 to N because total_temp
+  holds M spool(s) of input_bytes + container_bytes``. `total_temp` меньше одного spool допустим
+  (действующее значение 1): более крупная загрузка тогда отклоняется с `TempLimit`.
+* **Задан явно.** Значение 0, выше 256 или выше границы отвергается при старте, а сообщение
+  называет ключ и границу (`` `max_uploads` must be 1..=256 and at most N ``).
 
-The temp budget still bounds every spool: an upload that cannot reserve more is refused with
-`TempLimit` as before.
+Бюджет temp по-прежнему ограничивает каждый spool: загрузка, которая не может зарезервировать
+больше, отклоняется с `TempLimit`, как и раньше.
 
-**Migration note (`max_uploads`).** Nothing breaks for an existing configuration: a
-`server.toml` that does not set `max_uploads` keeps starting whatever its `total_temp`,
-`input_bytes` and `container_bytes` are; the only difference is that the effective default can
-be lower than 8 when `total_temp` is small (for example 4 with `total_temp` 8 GiB and the default
-allowances), which the start-up line above reports. Before this change a body occupied a native
-worker while it arrived, so the upload phase had no limit of its own; setting `max_uploads`
-yourself is only needed to go *below* the default or, with a larger `total_temp`, above 8.
+**Заметка о переходе (`max_uploads`).** Код `oncl-server` впервые вошёл в тег `v0.1.0-alpha.7`
+(в тегах `v0.1.0-alpha.1`–`alpha.6` его нет), и сразу с фазой загрузки: выпущенной версии без
+неё не было, так что выпущенную конфигурацию она сломать не могла. Для сборок из исходников до
+появления фазы ничего не ломается: `server.toml`, где
+`max_uploads` не задан, продолжает запускаться при любых `total_temp`, `input_bytes` и
+`container_bytes`; единственное отличие — действующее значение по умолчанию может оказаться
+ниже 8, когда `total_temp` мал (например, 4 при `total_temp` 8 ГиБ и допусках по умолчанию),
+о чём сообщает стартовая строка выше. До фазы загрузки тело занимало нативный worker, пока
+поступало, и у приёма не было собственного предела; задавать `max_uploads` самому нужно только
+чтобы опуститься *ниже* значения по умолчанию или, при большем `total_temp`, подняться выше 8.
 
-**Waiting for an operation slot.** `max_in_flight` bounds the operations that run at
-once. A request whose body has been accepted waits up to `admission_wait_ms`, polling every
-10 ms with no order guarantee between waiters, for one of them, and gets `503
-CapacityExceeded`/`NotApplied` only if none freed in that time (nothing was applied, the
-spool is deleted). It keeps its upload slot and its spool until it has the `max_in_flight`
-slot, so operations queued here count against `max_uploads` too. The operation deadline starts at the
-request's admission to the upload phase and also covers the upload; `admission_wait_ms` is not
-part of it, but the deadline keeps running. An admitted operation waits for a free native
-worker for at most the same `admission_wait_ms`; with `blocking_workers >= max_in_flight` (the
-default) that second wait does not normally arise.
+**Ожидание слота операции.** `max_in_flight` ограничивает операции, выполняющиеся одновременно.
+Запрос, чьё тело принято, ждёт один из них до `admission_wait_ms`, опрашивая каждые 10 мс, без
+гарантии порядка между ожидающими, и получает `503 CapacityExceeded`/`NotApplied`, только если
+за это время ничего не освободилось (ничего не применено, spool удалён). Он держит слот
+загрузки и spool, пока не получит слот `max_in_flight`, поэтому операции, стоящие здесь в
+очереди, тоже считаются в `max_uploads`. Срок операции начинается с допуска запроса в фазу
+загрузки и покрывает также загрузку; `admission_wait_ms` в него не входит, но срок продолжает
+идти. Допущенная операция ждёт свободного нативного worker-а не дольше того же
+`admission_wait_ms`; при `blocking_workers >= max_in_flight` (по умолчанию) это второе ожидание
+обычно не возникает.
 
-**Stalled and crawling uploads.** An upload that stops must not hold its upload slot and
-spool for the whole `operation_timeout_ms` (default 300 s: `max_uploads` silent clients would
-block every body-carrying route for five minutes). Every wait for the next body chunk
-(hash body, JSON, multipart metadata and documents, the epilogue) is governed by two rules.
-Only time spent waiting *for the client* counts, never time spent hashing, spooling or
-queueing, so a slow server is never charged to a client.
+**Зависшие и ползущие загрузки.** Остановившаяся загрузка не должна держать слот загрузки и
+spool весь `operation_timeout_ms` (по умолчанию 300 с: `max_uploads` молчащих клиентов
+заблокировали бы все маршруты с телом на пять минут). Каждое ожидание следующего куска тела
+(тело хеша, JSON, метаданные и документы multipart, эпилог) подчиняется двум правилам.
+Считается только время ожидания *клиента*, никогда время на хеширование, запись в spool или
+очередь, так что медленный сервер клиенту в вину не ставится.
 
-* `upload_idle_timeout_ms` (default 30 000, 1 000 .. 86 400 000): a wait that delivers no
-  byte for that long ends the request.
-* `upload_min_bytes_per_second` (default 1 024, `0` = off): idle timeout alone would let a
-  client that sends one byte every 29 s keep the slot until the operation deadline. So each
-  idle-timeout-long window of waiting must deliver at least this many bytes per second, or
-  the request ends. 1 KiB/s is about 8 kbit/s, below any link that can legitimately move a
-  document; the rule judges only whole windows, so a client that sends 64 KiB every 25 s
-  passes while one byte per second does not. The value may be at most 1 GiB/s. Under
-  server-terminated TLS a record (up to 16 KiB) must arrive whole, so keep the idle timeout
-  above 16 KiB divided by your slowest legitimate link rate (a 1 s idle timeout refuses
-  clients slower than about 16 KiB/s).
+* `upload_idle_timeout_ms` (по умолчанию 30 000, 1 000 .. 86 400 000): ожидание, не принёсшее ни
+  байта за это время, завершает запрос.
+* `upload_min_bytes_per_second` (по умолчанию 1 024, `0` = выключено): один таймаут простоя
+  позволил бы клиенту, шлющему по байту каждые 29 с, держать слот до срока операции. Поэтому
+  каждое окно ожидания длиной в таймаут простоя должно принести не меньше этого числа байт в
+  секунду, иначе запрос завершается. 1 КиБ/с — около 8 кбит/с, ниже любого канала, способного
+  законно передать документ; правило судит только целые окна, так что клиент, шлющий 64 КиБ
+  каждые 25 с, проходит, а один байт в секунду — нет. Значение может быть не больше 1 ГиБ/с. При
+  TLS, терминируемом сервером, запись (до 16 КиБ) должна прийти целиком, поэтому держите
+  таймаут простоя выше 16 КиБ, делённых на скорость вашего самого медленного законного канала
+  (таймаут простоя 1 с отказывает клиентам медленнее примерно 16 КиБ/с).
 
-Either rule ends the request with the existing `504 DeadlineExceeded`/`NotApplied`: it
-happens during intake, before any private key is used, so no audit binding or `BEGIN` is
-written, the spool is deleted and the upload slot is free immediately. No new error code
-exists. Neither rule replaces the operation deadline, which still bounds a healthy transfer: a
-1 GiB upload over a slow link needs `operation_timeout_ms` raised to cover it, not these two
-values. A client that keeps delivering at least the minimum rate, without a silence longer
-than the idle timeout, is never stopped by them.
+Любое из правил завершает запрос существующим `504 DeadlineExceeded`/`NotApplied`: это
+происходит при приёме, до использования любого закрытого ключа, поэтому привязка аудита и
+`BEGIN` не пишутся, spool удаляется, а слот загрузки освобождается сразу. Нового кода ошибки
+нет. Ни одно правило не заменяет срок операции, который по-прежнему ограничивает здоровую
+передачу: загрузке в 1 ГиБ по медленному каналу нужен увеличенный `operation_timeout_ms`, а не
+эти два значения. Клиента, который доставляет не меньше минимальной скорости без паузы длиннее
+таймаута простоя, они никогда не останавливают.
 
-**What a stalled upload still costs.** A stalled client no longer starves the service of
-workers or operation slots (other requests complete at once next to it), but it does hold
-one of the `max_uploads` slots until the idle timeout: with `max_uploads` authenticated clients
-stalled at once, every other body-carrying request waits `admission_wait_ms` and gets `503
-CapacityExceeded` until a stall ends, while `/health` stays up. The operations that already run
-are **not** isolated from the spools: they draw on the same `total_temp` and `total_memory`
-budgets. Stalled uploads hold their spools (up to `input_bytes + container_bytes` each) and a
-256 KiB gathering buffer each, so `max_uploads` stalled uploads can hold all of `total_temp`
-(8 x 2 GiB at the defaults) and a running operation that then needs temp space can be refused
-with `TempLimit`. There is no per-token upload limit: one token (one leaked token) can take
-every upload slot. A blocking spool write that is still running when its client disconnects
-finishes on its own and keeps its buffer (up to 256 KiB, charged until the request ends, so
-up to that much uncharged for the duration of one write); such writes can exceed `max_uploads`
-writers for that moment, bounded by the pool unless the disk stalls. Lower `upload_idle_timeout_ms` (never below the slowest legitimate link, see
-above) and raise `max_uploads` as far as the temp budget allows to widen the margin. A
-client that sends exactly the minimum rate holds an upload slot for the whole
-`operation_timeout_ms`; on a LAN raise `upload_min_bytes_per_second` to tens of KiB/s. The
-reverse direction is not governed either: a client that never reads a large response pins
-its in-flight slot until the operation deadline.
+**Чего стоит зависшая загрузка.** Зависший клиент больше не лишает сервис worker-ов или слотов
+операций (другие запросы рядом с ним завершаются сразу), но держит один из слотов
+`max_uploads` до таймаута простоя: когда `max_uploads` аутентифицированных клиентов зависли
+одновременно, каждый другой запрос с телом ждёт `admission_wait_ms` и получает `503
+CapacityExceeded`, пока зависание не закончится, а `/health` остаётся доступным. Уже
+выполняющиеся операции от spool-ов **не изолированы**: они берут из тех же бюджетов `total_temp`
+и `total_memory`. Зависшие загрузки держат свои spool-ы (до `input_bytes + container_bytes`
+каждый) и по буферу накопления 256 КиБ, так что `max_uploads` зависших загрузок могут занять
+весь `total_temp` (8 x 2 ГиБ при значениях по умолчанию), и выполняющаяся операция, которой
+после этого нужно место temp, может получить `TempLimit`. Предела загрузок на токен нет: один
+токен (один утёкший токен) может занять все слоты загрузки. Блокирующая запись в spool, всё ещё
+идущая при отключении клиента, завершается сама и держит свой буфер (до 256 КиБ, списывается до
+конца запроса, то есть на время одной записи до такого объёма не учтено); такие записи могут
+на этот момент превысить `max_uploads` пишущих, что ограничено пулом, если только диск не
+встал. Уменьшите `upload_idle_timeout_ms` (никогда ниже самого медленного законного канала, см.
+выше) и увеличьте `max_uploads`, насколько позволяет бюджет temp, чтобы расширить запас.
+Клиент, шлющий ровно минимальную скорость, держит слот загрузки весь `operation_timeout_ms`; в
+локальной сети поднимите `upload_min_bytes_per_second` до десятков КиБ/с. Обратное направление
+тоже не регулируется: клиент, который никогда не читает большой ответ, держит свой слот
+выполнения до срока операции.
 
 
-There are also finite pre-auth connection/header/TLS-handshake limits. HTTP/1
-header count is capped at 64 and a connection's parser buffer at 32 KiB. These
-network buffers/runtime overhead are separate from Core's aggregate document
-working-memory accounting; resource counters are not a claim about total RSS.
-A connection that has been answered keeps its `max_connections` permit, and nothing of its
-operation, until the client closes its side or the staged close ends, at most one second
-after the answer (see [the HTTP contract](http-api.md)): with `max_connections` clients that
-keep their sockets open after an answer, the next connection is not accepted for up to that
-second.
-The server stack is optional/server-only: minimal SDK crates and desktop/Win7
-build closures do not depend on Axum/Hyper, and static CRT/toolchain policy is
-unchanged. This Windows-host acceptance is not a Linux/macOS/Win7 runtime result
-or the later 1-GiB XML/PDF resource-harness gate.
+Есть также конечные пределы соединений/заголовков/TLS-рукопожатия до аутентификации. Число
+заголовков HTTP/1 ограничено 64, а буфер разбора соединения — 32 КиБ. Эти сетевые буферы и
+накладные расходы рантайма отделены от агрегатного учёта рабочей памяти документов в Core;
+счётчики ресурсов — не утверждение об общем RSS. Отвеченное соединение сохраняет своё
+разрешение `max_connections`, и ничего от своей операции, пока клиент не закроет свою сторону
+или не закончится ступенчатое закрытие, не позднее одной секунды после ответа (см. [контракт
+HTTP](http-api.md)): когда `max_connections` клиентов держат сокеты открытыми после ответа,
+следующее соединение не принимается до этой секунды.
+Серверный стек необязателен и только серверный: минимальные крейты SDK и замыкания сборки
+десктопа/Win7 не зависят от Axum/Hyper, а политика статического CRT/тулчейна не изменилась
+(замыкание SDK проверяет `cargo xtask sdk closure`, запускавшийся на хосте Windows).
+Гейт 1 ГиБ (`cargo xtask platform-proof`) пройден 70/70 на Windows x64 (дерево `9a1f0181`;
+12 HTTP-кейсов повторены на `e99a90a2`, коммите выпуска `0.1.0-alpha.7`; подробности — в
+`docs/dev/platform-acceptance.md` репозитория). Запусков этого гейта на Linux, macOS и Win7 в
+записях приёмки нет; на этих ОС выполнялось только дымовое испытание распакованных архивов
+(см. «Что проверено у упакованных программ» ниже).
 
-## Explicit PKI roots and endpoint pins
+## Явные корни PKI и закреплённые адреса
 
-Verification has no implicit document trust store and denies outbound PKI by
-default. Configure trusted certificate files and exact address-pinned origins in
-the private operator configuration, never in request metadata:
+У проверки нет неявного хранилища доверия для документов, и исходящий PKI-трафик по умолчанию
+запрещён. Доверенные файлы сертификатов и точные закреплённые за адресами источники (origin)
+настраиваются в закрытой конфигурации оператора, а не в метаданных запроса:
 
 ```toml
 [pki]
@@ -574,157 +614,182 @@ origin = "https://ca.example:443"
 addresses = ["203.0.113.10:443"]
 ```
 
-Each file is one DER/PEM certificate, at most 1 MiB; total configured certificate
-bytes are capped at 16 MiB, with at most 256 anchors and 256 intermediates. Keep
-these operator trust files protected against modification. Origins have at most
-16 explicit addresses each, at most 128 origins; a literal host cannot be silently
-repinned to another IP/port. The SDK's actual network policy validates these pins.
-No incoming URL, certificate-carried root or JSON policy flag installs trust.
-TLS listener certificates and document-validation roots are separate settings.
-The service does not install certificates in the OS/browser trust stores.
+Каждый файл — один сертификат DER/PEM, не более 1 МиБ; общий размер настроенных сертификатов
+ограничен 16 МиБ, не более 256 якорей и 256 промежуточных. Защищайте эти файлы доверия
+оператора от изменения. У источников не более 16 явных адресов каждый и не более 128 источников;
+литеральный хост нельзя молча перезакрепить на другой IP/порт. Эти закрепления проверяет
+фактическая сетевая политика SDK. Никакой входящий URL, корень из сертификата или флаг
+JSON-политики не устанавливает доверие. Сертификаты TLS-слушателя и корни проверки документов —
+отдельные настройки. Сервис не устанавливает сертификаты в хранилища ОС/браузера.
 
-## Optional OTLP telemetry
+## Необязательная телеметрия OTLP
 
-The service can export operational **metrics and traces** to an operator-chosen OTLP
-collector. It is **off by default**: with no `[telemetry]` table, or with
-`enabled = false`, the process starts no export thread, builds no exporter and opens
-no connection to any collector. OTLP **logs are not implemented**; local technical
-logs and the audit journal stay separate mechanisms. The SDK crates, the CLI and the
-desktop application never contain this code or its dependencies.
+Сервис может экспортировать эксплуатационные **метрики и трассы** в выбранный оператором
+OTLP-коллектор. По умолчанию она **выключена**: без таблицы `[telemetry]` или с
+`enabled = false` процесс не запускает поток экспорта, не строит экспортёр и не открывает
+соединение ни с каким коллектором. OTLP-**логи не реализованы**; локальные технические логи и
+журнал аудита остаются отдельными механизмами. Крейты SDK, CLI и приложение десктопа никогда
+не содержат этот код и его зависимости.
 
 ```toml
 [telemetry]
 enabled = true
-endpoint = "http://127.0.0.1:4318"   # OTLP/HTTP base URL; /v1/traces and /v1/metrics are appended
-service_name = "oncl-server"         # `service.name` resource attribute (operator value)
+endpoint = "http://127.0.0.1:4318"   # базовый URL OTLP/HTTP; /v1/traces и /v1/metrics дописываются
+service_name = "oncl-server"         # атрибут ресурса `service.name` (значение оператора)
 metrics = true
 traces = true
-trace_sample_ratio = 1.0             # traces only; metrics are never sampled
-export_interval_ms = 10000           # metric interval and span batch delay (100 .. 3 600 000)
-export_timeout_ms = 3000             # hard bound of one export HTTP call (100 .. 60 000)
+trace_sample_ratio = 1.0             # только трассы; метрики никогда не семплируются
+export_interval_ms = 10000           # интервал метрик и задержка пакета спанов (100 .. 3 600 000)
+export_timeout_ms = 3000             # жёсткий предел одного HTTP-вызова экспорта (100 .. 60 000)
 connect_timeout_ms = 1000            # <= export_timeout_ms
-queue_size = 2048                    # queued, not yet exported spans (16 .. 65 536)
+queue_size = 2048                    # спанов в очереди, ещё не экспортированных (16 .. 65 536)
 batch_size = 512                     # <= queue_size
-shutdown_timeout_ms = 5000           # bound of the final flush (100 .. 60 000)
-# headers = { authorization = "Bearer <collector credential>" }   # at most 8, operator secret; https or loopback only
-# ca_file = "/private/oncl-operator/collector-ca.pem"             # https only: the collector's CA (PEM)
+shutdown_timeout_ms = 5000           # предел последнего сброса (100 .. 60 000)
+# headers = { authorization = "Bearer <учётные данные коллектора>" }   # не более 8, секрет оператора; только https или loopback
+# ca_file = "/private/oncl-operator/collector-ca.pem"                  # только https: CA коллектора (PEM)
 ```
 
-An enabled configuration is validated at startup (`http`/`https` URL without user
-info, query or fragment; at least one of `metrics`/`traces`; header names are tokens,
-never `host`/`content-*`/`connection`/…, values are printable ASCII). **`headers`
-(a collector credential) are refused unless the endpoint is `https` or its host is
-loopback (`localhost`, `127.0.0.0/8`, `::1`)**, so a credential never crosses the
-network in cleartext. `ca_file` requires `https`. An invalid configuration refuses to
-start the service, with a generic error that never echoes header values. Unknown
-keys are rejected.
+Включённая конфигурация проверяется при старте (URL `http`/`https` без user info, query и
+fragment; хотя бы одно из `metrics`/`traces`; имена заголовков — токены, но никогда не
+`host`/`content-*`/`connection`/…, значения — печатаемый ASCII). **`headers` (учётные данные
+коллектора) отвергаются, если endpoint не `https` и его хост не loopback (`localhost`,
+`127.0.0.0/8`, `::1`)**, так что учётные данные никогда не идут по сети открытым текстом. `ca_file`
+требует `https`. Недопустимая конфигурация не даёт сервису запуститься, с общей ошибкой,
+которая никогда не повторяет значения заголовков. Неизвестные ключи отвергаются.
 
-### Transport and boundedness
+### Транспорт и ограниченность
 
-* **OTLP/HTTP with protobuf bodies**, one POST per export, no gRPC, no compression, no
-  redirects, no environment proxy. The client is the workspace `ureq` (rustls with
-  ring). `https` verifies the collector against the built-in web PKI roots, or, with
-  `ca_file`, only against the PEM CA certificates (at most 8, 1 MiB) in that file;
-  the operator PKI trust set above is not used for it. `OTEL_*` and proxy environment
-  variables are not configuration: the endpoint and timeout come from this table, any
-  header the environment would add is dropped by the transport, and compression
-  requests (`OTEL_EXPORTER_OTLP_*COMPRESSION`) are ignored (payloads stay plain
-  protobuf). The collector endpoint is operator-trusted egress and is **not** subject
-  to the `[[pki.endpoints]]` pinning.
-* **Two named threads, no more:** `oncl-otlp-traces` (span worker) and
-  `OpenTelemetry.Metrics.PeriodicReader` (metric reader), one per enabled signal. A
-  short-lived `oncl-otlp-shutdown` thread exists only during shutdown. No operation
-  thread ever touches the network: producers `try_send` into a fixed-size queue
-  (`queue_size`) and never wait.
-* **Drop accounting, not blocking.** A full queue, a failed export or a post-failure
-  back-off drops the affected spans and counts them. The count is visible in
-  `Telemetry::stats()` and, once a collector answers again, as the metric
-  `oncl.telemetry.dropped{oncl.signal=spans|metrics}`. Metric points are aggregated in
-  place (closed dimensions below), so only their *export* can fail, never their memory.
-* **No retry storms.** One attempt per batch; after a failure the worker backs off
-  (`export_interval_ms · 2^n`, at most 30 s) and discards what it would have sent.
-  A hanging collector blocks only the export thread, for at most `export_timeout_ms`.
-* **Bounded shutdown.** `serve` ends with a flush limited to `shutdown_timeout_ms`;
-  a dead or hanging collector cannot keep the process open longer. An export still
-  inside its (hard-timeout) HTTP call at the deadline is abandoned, not waited for.
-* **Audit is separate and untouched.** Trace sampling (`trace_sample_ratio`), drops,
-  a down collector or a failed exporter cannot remove, delay or replace a mandatory
-  audit record, and OTLP is never evidence that audit was written. Audit health stays
-  its own guard and `/health` signal.
+* **OTLP/HTTP с телами protobuf**, один POST на экспорт, без gRPC, без сжатия, без
+  перенаправлений, без прокси из окружения. Клиент — `ureq` рабочего пространства (rustls с
+  ring). `https` проверяет коллектор по встроенным корням web PKI или, при `ca_file`, только по
+  PEM-сертификатам CA (не более 8, 1 МиБ) из этого файла; набор доверия PKI оператора выше для
+  этого не используется. `OTEL_*` и переменные прокси окружения конфигурацией не являются:
+  endpoint и таймаут берутся из этой таблицы, любой заголовок, который добавило бы окружение,
+  отбрасывается транспортом, а запросы сжатия (`OTEL_EXPORTER_OTLP_*COMPRESSION`) игнорируются
+  (полезная нагрузка остаётся обычным protobuf). Endpoint коллектора — исходящий трафик,
+  которому доверяет оператор, и на него **не** распространяется закрепление `[[pki.endpoints]]`.
+* **Два именованных потока, не больше:** `oncl-otlp-traces` (worker спанов) и
+  `OpenTelemetry.Metrics.PeriodicReader` (читатель метрик), по одному на включённый сигнал.
+  Короткоживущий поток `oncl-otlp-shutdown` существует только во время остановки. Ни один поток
+  операции не касается сети: производители делают `try_send` в очередь фиксированного размера
+  (`queue_size`) и никогда не ждут.
+* **Учёт потерь, а не блокировка.** Полная очередь, неудавшийся экспорт или откат после сбоя
+  отбрасывают затронутые спаны и считают их. Счётчик виден в `Telemetry::stats()` и, когда
+  коллектор снова отвечает, как метрика `oncl.telemetry.dropped{oncl.signal=spans|metrics}`.
+  Точки метрик агрегируются на месте (закрытые измерения ниже), так что может сорваться только их
+  *экспорт*, но никогда их память.
+* **Никаких штормов повторов.** Одна попытка на пакет; после сбоя worker выдерживает паузу
+  (`export_interval_ms · 2^n`, не более 30 с) и отбрасывает то, что отправил бы. Зависший
+  коллектор блокирует только поток экспорта, не дольше `export_timeout_ms`.
+* **Ограниченная остановка.** `serve` заканчивается сбросом, ограниченным `shutdown_timeout_ms`;
+  мёртвый или зависший коллектор не может держать процесс дольше. Экспорт, всё ещё находящийся
+  внутри своего HTTP-вызова (с жёстким таймаутом) к сроку, бросается, а не ожидается.
+* **Аудит отдельно и не затронут.** Семплирование трасс (`trace_sample_ratio`), потери,
+  недоступный коллектор или сбойный экспортёр не могут убрать, задержать или заменить
+  обязательную запись аудита, и OTLP никогда не доказывает, что аудит записан. Здоровье аудита
+  остаётся его собственным стражем и сигналом `/health`.
 
-### Safe vocabulary (what can leave the process)
+### Безопасный словарь (что может покинуть процесс)
 
-Every attribute is a value of a small closed type (`SafeAttr`); there is no constructor
-from a string, path, identifier or error text, no automatic body/header
-instrumentation, no request/client/key/token identifier, and no metric label with
-unbounded cardinality. Resource attributes are only `service.name` and `service.version`;
-the instrumentation scope is `oncl-server`; spans carry no events, links or exemplars.
+Каждый атрибут — значение небольшого закрытого типа (`SafeAttr`); конструктора из строки, пути,
+идентификатора или текста ошибки нет, автоматической инструментации тел/заголовков нет,
+идентификатора запроса/клиента/ключа/токена нет и нет метки метрики с неограниченной
+кардинальностью. Атрибуты ресурса — только `service.name` и `service.version`; область
+инструментации — `oncl-server`; у спанов нет событий, ссылок и exemplar-ов.
 
-| Attribute | Values |
+| Атрибут | Значения |
 |---|---|
 | `oncl.route` | `hash`, `operations`, `batch` |
 | `oncl.operation.kind` | `hash`, `verify`, `extract`, `sign`, `extend`, `jws_sign`, `jws_add`, `jws_verify`, `jwt_encode`, `jwt_decode`, `jwt_verify`, `plugin`, `inspect`, `stamp`, `verify_stamp` |
-| `oncl.operation.family` | (sign only) `cms`, `cades`, `pdf`, `pades`, `xml`, `xades`, `wsse`, `xml_legacy`, `xades_legacy` |
-| `oncl.outcome` | `ok`, `rejected` (refused before work), `failed`, `aborted` |
-| `oncl.error.code` | the stable public error codes (`permission_denied`, `invalid_request`, `capacity_exceeded`, `deadline_exceeded`, `audit_unavailable`, `validation_failed`, `operation_failed`, …) |
+| `oncl.operation.family` | (только sign) `cms`, `cades`, `pdf`, `pades`, `xml`, `xades`, `wsse`, `xml_legacy`, `xades_legacy` |
+| `oncl.outcome` | `ok`, `rejected` (отказ до работы), `failed`, `aborted` |
+| `oncl.error.code` | стабильные публичные коды ошибок (`permission_denied`, `invalid_request`, `capacity_exceeded`, `deadline_exceeded`, `audit_unavailable`, `validation_failed`, `operation_failed`, …) |
 | `oncl.key.applied` | `not_applied`, `applied`, `unknown` |
-| `http.response.status_code` | the status of the response head (`200`, `400`, `403`, `404`, `408`, `413`, `422`, `500`, `503`, `504`) |
+| `http.response.status_code` | статус заголовка ответа (`200`, `400`, `403`, `404`, `408`, `413`, `422`, `500`, `503`, `504`) |
 | `oncl.delivery` | `complete`, `aborted` |
 | `oncl.stage` | `wait`, `run` |
 | `oncl.signal` | `spans`, `metrics` |
 
-Spans (`oncl.request` is the root; the others are its children in the same trace):
-`oncl.request` (route, outcome, error code, status, delivery), `oncl.admission`
-(request start to executor hand-off: for a request with a body this includes receiving the
-body, the wait for an upload slot and the wait for an operation slot, so it is dominated by
-the client's upload time, not by queueing), `oncl.executor.wait`, `oncl.executor.run`,
-`oncl.operation` (one per executed item: kind, family, outcome, error code, key
-applied state), `oncl.delivery` (response body delivery).
+Спаны (`oncl.request` — корневой; остальные — его потомки в той же трассе): `oncl.request`
+(маршрут, исход, код ошибки, статус, доставка), `oncl.admission` (от начала запроса до передачи
+исполнителю: для запроса с телом сюда входят приём тела, ожидание слота загрузки и ожидание
+слота операции, поэтому в нём доминирует время загрузки клиентом, а не очередь),
+`oncl.executor.wait`, `oncl.executor.run`, `oncl.operation` (по одному на выполненный элемент:
+вид, семейство, исход, код ошибки, состояние применения ключа), `oncl.delivery` (доставка тела
+ответа).
 
-Metrics: counters `oncl.requests`, `oncl.operations`, `oncl.key.uses` (counts of
-operations that applied or may have applied a private key; **no key identity**),
-`oncl.stream.aborted` (response streams the server cut short after the head, by route,
-`oncl.error.code` and `oncl.key.applied`; see "Aborted response streams" above),
-`oncl.executor.rejected`, `oncl.telemetry.dropped`; histograms in seconds
-`oncl.request.duration`, `oncl.admission.duration` (includes the upload, see above),
-`oncl.executor.duration`,
-`oncl.operation.duration`, `oncl.delivery.duration`, and `oncl.response.size` (bytes);
-gauges `oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued`.
+Метрики: счётчики `oncl.requests`, `oncl.operations`, `oncl.key.uses` (число операций, которые
+применили или могли применить закрытый ключ; **без идентичности ключа**), `oncl.stream.aborted`
+(потоки ответов, которые сервер оборвал после заголовка, по маршруту, `oncl.error.code` и
+`oncl.key.applied`; см. «Прерванные потоки ответов» выше), `oncl.executor.rejected`,
+`oncl.telemetry.dropped`; гистограммы в секундах `oncl.request.duration`,
+`oncl.admission.duration` (включает загрузку, см. выше), `oncl.executor.duration`,
+`oncl.operation.duration`, `oncl.delivery.duration` и `oncl.response.size` (байты); датчики
+`oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued`.
 
-### Limits of the guarantees
+### Пределы гарантий
 
-* Health and OpenAPI requests and transport-level failures before a request reaches a
-  route (malformed HTTP, connection limits) are not observed.
-* A streamed response's head status is `200` even if a later item fails; the per-item
-  outcomes are the `oncl.operation` spans and the `oncl.operations` counter, and the
-  request outcome becomes `failed` when any item failed. Items of `/v1/batch` have no
-  per-item duration (the SDK runs the closed batch as a unit), so they appear only in
-  the `oncl.operations`/`oncl.key.uses` counters and the request outcome, not as spans.
-* Durations, response sizes and the timing of requests are exported and can reveal
-  coarse activity patterns to the collector operator; trace/span ids are random and
-  not derived from any request value. Treat the collector as part of the service's
-  trust boundary and protect `headers`.
-* Drops under a slow or down collector are expected and counted; telemetry is not a
-  delivery guarantee and is never an audit record.
-* TLS to the collector verifies the certificate always (never skipped). The default
-  trust is the built-in web roots; `ca_file` replaces it with the operator's own CA.
-  Revocation checking and client certificates (mTLS) are not supported.
-* An incoming `traceparent`/`tracestate` header is ignored: every request starts its
-  own trace, so a client can neither join, force nor suppress sampling of a trace.
+* Запросы health и OpenAPI и транспортные сбои до того, как запрос дойдёт до маршрута
+  (искажённый HTTP, пределы соединений), не наблюдаются.
+* Статус заголовка потокового ответа — `200`, даже если позднее элемент падает; исходы по
+  элементам — это спаны `oncl.operation` и счётчик `oncl.operations`, а исход запроса становится
+  `failed`, когда упал любой элемент. У элементов `/v1/batch` нет длительности по элементу (SDK
+  выполняет закрытый пакет как единое целое), поэтому они видны только в счётчиках
+  `oncl.operations`/`oncl.key.uses` и в исходе запроса, но не как спаны.
+* Длительности, размеры ответов и время запросов экспортируются и могут выдать оператору
+  коллектора грубые закономерности активности; идентификаторы трасс/спанов случайны и не
+  выводятся ни из какого значения запроса. Считайте коллектор частью границы доверия сервиса и
+  защищайте `headers`.
+* Потери при медленном или недоступном коллекторе ожидаемы и считаются; телеметрия — не
+  гарантия доставки и никогда не запись аудита.
+* TLS к коллектору всегда проверяет сертификат (никогда не пропускается). Доверие по умолчанию —
+  встроенные web-корни; `ca_file` заменяет его собственным CA оператора. Проверка отзыва и
+  клиентские сертификаты (mTLS) не поддерживаются.
+* Входящий заголовок `traceparent`/`tracestate` игнорируется: каждый запрос начинает свою трассу,
+  так что клиент не может ни присоединиться к трассе, ни навязать или подавить её семплирование.
 
-## Package, service and container (operations)
+## Пакет, сервис и контейнер (эксплуатация)
 
-`oncl-server` ships as an archive of its own, `oncl-server-<version>-<flavor>.zip` (Windows: `win-x64`, `win-x86`, `win7-x64`, `win7-x86`) or `.tar.gz` (`linux-x64`, built against glibc 2.28; `osx`, universal), next to the separate `oncl-<version>-<flavor>` command-line archive. Neither is part of the OpenNCALayer desktop package, and nothing in them installs, enables or starts anything: no installer, no autostart, no trust-store change, no self-update. An archive holds the program, `README.md`, `server.example.toml` (the API **disabled**, no token, key or secret), `docs/`, `THIRD-PARTY.txt` (the licences of the third-party code of exactly that flavor: the Unix flavors add AWS-LC, which the Windows flavors do not contain), `LICENSE`, `NOTICE`, and on Linux `deploy/openncalayer-server.service` and `deploy/Dockerfile`. It holds no certificate, key, password, token or test file. The maintainer builds, gates and smoke-tests the archives with `cargo xtask package platform` (`cargo xtask package platform --help`); that command uploads and publishes nothing.
+`oncl-server` упаковывается в собственный архив `oncl-server-<version>-<flavor>.zip` (Windows:
+`win-x64`, `win-x86`, `win7-x64`, `win7-x86`) или `.tar.gz` (`linux-x64`, собран против glibc
+2.28; `osx`, универсальный) рядом с отдельным архивом командной строки `oncl-<version>-<flavor>`.
+Эти архивы собирает только workflow выпуска как артефакты запуска: к релизу, включая
+`0.1.0-alpha.7`, они не приложены (см. «Не сделано / не проверено здесь» ниже).
+Ни один из них не входит в пакет десктопа OpenNCALayer, и ничто в них ничего не устанавливает,
+не включает и не запускает: ни установщика, ни автозапуска, ни изменения хранилища доверия, ни
+самообновления. В архиве лежат программа, `README.md`, `server.example.toml` (API **выключен**, ни
+токена, ни ключа, ни секрета), `docs/`, `THIRD-PARTY.txt` (лицензии стороннего кода именно этого
+флейвора: к Unix-флейворам добавляется AWS-LC, которого в Windows-флейворах нет), `LICENSE`,
+`NOTICE`, а на Linux ещё `deploy/openncalayer-server.service` и `deploy/Dockerfile`. Сертификата,
+ключа, пароля, токена и тестового файла в нём нет. Мейнтейнер собирает, гейтит и проверяет
+дымовым испытанием архивы командой `cargo xtask package platform` (справка:
+`cargo xtask package platform --help`); эта команда ничего не загружает и не публикует.
 
-**Updating is the operator's act**: unpack the newer archive, replace the program and restart the service (or rebuild the image from the newer archive). The program never contacts an update server. Replacing it does not touch the configuration, key containers or the audit journal.
+**Обновление — действие оператора**: распакуйте более новый архив, замените программу и
+перезапустите сервис (или пересоберите образ из более нового архива). Программа никогда не
+обращается к серверу обновлений. Замена не затрагивает конфигурацию, контейнеры ключей и
+журнал аудита.
 
-### What the packaged programs were checked to do
+### Что проверено у упакованных программ
 
-`cargo xtask package platform` unpacks the archives it just made into an empty directory and starts the **unpacked** programs, without a GUI: `oncl --version`, `oncl hash` of a file and of stdin against an independent SHA-256, `oncl verify` refusing a file that is not a signature; then `oncl-server` without a subcommand and `serve` with the shipped example configuration, which must end by themselves while their control pipe stays open, with the operating system's socket table showing no listener on the configured port and a connection to it refused; then the explicit opt-in on loopback (a token from `token-create`, a named synthetic RSA key, loopback OCSP/CRL of a synthetic PKI, `--enable-api`), where the socket table shows exactly one loopback listener of the server process, `oncl --endpoint … sign` makes a CMS signature that `oncl verify` reports `Valid` and `extract` returns the document, the audit journal exists, and a newline on `--shutdown-stdin` stops the service and closes the port. `cargo xtask package platform-smoke` repeats only this part on archives that already exist.
+`cargo xtask package platform` распаковывает только что сделанные архивы в пустой каталог и
+запускает **распакованные** программы без GUI: `oncl --version`, `oncl hash` файла и stdin с
+независимым SHA-256, `oncl verify`, отказывающий файлу, который не является подписью; затем
+`oncl-server` без подкоманды и `serve` с поставляемой примерной конфигурацией, которые должны
+завершиться сами, пока их управляющий канал остаётся открытым, при этом таблица сокетов
+операционной системы не показывает слушателя на настроенном порту, а соединение с ним
+отклоняется; затем явное согласие на loopback (токен из `token-create`, именованный
+синтетический ключ RSA, loopback-OCSP/CRL синтетического PKI, `--enable-api`), где таблица
+сокетов показывает ровно одного loopback-слушателя процесса сервера, `oncl --endpoint … sign`
+делает подпись CMS, которую `oncl verify` объявляет `Valid`, а `extract` возвращает документ,
+журнал аудита существует, а перевод строки в `--shutdown-stdin` останавливает сервис и
+закрывает порт. `cargo xtask package platform-smoke` повторяет только эту часть на уже
+существующих архивах.
 
-### Linux service account and systemd
+### Учётная запись Linux и systemd
 
-The unit is a file you copy; copying it does not enable or start the service, and `ConditionPathExists` keeps it from starting before a configuration exists.
+Юнит — файл, который вы копируете; его копирование не включает и не запускает сервис, а
+`ConditionPathExists` не даёт ему стартовать, пока конфигурации нет.
 
 ```sh
 tar -xzf oncl-server-<version>-linux-x64.tar.gz
@@ -737,20 +802,38 @@ sudo install -m 0644 deploy/openncalayer-server.service /etc/systemd/system/open
 sudo systemctl daemon-reload
 ```
 
-The unit runs as `oncl-server` with `NoNewPrivileges`, an empty capability set, `ProtectSystem=strict` (only `/var/lib/oncl-server`, its state directory, and `/etc/oncl-server` are writable: the private-file API opens the configuration read-write), `PrivateTmp`, `PrivateDevices`, `PrivateUsers`, no address family but IPv4/IPv6, a system-call filter, `MemoryMax=1G` (about twice `total_memory`: the HTTP stack and framing are outside the document budget), `TasksMax`, no core dumps and `UMask=0077`. `systemd-analyze security` rates it 1.1 (OK). It sets `KillSignal=SIGINT` because the service drains admitted operations on SIGINT only; SIGTERM ends it at once (exit 143). With the example configuration (`enabled = false`) `systemctl start openncalayer-server` ends at once with `disabled: no listener` in the journal and opens no listener. The service starts listening only after you configure a token, enable the API and run `sudo systemctl enable --now openncalayer-server` yourself.
+Юнит запускается от `oncl-server` с `NoNewPrivileges`, пустым набором capabilities,
+`ProtectSystem=strict` (записываемы только `/var/lib/oncl-server`, его каталог состояния, и
+`/etc/oncl-server`: API закрытых файлов открывает конфигурацию на чтение и запись), `PrivateTmp`,
+`PrivateDevices`, `PrivateUsers`, без семейств адресов, кроме IPv4/IPv6, с фильтром системных
+вызовов, `MemoryMax=1G` (примерно вдвое больше `total_memory`: стек HTTP и обрамление лежат вне
+бюджета документов), `TasksMax`, без дампов памяти и с `UMask=0077`. Оценка
+`systemd-analyze security --offline=true` — 1.1 (OK) (проверено на systemd 255). Он задаёт `KillSignal=SIGINT`,
+потому что сервис дожидается допущенных операций только по SIGINT (`TimeoutStopSec=330` — больше
+300 с `operation_timeout_ms` по умолчанию); SIGTERM завершает его сразу
+(код 143). С примерной конфигурацией (`enabled = false`) `systemctl start openncalayer-server`
+завершается сразу, оставляя в журнале `disabled: no listener`, и слушатель не открывает. Сервис
+начинает слушать только после того, как вы настроите токен, включите API и сами выполните
+`sudo systemctl enable --now openncalayer-server`.
 
-`recover_audit`: a journal that exists is reopened only with `recover_audit = true`; after a clean stop a restart with `false` is refused. A service that restarts (`Restart=on-failure`, a reboot) therefore keeps `recover_audit = true` once it is enabled; the first start creates the journal and is unaffected.
+`recover_audit`: существующий журнал открывается заново только при `recover_audit = true`;
+после корректной остановки перезапуск с `false` отвергается. Поэтому сервис, который
+перезапускается (`Restart=on-failure`, перезагрузка), после включения держит
+`recover_audit = true`; первый запуск создаёт журнал и этого не требует.
 
-### Token provisioning
+### Выдача токена
 
-Run the real subcommand as the service account. It creates a new 256-bit token file in the private directory, refusing to overwrite one, and prints only its verifier:
+Выполните настоящую подкоманду от учётной записи сервиса. Она создаёт новый 256-битный файл
+токена в закрытом каталоге, не перезаписывая существующий, и печатает только его верификатор:
 
 ```sh
 sudo -u oncl-server /usr/local/bin/oncl-server token-create --directory /etc/oncl-server --name accounting.token
-# verifier=<64 hexadecimal characters>
+# verifier=<64 шестнадцатеричных знака>
 ```
 
-Put the verifier, never the token, into `server.toml`, and write that file as the service account with `umask 077`: a configuration that anyone else can read or replace is refused.
+Помещайте в `server.toml` верификатор, а не токен, и записывайте этот файл от учётной записи
+сервиса с `umask 077`: конфигурация, которую может прочитать или заменить кто-то ещё,
+отвергается.
 
 ```sh
 sudo -u oncl-server sh -c 'umask 077 && cat > /etc/oncl-server/server.toml' <<'EOF'
@@ -762,17 +845,26 @@ scratch_directory = "/var/lib/oncl-server/scratch"
 
 [[tokens]]
 id = "accounting"
-verifier = "<the verifier printed above>"
+verifier = "<верификатор, напечатанный выше>"
 actions = ["hash", "verify"]
 keys = []
 EOF
 ```
 
-Deliver `accounting.token` to that client over a channel you trust, into an owner-only directory on the client (`install -d -m 0700 ~/.oncl`, then a file written with `umask 077`; the client refuses a readable token file), and pass it with `--token-file`. Remove it from the server afterwards (`sudo -u oncl-server rm /etc/oncl-server/accounting.token`): the server only needs the verifier. Rotating a token is creating a new one, replacing its verifier and restarting.
+Передайте `accounting.token` этому клиенту по надёжному каналу в каталог только для владельца
+на клиенте (`install -d -m 0700 ~/.oncl`, затем файл, записанный с `umask 077`; клиент
+отвергает читаемый файл токена) и передавайте его через `--token-file`. После этого удалите его
+с сервера (`sudo -u oncl-server rm /etc/oncl-server/accounting.token`): серверу нужен только
+верификатор. Ротация токена — это создание нового, замена его верификатора и перезапуск.
 
-The client stages what it downloads (OCSP, CRLs) in its working directory unless `--temporary-directory` says otherwise, and on Unix it refuses a directory that others can reach: run `oncl` from an owner-only directory when it verifies against online PKI.
+Клиент складывает загружаемое (OCSP, CRL) в свой рабочий каталог, если `--temporary-directory`
+не говорит иное, а в Unix отвергает каталог, доступный другим: запускайте `oncl` из каталога
+только для владельца, когда он проверяет подпись по онлайновому PKI.
 
-**Windows.** The private-file check requires files with a protected ACL holding exactly one inheritable entry for the owner; `icacls` and PowerShell `Set-Acl` cannot produce it (measured). Use the program itself, which creates such files through the same private-file API, never overwrites, and prints only the name and size:
+**Windows.** Проверка закрытых файлов требует файлов с защищённым ACL с ровно одной
+наследуемой записью для владельца; `icacls` и PowerShell `Set-Acl` создать такой не могут
+(измерено). Используйте саму программу: она создаёт такие файлы через тот же API закрытых
+файлов, никогда не перезаписывает и печатает только имя и размер:
 
 ```bat
 oncl-server install-file --directory %ProgramData%\oncl-operator --name server.toml --input server.toml
@@ -782,17 +874,31 @@ oncl-server token-create --directory %ProgramData%\oncl-operator --name accounti
 oncl-server serve --config %ProgramData%\oncl-operator\server.toml --enable-api
 ```
 
-`--directory` is created owner-only if absent or must already be private; `--name` is one plain file name (no path, drive, stream or reserved device name such as `NUL`); input is at most 16 MiB; a refused name or oversized input creates nothing (not even the directory); if writing the file fails, the file is removed and a directory created by this command is left empty, and a failure of the final directory sync leaves the completed file in place. The same command works on Linux in place of `install -m 0600`. Delete the plain source files afterwards.
+`--directory` создаётся только для владельца, если его нет, или должен уже быть закрытым;
+`--name` — одно простое имя файла (без пути, диска, потока или зарезервированного имени
+устройства, такого как `NUL`; допустимы только латинские буквы, цифры и `-`, `_`, `.`, не более 64
+знаков); ввод не больше 16 МиБ; отклонённое имя или слишком большой ввод
+ничего не создают (даже каталога); если запись файла не удалась, файл удаляется, а созданный
+этой командой каталог остаётся пустым, а сбой финальной синхронизации каталога оставляет
+готовый файл на месте. Та же команда работает на Linux вместо `install -m 0600`. Простые
+исходные файлы после этого удалите.
 
-### TLS provisioning (LAN exposure)
+### Выдача TLS (доступ из локальной сети)
 
-A non-loopback bind needs `hosts` and either real TLS or a trusted proxy ([Explicit LAN exposure](#explicit-lan-exposure)). The service creates no CA and installs no certificate. Create the key as the service account, owner-only, and a request for your CA to sign:
+Не-loopback привязка требует `hosts` и либо настоящий TLS, либо доверенный прокси ([Явный доступ
+из локальной сети](#явный-доступ-из-локальной-сети)). Сервис не создаёт CA и не устанавливает
+сертификат. Создайте ключ от учётной записи сервиса, только для владельца, и запрос, который
+подпишет ваш CA:
 
 ```sh
 sudo -u oncl-server sh -c 'umask 077 && install -d -m 0700 /etc/oncl-server/tls && cd /etc/oncl-server/tls && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out server.key && openssl req -new -key server.key -subj "/CN=signing.internal" -addext "subjectAltName=DNS:signing.internal" -out server.csr'
 ```
 
-Install the certificate chain your CA returns (PEM, server certificate first) as `/etc/oncl-server/tls/server.crt`. For a laboratory without a CA, a self-signed **end-entity** certificate (`CA:FALSE`; the default `openssl req -x509` certificate is `CA:TRUE` and the client refused it as a server certificate, `TlsFailed`) that clients then trust explicitly is enough. It is not a production certificate:
+Установите цепочку сертификатов, которую вернёт ваш CA (PEM, сертификат сервера первым), как
+`/etc/oncl-server/tls/server.crt`. Для лаборатории без CA достаточно самоподписанного
+сертификата **конечного субъекта** (`CA:FALSE`; сертификат `openssl req -x509` по умолчанию —
+`CA:TRUE`, и клиент отверг его как сертификат сервера, `TlsFailed`), которому клиенты затем явно
+доверяют. Это не производственный сертификат:
 
 ```sh
 sudo -u oncl-server sh -c 'umask 077 && cd /etc/oncl-server/tls && openssl req -x509 -key server.key -days 365 -subj "/CN=signing.internal" -addext "subjectAltName=DNS:signing.internal,IP:127.0.0.1" -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=serverAuth" -out server.crt'
@@ -804,18 +910,26 @@ hosts = ["signing.internal:13579"]
 exposure = { mode = "tls", certificate = "/etc/oncl-server/tls/server.crt", private_key = { directory = "/etc/oncl-server/tls", name = "server.key" } }
 ```
 
-The client trusts exactly that certificate: `oncl --endpoint https://signing.internal:13579 --ca-file server.crt --token-file ~/.oncl/accounting.token hash --algorithm sha256 --input document.bin`. Without `--ca-file` it fails (`TlsFailed`); there is no flag that skips verification.
+Клиент доверяет ровно этому сертификату: `oncl --endpoint https://signing.internal:13579 --ca-file server.crt --token-file ~/.oncl/accounting.token hash --algorithm sha256 --input document.bin`. Без `--ca-file` он завершается ошибкой (`TlsFailed`); флага, пропускающего проверку, нет.
 
-### Container
+### Контейнер
 
-`deploy/Dockerfile` builds the image **from the release archive** (no source, no download) on a Debian 12 slim pinned by digest, as a non-root user (uid/gid 10001) with no configuration inside it. Build from a directory that holds the archive:
+`deploy/Dockerfile` собирает образ **из архива выпуска** (без исходников, без загрузок) на
+Debian 12 slim, закреплённом по дайджесту, от непривилегированного пользователя (uid/gid 10001),
+без конфигурации внутри. Собирайте из каталога, где лежит архив:
 
 ```sh
 tar -xzf oncl-server-<version>-linux-x64.tar.gz
 docker build -f oncl-server-<version>-linux-x64/deploy/Dockerfile --build-arg VERSION=<version> -t oncl-server:<version> .
 ```
 
-Mounts are explicit: `/etc/oncl-server` (private configuration, key containers, TLS key) and `/var/lib/oncl-server` (the audit journal `audit/` and `scratch/`, created by the service at its first start: mount a **volume** so the journal outlives the container, and do not create `audit/` yourself; an existing empty one is refused). The private-file rules hold inside the container, so prepare the volumes as the image's own user (uid 10001, mode 0700) and never mount a home directory:
+Монтирования явные: `/etc/oncl-server` (закрытая конфигурация, контейнеры ключей, ключ TLS),
+`/var/lib/oncl-server` (журнал аудита `audit/` и `scratch/`, создаваемые сервисом при первом
+старте: смонтируйте **том**, чтобы журнал пережил контейнер, и не создавайте `audit/` сами;
+существующий пустой отвергается) и необязательный `/run/oncl-secrets` (пароли, ключ TLS, файлы
+токенов). Правила закрытых файлов действуют и внутри контейнера, поэтому готовьте тома от
+собственного пользователя образа (uid 10001, режим 0700) и никогда не монтируйте домашний
+каталог:
 
 ```sh
 docker volume create oncl-config
@@ -828,9 +942,19 @@ docker run -d --name oncl-server --read-only --cap-drop ALL --security-opt no-ne
   -p 127.0.0.1:13579:13579 oncl-server:<version>
 ```
 
-(Put a TLS key into the volume the same way: `… --entrypoint sh … -c 'umask 077 && mkdir -p /etc/oncl-server/tls && cat > /etc/oncl-server/tls/server.key' < server.key`, and read the token out with `--entrypoint cat`.) Inside the container `bind` must be `0.0.0.0:13579` with `hosts` equal to the authority clients use, and TLS or `trusted_proxy`; `-p 127.0.0.1:…` publishes it on the host's loopback only. With the example configuration the container prints `disabled: no listener` and exits 0. Never use `--privileged`. The image sets `STOPSIGNAL SIGINT`, so `docker stop` drains admitted operations (give it `--time` beyond `operation_timeout_ms`; the default Docker grace is 10 s). `--memory 1g` is the container budget for the example's `total_memory`; scratch space is bounded by `total_temp`, so size the `oncl-state` volume for it or lower `temp_per_operation` and `total_temp`. Lowering `total_temp` also lowers the number of bodies received at once: with `max_uploads` unset the server uses `min(8, total_temp / (input_bytes + container_bytes))` (at least 1) and logs the lowered value once at start, while an explicit `max_uploads` above that bound is refused at start (see "Uploads" above). The image's `HEALTHCHECK` only tests that the port (`ONCL_HEALTH_PORT`, default 13579) accepts a TCP connection from inside the container: the authenticated `GET /health` needs a token, which the image must not hold, so probe it from your monitoring with a token that has the `hash` right.
+(Ключ TLS кладут в том так же: `… --entrypoint sh … -c 'umask 077 && mkdir -p /etc/oncl-server/tls && cat > /etc/oncl-server/tls/server.key' < server.key`, а токен читают через `--entrypoint cat`.) Внутри контейнера `bind` должен быть `0.0.0.0:13579`, а `hosts` — равным авторитету, которым пользуются клиенты, и нужен TLS или `trusted_proxy`; `-p 127.0.0.1:…` публикует порт только на loopback хоста. С примерной конфигурацией контейнер печатает `disabled: no listener` и завершается с кодом 0. Никогда не используйте `--privileged`. Образ задаёт `STOPSIGNAL SIGINT`, поэтому `docker stop` дожидается допущенных операций (задайте ему `--time` больше `operation_timeout_ms`; у Docker по умолчанию 10 с). `--memory 1g` — бюджет контейнера для `total_memory` из примера; пространство scratch ограничено `total_temp`, так что подберите под него размер тома `oncl-state` или уменьшите `temp_per_operation` и `total_temp`. Уменьшение `total_temp` уменьшает и число одновременно принимаемых тел: при незаданном `max_uploads` сервер берёт `min(8, total_temp / (input_bytes + container_bytes))` (не меньше 1) и один раз при старте пишет сниженное значение в лог, а явный `max_uploads` выше этой границы отвергается при старте (см. «Загрузки» выше). `HEALTHCHECK` образа проверяет лишь, что порт (`ONCL_HEALTH_PORT`, по умолчанию 13579) принимает TCP-соединение изнутри контейнера: аутентифицированному `GET /health` нужен токен, которого в образе быть не должно, поэтому опрашивайте его из своего мониторинга токеном с правом `hash`.
 
-### Not done / not exercised here
+### Не сделано / не проверено здесь
 
-* The programs and archives are not signed (no Authenticode, no notarization) and nothing is published to a registry, release or browser store: the release workflow builds the archives as workflow artifacts only.
-* The `platform` jobs (macOS universal packaging, tar.gz, the CycloneDX SBOM job `platform-sbom`) ran green in the `v0.1.0-alpha.7` release workflow (run `43413094628`); what they check is the unpacked programs starting without a GUI, not a user installation. Windows 7 packages were import-gated and started on Windows 10, not on Windows 7 itself.
+* Программы и архивы не подписаны (ни Authenticode, ни нотаризации), и ничто не опубликовано в
+  реестре, релизе или магазине расширений. Версия `0.1.0-alpha.7` выпущена, но архивы `oncl` и
+  `oncl-server` к её релизу не приложены: workflow `release.yml` собирает их только как
+  артефакты запуска (`platform-*`, хранятся 30 дней), и в списке из 44 файлов релиза
+  `v0.1.0-alpha.7` архивов `oncl-*` и `oncl-server-*` нет (проверено через GitHub API).
+  Собирайте архивы сами (`cargo xtask package platform`) или из исходников.
+* Все шесть jobs `platform` (`win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64`, `osx`,
+  включая универсальную упаковку macOS и tar.gz) и job CycloneDX SBOM `platform-sbom` завершились
+  успешно в запуске `43413094628` workflow `release.yml` для тега `v0.1.0-alpha.7` (проверено
+  через GitHub API); они проверяют, что распакованные программы запускаются без GUI, а не
+  установку пользователем. Пакеты Win7 прошли гейт импортов, но запускались на раннере
+  `windows-2025` (Windows Server 2025), а не на самой Windows 7.

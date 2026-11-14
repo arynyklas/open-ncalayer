@@ -15,7 +15,7 @@ oncl-server serve --config /etc/oncl-server/server.toml
 ```
 
 Начните с `server.example.toml`: скопируйте его в закрытый каталог оператора, затем следуйте
-`docs/server.md` (на английском): создайте токен
+`docs/server.md`: создайте токен
 
 ```sh
 oncl-server token-create --directory /etc/oncl-server --name client.token
@@ -32,7 +32,7 @@ oncl-server token-create --directory /etc/oncl-server --name client.token
 |---|---|
 | `{{EXE}}` | программа |
 | `server.example.toml` | пример конфигурации: API выключен, секретов нет |
-{{DEPLOY_ROWS}}| `docs/server.md`, `docs/http-api.md` | эксплуатация, TLS, токены, контракт HTTP (на английском) |
+{{DEPLOY_ROWS}}| `docs/server.md`, `docs/http-api.md` | эксплуатация, TLS, токены, контракт HTTP |
 | `THIRD-PARTY.txt` | лицензии сторонних компонентов этой сборки |
 | `LICENSE`, `NOTICE` | Apache-2.0 и уведомления |
 
