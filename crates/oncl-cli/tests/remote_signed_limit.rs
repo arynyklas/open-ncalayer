@@ -276,10 +276,7 @@ fn the_signed_result_of_a_limit_sized_xml_document_verifies_and_extends_over_htt
     let output = client.verify("xades-lt", &extended);
     assert_eq!(exit(&output), 0, "verify lt: {}", text(&output.stderr));
     assert_eq!(json(&output)["verdict"], "Valid");
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 }
 
 /// The rule is the engine's, not XML's: the CMS and PDF results of a document at the allowance
@@ -319,10 +316,7 @@ fn cms_and_pdf_signed_results_of_a_limit_sized_document_are_accepted_again_over_
     let output = client.verify("pades-b", &signed);
     assert_eq!(exit(&output), 0, "pades verify: {}", text(&output.stderr));
     assert_eq!(json(&output)["verdict"], "Valid");
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 }
 
 /// The proof's `cades-levels` chain at megabyte scale, attached and detached: CAdES-T over a
@@ -415,10 +409,7 @@ fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
         );
         assert_eq!(json(&output)["verdict"], "Valid");
     }
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 
     // The same results are refused by a server whose document allowance is one byte smaller,
     // and the signature structure is bounded by `container_bytes`.
@@ -463,10 +454,7 @@ fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
         &output,
     );
     assert!(!narrow_client.path("refused.p7s").exists());
-    assert!(
-        files(&narrow.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    narrow.assert_scratch_empty();
 
     let structure = std::fs::metadata(&signed_detached).unwrap().len();
     let tight = small_server(&pki, structure - 1);
@@ -496,10 +484,7 @@ fn the_cades_levels_chain_of_a_limit_sized_document_runs_over_http() {
         stderr.contains("InputLimit") && stderr.contains("applied=NotApplied"),
         "{stderr}"
     );
-    assert!(
-        files(&tight.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    tight.assert_scratch_empty();
 }
 
 /// A CAdES co-sign (`sign --add`) of a signed result at the allowance, attached and detached:
@@ -558,10 +543,7 @@ fn a_cades_co_sign_at_the_allowance_is_accepted_and_one_byte_more_is_refused_ove
             std::fs::metadata(&added).unwrap().len() > std::fs::metadata(&signed).unwrap().len()
         );
     }
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 
     // One document byte less allowance: refused, and no key is used.
     let narrow = Remote::start_with(&pki, |config, _| {
@@ -601,10 +583,7 @@ fn a_cades_co_sign_at_the_allowance_is_accepted_and_one_byte_more_is_refused_ove
         );
         assert_eq!(narrow.audit_begins(), begins, "{tag}: no key use");
     }
-    assert!(
-        files(&narrow.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    narrow.assert_scratch_empty();
 }
 
 /// Only the signature surcharge may pass the document allowance: a document one byte past it
@@ -680,10 +659,7 @@ fn a_document_past_the_allowance_is_refused_with_input_limit_even_when_signed() 
         "sign past the allowance and the container allowance",
         &client.sign("xades-b", &hostile, &client.path("hostile.signed.xml")),
     );
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 
     // The same signed result is refused once its signature is past `container_bytes`.
     let tight = small_server(&pki, 1024);
@@ -693,10 +669,7 @@ fn a_document_past_the_allowance_is_refused_with_input_limit_even_when_signed() 
         "verify of a signature past container_bytes",
         &client.verify("xades-b", &signed),
     );
-    assert!(
-        files(&tight.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    tight.assert_scratch_empty();
 }
 
 /// PAdES-LT extension passes the service's memory preflight, which reads the PDF before the
@@ -732,10 +705,7 @@ fn a_pades_t_result_of_a_limit_sized_pdf_extends_to_lt_over_http() {
         text(&output.stderr)
     );
     assert_eq!(json(&output)["verdict"], "Valid");
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 }
 
 /// The counted wire of a request with a signed `input` is widened by `container_bytes` once the
@@ -773,10 +743,7 @@ fn the_wire_ceiling_is_widened_by_the_container_allowance_for_a_signed_input() {
         "verify past the widened wire ceiling",
         &client.verify("xades-b", &hostile),
     );
-    assert!(
-        files(&remote.scratch()).is_empty(),
-        "scratch must be empty afterwards"
-    );
+    remote.assert_scratch_empty();
 }
 
 /// An evidence part is spooled up to 1 MiB and not a byte further: one byte more is refused
