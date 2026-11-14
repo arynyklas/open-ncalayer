@@ -167,7 +167,7 @@ fn zola_site_builds_from_committed_data() {
     };
     let (_out, public) = built(&inputs);
     let ports = xtask::registry::ports::load(&root().join("plugins")).unwrap();
-    assert_eq!(ports.len(), 34);
+    assert_eq!(ports.len(), 35);
     for port in &ports {
         for prefix in LANG_PREFIXES {
             let page = format!("{prefix}plugins/{}/index.html", port.short);

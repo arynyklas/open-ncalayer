@@ -1,5 +1,5 @@
 //! The medium ports: taxtech, energy, eproc, osdkz ESF, uchet esfSignUtil, qiwi, bas, eup,
-//! dogovor24, workspace, Simourg and motiw, run as the daemon runs them.
+//! dogovor24, onaidocs, workspace, Simourg and motiw, run as the daemon runs them.
 
 use oncl_flows::testing::Step;
 use oncl_pki::key::{PublicKey, SigAlg};
@@ -2101,6 +2101,344 @@ fn dogovor24_client_auth_rejected() {
     assert_eq!(
         text(harness.call("dogovor24", &dogovor24("signEsedo", BAS_HELLO), None)),
         r#"{"code":"500","message":"Необходимо использовать ключ для подписи!","uuid":"d-1"}"#
+    );
+}
+
+// onaidocs
+
+const ONAIDOCS: &str = "kz.onaidocs.SignBundle";
+
+fn onaidocs(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{ONAIDOCS}","method":"{method}","uuid":"o-1","args":{args}}}"#)
+}
+
+const ONAIDOCS_NO_CONTAINER: &str =
+    r#"{"code":"500","message":"Certificate container was not provided"}"#;
+const ONAIDOCS_NOT_SIGNING: &str = "Необходимо использовать ключ для подписи!";
+
+/// Verifies the attached CMS in `reply` over `data` and parses it.
+fn onaidocs_attached(reply: &str, data: &[u8]) -> CmsView {
+    let cms = reply_cms(reply);
+    oncl_pki::cms::verify(&cms, None).unwrap();
+    let view = cms_view(&cms);
+    assert_eq!(view.econtent.as_deref(), Some(data));
+    view
+}
+
+#[test]
+fn onaidocs_closed_dialog_answers_for_every_method() {
+    // The dialog comes first and a closed one is answered before the arguments or the
+    // method are looked at; the answer carries no uuid even for signEsedo.
+    let harness = Harness::new(vec![Step::CancelStorage; 5], vec![]);
+    let mut session = harness.session("onaidocs");
+    for request in [
+        onaidocs("signCMS", r#"["aGVsbG8="]"#),
+        onaidocs("batchSignCMS", r#"["aGVsbG8="]"#),
+        onaidocs("signEsedo", r#"["aGVsbG8=","a.pdf"]"#),
+        onaidocs("signXml", "[]"),
+        format!(r#"{{"module":"{ONAIDOCS}","method":"signCMS"}}"#),
+    ] {
+        assert_eq!(
+            text(session.call(&request, None)),
+            ONAIDOCS_NO_CONTAINER,
+            "{request}"
+        );
+    }
+    assert_eq!(harness.prompter().storage_prompts().len(), 5);
+    assert!(harness.http_log().is_empty());
+}
+
+#[test]
+fn onaidocs_unknown_method_is_json() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("onaidocs", &onaidocs("signXml", "[]"), None)),
+        r#"{"code":"500","message":"method not found [signXml]"}"#
+    );
+    // The key dialog was shown for it.
+    assert_eq!(harness.prompter().storage_prompts().len(), 1);
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("onaidocs", &format!(r#"{{"module":"{ONAIDOCS}"}}"#), None)),
+        r#"{"code":"500","message":"method not found []"}"#
+    );
+}
+
+#[test]
+fn onaidocs_request_that_is_not_json_is_dropped_before_the_dialog() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert!(
+        harness
+            .call("onaidocs", "not json", None)
+            .into_text()
+            .is_none()
+    );
+    assert!(harness.prompter().storage_prompts().is_empty());
+}
+
+#[test]
+fn onaidocs_sign_cms_attached_with_kalkan_tsa() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("onaidocs", &onaidocs("signCMS", r#"["aGVsbG8="]"#), None));
+    assert!(reply.starts_with(r#"{"responseObject":"MI"#), "{reply}");
+    assert!(reply.ends_with(r#"","code":"200"}"#), "{reply}");
+    let view = onaidocs_attached(&reply, b"hello");
+    assert_eq!(
+        token_policy_and_hash(&cms_view(&reply_cms(&reply)).tokens()[0]),
+        (
+            "1.2.398.3.3.2.6.2".to_owned(),
+            "2.16.840.1.101.3.4.2.1".to_owned()
+        )
+    );
+    assert!(view.signed_types().contains(&"1.2.840.113549.1.9.16.2.47"));
+    // Only Kalkan's time-stamp request: nothing goes to the OCSP responder.
+    let log = harness.http_log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].starts_with("GET http://tsp.pki.gov.kz"), "{log:?}");
+}
+
+#[test]
+fn onaidocs_sign_cms_argument_errors() {
+    // One key dialog per call.
+    let harness = Harness::new(
+        (0..4).flat_map(|_| pick("user-gost2015-sign", 0)).collect(),
+        vec![],
+    );
+    let mut session = harness.session("onaidocs");
+    assert_eq!(
+        text(session.call(
+            &format!(r#"{{"module":"{ONAIDOCS}","method":"signCMS"}}"#),
+            None
+        )),
+        r#"{"code":"500","message":"JSONObject[\"args\"] not found."}"#
+    );
+    assert_eq!(
+        text(session.call(&onaidocs("signCMS", "[5]"), None)),
+        r#"{"code":"500","message":"JSONArray[0] not a string."}"#
+    );
+    assert_eq!(
+        text(session.call(&onaidocs("signCMS", "[]"), None)),
+        r#"{"code":"500","message":"JSONArray[0] not found."}"#
+    );
+    // Java's decoder, unwrapped.
+    assert_eq!(
+        text(session.call(&onaidocs("signCMS", r#"["!!!!"]"#), None)),
+        r#"{"code":"500","message":"Illegal base64 character 21"}"#
+    );
+    // Nothing was signed, so no time-stamp was asked for.
+    assert!(harness.http_log().is_empty());
+}
+
+/// The number of certificates in the `certificates [0]` set of a CMS.
+fn cms_certificate_count(cms: &[u8]) -> usize {
+    let (_, _, content_info, _) = tlv(cms);
+    let signed_data = children(children(content_info)[1].2)[0].2;
+    children(signed_data)
+        .iter()
+        .find(|(tag, _, _)| *tag == 0xa0)
+        .map_or(0, |(_, _, certs)| children(certs).len())
+}
+
+/// signCMS embeds the signer certificate only (a decision of the port; the chain content of
+/// the original is unverified): switching to `CmsCerts::Chain` fails this.
+#[test]
+fn onaidocs_sign_cms_embeds_the_signer_certificate_only() {
+    let harness = Harness::new(pick("inter-user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("onaidocs", &onaidocs("signCMS", r#"["aGVsbG8="]"#), None));
+    assert_eq!(cms_certificate_count(&reply_cms(&reply)), 1, "{reply}");
+}
+
+#[test]
+fn onaidocs_certificate_without_eku_signs_cms_but_not_esedo() {
+    let cert = entry("user-gost2015-noeku");
+    assert!(
+        oncl_pki::info::cert_info(&cert.cert)
+            .ext_key_usages
+            .is_empty(),
+        "no extendedKeyUsage extension"
+    );
+    let harness = Harness::new(pick("user-gost2015-noeku", 0), vec![]);
+    let reply = text(harness.call("onaidocs", &onaidocs("signCMS", r#"["aGVsbG8="]"#), None));
+    assert!(reply.ends_with(r#"","code":"200"}"#), "{reply}");
+    onaidocs_attached(&reply, b"hello");
+    let harness = Harness::new(pick("user-gost2015-noeku", 0), vec![]);
+    let reply = text(harness.call(
+        "onaidocs",
+        &onaidocs("batchSignCMS", r#"["aGVsbG8="]"#),
+        None,
+    ));
+    assert!(reply.ends_with(r#"],"code":"200"}"#), "{reply}");
+    // signEsedo dereferences the missing list: the original's misleading answer.
+    let harness = Harness::new(pick("user-gost2015-noeku", 0), vec![]);
+    assert_eq!(
+        text(harness.call(
+            "onaidocs",
+            &onaidocs("signEsedo", r#"["aGVsbG8=","a.pdf"]"#),
+            None
+        )),
+        format!(r#"{{"code":"500","message":"{ONAIDOCS_NOT_SIGNING}","uuid":"o-1"}}"#)
+    );
+}
+
+#[test]
+fn onaidocs_client_auth_key_is_refused() {
+    let sign = |method: &str, args: &str| {
+        let harness = Harness::new(pick("user-gost2015-auth", 0), vec![]);
+        text(harness.call("onaidocs", &onaidocs(method, args), None))
+    };
+    assert_eq!(
+        sign("signCMS", r#"["aGVsbG8="]"#),
+        format!(r#"{{"code":"500","message":"{ONAIDOCS_NOT_SIGNING}"}}"#)
+    );
+    assert_eq!(
+        sign("batchSignCMS", r#"["aGVsbG8="]"#),
+        format!(r#"{{"code":"500","message":"action canceled: {ONAIDOCS_NOT_SIGNING}"}}"#)
+    );
+    assert_eq!(
+        sign("signEsedo", r#"["aGVsbG8=","a.pdf"]"#),
+        format!(r#"{{"code":"500","message":"{ONAIDOCS_NOT_SIGNING}","uuid":"o-1"}}"#)
+    );
+}
+
+#[test]
+fn onaidocs_batch_signs_every_element() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "onaidocs",
+        &onaidocs("batchSignCMS", r#"["aGVsbG8=","d29ybGQ="]"#),
+        None,
+    ));
+    assert!(reply.starts_with(r#"{"responseObject":["MI"#), "{reply}");
+    assert!(reply.ends_with(r#"],"code":"200"}"#), "{reply}");
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let items = value["responseObject"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    for (item, data) in items.iter().zip([&b"hello"[..], b"world"]) {
+        let cms = decode_java(item.as_str().unwrap()).unwrap();
+        oncl_pki::cms::verify(&cms, None).unwrap();
+        assert_eq!(cms_view(&cms).econtent.as_deref(), Some(data));
+    }
+    // One time-stamp request per element, and no OCSP request.
+    let log = harness.http_log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(
+        log.iter()
+            .all(|l| l.starts_with("GET http://tsp.pki.gov.kz")),
+        "{log:?}"
+    );
+    // No element: no signature, but a success.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("onaidocs", &onaidocs("batchSignCMS", "[]"), None)),
+        r#"{"responseObject":[],"code":"200"}"#
+    );
+}
+
+#[test]
+fn onaidocs_batch_failure_names_the_message_and_returns_nothing() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call(
+            "onaidocs",
+            &onaidocs("batchSignCMS", r#"["aGVsbG8=","!!!!","d29ybGQ="]"#),
+            None
+        )),
+        r#"{"code":"500","message":"action canceled: Illegal base64 character 21"}"#
+    );
+    // The first element was signed (a time-stamp was fetched), the third never.
+    assert_eq!(harness.http_log().len(), 1);
+}
+
+#[test]
+fn onaidocs_batch_args_errors_are_code_500() {
+    let harness = Harness::new(
+        [pick("user-gost2015-sign", 0), pick("user-gost2015-sign", 0)].concat(),
+        vec![],
+    );
+    let mut session = harness.session("onaidocs");
+    assert_eq!(
+        text(session.call(
+            &format!(r#"{{"module":"{ONAIDOCS}","method":"batchSignCMS"}}"#),
+            None
+        )),
+        r#"{"code":"500","message":"JSONObject[\"args\"] not found."}"#
+    );
+    assert_eq!(
+        text(session.call(
+            &format!(r#"{{"module":"{ONAIDOCS}","method":"batchSignCMS","args":"x"}}"#),
+            None
+        )),
+        r#"{"code":"500","message":"JSONObject[\"args\"] is not a JSONArray."}"#
+    );
+}
+
+#[test]
+fn onaidocs_sign_esedo_reply_and_uuid() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("onaidocs", &onaidocs("signEsedo", BAS_HELLO), None));
+    assert!(
+        reply.ends_with(r#"","code":"200","uuid":"o-1"}"#),
+        "{reply}"
+    );
+    let cms = reply_cms(&reply);
+    oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+    let view = cms_view(&cms);
+    assert_eq!(view.econtent, None);
+    let mut types = view.signed_types();
+    types.sort_unstable();
+    assert!(types.contains(&"1.2.840.113549.1.9.13"), "{types:?}");
+    assert!(types.contains(&"1.3.6.1.4.1.6801.2.8"), "{types:?}");
+    assert_eq!(view.signed("1.2.840.113549.1.9.13")[0], ESEDO_DESCRIPTION);
+    // The responder was asked once (and not for a CMS time-stamp).
+    let log = harness.http_log();
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("POST http://ocsp.pki.gov.kz")),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.contains("tsp.pki.gov.kz")), "{log:?}");
+    // A missing uuid is the empty string.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let request = format!(r#"{{"module":"{ONAIDOCS}","method":"signEsedo","args":{BAS_HELLO}}}"#);
+    assert!(
+        text(harness.call("onaidocs", &request, None)).ends_with(r#"","code":"200","uuid":""}"#)
+    );
+    // The OCSP answer is left out when the responder fails.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), down("ocsp", 500));
+    let reply = text(harness.call("onaidocs", &onaidocs("signEsedo", BAS_HELLO), None));
+    assert!(
+        !cms_view(&reply_cms(&reply))
+            .signed_types()
+            .contains(&"1.3.6.1.5.5.7.48.1.1")
+    );
+}
+
+#[test]
+fn onaidocs_sign_esedo_errors_are_exception_texts() {
+    let harness = Harness::new(
+        [
+            pick("user-gost2015-sign", 0),
+            pick("user-gost2015-sign", 0),
+            pick("user-gost2015-sign", 0),
+        ]
+        .concat(),
+        vec![],
+    );
+    let mut session = harness.session("onaidocs");
+    assert_eq!(
+        text(session.call(
+            &format!(r#"{{"module":"{ONAIDOCS}","method":"signEsedo","uuid":"u"}}"#),
+            None
+        )),
+        r#"{"code":"500","message":"org.json.JSONException: JSONObject[\"args\"] not found.","uuid":"u"}"#
+    );
+    assert_eq!(
+        text(session.call(&onaidocs("signEsedo", r#"["aGVsbG8="]"#), None)),
+        r#"{"code":"500","message":"org.json.JSONException: JSONArray[1] not found.","uuid":"o-1"}"#
+    );
+    assert_eq!(
+        text(session.call(&onaidocs("signEsedo", r#"["aGVsbG8é","a.pdf"]"#), None)),
+        r#"{"code":"500","message":"java.lang.ArrayIndexOutOfBoundsException: 233","uuid":"o-1"}"#
     );
 }
 

@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.onaidocs"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.7"
+modules = ["kz.onaidocs.SignBundle"]
+
+[name]
+ru = "OnaiDocs (порт OpenNCALayer)"
+kk = "OnaiDocs (OpenNCALayer порты)"
+en = "OnaiDocs (OpenNCALayer port)"
+
+[description]
+ru = "Подпись документов на onaidocs.kz: CMS с меткой времени, пакеты, ЕСЭДО"
+kk = "onaidocs.kz сайтындағы құжаттарға қол қою: уақыт белгісі бар CMS, топтамалар, ЕСЭДО"
+en = "Signs documents on onaidocs.kz: time-stamped CMS, batches, ESEDO"
+
+[replaces]
+symname = "onaidocs-sign-bundle"
+version = "1.1.0"
+
+[capabilities]
+keys = true

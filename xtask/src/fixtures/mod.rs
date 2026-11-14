@@ -138,6 +138,8 @@ impl Root {
 enum Profile {
     /// Individual, signing.
     Sign,
+    /// Individual, signing, without any extendedKeyUsage extension.
+    NoEku,
     /// Individual, authentication.
     Auth,
     /// Individual, authentication without the clientAuth EKU (older NCA certificates).
@@ -163,7 +165,9 @@ enum Subject {
 impl Profile {
     fn subject(self) -> Subject {
         match self {
-            Profile::Sign | Profile::Auth | Profile::LegacyAuth => Subject::Individual,
+            Profile::Sign | Profile::Auth | Profile::LegacyAuth | Profile::NoEku => {
+                Subject::Individual
+            }
             Profile::LegalSign => Subject::Legal,
             Profile::Tsa => Subject::Tsa,
             Profile::Ocsp | Profile::OcspNoCheckless => Subject::Ocsp,
@@ -204,6 +208,7 @@ impl Profile {
                 true,
                 None,
             ),
+            Profile::NoEku => (signing, &[][..], false, Some(POLICY_SIGN)),
             Profile::Ocsp | Profile::OcspNoCheckless => (
                 KeyUsages::DigitalSignature.into(),
                 &[EKU_OCSP_SIGNING][..],
@@ -211,13 +216,14 @@ impl Profile {
                 None,
             ),
         };
-        let mut extensions = vec![
-            extension(true, &KeyUsage(key_usage)),
-            extension(
+        let mut extensions = vec![extension(true, &KeyUsage(key_usage))];
+        // An empty extension is not valid: no usages, no extendedKeyUsage at all.
+        if !eku.is_empty() {
+            extensions.push(extension(
                 eku_critical,
                 &ExtendedKeyUsage(eku.iter().map(|o| oid(o)).collect()),
-            ),
-        ];
+            ));
+        }
         if let Some(policy) = policy {
             extensions.push(extension(
                 false,
@@ -374,6 +380,10 @@ const INTER_NOAKI: Container = Container {
         &[Profile::Sign],
     )
 };
+
+/// Issued directly by `root-gost2015` like `user-gost2015-sign`, but with no
+/// extendedKeyUsage extension. Drawn after [`INTER_NOAKI`].
+const NO_EKU: Container = container("user-gost2015-noeku", Root::Gost2015, &[Profile::NoEku]);
 
 /// A generated CA: its `.cer` name without extension, subject, key and certificate.
 struct IssuedCa {
@@ -533,6 +543,16 @@ pub fn generate() -> BTreeMap<String, Vec<u8>> {
         );
     }
     out.add_inter_p12(&INTER_NOAKI, root, &inter, &pointers, &mut rng);
+    // Drawn last, so every file above stays unchanged.
+    let entries = issue_entries(&NO_EKU, root, &[], &mut rng);
+    out.add_p12(
+        NO_EKU.name,
+        root,
+        root,
+        &entries,
+        NO_EKU.encryption,
+        &mut rng,
+    );
 
     out.files
         .insert(MANIFEST.to_owned(), out.manifest.into_bytes());

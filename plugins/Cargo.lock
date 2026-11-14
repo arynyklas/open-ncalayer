@@ -771,6 +771,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-onaidocs"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-pki"
 version = "0.1.0"
 dependencies = [

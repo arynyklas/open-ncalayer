@@ -89,5 +89,6 @@
       | `ocsp-nocheckless-gost2015.p12` | `inter-gost2015` | как `ocsp-gost2015`, но без `id-pkix-ocsp-nocheck` |
       | `inter-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `inter-gost2015.cer`: им тесты подписывают CRL промежуточного CA |
       | `root-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `root-gost2015.cer` (самоподписанный): им тесты подписывают CRL корня |
-      | `inter-noaki-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, но без `authorityKeyIdentifier`: от одноимённого `inter-gost2015-twin` издателя отличает только подпись. Генерируется последним |
+      | `inter-noaki-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, но без `authorityKeyIdentifier`: от одноимённого `inter-gost2015-twin` издателя отличает только подпись |
+      | `user-gost2015-noeku.p12` | `root-gost2015` | как `user-gost2015-sign` (KU, политика), но без расширения `extendedKeyUsage` вовсе, без AIA и CDP: сертификат без EKU, который порт onaidocs обязан подписать в `signCMS`. Генерируется последним, поэтому остальные файлы не менялись |
   - `fixtures.toml` — описание контейнеров (пароль, корень, издатель — `.cer` выпустившего CA, alias в порядке загрузки) для `oncl_testkit::synthetic` и `synthetic_all`. Сертификаты `.cer` читает `oncl_testkit::synthetic_cert`.

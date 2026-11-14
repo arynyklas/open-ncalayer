@@ -1,7 +1,7 @@
 //! `cargo xtask plugin-ports-manual`: the plugin ports' real wasm under the manual window's
 //! call path (`crates/oncl-core/tests/plugin_ports_manual.rs`, docs/dev/plugins-manual-tests.md).
 //!
-//! One command: builds the 34 modules the way `plugin-ops-check` and `plugin pack` expect them
+//! One command: builds the port modules the way `plugin-ops-check` and `plugin pack` expect them
 //! (`target/plugin-build`), lints the `[[operations]]` against the built modules
 //! (`plugin-ops-check --require-wasm`), then runs the `#[ignore]`d tests with
 //! `ONCL_PLUGIN_WASM_DIR` set. Offline: `--locked`, vendored sources.
