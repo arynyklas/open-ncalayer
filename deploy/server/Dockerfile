@@ -9,7 +9,7 @@
 # The image enables nothing: it contains no configuration, so a container started without
 # the operator's private config mount refuses to start, and a configuration with
 # `enabled = false` (the example) makes the process exit at once without a listener.
-# Run it as docs/user/server.md ("Container") describes: read-only root file system, all
+# Run it as docs/user/server.md ("Контейнер") describes: read-only root file system, all
 # capabilities dropped, memory and process limits, explicit config / secret / scratch /
 # audit mounts. Never `--privileged`, never a mount of a home directory.
 

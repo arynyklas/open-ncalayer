@@ -4,7 +4,7 @@
 # audit journal, a key, a TLS file or the network.
 #
 # To use it: copy this file to the private operator directory (an owner-only directory;
-# see docs/server.md, "Private operator namespace and tokens"), edit the paths, create a
+# see docs/server.md, "Закрытый каталог оператора и токены"), edit the paths, create a
 # token (`oncl-server token-create`), add it under [[tokens]] and ENABLE the API
 # explicitly: set `enabled = true` here, or start with `oncl-server serve --config <file>
 # --enable-api`. Paths below are for a Linux service account; use absolute paths.
@@ -126,7 +126,7 @@ inline_pkcs12 = false
 
 # A WASM plugin is installed by the operator (code availability only; installation grants
 # nothing) and reached through one exact grant per (token, operation); see docs/user/server.md,
-# "Plugins". `imports` are the exact host imports the operation may use and `keys` the named
+# "Плагины". `imports` are the exact host imports the operation may use and `keys` the named
 # operator keys above. A plugin that declares its operations (`[[operations]]` in its manifest)
 # is granted only under a declared name with `server = true`, its imports must be among the
 # declared ones (an empty list means all of them) and Core forces the declared signature
