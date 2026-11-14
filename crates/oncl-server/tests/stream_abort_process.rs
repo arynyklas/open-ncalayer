@@ -106,6 +106,7 @@ fn seen(response: &[u8]) -> Seen {
 ///   load that was seen across the lower part of the window, down to ~450 bytes below
 ///   the edge. The window is over a thousand bytes wide, but the band that is free of
 ///   both is about 350 bytes wide, from ~70 to ~420 bytes below the edge.
+///
 /// `MARGIN` is the middle of that band.
 ///
 /// The bisect has the same jitter: one stray abort of a value above the edge (seen under
