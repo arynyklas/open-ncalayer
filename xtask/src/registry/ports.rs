@@ -328,7 +328,7 @@ ru = "Окно — общее окно OpenNCALayer."
     #[test]
     fn loads_every_committed_port() {
         let ports = load(&oncl_testkit::workspace_root().join("plugins")).unwrap();
-        assert_eq!(ports.len(), 34);
+        assert_eq!(ports.len(), 35);
         let mut shorts: Vec<&str> = ports.iter().map(|p| p.short.as_str()).collect();
         shorts.sort_unstable();
         assert!(shorts.iter().eq(ports.iter().map(|p| &p.short)));
