@@ -41,7 +41,7 @@ A big run that was not done is **not** a pass.
 
 ## The overload cases
 
-Since the upload phase (`docs/user/server.md`, "Uploads") a body is received under one of `max_uploads`
+Since the upload phase (`docs/user/server.md`, «Загрузки») a body is received under one of `max_uploads`
 upload slots, and only the completed body takes a `max_in_flight` slot and a native worker. The cases are
 therefore built on **observed server state, not on clocks**: a wave of clients starts when the previous wave has
 produced the state it was meant to produce (`xtask/src/platform/large/barrier.rs`). What the harness reads is

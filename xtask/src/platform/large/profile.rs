@@ -6,7 +6,7 @@
 //! never a hang or a 500) and its responsiveness.
 //!
 //! The outcome never depends on how the clients' threads happen to be scheduled. Since the
-//! upload phase (docs/user/server.md, "Uploads"), a body is received under one of `max_uploads`
+//! upload phase (docs/user/server.md, «Загрузки»), a body is received under one of `max_uploads`
 //! upload slots, and only the whole body takes a `max_in_flight` slot and a worker; so the
 //! profile is a sequence of WAVES, each started when the SERVER has reached the state the
 //! previous wave was to produce (see [`super::barrier`]): the stalled uploads are PARKED (they

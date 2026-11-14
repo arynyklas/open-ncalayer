@@ -40,7 +40,7 @@ oncl-pdf.workspace = true
 oncl-xml.workspace = true
 oncl-plugin.workspace = true
 oncl-pdk.workspace = true
-# Opt-in OTLP/HTTP protobuf export (docs/user/server.md "Telemetry"). Server-only: the SDK
+# Opt-in OTLP/HTTP protobuf export (docs/user/server.md "Необязательная телеметрия OTLP"). Server-only: the SDK
 # and desktop closures never contain these. The HTTP client is the workspace `ureq`
 # (rustls+ring), not the OTLP crate's reqwest; no gRPC, no logs, no internal-logs bridge.
 opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace", "metrics"] }
