@@ -328,7 +328,7 @@ impl BoundedExecutor {
             // Worker permit, admission slot, context and reservations are INSIDE
             // the real closure, never merely inside a cancellable async waiter.
             tokio::task::spawn_blocking(move || {
-                let _scope = scope;
+                let scope = scope;
                 let active = active;
                 let worker = worker;
                 let running = running;
@@ -349,6 +349,13 @@ impl BoundedExecutor {
                 // still running for it. Releasing after `send` is a race the receiver can win.
                 drop(running);
                 drop(worker);
+                // The executor's own share of the operation (a view of its resource scope, which
+                // keeps the operation's `max_in_flight` slot taken until its last owner lets go)
+                // ends with the native call as well. It must go before `active`: a caller that
+                // waits for `idle()` and admits again at once finds the slot free only if no
+                // share of the operation outlives the slot of this request. A local that is
+                // dropped at the closure's end would be released after `active`, a race.
+                drop(scope);
                 let _ = sender.send(result);
                 // This thread's share of the request goes before the slot. The executor is
                 // idle (and a shutdown may flush telemetry) only when `active` is gone, and a
@@ -534,5 +541,88 @@ mod tests {
             Poll::Ready(Ok(Ok(7)))
         ));
         executor.idle().await;
+    }
+
+    /// The executor's free request slots at the moment the last owner of an operation let go
+    /// of it: the guard of the operation's lease is dropped then, and not earlier.
+    struct FreeSlotsAtRelease {
+        executor: BoundedExecutor,
+        seen: Arc<std::sync::Mutex<Option<usize>>>,
+    }
+    impl Drop for FreeSlotsAtRelease {
+        fn drop(&mut self) {
+            *self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(self.executor.shared.slots.available_permits());
+        }
+    }
+
+    /// `idle()` means that nothing of a request is left in the executor, so whoever waits for
+    /// it and admits again at once (an engine that runs one operation at a time) finds the
+    /// operation's `max_in_flight` slot free. That slot is freed when the last owner of the
+    /// operation lets go, and the executor's share of it (a view of the resource scope) is
+    /// one of the owners: it must be gone before the executor's own request slot is. Not a
+    /// race to be sampled: the lease's guard records the free request slots at the moment the
+    /// last owner lets go, on the worker's thread, so a share that is released after the slot
+    /// is seen on every run, whether the result is awaited or its receiver is gone already.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_executor_lets_go_of_the_operation_before_it_frees_its_own_slot() {
+        for abandoned in [false, true] {
+            let executor = BoundedExecutor::new(ExecutorConfig {
+                blocking_workers: 1,
+                queue_capacity: 1,
+                admission_wait: Duration::from_secs(1),
+            })
+            .unwrap();
+            let full =
+                executor.shared.config.blocking_workers + executor.shared.config.queue_capacity;
+            let seen = Arc::new(std::sync::Mutex::new(None));
+            let scope = scope();
+            assert!(scope.lease().attach_guard(Box::new(FreeSlotsAtRelease {
+                executor: executor.clone(),
+                seen: seen.clone(),
+            })));
+            let (open, held) = std::sync::mpsc::channel::<()>();
+            let (entered, started) = oneshot::channel::<()>();
+            let handle = executor
+                .launch(scope, move || {
+                    entered.send(()).expect("the test waits for the start");
+                    held.recv().expect("the test opens the gate");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            started.await.expect("the native call starts");
+            if abandoned {
+                // Nobody is left to take the result: the native call runs on, unseen.
+                drop(handle);
+                open.send(()).unwrap();
+            } else {
+                open.send(()).unwrap();
+                handle.wait().await.unwrap();
+            }
+            executor.idle().await;
+            let began = Instant::now();
+            let free = loop {
+                if let Some(free) = *seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                {
+                    break free;
+                }
+                assert!(
+                    began.elapsed() < Duration::from_secs(5),
+                    "the operation is let go of"
+                );
+                tokio::task::yield_now().await;
+            };
+            assert_eq!(
+                free,
+                full - 1,
+                "free request slots when the operation was let go of (abandoned: {abandoned})"
+            );
+        }
     }
 }
