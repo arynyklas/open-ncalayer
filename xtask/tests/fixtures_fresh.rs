@@ -33,7 +33,7 @@ fn committed_fixtures_are_fresh() {
 #[test]
 fn every_p12_loads_and_chains_through_its_issuer_to_its_root() {
     let all = synthetic_all();
-    assert_eq!(all.len(), 18);
+    assert_eq!(all.len(), 19);
     for f in all {
         let entries =
             pkcs12::load(&read(&f.path), &f.password).unwrap_or_else(|e| panic!("{}: {e}", f.name));
