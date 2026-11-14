@@ -2214,7 +2214,7 @@ fn onaidocs_sign_cms_argument_errors() {
     );
     assert_eq!(
         text(session.call(&onaidocs("signCMS", "[5]"), None)),
-        r#"{"code":"500","message":"JSONArray[0] is not a String."}"#
+        r#"{"code":"500","message":"JSONArray[0] not a string."}"#
     );
     assert_eq!(
         text(session.call(&onaidocs("signCMS", "[]"), None)),
@@ -2227,6 +2227,25 @@ fn onaidocs_sign_cms_argument_errors() {
     );
     // Nothing was signed, so no time-stamp was asked for.
     assert!(harness.http_log().is_empty());
+}
+
+/// The number of certificates in the `certificates [0]` set of a CMS.
+fn cms_certificate_count(cms: &[u8]) -> usize {
+    let (_, _, content_info, _) = tlv(cms);
+    let signed_data = children(children(content_info)[1].2)[0].2;
+    children(signed_data)
+        .iter()
+        .find(|(tag, _, _)| *tag == 0xa0)
+        .map_or(0, |(_, _, certs)| children(certs).len())
+}
+
+/// signCMS embeds the signer certificate only (a decision of the port; the chain content of
+/// the original is unverified): switching to `CmsCerts::Chain` fails this.
+#[test]
+fn onaidocs_sign_cms_embeds_the_signer_certificate_only() {
+    let harness = Harness::new(pick("inter-user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("onaidocs", &onaidocs("signCMS", r#"["aGVsbG8="]"#), None));
+    assert_eq!(cms_certificate_count(&reply_cms(&reply)), 1, "{reply}");
 }
 
 #[test]

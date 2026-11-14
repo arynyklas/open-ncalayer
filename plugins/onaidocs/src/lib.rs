@@ -142,7 +142,14 @@ fn reply(outcome: Result<JValue, Option<String>>, uuid: Option<String>) -> Strin
 /// `signCMS{args:[<base64>]}`.
 fn sign_cms(root: &Map<String, Value>, key: &Key) -> Result<JValue, Option<String>> {
     let args = orgjson::get_array(root, "args")?;
-    let data = orgjson::array_get_string(args, 0)?;
+    // The bundle embeds an older org.json: `getString` fails with `] not a string.`, not the
+    // `is not a String.` of the shared helper.
+    let data = match args.first() {
+        None => return Err(Some("JSONArray[0] not found.".to_owned())),
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| Some("JSONArray[0] not a string.".to_owned()))?,
+    };
     cades(data, key).map(JValue::Str)
 }
 
