@@ -25,7 +25,7 @@ oncl verify --profile cms --input signature.p7s --root nca-root.der
 С `--endpoint https://host:13579 --token-file client.token --ca-file ca.pem` те же команды
 работают как клиент `oncl-server` (отдельный пакет).
 
-Полное описание: `docs/cli.md` в этом архиве (на английском).
+Полное описание: `docs/cli.md` в этом архиве.
 
 ## Состав
 

@@ -1,18 +1,20 @@
-# Typed HTTP request contract
+# Типизированный контракт HTTP-запросов
 
-The standalone service exposes `POST /v1/operations` in addition to the original
-raw `POST /v1/hash`. Both require the individual bearer token and exact configured
-Host authority described in [server.md](server.md). There are no NCANode
-compatibility aliases, request-controlled filesystem paths, trust roots, grants,
-limits, method overrides, administrative actions, retries or stored jobs.
+Автономная служба предоставляет `POST /v1/operations` в дополнение к исходному
+сырому `POST /v1/hash`. Оба требуют индивидуальный bearer-токен и точно настроенную
+Host-authority, описанные в [server.md](server.md). Псевдонимов совместимости с
+NCANode, путей файловой системы, корней доверия, грантов, лимитов, переопределений
+метода, административных действий, повторов и сохраняемых заданий, управляемых
+запросом, нет.
 
 ## JSON-small
 
-Use `Content-Type: application/json`. The complete encoded entity is limited to
-65,536 bytes independently of the document limit. Document values are UTF-8 text,
-not base64 encodings of large files. Duplicate document names, unknown fields,
-unused parts, duplicate item/part identifiers and mismatched item ownership are
-errors. Item and part identifiers contain 1–128 ASCII letters, digits, `_` or `-`.
+Используйте `Content-Type: application/json`. Вся закодированная сущность ограничена
+65 536 байтами независимо от лимита документа. Значения документов — текст UTF-8, а не
+base64-кодировки больших файлов. Повторяющиеся имена документов, неизвестные поля,
+неиспользуемые части, повторяющиеся идентификаторы элементов/частей и несоответствие
+принадлежности элементов — ошибки. Идентификаторы элементов и частей состоят из 1–128
+ASCII-букв, цифр, `_` или `-`.
 
 ```json
 {
@@ -28,40 +30,43 @@ errors. Item and part identifiers contain 1–128 ASCII letters, digits, `_` or 
 }
 ```
 
-The typed `hash` operation's explicit algorithm is one of
-`sha1`, `sha256`, `sha512`, `gost34311`, `streebog256`, `streebog512`; an algorithm
-is not inferred from a filename or document contents. A hash request needs the
-`hash` action and cannot select a key. Hashing SHA-1 is not signing permission.
+Явный алгоритм типизированной операции `hash` — один из
+`sha1`, `sha256`, `sha512`, `gost34311`, `streebog256`, `streebog512`; алгоритм
+не выводится из имени файла или содержимого документа. Запрос hash требует
+действия `hash` и не может выбирать ключ. Хеширование SHA-1 — это не разрешение на подпись.
 
-`verify` requires the distinct `verify` token action before document intake. Its
-metadata is `{"kind":"verify","profile":"cms","input":"signature"}`; optional
-`detached` names a second declared public document. Available SDK profiles are
+`verify` требует отдельного действия токена `verify` до приёма документа. Его
+метаданные — `{"kind":"verify","profile":"cms","input":"signature"}`; необязательный
+`detached` называет вторую объявленную открытую часть-документ. Доступные профили SDK:
 `cms`, `cades_b`, `cades_t`, `cades_lt`, `cades_lta`, `pdf`, `pades_b`, `pades_t`,
-`pades_lt`, `pades_lta`, `xml`, and `xml_kalkan`. These select the actual verifier,
-not a filename guess. No wire roots, validation mode or network privileges are
-accepted. The service's default trust set is empty and PKI network is denied;
-this does not promote a valid cryptographic signature to trusted validity.
+`pades_lt`, `pades_lta`, `xml`, `xml_kalkan`, `xades_b`, `xades_t`, `xades_lt`,
+`xades_lta` и `wsse`. Они выбирают настоящий проверяющий код, а не догадку по имени
+файла. Корни, режим проверки и права на сеть через wire не принимаются. Набор доверия
+службы по умолчанию пуст, а сеть PKI запрещена; это не повышает криптографически
+верную подпись до доверенной.
 
-A cryptographically invalid signature is a completed HTTP 200 result with
-`kind:"verification"` and `verdict:"Invalid"`, not HTTP 500. Results carry actual
-per-signer signature, chain, validity, revocation, timestamp and key-usage checks,
-the host policy, checked time and time basis. Diagnostic reasons are explanatory
-text, not additional authorization or a replacement for the typed check fields. A signature
-that is cryptographically intact but misses a CAdES/PAdES baseline rule (for example the
-signing-time attribute Kalkan writes into a PAdES CMS, which EN 319 142-1 forbids) shows
-every check `Passed` or `Unavailable`, a `Profile(...)` reason and `verdict:"Invalid"`; read
-the verdict and the reasons together, not the six checks alone.
+Криптографически неверная подпись — это завершённый результат HTTP 200 с
+`kind:"verification"` и `verdict:"Invalid"`, а не HTTP 500. Результаты несут настоящие
+проверки по каждому подписанту — подпись, цепочка, срок действия, отзыв, штамп времени
+и использование ключа, — политику хоста, проверенное время и основание времени.
+Диагностические причины — пояснительный текст, а не дополнительное разрешение и не замена
+типизированных полей проверок. Подпись, которая криптографически цела, но нарушает
+правило baseline CAdES/PAdES (например, атрибут signing-time, который Kalkan пишет в CMS
+PAdES и который запрещает EN 319 142-1), показывает все проверки `Passed` или
+`Unavailable`, причину `Profile(...)` и `verdict:"Invalid"`; читайте вердикт и причины
+вместе, а не одни шесть проверок.
 
-## Metadata-first multipart
+## Multipart: метаданные первыми (metadata-first)
 
-Use `Content-Type: multipart/form-data; boundary=<boundary>`. Boundary length is
-1–70 ASCII characters from the multipart boundary alphabet. The first field must
-have `Content-Disposition: form-data; name="metadata"`, no filename, and contain
-only the `metadata` object from the JSON example, limited to 65,536 encoded bytes.
-It is parsed before the host resolves the action and grants authority. No extra
-authority header or duplicate metadata copy is required.
+Используйте `Content-Type: multipart/form-data; boundary=<boundary>`. Длина границы —
+1–70 ASCII-символов из алфавита границ multipart. Первое поле должно иметь
+`Content-Disposition: form-data; name="metadata"`, без имени файла, и содержать
+только объект `metadata` из примера JSON, не больше 65 536 закодированных байт.
+Оно разбирается до того, как хост определяет действие и выдаёт полномочия. Дополнительный
+заголовок полномочий или повторная копия метаданных не нужны.
 
-After this first field, send each declared part once using its declared name:
+После этого первого поля отправьте каждую объявленную часть один раз под её объявленным
+именем:
 
 ```text
 --example-boundary\r\n
@@ -76,386 +81,410 @@ Content-Type: application/octet-stream\r\n
 --example-boundary--\r\n
 ```
 
-Here `\r\n` denotes actual CRLF bytes, not the four printable characters.
-Unknown, duplicate, missing or late-changing fields are refused. The current hash
-operation accepts only `document` roles; a `secret` role, including a secret with
-a document filename/content type, cannot be reclassified into a hash document.
-A Content-Disposition filename is untrusted display metadata, never a filesystem
-name. Public documents are immutable, randomly named owner-only SDK snapshots in
-the explicit operator `scratch_directory`; no spool is created from filenames.
-The directory must be private if already present. Scratch disappears when its
-last owner is released and is not an archive or a persistent queue.
+Здесь `\r\n` обозначает настоящие байты CRLF, а не четыре печатных символа.
+Неизвестные, повторяющиеся, отсутствующие и изменяющиеся с запозданием поля отклоняются.
+Текущая операция hash принимает только роли `document`; роль `secret`, в том числе
+секрет с именем файла/типом содержимого документа, нельзя переклассифицировать в документ
+для хеширования. Имя файла в Content-Disposition — недоверенные метаданные для
+отображения, а не имя в файловой системе. Открытые документы — неизменяемые снимки SDK
+со случайными именами, доступные только владельцу, в явно заданном операторском
+`scratch_directory`; spool по именам файлов не создаётся.
+Каталог должен быть приватным, если он уже существует. Scratch исчезает, когда
+освобождается его последний владелец, и не является архивом или постоянной очередью.
 
-Content-Length is optional. Actual bytes are counted, including unknown-length
-chunked uploads and overflow probes. Wire chunks may split every delimiter and
-CRLF; a legal 64-KiB wire chunk is not rejected merely because of its chunk size.
-Document bytes and framing overhead have separate quotas. Closing-delimiter
-read-ahead and remaining HTTP entity bytes are also counted, so an oversized
-epilogue cannot borrow an unused document allowance or wait out an advertised
-tail before being refused.
-Raw framing is now observed at the pinned parser's existing byte-consumption
-transitions, including proven partial headers and preambles, before further body
-waiting or header-map allocation. An over-budget complete or partial part header
-is `FramingLimit`/413 even when its document body is never sent. Exhausting the
-separate header admission cap is `MetadataLimit`/413; malformed/truncated framing
-remains `InvalidRequest`/400. The first owned transport/resource/control cause is
-shared immutably through parser, field-reader, worker and terminal-status
-selection, including when worker delivery is delayed past the original deadline.
-It is never inferred from error text or replaced by a later cancellation.
+Content-Length необязателен. Считаются фактические байты, включая chunked-загрузки
+неизвестной длины и пробы переполнения. Wire-чанки могут разрезать любой разделитель и
+CRLF; допустимый wire-чанк в 64 КиБ не отклоняется только из-за размера чанка.
+У байт документа и накладных расходов на обрамление отдельные квоты. Упреждающее чтение
+закрывающего разделителя и оставшиеся байты HTTP-сущности тоже считаются, поэтому слишком
+большой эпилог не может занять неиспользованный запас документа или переждать объявленный
+хвост, прежде чем будет отклонён.
+Сырое обрамление наблюдается на существующих переходах потребления байт закреплённого
+разборщика, включая подтверждённые частичные заголовки и преамбулы, до дальнейшего
+ожидания тела или выделения карты заголовков. Полный или частичный заголовок части сверх
+бюджета — это `FramingLimit`/413, даже если тело документа так и не было отправлено.
+Исчерпание отдельного предела допуска заголовков — `MetadataLimit`/413; искажённое/усечённое
+обрамление остаётся `InvalidRequest`/400. Первая зафиксированная причина
+транспорта/ресурса/управления неизменяемо разделяется между разборщиком, читателем полей,
+рабочим потоком и выбором завершающего статуса, в том числе когда доставка рабочему потоку
+задержана за пределы исходного дедлайна. Она никогда не выводится из текста ошибки и не
+заменяется более поздней отменой.
 
-**Document allowance and signed results.** `input_bytes` bounds a document, and a document one
-byte past it is `InputLimit`/413. The `input` part of a `verify`, `extend`, `extract` or `sign`
-item may already be a signed result (a document plus the signature, revision or envelope bytes
-that this service or another signer added), so it may exceed `input_bytes` by those container
-bytes only, and never past `container_bytes` (default 1 GiB, the SDK default) or the bound the
-format itself has (for example about 188 MiB of appended PDF revisions). The server spools such
-a part as unclassified wire of at most `input_bytes + container_bytes` without charging the
-document allowance, and the engine then reads it as it reads any file given to the SDK or the
-CLI: it classifies the signature bytes, charges `input_bytes` for the document part and the
-container allowance for the rest, so a signed result of a document that was exactly at
-`input_bytes` is accepted again by the service that produced it, and a parsable document part one byte
-past `input_bytes` is still `InputLimit`, signed or not (unparsable garbage in that role is
-`InvalidRequest`/400, because the engine cannot classify it). The wire ceiling of a request with such
-an input is `input_bytes + container_bytes + framing_bytes + 64 KiB` (the metadata part); the
-ceiling of every other multipart request is `input_bytes + framing_bytes + 64 KiB`, and `/v1/hash` takes a raw body of at most `input_bytes`.
-Every other document part (a detached payload, an inspected container, JOSE input) stays within
-`input_bytes` at once. Evidence parts (`certificate`, `ocsp`, `crl`) are validation material, not
-documents: each is bounded at 1 MiB and the engine's evidence limits, and none is charged to the
-document allowance, exactly as the CLI reads evidence files. The oversize refusal of a signed
-input is found by the engine after the response status is chosen, so a streamed request reports
-it as a failed final record with `InputLimit` and `NotApplied`, never as a dropped stream. CAdES
-follows the same rule for verify, extend and `add`: an attached result is document + signature,
-and a detached signature (the `input` part) is container only, its detached payload being a
-document of at most `input_bytes` of its own, so the signature and a payload of exactly
-`input_bytes` are accepted together.
+**Лимит документа и подписанные результаты.** `input_bytes` ограничивает документ, а
+документ на один байт больше — это `InputLimit`/413. Часть `input` элемента `verify`,
+`extend`, `extract` или `sign` уже может быть подписанным результатом (документ плюс байты
+подписи, ревизии или конверта, которые добавила эта служба или другой подписывающий),
+поэтому она может превышать `input_bytes` только на эти байты контейнера и никогда — не
+больше `container_bytes` (по умолчанию 1 ГиБ, как в SDK) или границы, которую задаёт сам
+формат (например, около 188 МиБ добавленных ревизий PDF). Сервер складывает такую часть в
+spool как неклассифицированный wire не больше `input_bytes + container_bytes`, не списывая
+запас документа, а затем движок читает её так же, как любой файл, переданный SDK или CLI:
+классифицирует байты подписи, списывает `input_bytes` за часть-документ, а остальное — с
+запаса контейнера, поэтому подписанный результат документа, равного `input_bytes`, снова
+принимается породившей его службой, а разбираемая часть-документ на один байт больше
+`input_bytes` по-прежнему `InputLimit`, подписана она или нет (неразбираемый мусор в этой
+роли — `InvalidRequest`/400, потому что движок не может его классифицировать). Потолок wire
+запроса с таким входом — `input_bytes + container_bytes + framing_bytes + 64 KiB` (часть
+метаданных); потолок любого другого multipart-запроса — `input_bytes + framing_bytes + 64 KiB`,
+а `/v1/hash` принимает сырое тело не больше `input_bytes`.
+Каждая другая часть-документ (отсоединённая полезная нагрузка, проверяемый контейнер, вход
+JOSE) целиком укладывается в `input_bytes`. Части-свидетельства (`certificate`, `ocsp`,
+`crl`) — материал для проверки, а не документы: каждая ограничена 1 МиБ и лимитами
+свидетельств движка, и ни одна не списывается с запаса документа, точно так же, как CLI
+читает файлы свидетельств. Отказ из-за слишком большого подписанного входа находит движок
+после того, как статус ответа выбран, поэтому потоковый запрос сообщает о нём как о
+завершающей записи с ошибкой `InputLimit` и `NotApplied`, а не как об оборванном потоке.
+CAdES следует тому же правилу для verify, extend и `add`: присоединённый результат — это
+документ + подпись, а отсоединённая подпись (часть `input`) — только контейнер, её
+отсоединённая полезная нагрузка — отдельный документ не больше `input_bytes`, поэтому
+подпись и полезная нагрузка ровно в `input_bytes` принимаются вместе.
 
-Scratch and sizing. Lowering `input_bytes` requires lowering `container_bytes` too. At the
-defaults one `input` part of a verify, extend, extract or sign item is spooled up to
-`input_bytes + container_bytes` (2 GiB) before the engine refuses an unsupported document, and
-the engine then copies about `input_bytes` (a CAdES verify, extend or add copies the wire again
-while it parses it, up to `input_bytes + container_bytes` plus one 256 KiB chunk before a
-hostile wire is refused, so up to about 4 GiB at the defaults together with the upload
-spool), so a hostile upload can write several GiB to
-the scratch before it is refused; this is bounded by `temp_per_operation`, `total_temp`,
-`max_uploads` (the bodies being received) and `max_in_flight`. Measured peaks: signing a
-document at the limit holds about 3x `input_bytes`
-of scratch, and verifying a signed result about 2x. Rule of thumb:
-`temp_per_operation >= 3 * (input_bytes + container_bytes)`. The configuration does not check
-this rule, only that an explicit `max_uploads` lets every upload spool its largest input at once:
-`max_uploads <= total_temp / (input_bytes + container_bytes)` (unset, `max_uploads` is
-`min(8, max(1, that bound))`). A request declaring a length past the ceiling is refused at once with `InputLimit`; an
-upload without a declared length is counted and refused with `FramingLimit` when the wire passes
-the ceiling. A sign or extend item takes at most 64 evidence references (more is
-`InvalidRequest`, before any part is read). `container_bytes` must be positive and
-`input_bytes + container_bytes + framing_bytes + 64 KiB` must fit in 64 bits.
+Scratch и размеры. Уменьшение `input_bytes` требует уменьшить и `container_bytes`. При
+значениях по умолчанию одна часть `input` элемента verify, extend, extract или sign
+складывается в spool до `input_bytes + container_bytes` (2 ГиБ), прежде чем движок отклонит
+неподдерживаемый документ, а затем движок копирует около `input_bytes` (verify, extend или
+add CAdES копирует wire ещё раз, пока разбирает его, — до `input_bytes + container_bytes`
+плюс один чанк 256 КиБ, прежде чем враждебный wire будет отклонён, то есть при значениях
+по умолчанию вместе со spool загрузки до примерно 4 ГиБ), поэтому враждебная загрузка может
+записать в scratch несколько ГиБ, прежде чем будет отклонена; это ограничено
+`temp_per_operation`, `total_temp`, `max_uploads` (принимаемые тела) и `max_in_flight`.
+Измеренные пики: подпись документа на пределе удерживает в scratch около 3x `input_bytes`,
+а проверка подписанного результата — около 2x. Практическое правило:
+`temp_per_operation >= 3 * (input_bytes + container_bytes)`. Конфигурация это правило не
+проверяет, а только то, что явный `max_uploads` позволяет каждой загрузке разом положить в
+spool её наибольший вход:
+`max_uploads <= total_temp / (input_bytes + container_bytes)` (не заданный `max_uploads`
+равен `min(8, max(1, that bound))`, где that bound — эта граница). Запрос, объявляющий длину
+сверх потолка, сразу отклоняется с `InputLimit`; загрузка без объявленной длины считается и
+отклоняется с `FramingLimit`, когда wire переходит потолок. Элемент sign или extend
+принимает не больше 64 ссылок на свидетельства (больше — `InvalidRequest` до чтения любой
+части). `container_bytes` должен быть положительным, а
+`input_bytes + container_bytes + framing_bytes + 64 KiB` — помещаться в 64 бита.
 
-The implementation uses pinned `multer` 3.1.0 for multipart parsing. Its feeder
-admits at most 8,192 new bytes while parsing unknown-role headers/preamble, in
-addition to at most one previous 4,096-byte data chunk and boundary suffix. It
-forces cooperative polling so an always-ready upload is not collected into the
-parser. Header count is additionally bounded by the parser; metadata fixes the
-exact permitted names and total part count. The actual standalone Hyper read
-buffer is capped at 32,768 bytes; per-connection HTTP/TLS transport overhead is
-separate from the SDK working-buffer reservations. Per-request parser, decoded
-metadata and retained ingress allocations are admitted before allocation. This
-is not a claim of the 1-GiB XML/PDF resource acceptance gate.
+Реализация использует для разбора multipart закреплённую версию `multer` 3.1.0. Его
+подающая часть (feeder) допускает не больше 8 192 новых байт при разборе
+заголовков/преамбулы неизвестной роли — помимо не более чем одного предыдущего блока данных
+в 4 096 байт и суффикса границы. Она принудительно использует кооперативный опрос, чтобы
+всегда готовая загрузка не накапливалась в разборщике. Число заголовков дополнительно
+ограничено разборщиком; метаданные фиксируют точные допустимые имена и общее число частей.
+Фактический буфер чтения автономного Hyper ограничен 32 768 байтами; накладные расходы
+транспорта HTTP/TLS на соединение — отдельно от резервов рабочих буферов SDK. Выделения на
+запрос — разборщик, декодированные метаданные и удерживаемый ingress — допускаются до
+выделения. Это не заявление о воротах приёмки ресурсов XML/PDF на 1 ГиБ.
 
-## Result and errors
+## Результат и ошибки
 
-A completed typed hash response has `Content-Type: application/json`:
+Завершённый типизированный ответ hash имеет `Content-Type: application/json`:
 
 ```json
 {"type":"final","operation_id":1,"status":"completed","results":[{"item_id":"invoice","applied":"NotApplied","result":{"kind":"hash","algorithm":"sha256","digest":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","bytes_in":3}}]}
 ```
 
-The operation ID varies; item IDs echo the validated metadata. Item `bytes_in`
-counts the actual document bytes, including immutable uploaded snapshots; replay
-does not debit the original input quota a second time. Only a complete terminal
-result is success.
+Идентификатор операции меняется; идентификаторы элементов повторяют проверенные
+метаданные. `bytes_in` элемента считает фактические байты документа, включая неизменяемые
+загруженные снимки; повторное чтение не списывает исходную входную квоту второй раз.
+Успех — только полный завершающий результат.
 
-## Streaming artifact responses
+## Потоковые ответы с артефактами
 
-`extract` is an actual SDK structural CMS-content extraction operation, not a
-signature-validation assertion. Its request metadata is
-`{"kind":"extract","input":"container"}` with the referenced public document.
-It requires the distinct `extract` token action and configured private scratch.
+`extract` — настоящая операция SDK по структурному извлечению содержимого CMS, а не
+утверждение о проверке подписи. Её метаданные запроса —
+`{"kind":"extract","input":"container"}` с указанным открытым документом.
+Она требует отдельного действия токена `extract` и настроенного приватного scratch.
 
-Requests containing extraction return `multipart/mixed` with a random boundary.
-JSON `progress` parts contain actual operation ID and coalesced byte counters;
-they are not success receipts. Binary `artifact` parts carry a server-generated
-`Content-ID` and exact `Content-Length`. The JSON `final` part links the extraction
-result's `artifact` ID to those bytes and is the sole completed-result authority.
-There are no callback URLs, stored jobs or follow-up artifact paths.
+Запросы, содержащие извлечение, возвращают `multipart/mixed` со случайной границей.
+Части JSON `progress` содержат настоящий идентификатор операции и объединённые счётчики
+байт; это не квитанции об успехе. Бинарные части `artifact` несут сгенерированный
+сервером `Content-ID` и точный `Content-Length`. Часть JSON `final` связывает
+идентификатор `artifact` результата извлечения с этими байтами и является единственным
+источником истины о завершённом результате. Адресов обратного вызова, сохраняемых заданий и
+последующих путей к артефактам нет.
 
-The server completes bounded input staging before starting this response, so a
-blocking upload-then-read client need not consume output concurrently with upload.
-SDK processing remains in the admitted native worker. That worker materializes
-bounded public output and releases its permit; socket backpressure never keeps a
-PKI worker occupied. Delivery reads one admitted 256-KiB region at a time through
-the SAME bounded executor. Its opaque task accepts only a finished artifact and
-the actual matching output owner, never an arbitrary caller-supplied scope.
-The original context, root, output files and reservations remain attached to all
-actual response-byte clones/slices until their final drop.
+Сервер завершает ограниченную подготовку (staging) входа до начала этого ответа, поэтому
+блокирующему клиенту, который сначала загружает, а потом читает, не нужно потреблять выход
+одновременно с загрузкой. Обработка SDK остаётся в допущенном нативном рабочем потоке. Этот
+поток материализует ограниченный открытый выход и освобождает свой допуск; обратное давление
+сокета никогда не держит рабочий поток PKI занятым. Доставка читает по одной допущенной
+области в 256 КиБ через ТОТ ЖЕ ограниченный исполнитель. Его непрозрачная задача принимает
+только готовый артефакт и настоящего соответствующего владельца выхода, но никогда не
+произвольную область, предоставленную вызывающим. Исходный контекст, корень (root), файлы
+выхода и резервы остаются привязанными ко всем настоящим клонам/срезам байт ответа до их
+последнего освобождения (drop).
 
-Small progress/final metadata and MIME framing have actual output accounting;
-SDK-produced artifact bytes are not charged a second time by the disk adapter.
-The private disk adapter reserves temporary storage before file growth, caps a
-write quantum, records successful partial writes and checks flush/sync/extent
-before making an artifact readable. Header/nonce ownership authorizes deletion
-only of its own generated files; incomplete or failed output is never published.
+Малые метаданные progress/final и обрамление MIME учитываются как настоящий выход; байты
+артефактов, созданные SDK, дисковый адаптер второй раз не списывает.
+Приватный дисковый адаптер резервирует временное хранилище до роста файла, ограничивает
+квант записи, фиксирует успешные частичные записи и проверяет flush/sync/extent, прежде чем
+сделать артефакт читаемым. Владение заголовком/nonce даёт право удалять только собственные
+созданные файлы; неполный или неудачный выход никогда не публикуется.
 
-A client must stage artifact bytes and require the final result, closing MIME
-delimiter AND successful completion of the HTTP entity before publishing. An
-execution/read/deadline failure after headers can abort transport; a valid prefix
-or a progress part is never partial success. No terminal result means no publish,
-not a claim that a prior private effect was rolled back.
+Клиент обязан складывать байты артефакта во временное хранилище (staging) и требовать
+завершающий результат, закрывающий разделитель MIME И успешное завершение HTTP-сущности,
+прежде чем публиковать. Сбой выполнения/чтения/дедлайна после заголовков может оборвать
+транспорт; корректный префикс или часть progress никогда не считается частичным успехом.
+Отсутствие завершающего результата означает отсутствие публикации, а не утверждение, что
+прежний закрытый эффект откатан.
 
-Before a completed response, execution failures use the stable `code` and
-`applied` envelope from the raw service: 403 PermissionDenied, 400 InvalidRequest,
-413 byte/resource limit, 503 CapacityExceeded/AuditUnavailable, or 504
-DeadlineExceeded (also for an upload that stalls or falls below the minimum upload rate,
-see [the server guide](server.md)). An error answer may add an optional `subcode` string next
-to `code` (see "Error subcodes" below). Hashing never applies a private key. Authentication occurs
-before body intake. Receiving the body is a phase of its own with its own limit
-(`max_uploads`): a request takes an upload slot before its first body byte is read, and
-neither waiting for a slow client nor spooling the documents takes a `max_in_flight` slot, a
-native worker or an audit binding, so a stalled upload leaves every other request unaffected
-except for that one upload slot. `503 CapacityExceeded` means that no upload slot, or no
-operation slot (`max_in_flight`), freed within the server's `admission_wait_ms` before the
-body was read (the server checks both before it reads the first body byte, waiting up to
-`admission_wait_ms` for a slot; a busy server then refuses without taking the upload and an
-`Expect: 100-continue` client is never told to send), or, once the whole body was accepted, that no operation slot freed within
-`admission_wait_ms`; nothing was applied. The check before the body is best effort: a slot
-can be taken between it and the end of the body, which is then refused after the body.
+До завершённого ответа сбои выполнения используют стабильный конверт `code` и
+`applied` из сырой службы: 403 PermissionDenied, 400 InvalidRequest,
+413 лимит байт/ресурсов, 503 CapacityExceeded/AuditUnavailable или 504
+DeadlineExceeded (также для загрузки, которая застряла или упала ниже минимальной скорости
+загрузки, см. [руководство по серверу](server.md)). Ответ с ошибкой может добавить рядом с
+`code` необязательную строку `subcode` (см. «Подкоды ошибок» ниже). Хеширование никогда не
+применяет закрытый ключ. Аутентификация выполняется до приёма тела. Приём тела — отдельная
+фаза со своим лимитом (`max_uploads`): запрос занимает слот загрузки до чтения первого байта
+тела, а ни ожидание медленного клиента, ни складывание документов в spool не занимают ни
+слот `max_in_flight`, ни нативный рабочий поток, ни привязку аудита, поэтому застрявшая
+загрузка не влияет ни на какой другой запрос, кроме занятого ею одного слота загрузки.
+`503 CapacityExceeded` означает, что ни один слот загрузки или ни один слот операции
+(`max_in_flight`) не освободился за `admission_wait_ms` сервера до чтения тела (сервер
+проверяет оба слота, прежде чем читать первый байт тела, и ждёт слот до
+`admission_wait_ms`; занятый сервер затем отказывает, не принимая загрузку, а клиенту с
+`Expect: 100-continue` никогда не говорят отправлять) либо, когда всё тело уже принято, что
+ни один слот операции не освободился за
+`admission_wait_ms`; ничего не применялось. Проверка до тела выполняется по возможности
+(best effort): слот может быть занят между ней и концом тела, и тогда отказ следует после
+тела.
 
-A client that is still writing a large body when the server refuses (a refusal is decided
-from the metadata part, before the documents) would see a connection reset or a broken pipe
-instead of the typed answer if the server closed at once: closing a socket whose peer goes on
-sending resets the connection, which can erase the response in transit (on Windows too). The
-server therefore closes in stages (RFC 9112 section 9.6): it ends its side after the answer,
-then reads and discards what the client still sends until the client closes, for at most one
-second and about 8 MiB, and only then closes (both bounds are fixed, not configurable). The
-server reads about 8 MiB of it; a client that sends faster can have pushed more into the
-kernel buffers by the time it is reset. While it waits, the connection holds its
-`max_connections` permit and nothing of its operation (the `max_in_flight` slot, the scratch
-and the budgets are released when the answer is out): with `max_connections` clients that keep
-their sockets open after an answer, the next connection is not accepted for up to that second.
-A client that finishes a body within that bound reads the typed refusal; one that sends more
-is reset, as it would be without the staged close. A client SHOULD read the response while it
-sends, or send `Expect: 100-continue` and wait for the answer before it sends the body (the
-reference client does). The original admission root starts before
-bounded metadata intake, then the host consumes that same root into an authorized operation
-context. Queueing, SDK work, response ownership and actual network writes retain
-the original deadline and shared budgets. Dropping a response does not make a
-still-running worker free, and retaining/cloning response bytes retains their
-original reservation/root until the actual final drop.
+Клиент, который всё ещё пишет большое тело, когда сервер отказывает (отказ решается по
+части метаданных, до документов), увидел бы сброс соединения или разрыв канала (broken
+pipe) вместо типизированного ответа, если бы сервер закрылся сразу: закрытие сокета, чей
+партнёр продолжает отправку, сбрасывает соединение, а это может стереть ответ в пути (в том
+числе в Windows). Поэтому сервер закрывается поэтапно (RFC 9112, раздел 9.6): завершает
+свою сторону после ответа, затем читает и отбрасывает то, что клиент ещё присылает, пока
+клиент не закроется, — не дольше одной секунды и около 8 МиБ, и только потом закрывается
+(обе границы фиксированные, не настраиваются). Сервер читает около 8 МиБ из этого; клиент,
+который отправляет быстрее, к моменту сброса мог протолкнуть в буферы ядра больше. Пока он
+ждёт, соединение держит свой допуск `max_connections` и ничего от своей операции (слот
+`max_in_flight`, scratch и бюджеты освобождаются, когда ответ отправлен): если
+`max_connections` клиентов держат сокеты открытыми после ответа, следующее соединение не
+принимается до этой секунды. Клиент, который заканчивает тело в этих пределах, читает
+типизированный отказ; тот, кто шлёт больше, получает сброс, как было бы и без поэтапного
+закрытия. Клиенту СЛЕДУЕТ читать ответ во время отправки или отправить
+`Expect: 100-continue` и дождаться ответа, прежде чем отправлять тело (эталонный клиент так
+и делает). Исходный корень допуска (admission root) создаётся до ограниченного приёма
+метаданных, затем хост превращает этот же корень в контекст авторизованной операции.
+Очередь, работа SDK, владение ответом и фактические записи в сеть сохраняют исходный
+дедлайн и общие бюджеты. Отбрасывание ответа не освобождает ещё работающий рабочий поток,
+а удержание/клонирование байт ответа сохраняет их исходный резерв/корень до фактического
+последнего освобождения.
 
-## Operation families
+## Семейства операций
 
-All operations use the same `metadata` envelope (JSON-small or metadata-first
-multipart). `GET /v1/openapi.json` (authenticated like `/health`) publishes the
-OpenAPI 3.1 description with request and response examples that are parsed and
-serialized by the real DTOs. Each token needs the matching action:
+Все операции используют один и тот же конверт `metadata` (JSON-small или multipart с
+метаданными первыми). `GET /v1/openapi.json` требует индивидуального токена, но не какого-либо
+действия (`GET /health` требует действия `hash`) и публикует описание OpenAPI 3.1 с примерами
+запросов и ответов, которые разбираются и сериализуются настоящими DTO. Каждому токену нужно
+соответствующее действие:
 
-| `kind` | Token action | Output |
+| `kind` | Действие токена | Выход |
 |---|---|---|
 | `hash` | `hash` | JSON |
-| `verify` (`cms`, `cades_*`, `pdf`, `pades_*`, `xml`, `xml_kalkan`, `xades_*`) | `verify` | JSON; Invalid is a completed HTTP 200 report |
-| `extract` | `extract` | `multipart/mixed` artifact |
-| `sign` (`cms`, `cades_b/t/lt/lta`, `pdf`, `pades_b/t/lt/lta`, `xml`, `xades_b/t`, `wsse`, `xml_legacy`, `xades_legacy_b/t`; there is no `xades_lt/lta` sign profile; `mode` `create`/`add` for CMS/CAdES; XML takes optional `target`/`parent`/`signature_id` element IDs) | `sign` plus per-key right | `multipart/mixed` artifact |
-| `extend` (`cades_t/lt/lta`, `pades_t/lt/lta`, `xades_lt/lta`) | `extend` (keyless; no provider/audit use) | `multipart/mixed` artifact |
-| `jws_sign`, `jws_add`, `jwt_encode` | `sign` plus per-key right | `multipart/mixed` artifact |
-| `jws_verify`, `jwt_verify` | `verify` | JSON; signature, host trust and claims reported separately |
-| `jwt_decode` | `extract` | JSON; `verified` is always `false` |
-| `inspect` (`certificate`, `cms`, `container`, `named`) | `inspect` (`named` also needs that key right) | JSON |
-| `plugin` | the exact operator grant for (token, plugin, operation); a plugin item that names keys also needs the token's `sign` right and each key in the token's `keys` (and in the grant's `keys`), else 403 | JSON |
-| `stamp` | `stamp` | `multipart/mixed` token artifact |
+| `verify` (`cms`, `cades_*`, `pdf`, `pades_*`, `xml`, `xml_kalkan`, `xades_*`) | `verify` | JSON; Invalid — завершённый отчёт HTTP 200 |
+| `extract` | `extract` | артефакт `multipart/mixed` |
+| `sign` (`cms`, `cades_b/t/lt/lta`, `pdf`, `pades_b/t/lt/lta`, `xml`, `xades_b/t`, `wsse`, `xml_legacy`, `xades_legacy_b/t`; профиля подписи `xades_lt/lta` нет; `mode` `create`/`add` для CMS/CAdES; XML принимает необязательные идентификаторы элементов `target`/`parent`/`signature_id`) | `sign` плюс право на ключ | артефакт `multipart/mixed` |
+| `extend` (`cades_t/lt/lta`, `pades_t/lt/lta`, `xades_lt/lta`) | `extend` (без ключа; провайдер и аудит не используются) | артефакт `multipart/mixed` |
+| `jws_sign`, `jws_add`, `jwt_encode` | `sign` плюс право на ключ | артефакт `multipart/mixed` |
+| `jws_verify`, `jwt_verify` | `verify` | JSON; подпись, доверие хоста и claims сообщаются отдельно |
+| `jwt_decode` | `extract` | JSON; `verified` всегда `false` |
+| `inspect` (`certificate`, `cms`, `container`, `named`) | `inspect` (для `named` нужно ещё право на этот ключ) | JSON |
+| `plugin` | точный грант оператора для (токен, плагин, операция); элементу плагина, называющему ключи, нужны ещё право `sign` токена и каждый ключ в `keys` токена (и в `keys` гранта), иначе 403 | JSON |
+| `stamp` | `stamp` | артефакт-токен `multipart/mixed` |
 | `verify_stamp` | `verify_stamp` | JSON |
 
-Multiple items on `/v1/operations` execute sequentially under one original deadline
-and budget (independent items, one all-or-nothing terminal record). The closed SDK
-batch with explicit host approval and per-item records is `POST /v1/batch` (below).
-There are no encryption/decryption routes: the applicable GOST envelope backend is an
-external prerequisite and is not replaced by an RSA-only or generic Unsupported
-route.
+Несколько элементов на `/v1/operations` выполняются последовательно под одним исходным
+дедлайном и бюджетом (независимые элементы, одна завершающая запись «всё или ничего»).
+Закрытый пакет SDK с явным одобрением хоста и записями по элементам — это
+`POST /v1/batch` (ниже). Маршрутов шифрования/расшифрования нет: применимый бэкенд
+конвертов ГОСТ — внешняя предпосылка, и его не заменяет ни маршрут «только RSA», ни общий
+маршрут Unsupported.
 
-`sign` profiles also include `wsse` (SOAP Body signature, `soap` = `soap11`/`soap12`,
-optional `body_id`), `xml_legacy` (Kalkan wire layout; `element`/`xpath_parent` XPaths,
-`signature_method`/`digest_method` URIs, which must fit the key; the Kalkan default
-follows the certificate's *signature* algorithm) and `xades_legacy_b`. `verify` accepts
-`wsse`. Unsupported field/profile combinations are refused from metadata alone (400)
-before any key, secret or document is touched. `xades_legacy_t` signs with a host TSA
-(policy OID required, see below).
+Профили `sign` включают также `wsse` (подпись SOAP Body, `soap` = `soap11`/`soap12`,
+необязательный `body_id`), `xml_legacy` (раскладка Kalkan на wire; XPath
+`element`/`xpath_parent`, URI `signature_method`/`digest_method`, которые должны подходить
+ключу; значение Kalkan по умолчанию следует *алгоритму подписи* сертификата) и
+`xades_legacy_b`. `verify` принимает `wsse`. Неподдерживаемые сочетания полей и профилей
+отклоняются по одним метаданным (400), до любого обращения к ключу, секрету или документу.
+`xades_legacy_t` подписывает через TSA хоста (нужен policy OID, см. ниже).
 
-`plugin` calls an operator-installed plugin operation through `Engine::plugin_call`
-with the original admitted context. Installation is not authority: each
-(token, plugin, operation) needs an operator `[[plugins.permissions]]` entry listing
-the allowed host imports, named keys and exact GET PKI status URLs; the caller identity
-is the token, never a request or payload `origin`. A plugin that **declares** its operations
-(`[[operations]]` in its manifest) is held to the declaration: Core forces the declared
-signature options (a request cannot add attributes, a custom TSA and the like), `cosign`
-is never, and a key use needs the grant's explicit `plugin_bytes = true` (below); the
-unrefused use is audited with its ticket. A plugin **without** declarations is unchanged. Mandatory dialogs fail with
-`InteractionRequired` (403), a denied nested import is `PermissionDenied`, key use is
-audited and reported `Applied`/`Unknown`. Token (PC/SC) keys are operator named keys;
-they fail closed (NotApplied, no BEGIN) without a reader/card and card transactions
-on one device never overlap.
+`plugin` вызывает установленную оператором операцию плагина через `Engine::plugin_call`
+с исходным допущенным контекстом. Установка — не полномочие: каждому
+(токен, плагин, операция) нужна запись оператора `[[plugins.permissions]]` с перечнем
+разрешённых импортов хоста, именованных ключей и точных URL статуса PKI (GET);
+личность вызывающего — токен, а не `origin` из запроса или полезной нагрузки. Плагин,
+который **объявляет** свои операции (`[[operations]]` в манифесте), связан объявлением:
+Core навязывает объявленные параметры подписи (запрос не может добавить атрибуты, свой TSA
+и т. п.), `cosign` не допускается никогда, а для использования ключа нужен явный
+`plugin_bytes = true` в гранте (ниже); неотклонённое использование аудируется вместе с
+билетом. Плагин **без** объявлений не меняется. Обязательные диалоги завершаются
+`InteractionRequired` (403), отклонённый вложенный импорт — `PermissionDenied`,
+использование ключа аудируется и сообщается как `Applied`/`Unknown`. Ключи токенов (PC/SC) —
+именованные ключи оператора; без считывателя/карты они закрываются отказом (NotApplied, без
+BEGIN), а транзакции карты на одном устройстве никогда не пересекаются.
 
-## Error subcodes
+## Подкоды ошибок
 
-An error answer (an HTTP error before the headers, `error` of a failed `final` record,
-`error` of a failed batch item) is `{"code": ..., "applied": ...}` and, **only when the
-refusal has a precise reason**, `"subcode": "<id>"`:
+Ответ с ошибкой (ошибка HTTP до заголовков, `error` неудачной записи `final`, `error`
+неудачного элемента пакета) — это `{"code": ..., "applied": ...}` и, **только когда у отказа
+есть точная причина**, `"subcode": "<id>"`:
 
 ```json
 {"code":"PermissionDenied","applied":"NotApplied","subcode":"not-granted"}
 ```
 
-* The field is **additive**: `ErrorCode` (the 19 stable codes) and the statuses are unchanged,
-  an error without a reason is byte-for-byte what it was, and `subcode` is never required.
-  The OpenAPI schema lists it and keeps `additionalProperties: false` for what a server may
-  send. The Rust client (`oncl_api`) ignores unknown fields and drops a non-string subcode, so
-  older and newer peers interoperate; a client built before this change that still rejects
-  unknown fields fails to parse a plugin refusal that carries one (code and `applied` are lost
-  with it), so upgrade clients with the server.
-* The id matches `^[A-Za-z][A-Za-z0-9_-]{0,63}$` (the ids the server emits are lowercase
-  kebab-case; the pattern is the wire bound). `InteractionRequired` carries no subcode. It is **opaque and
-  open**: new ids may appear, treat unknown ones as the plain `code`. It is a reason, never a
-  message, and never contains document, key or parameter bytes. A value outside the pattern
-  is dropped by the client (the typed `code` survives).
-* Today only plugin refusals carry one. A refusal is **always `NotApplied`** except
-  `key-use-spent` (a second key use in one request (one `OperationId`; two plugin items of one request count together): the first use is real and stays
-  reported `Applied`). The ids a server answer carries in practice for a plugin operation:
+* Поле **аддитивное**: `ErrorCode` (19 стабильных кодов) и статусы не меняются,
+  ошибка без причины байт в байт такая же, как была, а `subcode` никогда не обязателен.
+  Схема OpenAPI его перечисляет и сохраняет `additionalProperties: false` для того, что
+  может отправить сервер. Клиент на Rust (`oncl_api`) игнорирует неизвестные поля и
+  отбрасывает не-строковый подкод, поэтому старые и новые участники совместимы; клиент,
+  собранный до этого изменения и всё ещё отвергающий неизвестные поля, не сможет разобрать
+  отказ плагина с подкодом (код и `applied` вместе с ним теряются), поэтому обновляйте
+  клиентов вместе с сервером.
+* Идентификатор соответствует `^[A-Za-z][A-Za-z0-9_-]{0,63}$` (идентификаторы, которые
+  выдаёт сервер, — kebab-case в нижнем регистре; шаблон — граница wire).
+  `InteractionRequired` подкода не несёт. Подкод **непрозрачный и открытый**: могут
+  появляться новые идентификаторы, неизвестные трактуйте как простой `code`. Это причина,
+  но не сообщение, и в нём никогда нет байт документа, ключа или параметра. Значение вне
+  шаблона клиент отбрасывает (типизированный `code` сохраняется).
+* Сегодня подкод несут только отказы плагинов. Отказ — **всегда `NotApplied`**, кроме
+  `key-use-spent` (второго использования ключа в одном запросе (один `OperationId`; два
+  элемента плагина одного запроса считаются вместе): первое использование настоящее и
+  остаётся `Applied`). Идентификаторы, которые на практике несёт ответ сервера для операции
+  плагина:
 
-| `subcode` | `code` | Meaning |
+| `subcode` | `code` | Значение |
 |---|---|---|
-| `not-granted` | `PermissionDenied` | The operation declares a key use and the grant has no `plugin_bytes = true`; or no grant covers the ticketed use |
-| `options-mismatch` | `PermissionDenied` | The plugin asked for signature options other than the declared profile (or a profile that names a parameter, which a server cannot match) |
-| `package-changed` | `PermissionDenied` | The plugin package is not the installed one |
-| `key-mismatch` | `PermissionDenied` | The key is not one the grant names |
-| `kind-mismatch` | `PermissionDenied` | The signature kind is not a declared key use |
-| `caller-mismatch` | `PermissionDenied` | The ticket's caller is not a service-client token (not reachable through HTTP: a token without a matching grant is `not-granted`) |
-| `ticket-uses` | `PermissionDenied` | The ticket allows other than exactly one use |
-| `key-use-spent` | `PermissionDenied` | One request tried to use a key twice (`applied` is `Applied`) |
-| `not-declared` | `PermissionDenied` | The operation is not declared by the plugin (a server grant for it is skipped at start-up, so a request normally gets a plain 403 without a subcode; the `oncl plugin` CLI reports this id) |
+| `not-granted` | `PermissionDenied` | Операция объявляет использование ключа, а в гранте нет `plugin_bytes = true`; либо ни один грант не покрывает использование по билету |
+| `options-mismatch` | `PermissionDenied` | Плагин запросил параметры подписи, отличные от объявленного профиля (или профиль, называющий параметр, который сервер не может сопоставить) |
+| `package-changed` | `PermissionDenied` | Пакет плагина — не тот, что установлен |
+| `key-mismatch` | `PermissionDenied` | Ключ не из названных в гранте |
+| `kind-mismatch` | `PermissionDenied` | Вид подписи не входит в объявленные использования ключа |
+| `caller-mismatch` | `PermissionDenied` | Вызывающий в билете — не токен клиента службы (через HTTP недостижимо: токен без подходящего гранта получает `not-granted`) |
+| `ticket-uses` | `PermissionDenied` | Билет допускает не ровно одно использование |
+| `key-use-spent` | `PermissionDenied` | Один запрос попытался использовать ключ дважды (`applied` — `Applied`) |
+| `not-declared` | `PermissionDenied` | Операция не объявлена плагином (грант сервера на неё пропускается при запуске, поэтому запрос обычно получает простой 403 без подкода; этот идентификатор сообщает CLI `oncl plugin`) |
 
-Other ids of the same family (`PluginRefusalCode`, `oncl_core::plugins`, 49 ids, each with its
-meaning) belong mostly to the desktop manual window; the complete table is in
-[the manual-window guide](manual-plugins.md#отказы-как-читать-код-на-странице) and the SDK guide.
+Остальные идентификаторы того же семейства (`PluginRefusalCode`, `oncl_core::plugins`,
+49 идентификаторов, у каждого своё значение) относятся в основном к ручному окну настольной
+программы; полная таблица — в
+[руководстве по ручному окну](manual-plugins.md#отказы-как-читать-код-на-странице) и в
+руководстве по SDK.
 
-The Rust client (`oncl_api::client::ClientError`) exposes it as `server_subcode`
-(`Option<String>`, already validated, safe to print); its `describe()` becomes
-`PermissionDenied; subcode=not-granted`. The `oncl` CLI prints
-`oncl: PermissionDenied; subcode=not-granted; applied=NotApplied` and adds `subcode` to the
-failed row of a `batch --json` report; without a reason the line is exactly as before.
+Клиент на Rust (`oncl_api::client::ClientError`) отдаёт его как `server_subcode`
+(`Option<String>`, уже проверен, его безопасно печатать); его `describe()` становится
+`PermissionDenied; subcode=not-granted`. CLI `oncl` печатает
+`oncl: PermissionDenied; subcode=not-granted; applied=NotApplied` и добавляет `subcode` в
+строку с ошибкой отчёта `batch --json`; без причины строка точно такая же, как раньше.
 
-## Keys and secret roles
+## Ключи и роли секретов
 
-A signing item names keys as either `{"source":"named","name":"..."}` (operator
-configured alias; the token must list that exact name in `keys`) or
+Элемент подписи называет ключи либо как `{"source":"named","name":"..."}` (настроенный
+оператором псевдоним; токен должен перечислять это точное имя в `keys`), либо как
 `{"source":"inline","container":"<part>","password":"<part>","alias":"..."}`.
-Inline use needs both the global `inline_pkcs12 = true` and the token's
-`inline_pkcs12 = true`; the host then grants only the exact immutable InlineID
-computed from the received container and alias. There is no client file path,
-token reader, certificate fingerprint or PIN-cache selection.
+Для inline нужны и глобальный `inline_pkcs12 = true`, и `inline_pkcs12 = true` токена;
+тогда хост выдаёт право только на точный неизменяемый InlineID, вычисленный по полученному
+контейнеру и псевдониму. Выбора по пути к файлу клиента, считывателю токена, отпечатку
+сертификата или кэшу PIN нет.
 
-Parts with `role:"secret"` are bounded fixed-capacity zeroizing memory (container
-4 MiB, password 4096 bytes). They are declared first and must be sent before every
-`document` part, are never written to the document spool or response, and keep that
-role whatever filename or Content-Type the wire part carries. Secrets are refused
-in JSON-small. Network and parser transport buffers outside the service-owned
-secret owner are not wiped. Container inspection uses the same secret roles and
-shows only aliases the token's `metadata_aliases` lists.
+Части с `role:"secret"` — это ограниченная память фиксированной ёмкости с затиранием
+(контейнер 4 МиБ, пароль 4096 байт). Они объявляются первыми и должны быть отправлены
+раньше каждой части `document`, никогда не записываются в spool документов или в ответ и
+сохраняют эту роль, какое бы имя файла или Content-Type ни нёс wire-часть. В JSON-small
+секреты отклоняются. Сетевые буферы и буферы транспорта разборщика вне принадлежащего
+службе владельца секрета не затираются. Инспекция контейнера использует те же роли секретов
+и показывает только псевдонимы, которые перечисляет `metadata_aliases` токена.
 
-## Audit and Applied state
+## Аудит и состояние Applied
 
-Before the key is applied the service writes a durable audit BEGIN bound to the
-authenticated principal and the exact key label; a FINAL follows. Audit failure
-before use is a typed `AuditUnavailable`/`NotApplied` failure. If a failure follows
-a possible key application, the terminal record reports `Applied` or `Unknown`; no
-rollback, retry or exactly-once guarantee is given. Closed audit bindings remain
-as tombstones (the closed operation id can never rebind) until the original
-deadline or until every owner of that operation (context, worker, response,
-artifact) has been dropped, whichever is first, so completed requests do not
-consume the bounded binding table.
+Перед применением ключа служба пишет надёжную запись аудита BEGIN, привязанную к
+аутентифицированному субъекту (principal) и точной метке ключа; затем следует FINAL. Сбой
+аудита до использования — типизированный сбой `AuditUnavailable`/`NotApplied`. Если сбой
+наступает после возможного применения ключа, завершающая запись сообщает `Applied` или
+`Unknown`; отката, повтора и гарантии «ровно один раз» нет. Закрытые привязки аудита
+остаются надгробиями (tombstones) (закрытый идентификатор операции больше никогда не может
+быть привязан заново) до исходного дедлайна или до освобождения каждого владельца этой
+операции (контекст, рабочий поток, ответ, артефакт) — смотря что наступит раньше, поэтому
+завершённые запросы не занимают ограниченную таблицу привязок.
 
-## Evidence parts, rights order and statuses
+## Части-свидетельства, порядок проверки прав и статусы
 
-`sign` and `extend` accept `evidence`: `[{"kind":"certificate|ocsp|crl","input":"<document part>"}]`
-(at most 64 public DER parts of up to 1 MiB each). LT/LTA levels need caller-acquired
-OCSP/CRL material (`PAdES extension requires acquired status material` is a typed
-`InvalidRequest` failure otherwise); evidence is never a trust anchor. PAdES-LT/LTA
-and large evidence need a larger per-operation memory budget than the default (the
-default metadata budget is 64 MiB);
-that need is refused before the audit BEGIN (see "Resource and material profiles").
+`sign` и `extend` принимают `evidence`: `[{"kind":"certificate|ocsp|crl","input":"<document part>"}]`
+(не больше 64 открытых частей DER размером до 1 МиБ каждая). Уровням LT/LTA нужен материал
+OCSP/CRL, полученный вызывающим (иначе `PAdES extension requires acquired status material` —
+типизированный сбой `InvalidRequest`); свидетельство никогда не является якорем доверия.
+PAdES-LT/LTA и большие свидетельства требуют бюджета памяти на операцию больше, чем по
+умолчанию (бюджет метаданных по умолчанию — 64 МиБ); такая потребность отклоняется до BEGIN
+аудита (см. «Профили ресурсов и материалов»).
 
-Rights are checked in this order: token action, then (before any secret byte is
-reserved or read) the per-key right, the global/token inline right and the
-`metadata_aliases` grant; an inline key without a `password` part is refused
-(400) before any binding or document capture. The exact InlineID is authorized after
-the bounded container has been read. `hash` accepts only `document` roles.
+Права проверяются в таком порядке: действие токена, затем (до резервирования или чтения
+любого байта секрета) право на ключ, глобальное/токена право inline и грант
+`metadata_aliases`; inline-ключ без части `password` отклоняется (400) до любой привязки
+или захвата документа. Точный InlineID авторизуется после чтения ограниченного контейнера.
+`hash` принимает только роли `document`.
 
-Statuses before response headers: 400 InvalidRequest, 403 PermissionDenied, 404
-unknown route (there are no plugin-route, encryption or NCANode routes; `/v1/batch`
-exists) or `KeyNotFound` (Core could not resolve a key selector the token is
-allowed to use; the token's key right is checked first, so a name outside the
-token's `keys` is 403, never a 404 existence oracle), 405 with
-`Allow`, 408 Cancelled, 413 resource limits, 422 ValidationFailed/OperationFailed,
-500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration, 504
-DeadlineExceeded. The two 404 causes differ by the JSON `code` (`InvalidRequest` on
-`NotApplied` for a route, `KeyNotFound` for a key). After headers only the terminal `final` record or a transport
-abort can report failure; a transport abort carries no reason to the client (the server
-logs it, see "Aborted response streams" in `server.md`).
+Статусы до заголовков ответа: 400 InvalidRequest, 403 PermissionDenied, 404
+неизвестный маршрут (маршрутов плагинов, шифрования и NCANode нет; `/v1/batch`
+существует) или `KeyNotFound` (Core не смог разрешить селектор ключа, которым токену
+разрешено пользоваться; право токена на ключ проверяется первым, поэтому имя вне
+`keys` токена — это 403, а не 404 как оракул существования), 405 с
+`Allow`, 408 Cancelled, 413 лимиты ресурсов, 422 ValidationFailed/OperationFailed,
+500 Internal, 503 CapacityExceeded/AuditUnavailable/MissingConfiguration/
+MissingTemporaryStore, 504 DeadlineExceeded. Две причины 404 различаются по JSON-полю `code`
+(`InvalidRequest` при `NotApplied` для маршрута, `KeyNotFound` для ключа). После заголовков
+о сбое могут сообщить только завершающая запись `final` или обрыв транспорта; обрыв
+транспорта не несёт клиенту причины (сервер её журналирует, см. «Прерванные потоки ответов»
+в `server.md`).
 
-Progress parts are coalesced from a single latest-value channel (at most one frame
-per observed change, never queued per checkpoint); each frame is charged as output
-and metadata under the original scope, so a long operation cannot create unbounded
-progress traffic.
+Части progress объединяются из одного канала «последнего значения» (не больше одного кадра
+на наблюдаемое изменение, никогда не ставятся в очередь на каждую контрольную точку);
+каждый кадр списывается как выход и метаданные в исходной области, поэтому длинная операция
+не может породить неограниченный трафик progress.
 
-## Resource and material profiles (refused before any key use)
+## Профили ресурсов и материалов (отказ до любого использования ключа)
 
-- `cades_lt/lta` and `pades_lt/lta` (sign and `extend`) and `xades_lt/lta` (extend) need
-  caller-acquired status material: `evidence` with at least one `ocsp` or `crl` part,
-  otherwise 400 before any secret, key or document is touched.
-- XAdES LT/LTA are available only as **sign `xades_t`, then keyless `extend` to `xades_lt`,
-  then `xades_lta`**: there is no `xades_lt/lta` sign profile (the SDK XML sign request
-  carries no status material). The chain is exercised over HTTP with the lxml oracle;
-  extension never uses a key.
-- `pades_lt/lta` need the update plan's memory and metadata. The need is computed from
-  `oncl_pdf::budget::plan_memory` / `plan_metadata` (the reservation formulas the PDF
-  reader, update plan, signer and verify view use) and from inputs known before the key
-  opens: the PDF's existing signature contents, the request's evidence part sizes and the
-  operator trust-set size, plus named host reservations (4 I/O chunk buffers, 64 KiB
-  metadata, one evidence copy). It is probed against the request's ORIGINAL scope after
-  the body is taken; if it does not fit: 413 `MemoryLimit` or `MetadataLimit`,
-  `NotApplied`, before the audit BEGIN. At the default limits and the small test evidence
-  the threshold is about 380 MiB, so the default 256 MiB `memory_per_operation` refuses
-  PAdES LT/LTA; several MiB of CRL evidence needs on the order of 600 MiB and 72 MiB of
-  metadata. This is **empirically sufficient for the tested fixtures and evidence shapes**
-  (sweeps with 1 MiB steps near the transitions never produced a BEGIN followed by a
-  resource failure); it is not a proof for every PDF or evidence shape. Shared-budget
-  exhaustion by other requests at runtime, or an input shape outside the tested ones, can
-  still fail after use; such a failure is reported with its real `Applied`/`Unknown` state.
-  A PDF the PDF layer cannot read (malformed, or a non-PAdES signature SubFilter) is a
-  400 `InvalidRequest` before the BEGIN; a document that would exceed the signature-count
-  limit with the new signature is 413 `InputLimit`; deadline, cancellation and capacity
-  keep their own typed codes in the preflight.
-- Signing PAdES B/T/LT/LTA onto a PDF that already carries valid signatures is supported
-  (old revisions stay byte-identical; the new signature must itself reach the requested
-  level; LT/LTA also elevate the old signers, so the evidence must validate them too). A
-  document with an already-invalid signature is refused 400 before any key use.
-- `xades_t` / `xades_legacy_t` need a host TSA with a policy OID (`[pki.tsa] policy`),
-  because the SDK binds the TSA policy for XAdES T/LT/LTA; without it: 503
-  `MissingConfiguration`, `NotApplied`, no BEGIN. CAdES/PAdES T accept a TSA without
-  policy.
+- `cades_lt/lta` и `pades_lt/lta` (sign и `extend`) и `xades_lt/lta` (extend) требуют
+  материала статуса, полученного вызывающим: `evidence` как минимум с одной частью `ocsp`
+  или `crl`, иначе 400 до обращения к любому секрету, ключу или документу.
+- XAdES LT/LTA доступны только как **sign `xades_t`, затем `extend` без ключа до `xades_lt`,
+  затем `xades_lta`**: профиля подписи `xades_lt/lta` нет (запрос подписи XML в SDK не несёт
+  материала статуса). Цепочка проверена по HTTP независимым средством lxml (оракул);
+  продление никогда не использует ключ.
+- `pades_lt/lta` требуют памяти и метаданных плана обновления. Потребность вычисляется по
+  `oncl_pdf::budget::plan_memory` / `plan_metadata` (формулы резервирования, которыми
+  пользуются читатель PDF, план обновления, подписывающий код и представление проверки) и по
+  входным данным, известным до открытия ключа: существующему содержимому подписей PDF,
+  размерам частей-свидетельств запроса и размеру операторского набора доверия, плюс
+  именованные резервы хоста (4 буфера чанков ввода-вывода, 64 КиБ метаданных, одна копия
+  свидетельств). Она проверяется (probe) по ИСХОДНОЙ области запроса после приёма тела; если
+  не помещается: 413 `MemoryLimit` или `MetadataLimit`, `NotApplied`, до BEGIN аудита. При
+  лимитах по умолчанию и малых тестовых свидетельствах порог — около 380 МиБ, поэтому
+  `memory_per_operation` по умолчанию в 256 МиБ отклоняет PAdES LT/LTA; несколько МиБ
+  свидетельств CRL требуют порядка 600 МиБ и 72 МиБ метаданных. Это **эмпирически достаточно
+  для проверенных фикстур и форм свидетельств** (прогоны с шагом 1 МиБ около переходов ни
+  разу не дали BEGIN с последующим сбоем по ресурсам); это не доказательство для любого PDF
+  или формы свидетельств. Исчерпание общего бюджета другими запросами во время работы или
+  форма входа вне проверенных всё ещё может привести к сбою после использования ключа; о
+  таком сбое сообщается с настоящим состоянием `Applied`/`Unknown`. PDF, который слой PDF
+  прочитать не может (искажённый или с подписью с SubFilter не PAdES), — это 400
+  `InvalidRequest` до BEGIN; документ, который превысил бы лимит числа подписей с новой
+  подписью, — 413 `InputLimit`; дедлайн, отмена и ёмкость сохраняют в предварительной
+  проверке (preflight) свои типизированные коды.
+- Подпись PAdES B/T/LT/LTA поверх PDF, который уже несёт действительные подписи,
+  поддерживается (старые ревизии остаются байт в байт теми же; сама новая подпись должна
+  достичь запрошенного уровня; LT/LTA поднимают и старых подписантов, поэтому свидетельства
+  должны подтверждать и их). Документ с уже недействительной подписью отклоняется с 400 до
+  любого использования ключа.
+- `xades_t` / `xades_legacy_t` требуют TSA хоста с policy OID (`[pki.tsa] policy`), потому
+  что SDK привязывает политику TSA для XAdES T/LT/LTA; без него: 503
+  `MissingConfiguration`, `NotApplied`, без BEGIN. CAdES/PAdES T принимают TSA без политики.
 
-Authorization is re-run as a pre-execution check after the whole body has been taken,
-before the worker starts private use: a token revoked, a key right removed or a policy
-generation changed during a long upload gets 403 without BEGIN or key use. A change made
-after that check (while the operation is already running) is not observed: the residual
-window is the execution itself, which the audit BEGIN/FINAL records.
+Авторизация повторно выполняется как проверка перед исполнением после того, как принято
+всё тело и до того, как рабочий поток начнёт закрытое использование: отозванный токен,
+снятое право на ключ или изменившееся поколение политики за время долгой загрузки дают 403
+без BEGIN и использования ключа. Изменение после этой проверки (пока операция уже идёт) не
+наблюдается: остаточное окно — само исполнение, которое фиксируют BEGIN/FINAL аудита.
 
-## Plugin configuration reference
+## Справочник по настройке плагинов
 
 ```toml
 [[plugins]]
@@ -474,149 +503,159 @@ pki_endpoints = ["http://pki.example/ocsp"]   # exact GET URLs for nested valida
 plugin_bytes = false                  # default; see below
 ```
 
-`plugin_bytes = true` is the operator's explicit acceptance that **the plugin (or its
-client) chooses the bytes the granted key signs**. The server cannot bind the content to a
-document (`args` is free JSON; typed parameters and document parts are a later stage), so
-a key use of a *declared* operation is refused (`PermissionDenied`, subcode `not-granted`,
-`NotApplied`, before any `BEGIN` and before the key; a refusal record may be written) unless the grant carries it. It needs at
-least one `keys` entry (validation refuses `plugin_bytes = true` without a key) and has no
-effect for a plugin without declarations (the server logs a warning). Even then the use
-must match the declaration exactly: the ticket's plugin, package hash, operation, the
-token as caller, a named key of the grant, the declared kind and the declared options
-(`options-mismatch` otherwise) and it must be the request's only key use (a second plugin item or a second signature in the same request is `key-use-spent`).
+`plugin_bytes = true` — явное согласие оператора с тем, что **плагин (или его клиент)
+выбирает байты, которые подписывает выданный ключ**. Сервер не может привязать содержимое к
+документу (`args` — свободный JSON; типизированные параметры и части-документы — более
+поздний этап), поэтому использование ключа в *объявленной* операции отклоняется
+(`PermissionDenied`, подкод `not-granted`, `NotApplied`, до любого `BEGIN` и до ключа;
+запись об отказе может быть сделана), если в гранте нет этого флага. Ему нужна хотя бы одна
+запись `keys` (проверка отклоняет `plugin_bytes = true` без ключа), а для плагина без
+объявлений он не действует (сервер пишет предупреждение). И тогда использование должно в
+точности соответствовать объявлению: плагин, хеш пакета, операция и токен как вызывающий из
+билета, именованный ключ из гранта, объявленный вид и объявленные параметры
+(иначе `options-mismatch`), и оно должно быть единственным использованием ключа в запросе
+(второй элемент плагина или вторая подпись в том же запросе — `key-use-spent`).
 
-**Limit:** an operation whose declared profile names a parameter (`param:` sources, such as an XML element typed by the user) cannot use a key on the server: the server has no value to match, so the use is always refused as `options-mismatch`. The shipped plugins under `plugins/` declare 30 operations, but none declares `server = true`: no shipped operation can be granted on the server (or run by `oncl plugin call`); the server skips such a grant with an error in the log and the CLI refuses it with `not-declared`.
+**Ограничение:** операция, чей объявленный профиль называет параметр (источники `param:`,
+например элемент XML, который вводит пользователь), не может использовать ключ на сервере:
+у сервера нет значения для сопоставления, поэтому использование всегда отклоняется как
+`options-mismatch`. Поставляемые в `plugins/` плагины объявляют 30 операций, но ни одна не
+объявляет `server = true`: ни одну поставляемую операцию нельзя выдать на сервере (или
+запустить `oncl plugin call`); сервер пропускает такой грант с ошибкой в журнале, а CLI
+отказывает с `not-declared`.
 
-At start-up a grant of a declared plugin is checked against the manifest and **skipped with
-an error in the log** (the other grants and the server keep running) when it is wider than the
-declaration: an operation the plugin does not declare (the error lists the declared ones) or
-declares without `server = true` or whose content is `derived` (not runnable); an import outside `uses.imports` (an empty `imports` list
-means all declared imports); `keys` or `plugin_bytes` for an operation with no key use;
-`pki_endpoints` without `network = "pki"`. A grant naming an import that does not exist, an
-unknown token or a duplicate (token, operation) still fails the configuration. A grant of a
-plugin without declarations is kept as before with a start-up warning that its signature
-options are not enforced.
+При запуске грант объявленного плагина сверяется с манифестом и **пропускается с ошибкой в
+журнале** (остальные гранты и сервер продолжают работать), если он шире объявления:
+операция, которую плагин не объявляет (ошибка перечисляет объявленные), или объявляет без
+`server = true`, или чьё содержимое `derived` (не запускается); импорт вне `uses.imports`
+(пустой список `imports` означает все объявленные импорты); `keys` или `plugin_bytes` для
+операции без использования ключа; `pki_endpoints` без `network = "pki"`. Грант с
+несуществующим импортом, неизвестным токеном или дубликатом (токен, операция) по-прежнему
+приводит к сбою конфигурации. Грант плагина без объявлений сохраняется как раньше, с
+предупреждением при запуске, что его параметры подписи не навязываются.
 
-Configuration bounds (a violation fails the configuration): at most 16 `[[plugins]]` and 256
-permissions per plugin; a plugin `id`, a grant's `token` and `operation` at most 64 bytes (the
-plugin `id` must equal the manifest's, a duplicate plugin id is refused); `imports` at most 72,
-`keys` at most 8, `pki_endpoints` at most 16 of at most 2048 bytes each. On the server the
-`pki_endpoints` are GET only (the CLI also takes `POST=`).
+Границы конфигурации (нарушение приводит к сбою конфигурации): не больше 16 `[[plugins]]` и
+256 разрешений на плагин; `id` плагина, `token` и `operation` гранта — не больше 64 байт
+(`id` плагина должен совпадать с `id` манифеста, дубликат `id` плагина отклоняется);
+`imports` не больше 72, `keys` не больше 8, `pki_endpoints` не больше 16 по не более 2048
+байт. На сервере `pki_endpoints` — только GET (CLI принимает и `POST=`).
 
-Plugin outputs (`take_output` staged files) and bound input files are **not exposed** by
-HTTP: the SDK supports them through the original context, but no request-to-file
-binding contract has been designed or reviewed, so `file_*` imports are never granted.
-Dialog imports always fail with `InteractionRequired`.
+Выходы плагинов (подготовленные файлы `take_output`) и привязанные входные файлы по HTTP
+**не раскрываются**: SDK поддерживает их через исходный контекст, но контракт привязки
+запроса к файлу не проектировался и не рецензировался, поэтому импорты `file_*` никогда не
+выдаются. Импорты диалогов всегда завершаются `InteractionRequired`.
 
-## Containers
+## Контейнеры
 
-Inline and named key containers are exercised as PKCS#12 only. JKS containers are
-read-only in this project (no JKS writer exists), so a JKS container chained to a
-loopback CA with status endpoints cannot be produced for a strict-validation signing
-test; JKS signing over HTTP is therefore not evidenced.
+Inline- и именованные контейнеры ключей проверены только как PKCS#12. Контейнеры JKS в этом
+проекте только читаются (писателя JKS нет), поэтому контейнер JKS, выстроенный до
+закольцованного (loopback) CA с конечными точками статуса, создать для теста подписи со
+строгой проверкой нельзя; подпись JKS по HTTP поэтому не подтверждена.
 
-## Terminal records for streamed responses
+## Завершающие записи потоковых ответов
 
-`final` has `status` `completed` or `failed`. A `failed` record carries
-`error: {code, applied}` and withholds every artifact of the request (there is no
-partial success); prior items' `applied` values stay visible in `results`. Resource,
-deadline and cancellation failures that never applied a key abort the transport as
-before. A stream without a `completed` final record is not a result. The client gets no
-reason for such an abort (only a lost response); the **server** logs the typed cause
-(error code, item, applied state, elapsed time, byte counts; never user data) and counts
-it in `oncl.stream.aborted`, see "Aborted response streams" in `server.md`. The protocol
-and the clients are unchanged: they cannot see this log.
+У `final` `status` равен `completed` или `failed`. Запись `failed` несёт
+`error: {code, applied}` и удерживает каждый артефакт запроса (частичного успеха нет);
+значения `applied` прежних элементов остаются видны в `results`. Сбои ресурсов, дедлайна и
+отмены, которые ни разу не применили ключ, обрывают транспорт, как и раньше. Поток без
+завершающей записи `completed` — не результат. Клиент не получает причины такого обрыва
+(только потерянный ответ); **сервер** журналирует типизированную причину (код ошибки,
+элемент, состояние применения, прошедшее время, счётчики байт; никогда пользовательские
+данные) и считает её в `oncl.stream.aborted`, см. «Прерванные потоки ответов» в `server.md`.
+Протокол и клиенты не меняются: этот журнал они увидеть не могут.
 
-## Closed batch (`POST /v1/batch`)
+## Закрытый пакет (`POST /v1/batch`)
 
-The request is the same metadata-first multipart (or JSON-small) envelope as
-`/v1/operations`: `items` (1..1024, unique IDs, manifest order is execution order) and
-`parts` (secret roles first, then documents). Every item kind of the table above is
-accepted **except `plugin`** (the SDK batch has no plugin operation; 400). The
-metadata carries no approval, grant or authority flag: unknown fields are rejected.
+Запрос — тот же конверт multipart с метаданными первыми (или JSON-small), что и у
+`/v1/operations`: `items` (1..1024, уникальные идентификаторы, порядок манифеста — порядок
+выполнения) и `parts` (сначала роли секретов, затем документы). Принимается каждый вид
+элемента из таблицы выше, **кроме `plugin`** (в пакете SDK нет операции плагина; 400).
+Метаданные не несут одобрения, гранта или флага полномочий: неизвестные поля отклоняются.
 
-Authority, all decided by the operator policy and never by the payload:
+Полномочия целиком определяет политика оператора, а не полезная нагрузка:
 
-1. **Before any document or secret byte is read**: the token needs the separate
-   `batch` right (`actions = [..., "batch"]`; it is not an SDK action and grants
-   nothing else) AND, for **every** item, that item's operation action, named-key
-   right, inline right or `metadata_aliases`. One ungranted item refuses the whole
-   batch (403, nothing runs, no key is opened, no secret is read).
-2. After the body is taken the same function is run again (revocation, policy
-   generation), then every source is captured as an immutable snapshot
-   (`Engine::capture_batch`; keys are resolved to a lease and certificate but **no
-   private key is applied**).
-3. The host approval (`BatchApproval`) is produced by the service only if the captured
-   plan equals, item by item, the composition the operator policy authorized: ids and
-   order, action, signing profile, the resolved key IDs and the captured source sizes.
-   A different plan (or an approval made for another plan) is refused with 403 before
-   any private use. The approval is single use and bound to the original operation.
-4. Execution (`run_batch_with_outputs`) uses the ORIGINAL admitted context; each
-   private use is audited with the batch item ordinal (`BEGIN`/`FINAL` per item).
+1. **До чтения любого байта документа или секрета**: токену нужно отдельное право `batch`
+   (`actions = [..., "batch"]`; это не действие SDK, и оно ничего больше не даёт) И для
+   **каждого** элемента — действие его операции, право на именованный ключ, право inline
+   или `metadata_aliases`. Один не выданный элемент отклоняет весь пакет (403, ничего не
+   запускается, ни один ключ не открывается, ни один секрет не читается).
+2. После приёма тела та же функция запускается ещё раз (отзыв, поколение политики), затем
+   каждый источник захватывается как неизменяемый снимок (`Engine::capture_batch`; ключи
+   разрешаются до lease и сертификата, но **закрытый ключ не применяется**).
+3. Одобрение хоста (`BatchApproval`) выдаётся службой, только если захваченный план
+   совпадает, элемент за элементом, с композицией, которую авторизовала политика оператора:
+   идентификаторы и порядок, действие, профиль подписи, разрешённые идентификаторы ключей и
+   захваченные размеры источников. Другой план (или одобрение, сделанное для другого плана)
+   отклоняется с 403 до любого закрытого использования. Одобрение одноразовое и привязано к
+   исходной операции.
+4. Исполнение (`run_batch_with_outputs`) использует ИСХОДНЫЙ допущенный контекст; каждое
+   закрытое использование аудируется с порядковым номером элемента пакета (`BEGIN`/`FINAL` на
+   каждый элемент).
 
-Response: always `multipart/mixed` (the status is decided at approval; refusals before
-that are typed JSON errors with `NotApplied`): coalesced `progress` parts that also
-report the batch position (`items`: `total`, `finished`, `current` `{index,item_id}`),
-one `artifact` part per **finished** output, and a mandatory last `final` part,
+Ответ: всегда `multipart/mixed` (статус решается при одобрении; отказы до этого — типизированные
+ошибки JSON с `NotApplied`): объединённые части `progress`, которые также сообщают позицию в
+пакете (`items`: `total`, `finished`, `current` `{index,item_id}`), по одной части `artifact`
+на каждый **завершённый** выход и обязательная последняя часть `final`,
 `type = "batch_final"`:
 
-- `status`: `completed` (every item completed; an `Invalid` verification is a
-  completed item with `verdict = "Invalid"`), `partial` (some item failed or did not
-  run) or `failed` (nothing could run).
-- `items[]` in manifest order, each with `item_id`, `index`, `outcome` (`completed`,
+- `status`: `completed` (завершён каждый элемент; проверка `Invalid` — завершённый элемент с
+  `verdict = "Invalid"`), `partial` (какой-то элемент не удался или не запускался) или
+  `failed` (ничего не удалось запустить).
+- `items[]` в порядке манифеста, каждый с `item_id`, `index`, `outcome` (`completed`,
   `failed`, `not_run`), `applied` (`NotApplied`/`Applied`/`Unknown`), `verdict`,
-  `error {code, applied}` for failed items, `result` for completed items (same
-  result families as `/v1/operations`; `artifact` is the Content-ID of finished output
-  only) and `sources` (SHA-256 and length of the exact captured bytes).
-- A failing item never erases completed items' results, artifacts or `applied` facts.
-  Item-local failures (unreadable source, missing key) let later items run. After a
-  terminal stop (quota, audit failure, deadline or cancel during an item) the later
-  items are `not_run` and `stop` says why (`kind` `item`/`control`, `code`,
-  `item_index`). There are no retries, idempotency keys or rollback.
-- Output bytes are accounted once by the SDK staged output; the service copies each
-  finished staged output into its owned artifact store (temporary disk is briefly
-  held twice for that item) and the artifact keeps the original root, deadline and
-  scratch accounting until its last network slice is dropped.
-- Completed XML/PDF reports keep their bounded metadata reservation until the batch
-  ends (SDK ownership; `/v1/operations` releases it per item). A batch of several XML
-  or PDF signatures therefore needs a proportionally larger per-operation
-  `metadata_bytes` (measured: three plain XML signatures plus one XAdES-B fit in
-  96 MiB, one XML signature plus a second one does not fit in 64 MiB). When it is
-  exhausted the item fails with `MetadataLimit` and its honest Applied state, later
-  items are `not_run` and earlier artifacts stand.
-- The original deadline covers upload, queue, every item and delivery. If it expires
-  (or the client disconnects) mid-batch no byte may leave afterwards, so the response
-  is **aborted without a terminal record** (a missing final is an unknown outcome,
-  never success); the durable audit journal holds the per-item facts, and the native
-  worker keeps the original root until it returns. A deadline that expires while the
-  client is still uploading is a typed `504 DeadlineExceeded` (`NotApplied`) before
-  any header. (A deadline or disconnect that cuts the transport itself writes no log
-  line; an abort the stream ends with a typed failure does, see "Aborted response
-  streams" in `server.md`.)
+  `error {code, applied}` для неудавшихся элементов, `result` для завершённых элементов (те
+  же семейства результатов, что у `/v1/operations`; `artifact` — Content-ID только
+  завершённого выхода) и `sources` (SHA-256 и длина точных захваченных байт).
+- Неудавшийся элемент никогда не стирает результаты, артефакты или факты `applied` завершённых
+  элементов. Локальные для элемента сбои (нечитаемый источник, отсутствующий ключ) позволяют
+  последующим элементам выполняться. После завершающей остановки (квота, сбой аудита,
+  дедлайн или отмена во время элемента) последующие элементы получают `not_run`, а `stop`
+  говорит, почему (`kind` `item`/`control`, `code`, `item_index`). Повторов, ключей
+  идемпотентности и отката нет.
+- Байты выхода учитываются один раз — подготовленным выходом SDK; служба копирует каждый
+  завершённый подготовленный выход в собственное хранилище артефактов (временный диск на
+  время этого элемента ненадолго удерживается дважды), а артефакт сохраняет исходный корень,
+  дедлайн и учёт scratch до освобождения его последнего сетевого среза.
+- Завершённые отчёты XML/PDF удерживают свой ограниченный резерв метаданных до конца пакета
+  (владение SDK; `/v1/operations` освобождает его по элементам). Пакет из нескольких подписей
+  XML или PDF поэтому требует пропорционально большего `metadata_bytes` на операцию (измерено:
+  три обычные подписи XML плюс одна XAdES-B помещаются в 96 МиБ, одна подпись XML плюс вторая
+  не помещаются в 64 МиБ). Когда он исчерпан, элемент завершается сбоем `MetadataLimit` с
+  честным состоянием Applied, последующие элементы получают `not_run`, а прежние артефакты
+  остаются.
+- Исходный дедлайн покрывает загрузку, очередь, каждый элемент и доставку. Если он истекает
+  (или клиент отключается) посреди пакета, ни один байт после этого не может уйти, поэтому
+  ответ **обрывается без завершающей записи** (отсутствие final — неизвестный исход, но не
+  успех); долговременный журнал аудита хранит факты по элементам, а нативный рабочий поток
+  сохраняет исходный корень, пока не вернётся. Дедлайн, истёкший, пока клиент ещё загружает,
+  — типизированный `504 DeadlineExceeded` (`NotApplied`) до любого заголовка. (Дедлайн или
+  отключение, которые обрывают сам транспорт, не пишут строку журнала; обрыв, которым поток
+  заканчивается с типизированным сбоем, пишет, см. «Прерванные потоки ответов» в
+  `server.md`.)
 
-## Test oracles
+## Тестовые оракулы
 
-The real-socket tests use independent tools. `openssl` and `python` (with `lxml` and
-`cryptography`) are found on `PATH`. The PAdES test needs a Python environment with
-`pyhanko`, `pyhanko-certvalidator` and `cryptography`: set `ONCL_PYHANKO_PYTHON` to that
-environment's python executable. If it is unset or missing that test fails with this
-explanation (it is never skipped).
+Тесты на настоящих сокетах используют независимые инструменты. `openssl` и `python` (с
+`lxml` и `cryptography`) ищутся в `PATH`. Тесту PAdES нужно окружение Python с
+`pyhanko`, `pyhanko-certvalidator` и `cryptography`: задайте `ONCL_PYHANKO_PYTHON` как
+исполняемый файл python этого окружения. Если переменная не задана или файла нет, тест
+падает с этим пояснением (он никогда не пропускается).
 
-## Operator configuration (summary)
+## Конфигурация оператора (кратко)
 
-`[pki]` adds `anchors`, `intermediates`, address-pinned `endpoints`, an optional
-`[pki.tsa]` (`url`, optional `policy`, `timeout_ms`, `skew_ms`) required for
-`*_t/lt/lta` signing and `stamp`, and `[pki.jwt]` (`expected_issuer`,
-`expected_audience`). Tokens gain the actions `extend`, `inspect`, `stamp`,
-`verify_stamp`, `batch` and `metadata_aliases`. None of these are request fields. Private
-operations use strict validation: they need configured anchors and reachable
-revocation evidence, otherwise they fail before the key is applied.
+`[pki]` добавляет `anchors`, `intermediates`, `endpoints` с привязкой адресов,
+необязательный `[pki.tsa]` (`url`, необязательный `policy`, `timeout_ms`, `skew_ms`),
+обязательный для подписи `*_t/lt/lta` и для `stamp`, и `[pki.jwt]` (`expected_issuer`,
+`expected_audience`). Токены получают действия `extend`, `inspect`, `stamp`,
+`verify_stamp` и `batch` и список `metadata_aliases`. Ничто из этого не является полем
+запроса. Закрытые операции используют строгую проверку: им нужны настроенные якоря и
+доступные свидетельства об отзыве, иначе они завершаются сбоем до применения ключа.
 
-Encryption additionally requires the real external GOST backend contract. No
-1-GiB/RSS or platform-matrix claim is made by this document.
+Шифрование дополнительно требует настоящего контракта внешнего бэкенда ГОСТ. Документ не
+заявляет ни приёмки на 1 ГиБ/RSS, ни матрицы платформ.
 
-## Reference client
+## Эталонный клиент
 
-`oncl_api::client::ApiClient` (feature `client` of `oncl-api`, `ureq` + `rustls` only) is the reference client of this contract and the transport of `oncl --endpoint` ([cli.md](cli.md#remote-mode---endpoint)). It writes the metadata-first multipart request as a bounded stream (secrets first, document bodies streamed with an exact declared length or chunked), sends `Expect: 100-continue`, never follows a redirect, and reads `multipart/mixed` by part `Content-Length` with a bounded reader. A response is a result only when `final`, the closing delimiter and the end of the HTTP entity were received; otherwise the outcome is `ResponseLost` with `Unknown` (private key possible) or `NotApplied`, with no retry. Its owned response mirror (`client::wire`) is checked against every published OpenAPI example (`tests/client.rs`).
+`oncl_api::client::ApiClient` (feature `client` крейта `oncl-api`, только `ureq` + `rustls`) — эталонный клиент этого контракта и транспорт `oncl --endpoint` ([cli.md](cli.md#удалённый-режим---endpoint)). Он пишет запрос multipart с метаданными первыми как ограниченный поток (сначала секреты, тела документов передаются потоком с точной объявленной длиной или chunked), отправляет `Expect: 100-continue`, никогда не следует перенаправлениям и читает `multipart/mixed` по `Content-Length` части ограниченным читателем. Ответ — результат только тогда, когда получены `final`, закрывающий разделитель и конец HTTP-сущности; иначе исход — `ResponseLost` с `Unknown` (возможен закрытый ключ) или `NotApplied`, без повтора. Его собственное зеркало ответа (`client::wire`) сверяется с каждым опубликованным примером OpenAPI (`tests/client.rs`).
 
-The client checks stated artifact lengths only where the server enforces them (extraction, timestamp token, JWS/JWT creation; never batch items), and its `ExecuteOptions.control` is polled every 50 ms so a stop reports `Unknown` only when a key-capable body was fully sent.
+Клиент проверяет заявленные длины артефактов только там, где их навязывает сервер (извлечение, токен штампа времени, создание JWS/JWT; элементы пакета — никогда), а его `ExecuteOptions.control` опрашивается каждые 50 мс, поэтому остановка сообщает `Unknown` только тогда, когда тело, способное использовать ключ, было отправлено полностью.
