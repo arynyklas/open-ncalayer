@@ -563,6 +563,21 @@ impl Remote {
     pub fn scratch(&self) -> PathBuf {
         self.server_dir.path().join("scratch")
     }
+    /// Asserts that the server's scratch holds no file. The server removes a request's
+    /// spools and staged output when it lets go of the request, which happens after the
+    /// response has been delivered: the client can have read the answer and exited a moment
+    /// earlier, so the condition is waited for (bounded) and then asserted strictly.
+    pub fn assert_scratch_empty(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !files(&self.scratch()).is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let left = files(&self.scratch());
+        assert!(
+            left.is_empty(),
+            "scratch must be empty afterwards: {left:?}"
+        );
+    }
     pub fn audit_begins(&self) -> usize {
         self.host
             .audit
